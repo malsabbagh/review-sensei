@@ -1724,6 +1724,10 @@ class ApiRunRequestTransport:
                 getattr(self, "_accepted_semantic_predecessor", None),
             )
             carried_reference = preview_candidate.finding_lifecycle
+            if old.analysis_abort is not None:
+                from .pre_entry_abort_admission import require_pre_entry_abort_admission
+
+                require_pre_entry_abort_admission(ledger, identity, record, old)
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old

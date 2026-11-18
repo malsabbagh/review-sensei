@@ -1414,21 +1414,19 @@ def bootstrap(
                     and previous_root.transaction is not None
                     and previous_root.transaction.phase == "publication_succeeded"
                 )
-                stopped = (
-                    None
-                    if historical_candidate
-                    else evidence.ceased_run_owner(
-                        identity, previous.identity.run_id, previous.owner
+
+                def observe_cessation():
+                    return evidence.ceased_run_owner(
+                        identity,
+                        previous.identity.run_id,
+                        previous.owner,
+                        complete_terminal_inventory=previous.analysis_abort is not None,
                     )
-                )
+
+                stopped = None if historical_candidate else observe_cessation()
 
                 def require_cessation():
-                    if (
-                        evidence.ceased_run_owner(
-                            identity, previous.identity.run_id, previous.owner
-                        )
-                        != stopped
-                    ):
+                    if observe_cessation() != stopped:
                         raise ReviewInputError("previous caller cessation changed")
 
                 if historical_candidate:

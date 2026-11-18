@@ -145,6 +145,8 @@ class EntryFixture(LifecycleFixture):
         self.run_id = 456
         self.previous_active = False
         self.previous_incomplete = False
+        self.previous_conclusion = "success"
+        self.previous_auxiliary_running = False
         self.previous_reads = 0
         self.rollover_fault = None
         self.change_root = False
@@ -229,7 +231,10 @@ class EntryFixture(LifecycleFixture):
                 return json_response(
                     {
                         "total_count": 2
-                        if not current and self.previous_incomplete
+                        if not current
+                        and (
+                            self.previous_incomplete or self.previous_auxiliary_running
+                        )
                         else 1,
                         "jobs": [
                             {
@@ -256,6 +261,20 @@ class EntryFixture(LifecycleFixture):
                             ]
                             if self.overlap
                             else []
+                        )
+                        + (
+                            [
+                                {
+                                    "id": run_id * 10 + 9,
+                                    "run_id": run_id,
+                                    "run_attempt": attempt,
+                                    "name": "fixture auxiliary",
+                                    "status": "in_progress",
+                                    "conclusion": None,
+                                }
+                            ]
+                            if not current and self.previous_auxiliary_running
+                            else []
                         ),
                     }
                 )
@@ -265,6 +284,7 @@ class EntryFixture(LifecycleFixture):
                     "run_attempt": self.attempt,
                     "repository": {"id": 123, "full_name": "owner/repo"},
                     "status": "in_progress" if active else "completed",
+                    "conclusion": None if active else self.previous_conclusion,
                     "event": self.event_name if current else "pull_request",
                 }
             )
@@ -314,6 +334,17 @@ class EntryFixture(LifecycleFixture):
                 self.trace.append((self.attempt, request.get_method(), path))
             raise TimeoutError("synthetic uncertain rollover effect")
         response = self._external_open(request, timeout)
+        if (
+            self.accounted._state is None
+            and request.get_method() == "GET"
+            and path.endswith("/pulls/7/comments")
+        ):
+            # The native REST inventory includes both original and current
+            # commit IDs. Unchanged fixture threads were born on this commit.
+            rows = json.loads(response.read(524288))
+            for row in rows:
+                row.setdefault("original_commit_id", row["commit_id"])
+            return json_response(rows)
         if (
             self.archive_bad
             and request.get_method() == "GET"
@@ -3446,6 +3477,7 @@ os._exit(92)
     def test_only_confirmed_pre_entry_abort_can_close(self):
         from review_sensei_github.session_ledger import parse_session_comment
 
+        from review_sensei.api_work import ApiRunAccounting
         from review_sensei.errors import ReviewInputError
 
         cases = (
@@ -3459,6 +3491,13 @@ os._exit(92)
                 ReviewInputError("local validation refusal"),
                 "cleanup-absent",
                 False,
+                1,
+            ),
+            (
+                "pre-entry",
+                ReviewInputError("local validation refusal"),
+                "cleanup-stored",
+                True,
                 1,
             ),
             (
@@ -3502,10 +3541,37 @@ os._exit(92)
                     self.assertEqual(closure["run_id"], f.run_id)
                     self.assertEqual(closure["owner"]["run_attempt"], 1)
                     self.assertEqual(closure["entry_state"], "not_started")
+                # The predecessor can reconcile a lost root response in
+                # memory and still leave a charged pending ID in its durable
+                # accounting. A cold successor cannot authenticate the ID's
+                # effect from the closure alone.
+                lost_response = fault in {"cleanup-stored", "closure-stored"}
+                if closes:
+                    self.assertEqual(
+                        ApiRunAccounting.from_document(
+                            record.api_run_accounting
+                        ).uncertain,
+                        int(lost_response),
+                    )
+                original_comment = f.comment.copy()
+                provider_calls = f.provider_calls
                 f.before_entry = f.before_provider = None
                 f.next_run()
-                self.assertEqual(f.invoke(), 0 if closes else 1, f.error)
-                if closes:
+                can_roll_over = closes and not lost_response
+                self.assertEqual(f.invoke(), 0 if can_roll_over else 1, f.error)
+                if lost_response:
+                    self.assertIn("caller dispatch remains uncertain", f.error)
+                if not can_roll_over:
+                    self.assertEqual(f.comment, original_comment)
+                    self.assertEqual(f.provider_calls, provider_calls)
+                    self.assertIsNone(f.accounted._activation)
+                    self.assertFalse(
+                        any(
+                            method != "GET" and path.startswith("/repos/")
+                            for _, method, path in f.trace
+                        )
+                    )
+                else:
                     from review_sensei_github.api_run_history import read_previous_run
 
                     archived = read_previous_run(
@@ -3514,6 +3580,425 @@ os._exit(92)
                         f.accounted.accounting.previous_record,
                     )
                     self.assertEqual(archived.to_dict(), record.to_dict())
+
+
+class OrdinaryPreEntryAbortAdmissionTests(unittest.TestCase):
+    """Run the public hosted entry; only the native wire responses are fake."""
+
+    def setUp(self):
+        from unittest.mock import patch
+
+        self.enterContext(
+            patch("socket.socket", side_effect=AssertionError("offline fixture"))
+        )
+
+    def abort_then_start_successor(self, f):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.errors import ReviewInputError
+
+        def refuse():
+            raise ReviewInputError("synthetic validation refusal before entry")
+
+        f.before_entry = refuse
+        self.assertEqual(f.invoke(), 1, f.error)
+        self.assertIn("synthetic validation refusal", f.error)
+        record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+        self.assertIsNone(record.transaction)
+        self.assertIsNone(record.reservation_id)
+        old = ApiRunAccounting.from_document(record.api_run_accounting)
+        self.assertIsNotNone(old.analysis_abort)
+        self.assertEqual(old.uncertain, 0)
+        f.before_entry = None
+        f.next_run()
+        return record
+
+    def install_wire_inventory(self, f, lookup):
+        import copy
+        from urllib.parse import parse_qs, urlsplit
+
+        from fake_github_http import FakeHTTPResponse, json_response
+
+        external = f.external
+        calls = []
+
+        def supply(request, timeout):
+            path = urlsplit(request.full_url)
+            if (
+                request.get_method() != "GET"
+                or f.accounted._state is not None
+                or path.path
+                not in {
+                    "/repos/owner/repo/pulls/7/reviews",
+                    "/repos/owner/repo/pulls/7/comments",
+                }
+            ):
+                return external(request, timeout)
+            self.assertEqual(
+                request.get_header("Authorization"), "Bearer synthetic-review_session"
+            )
+            page = parse_qs(path.query)
+            self.assertEqual(set(page), {"page", "per_page"})
+            self.assertEqual(page["per_page"], ["100"])
+            self.assertEqual(f.accounted.observations[-1]["phase"], "startup")
+            self.assertFalse(f.accounted.observations[-1]["mutation"])
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 30)
+            f.trace.append((f.attempt, "GET", path.path))
+            target = path.path.rsplit("/", 1)[-1], int(page["page"][0])
+            calls.append(target)
+            data = lookup(*target)
+            if isinstance(data, Exception):
+                raise data
+            if isinstance(data, bytes):
+                return FakeHTTPResponse(data)
+            if isinstance(data, tuple):
+                return json_response(copy.deepcopy(data[0]), status=data[1])
+            return json_response(copy.deepcopy(data))
+
+        f.external = supply
+        return calls
+
+    def assert_held(self, f, reason):
+        import copy
+
+        previous = copy.deepcopy(f.comment)
+        evidence = copy.deepcopy(f.extra_comments)
+        native = copy.deepcopy((f.reviews, f.inline, f.threads, f.check_runs))
+        providers = f.provider_calls
+        self.assertEqual(f.invoke(), 1, f.error)
+        self.assertIn(reason, f.error)
+        self.assertEqual(f.comment, previous)
+        self.assertEqual(f.extra_comments, evidence)
+        self.assertEqual((f.reviews, f.inline, f.threads, f.check_runs), native)
+        self.assertEqual(f.provider_calls, providers)
+        self.assertIsNone(f.accounted._activation)
+        self.assertIsNone(f.accounted._state)
+        self.assertEqual(f.accounted.usable, 0)
+        self.assertEqual(f.accounted.startup_dispatches, len(f.accounted.observations))
+        self.assertEqual(
+            [item["capability"] for item in f.worker_observations],
+            ["review_actions", "review_session"],
+        )
+        self.assertFalse(
+            any(
+                method in {"POST", "PUT", "PATCH", "DELETE"}
+                and path.startswith("/repos/")
+                for _, method, path in f.trace
+            ),
+            f.trace,
+        )
+
+    def test_missing_unreadable_ambiguous_and_positive_rows_hold_at_public_entry(self):
+        from review_sensei_github.publication import (
+            FINDING_MARKER_PREFIX_V2,
+            approval_marker,
+        )
+
+        bot = {"type": "Bot", "login": "reviewsensei[bot]", "id": 999}
+        approved = {
+            "id": 91,
+            "state": "APPROVED",
+            "commit_id": HEAD,
+            "user": bot,
+            "body": approval_marker(
+                repository_id=123, pull_request=7, head_sha=HEAD, base_sha=BASE
+            ),
+        }
+        inline = {
+            "id": 92,
+            "pull_request_review_id": 91,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
+            "user": bot,
+            "body": (
+                f"{FINDING_MARKER_PREFIX_V2} repo=123 pr=7 head={HEAD} base={BASE} "
+                f"fingerprint={'a' * 64} state=new blocking=false -->"
+            ),
+        }
+        cases = (
+            ("reviews", "missing", ([], 404), "census is incomplete"),
+            ("reviews", "partial-response", ([], 206), "census is incomplete"),
+            (
+                "reviews",
+                "transport",
+                TimeoutError("synthetic read loss"),
+                "census is unavailable",
+            ),
+            ("reviews", "non-json", b"{", "census is unavailable"),
+            ("reviews", "null-row", [None], "unreadable row"),
+            (
+                "reviews",
+                "duplicate",
+                [{"id": 1, "user": {"id": 42, "type": "User", "login": "alice"}}] * 2,
+                "unreadable row",
+            ),
+            (
+                "reviews",
+                "unreadable-body",
+                [{**approved, "body": None}],
+                "scope is unconfirmed",
+            ),
+            (
+                "reviews",
+                "unreadable-author",
+                [{**approved, "user": None}],
+                "scope is unconfirmed",
+            ),
+            ("reviews", "known-approval", [approved], "late native effect"),
+            ("comments", "missing", ([], 404), "census is incomplete"),
+            (
+                "comments",
+                "unreadable-body",
+                [{**inline, "body": None}],
+                "scope is unconfirmed",
+            ),
+            (
+                "comments",
+                "unknown-commit",
+                [{**inline, "original_commit_id": None}],
+                "scope is unconfirmed",
+            ),
+            ("comments", "known-thread", [inline], "late native effect"),
+            (
+                "comments",
+                "known-reply",
+                [{**inline, "in_reply_to_id": 99}],
+                "late native effect",
+            ),
+            (
+                "comments",
+                "conflicting-head",
+                [
+                    {
+                        **inline,
+                        "original_commit_id": "c" * 40,
+                        "body": inline["body"].replace(HEAD, "c" * 40),
+                    }
+                ],
+                "scope is unconfirmed",
+            ),
+        )
+        for surface, mode, response, reason in cases:
+            with (
+                self.subTest(surface=surface, mode=mode),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+                self.abort_then_start_successor(f)
+                requests = self.install_wire_inventory(
+                    f, lambda resource, _: response if resource == surface else []
+                )
+                self.assert_held(f, reason)
+                self.assertEqual(
+                    requests,
+                    [("reviews", 1)]
+                    if surface == "reviews"
+                    else [("reviews", 1), ("comments", 1)],
+                )
+
+    def test_exact_empty_or_complete_unrelated_inventory_can_roll_over(self):
+        from review_sensei_github.api_run_history import read_previous_run
+        from review_sensei_github.http import MAX_PAGINATION_PAGES
+
+        for multipage in (False, True):
+            with (
+                self.subTest(multipage=multipage),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+                old = self.abort_then_start_successor(f)
+                f.previous_conclusion = "cancelled"
+                f.live_head = f.requested_head = HEAD
+                foreign = [
+                    {
+                        "id": 100 + i,
+                        "user": {"id": 42, "type": "User", "login": "alice"},
+                    }
+                    for i in range(100)
+                ]
+                reads = self.install_wire_inventory(
+                    f, lambda _, page: foreign if multipage and page == 1 else []
+                )
+                self.assertEqual(f.invoke(), 0, f.error)
+                self.assertEqual(f.provider_calls, 1)
+                self.assertEqual(
+                    reads,
+                    [("reviews", 1), ("reviews", 2), ("comments", 1), ("comments", 2)]
+                    if multipage
+                    else [("reviews", 1), ("comments", 1)],
+                )
+                archival_write = next(
+                    i
+                    for i, (_, method, path) in enumerate(f.trace)
+                    if method == "POST" and path.endswith("/issues/7/comments")
+                )
+                self.assertIn(
+                    (f.attempt, "GET", "/repos/owner/repo/pulls/7/comments"),
+                    f.trace[:archival_write],
+                )
+                self.assertLessEqual(
+                    f.accounted.startup_dispatches, len(f.accounted._slot.requests)
+                )
+                self.assertEqual(f.accounted.accounting.configuration.limit, 512)
+                self.assertEqual(
+                    read_previous_run(
+                        f.selected.ledger,
+                        IDENTITY,
+                        f.accounted.accounting.previous_record,
+                    ).to_dict(),
+                    old.to_dict(),
+                )
+                self.assertLessEqual(len(reads), 2 * MAX_PAGINATION_PAGES)
+
+    def test_census_limits_hold_without_reading_unneeded_surface(self):
+        from review_sensei_github.http import MAX_PAGINATION_PAGES
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            self.abort_then_start_successor(f)
+
+            def full_page(_surface, page):
+                return [
+                    {
+                        "id": 100 * page + i,
+                        "user": {"id": 42, "type": "User", "login": "alice"},
+                    }
+                    for i in range(100)
+                ]
+
+            reads = self.install_wire_inventory(f, full_page)
+            self.assert_held(f, "census reached its pagination bound")
+            self.assertEqual(
+                reads,
+                [("reviews", page) for page in range(1, MAX_PAGINATION_PAGES + 1)],
+            )
+
+    def test_ordinary_abort_holds_unknown_dispatch_and_unceased_actions(self):
+        from review_sensei.api_work import ApiRunAccounting, PendingApiRequest
+
+        for mode in (
+            "uncertain-dispatch",
+            "unknown-run",
+            "active-auxiliary",
+            "partial-jobs",
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                f = EntryFixture(directory)
+                self.abort_then_start_successor(f)
+                if mode == "uncertain-dispatch":
+
+                    def pending(record):
+                        state = ApiRunAccounting.from_document(
+                            record.api_run_accounting
+                        )
+                        state = state.dispatch(
+                            "hosted-review", PendingApiRequest("fixture-pending", 1234)
+                        )
+                        return record.evolve(
+                            generation=record.generation + 1,
+                            api_run_accounting=state.to_document(),
+                        )
+
+                    f.rewrite_record(mutate=pending)
+                    reason = "predecessor caller dispatch remains uncertain"
+                elif mode == "unknown-run":
+                    f.previous_conclusion = None
+                    reason = "previous Actions run has not ceased"
+                elif mode == "active-auxiliary":
+                    f.previous_auxiliary_running = True
+                    reason = "pre-entry abort predecessor job inventory has not ceased"
+                else:
+                    f.previous_incomplete = True
+                    reason = "owner job inventory is incomplete"
+                reads = self.install_wire_inventory(f, lambda *_: [])
+                self.assert_held(f, reason)
+                self.assertEqual(reads, [])
+
+    def test_census_does_not_spend_the_original_startup_confirmation_tail(self):
+        from review_sensei_github.api_run_history import RETAINED_CONFIRMATION_TAIL
+        from review_sensei_github.http import MAX_PAGINATION_PAGES
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            self.abort_then_start_successor(f)
+            # Complete, but near-cap native root scans consume startup before
+            # the census. No injected accountant or smaller synthetic bound.
+            for i in range(899):
+                f.extra_comments[3_000_000 + i] = {
+                    "id": 3_000_000 + i,
+                    "body": "synthetic unrelated issue discussion",
+                    "user": {"id": 42, "type": "User", "login": "alice"},
+                }
+
+            def full_until_last(_surface, page):
+                if page == MAX_PAGINATION_PAGES:
+                    return []
+                return [
+                    {
+                        "id": 100 * page + i,
+                        "user": {"id": 42, "type": "User", "login": "alice"},
+                    }
+                    for i in range(100)
+                ]
+
+            reads = self.install_wire_inventory(f, full_until_last)
+            self.assert_held(f, "census is unfunded in caller startup")
+            self.assertLess(len(reads), 2 * MAX_PAGINATION_PAGES)
+            self.assertEqual(
+                f.accounted.budget_view.ordinary_remaining(), RETAINED_CONFIRMATION_TAIL
+            )
+
+    def test_retained_older_same_head_objects_must_match_exact_native_readback(self):
+        from urllib.parse import urlsplit
+
+        from test_review_run_rescan import partial_fixture, request
+
+        for mode in (
+            "review-edited",
+            "inline-edited",
+            "parent-missing",
+            "archive-unreadable",
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                f, _ = partial_fixture(directory)
+                # Preserve the initial terminal review and then abort a distinct
+                # new review on the same head before any provider entry.
+                request(f, 9, "rescan")
+                aborted = self.abort_then_start_successor(f)
+                f.live_head = f.requested_head = HEAD
+                f.event_name = "pull_request"
+                f.event_document = None
+                f.review_intent = None
+                if mode == "review-edited":
+                    f.reviews[0]["body"] += "\nchanged native bytes"
+                elif mode == "inline-edited":
+                    f.inline[0]["body"] += "\nchanged native bytes"
+                elif mode == "parent-missing":
+                    f.reviews.clear()
+                else:
+                    external = f.external
+                    storage = aborted.api_run_accounting["previous_record"]["manifest"][
+                        "parts"
+                    ][0]["storage_id"]
+
+                    def lose_archive(request, timeout):
+                        path = urlsplit(request.full_url).path
+                        if request.get_method() == "GET" and path.endswith(
+                            f"/issues/comments/{storage}"
+                        ):
+                            f.trace.append((f.attempt, "GET", path))
+                            raise TimeoutError("synthetic older receipt loss")
+                        return external(request, timeout)
+
+                    f.external = lose_archive
+                self.assert_held(
+                    f,
+                    "earlier native effect evidence is unavailable"
+                    if mode == "archive-unreadable"
+                    else "late native effect",
+                )
 
 
 class CheckAccountingEntryTests(unittest.TestCase):
