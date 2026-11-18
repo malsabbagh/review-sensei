@@ -288,11 +288,22 @@ class QuarantineNetworkGuardDispatchTests(unittest.TestCase):
             (lane / "test_quarantine_contract.py").write_text(
                 contract, encoding="utf-8"
             )
+            # Discovery and workers must not append to a shared file. The unique
+            # suffix keeps journals distinct even if the OS reuses a process ID.
             (suite / "packaging_guard.py").write_text(
-                "from pathlib import Path\n"
-                "def assert_distribution_import():\n"
-                "    with Path(__file__).with_name('import-guards').open('a') as stream:\n"
-                "        stream.write('core\\n')\n"
+                textwrap.dedent("""\
+                    import os
+                    from pathlib import Path
+                    from uuid import uuid4
+                    JOURNAL = Path(__file__).with_name(
+                        f'events-{os.getpid()}-{uuid4().hex}.log'
+                    )
+                    def record(label):
+                        with JOURNAL.open('a', encoding='utf-8') as stream:
+                            stream.write(label + '\\n')
+                    def assert_distribution_import():
+                        record('core-import-guard')
+                    """)
                 + (
                     "    raise ImportError('synthetic core boundary refused')\n"
                     if boundary == "core-refused"
@@ -313,10 +324,7 @@ class QuarantineNetworkGuardDispatchTests(unittest.TestCase):
             (suite / "guard_fixture.py").write_text(
                 textwrap.dedent("""\
                     import socket
-                    from pathlib import Path
-                    EVENTS = Path(__file__).with_name('events')
-                    def record(label):
-                        with EVENTS.open('a') as stream: stream.write(label + '\\n')
+                    from packaging_guard import record
                     def unsafe_connect(*args, **kwargs):
                         record('UNGUARDED CONNECT')
                         raise RuntimeError('synthetic unguarded socket; no real network')
@@ -439,132 +447,168 @@ class QuarantineNetworkGuardDispatchTests(unittest.TestCase):
             result = subprocess.run(
                 command, cwd=root, capture_output=True, text=True, timeout=30
             )
-            data = json.loads(report.read_text()) if report.exists() else None
-            events = (
-                (suite / "events").read_text().splitlines()
-                if (suite / "events").exists()
-                else []
+            data = (
+                json.loads(report.read_text(encoding="utf-8"))
+                if report.exists()
+                else None
             )
+            journals = {
+                path.name: path.read_text(encoding="utf-8").splitlines()
+                for path in sorted(suite.glob("events-*.log"))
+            }
             proof = (
                 json.loads((suite / "repeat-proof").read_text())
                 if (suite / "repeat-proof").exists()
                 else None
             )
-            guards = (
-                (suite / "import-guards").read_text().splitlines()
-                if (suite / "import-guards").exists()
-                else []
-            )
-            return result, data, events, proof, guards
+            return result, data, journals, proof
 
-    def assert_complete(self, result, data, events, *, exit_code=0):
-        self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
-        self.assertEqual(data["hook_mode"], "reviewed-local")
-        self.assertEqual(data["discovered"], 4)
-        self.assertEqual(data["units"], 3)
-        self.assertEqual(sum(worker["assigned"] for worker in data["workers"]), 4)
-        self.assertTrue(all(worker["execution_complete"] for worker in data["workers"]))
-        self.assertNotIn("UNGUARDED CONNECT", events)
-        self.assertEqual(events.count("restored"), 1)
+    @staticmethod
+    def diagnostics(result, data, journals):
+        return (
+            f"\nexit: {result.returncode}\nreport: {data!r}\njournals: {journals!r}"
+            f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
-    def test_actual_imported_fixture_lifecycle_is_guarded_and_restored(self):
-        result, data, events, _, guards = self.execute()
-        self.assert_complete(result, data, events)
-        expected = []
-        for module, classes in (("a", ("First", "Second")), ("b", ("Only",))):
-            expected.append(module + ".setup")
-            for cls in classes:
-                expected.extend(
-                    f"{module}.{cls}.{stage}"
-                    for stage in (
-                        "setup-class",
-                        "setup-test",
-                        "test",
-                        "teardown-test",
-                        "teardown-class",
-                        "class-cleanup",
-                    )
+    def assert_complete(self, result, data, journals, *, exit_code=0):
+        details = self.diagnostics(result, data, journals)
+        self.assertEqual(result.returncode, exit_code, details)
+        self.assertIsNotNone(data, details)
+        self.assertEqual(data["hook_mode"], "reviewed-local", details)
+        self.assertEqual(data["discovered"], 4, details)
+        self.assertEqual(data["units"], 3, details)
+        self.assertTrue(
+            all(worker["execution_complete"] for worker in data["workers"]), details
+        )
+        self.assertEqual(
+            sum(worker["assigned"] for worker in data["workers"]), 4, details
+        )
+        return details
+
+    @staticmethod
+    def module_events(module, *classes):
+        return [
+            f"{module}.setup",
+            *(
+                f"{module}.{cls}.{stage}"
+                for cls in classes
+                for stage in (
+                    "setup-class",
+                    "setup-test",
+                    "test",
+                    "teardown-test",
+                    "teardown-class",
+                    "class-cleanup",
                 )
-            expected.extend(
+            ),
+            *(
                 f"{module}.{stage}"
                 for stage in ("teardown", "cleanup-second", "cleanup-first")
-            )
-        self.assertEqual(events, [*expected, "restored"])
-        self.assertTrue(guards)
+            ),
+        ]
+
+    def assert_journals(self, journals, *worker_events, details):
+        # Discovery records only the import check. Compare whole journals as an
+        # unordered collection; event order matters only within one process.
+        expected = [["core-import-guard", *rows] for rows in ((), *worker_events)]
+        self.assertCountEqual(journals.values(), expected, details)
+
+    def assert_serial_lifecycle(self, journals, details):
+        self.assert_journals(
+            journals,
+            [
+                *self.module_events("a", "First", "Second"),
+                *self.module_events("b", "Only"),
+                "restored",
+            ],
+            details=details,
+        )
+
+    def test_actual_imported_fixture_lifecycle_is_guarded_and_restored(self):
+        result, data, journals, _ = self.execute()
+        details = self.assert_complete(result, data, journals)
+        self.assert_serial_lifecycle(journals, details)
 
     def test_distinct_modules_remain_parallel_and_same_module_classes_stay_whole(self):
-        result, data, events, _, _ = self.execute(workers=4)
-        self.assert_complete(result, data, events)
-        self.assertEqual(len(data["workers"]), 3)
+        result, data, journals, _ = self.execute(workers=4)
+        details = self.assert_complete(result, data, journals)
         self.assertEqual(
-            sorted(worker["assigned"] for worker in data["workers"]), [1, 1, 2]
+            sorted(worker["assigned"] for worker in data["workers"]), [1, 1, 2], details
         )
-        self.assertEqual(events.count("a.setup"), 1)
-        self.assertEqual(events.count("b.setup"), 1)
+        self.assert_journals(
+            journals,
+            self.module_events("a", "First", "Second"),
+            self.module_events("b", "Only"),
+            ["restored"],
+            details=details,
+        )
 
     def test_repeated_discovery_preserves_guard_binding_and_exact_suite_shape(self):
-        result, data, events, proof, _ = self.execute(repeat=True)
-        self.assert_complete(result, data, events)
-        self.assertEqual(len(proof["units"]), 3)
-        self.assertEqual(events.count("a.setup"), 1)
-        self.assertEqual(events.count("b.setup"), 1)
+        result, data, journals, proof = self.execute(repeat=True)
+        details = self.assert_complete(result, data, journals)
+        self.assertIsNotNone(proof, details)
+        self.assertEqual(len(proof["units"]), 3, details)
+        self.assert_serial_lifecycle(journals, details)
 
     def test_setup_skip_and_error_restore_after_all_guarded_cleanups(self):
         for mode in ("setup-skip", "setup-error"):
             with self.subTest(mode=mode):
-                result, data, events, _, _ = self.execute(mode=mode)
-                self.assertEqual(
-                    events[:3], ["a.setup", "a.cleanup-second", "a.cleanup-first"]
+                result, data, journals, _ = self.execute(mode=mode)
+                details = self.diagnostics(result, data, journals)
+                self.assert_journals(
+                    journals,
+                    [
+                        "a.setup",
+                        "a.cleanup-second",
+                        "a.cleanup-first",
+                        *self.module_events("b", "Only"),
+                        "restored",
+                    ],
+                    details=details,
                 )
-                self.assertNotIn("a.teardown", events)
-                self.assertFalse(
-                    any(
-                        event.startswith("a.First.") or event.startswith("a.Second.")
-                        for event in events
-                    )
-                )
-                self.assertNotIn("UNGUARDED CONNECT", events)
-                self.assertEqual(events[-1], "restored")
                 if mode == "setup-skip":
-                    self.assert_complete(result, data, events)
+                    self.assert_complete(result, data, journals)
                     self.assertEqual(
-                        sum(worker["fixture_skipped"] for worker in data["workers"]), 2
+                        sum(worker["fixture_skipped"] for worker in data["workers"]),
+                        2,
+                        details,
                     )
                     self.assertEqual(
-                        sum(worker["started"] for worker in data["workers"]), 2
+                        sum(worker["started"] for worker in data["workers"]), 2, details
                     )
                 else:
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertFalse(data["complete"])
+                    self.assertNotEqual(result.returncode, 0, details)
+                    self.assertIsNotNone(data, details)
+                    self.assertFalse(data["complete"], details)
                     self.assertIn(
-                        "synthetic setup error", result.stdout + result.stderr
+                        "synthetic setup error", result.stdout + result.stderr, details
                     )
 
     def test_test_teardown_and_cleanup_errors_preserve_protection_and_restoration(self):
         for mode in ("test-error", "teardown-error", "cleanup-error"):
             with self.subTest(mode=mode):
-                result, data, events, _, _ = self.execute(mode=mode)
-                self.assert_complete(result, data, events, exit_code=1)
-                self.assertIn("a.teardown", events)
-                self.assertIn("a.cleanup-second", events)
-                self.assertIn("a.cleanup-first", events)
-                self.assertEqual(events[-1], "restored")
+                result, data, journals, _ = self.execute(mode=mode)
+                details = self.assert_complete(result, data, journals, exit_code=1)
+                self.assert_serial_lifecycle(journals, details)
                 self.assertIn(
-                    "synthetic " + mode.replace("-", " "), result.stdout + result.stderr
+                    "synthetic " + mode.replace("-", " "),
+                    result.stdout + result.stderr,
+                    details,
                 )
 
     def test_changed_guard_binding_fails_discovery_before_any_test(self):
-        result, data, events, proof, _ = self.execute(mode="changed-setup", repeat=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIsNone(data)
-        self.assertIsNone(proof)
-        self.assertEqual(events, [])
+        result, data, journals, proof = self.execute(mode="changed-setup", repeat=True)
+        details = self.diagnostics(result, data, journals)
+        self.assertNotEqual(result.returncode, 0, details)
+        self.assertIsNone(data, details)
+        self.assertIsNone(proof, details)
+        self.assert_journals(journals, details=details)
 
     def test_original_import_boundaries_still_refuse_before_any_test(self):
         for boundary in ("core-refused", "hosted-outside"):
             with self.subTest(boundary=boundary):
-                result, data, events, _, guards = self.execute(boundary=boundary)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIsNone(data)
-                self.assertEqual(events, [])
-                self.assertTrue(guards)
+                result, data, journals, _ = self.execute(boundary=boundary)
+                details = self.diagnostics(result, data, journals)
+                self.assertNotEqual(result.returncode, 0, details)
+                self.assertIsNone(data, details)
+                self.assert_journals(journals, details=details)
