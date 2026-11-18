@@ -2412,10 +2412,16 @@ def _request_matches(observed, expected):
 
 def _check_request_matches(observed, expected):
     """Match the sent check projection, not GitHub's larger output envelope."""
-    if _request_matches(observed, expected):
-        return True
     if not isinstance(observed, dict):
         return False
+    if (
+        expected.get("status") == "in_progress"
+        and expected.get("conclusion") is None
+        and observed.get("conclusion") is not None
+    ):
+        return False
+    if _request_matches(observed, expected):
+        return True
     output, sent = observed.get("output"), expected.get("output")
     # The current check producer sends only title and summary. GitHub adds
     # nullable text and annotation metadata. Do not ignore another rendered
@@ -5689,7 +5695,6 @@ class FindingLifecycleJournal:
             and effect["method"] == "POST"
             and response is None
         ):
-            stable = ("name", "head_sha", "external_id")
             external_id = request.get("external_id")
             if (
                 path != f"/repos/{self.identity.repository}/check-runs"
@@ -5719,11 +5724,28 @@ class FindingLifecycleJournal:
                 # stable identity. Count all owned matches before inspecting
                 # their mutable output, and never page beyond this bounded GET.
                 candidates = []
+                seen: set[int] = set()
                 source_app_id = getattr(self.ledger, "authenticated_app_id", None)
                 for run in runs:
                     if not isinstance(run, dict):
                         return None
-                    if not all(run.get(key) == request[key] for key in stable):
+                    run_id, name, head = (
+                        run.get("id"),
+                        run.get("name"),
+                        run.get("head_sha"),
+                    )
+                    if (
+                        type(run_id) is not int
+                        or run_id <= 0
+                        or run_id in seen
+                        or not isinstance(name, str)
+                        or not name
+                        or not isinstance(head, str)
+                        or _HEX40_RE.fullmatch(head) is None
+                    ):
+                        return None
+                    seen.add(run_id)
+                    if name != request["name"] or head != request["head_sha"]:
                         continue
                     app = run.get("app")
                     if (
@@ -5734,16 +5756,22 @@ class FindingLifecycleJournal:
                         or not app["slug"]
                     ):
                         return None
-                    if source_app_id is not None and app["id"] != source_app_id:
-                        continue
+                    if source_app_id is not None and (app["id"] == source_app_id) != (
+                        app["slug"] == expected_slug
+                    ):
+                        return None
                     if app["slug"] != expected_slug:
-                        if source_app_id is not None:
-                            return None
                         continue
-                    candidates.append(run)
-                if len(candidates) == 1 and (
-                    candidates[0].get("conclusion") != request.get("conclusion")
-                    or not _check_request_matches(candidates[0], request)
+                    observed_external_id = run.get("external_id")
+                    if (
+                        not isinstance(observed_external_id, str)
+                        or not observed_external_id
+                    ):
+                        return None
+                    if observed_external_id == external_id:
+                        candidates.append(run)
+                if len(candidates) == 1 and not _check_request_matches(
+                    candidates[0], request
                 ):
                     return None
         elif path.endswith("/reviews") and effect["method"] == "POST":

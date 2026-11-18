@@ -163,6 +163,12 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
             None,
             "duplicate",
             "duplicate_changed_output",
+            "repeated_native_id",
+            "unknown_external_id",
+            "unknown_candidate_name",
+            "unknown_candidate_head",
+            "conflicting_app_identity",
+            "confirmed_other_identity",
             "truncated",
             "malformed_count",
             "missing_count",
@@ -178,10 +184,31 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
                 native = native_check(**CREATE)
                 runs = [native]
                 count = 1
-                if fault in {"duplicate", "duplicate_changed_output"}:
+                if fault in {
+                    "duplicate",
+                    "duplicate_changed_output",
+                    "repeated_native_id",
+                    "unknown_external_id",
+                    "unknown_candidate_name",
+                    "unknown_candidate_head",
+                    "conflicting_app_identity",
+                    "confirmed_other_identity",
+                }:
                     runs.append(native_check(check_id=502, **CREATE))
                     if fault == "duplicate_changed_output":
                         runs[1]["output"]["summary"] = "Different retained output"
+                    elif fault == "repeated_native_id":
+                        runs[1].update(id=native["id"], external_id="another-result")
+                    elif fault == "unknown_external_id":
+                        del runs[1]["external_id"]
+                    elif fault == "unknown_candidate_name":
+                        del runs[1]["name"]
+                    elif fault == "unknown_candidate_head":
+                        del runs[1]["head_sha"]
+                    elif fault == "conflicting_app_identity":
+                        runs[1]["app"]["id"] += 1
+                    elif fault == "confirmed_other_identity":
+                        runs[1]["external_id"] = "another-result"
                     count = 2
                 elif fault == "truncated":
                     count = 2
@@ -202,7 +229,12 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
                     page["total_count"] = count
                 http = FakeHTTP((200, page))
                 result = value._readback(http, value.effects[0], token="synthetic")
-                self.assertEqual(result, (200, native) if fault is None else None)
+                self.assertEqual(
+                    result,
+                    (200, native)
+                    if fault in {None, "confirmed_other_identity"}
+                    else None,
+                )
                 self.assertEqual(value.effects[0]["status"], "pending")
                 self.assertEqual(
                     [(method, path) for method, path, _ in http.calls],
@@ -213,6 +245,21 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
                         )
                     ],
                 )
+
+    def test_in_progress_update_cannot_recover_with_a_stale_conclusion(self):
+        precondition = fixture()[0].effects[1]["check_update_precondition"]
+        request = {"status": "in_progress", "output": CREATE["output"]}
+        pending = effect(request, path=PATH + "/501", method="PATCH")
+        pending["check_update_precondition"] = precondition
+        for returned in (None, "success"):
+            with self.subTest(returned=returned):
+                value = journal(retained=document((pending,)))
+                native = native_check(**{**CREATE, "conclusion": returned})
+                http = FakeHTTP((200, native))
+                result = value._readback(http, value.effects[0], token="synthetic")
+                self.assertEqual(result, (200, native) if returned is None else None)
+                self.assertEqual(value.effects[0]["status"], "pending")
+                self.assertEqual(len(http.calls), 1)
 
     def test_cold_targeted_update_preserves_prior_creation_external_id(self):
         value, native = fixture()
