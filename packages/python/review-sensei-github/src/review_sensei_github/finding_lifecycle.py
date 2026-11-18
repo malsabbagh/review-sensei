@@ -2410,6 +2410,39 @@ def _request_matches(observed, expected):
     )
 
 
+def _check_request_matches(observed, expected):
+    """Match the sent check projection, not GitHub's larger output envelope."""
+    if _request_matches(observed, expected):
+        return True
+    if not isinstance(observed, dict):
+        return False
+    output, sent = observed.get("output"), expected.get("output")
+    # The current check producer sends only title and summary. GitHub adds
+    # nullable text and annotation metadata. Do not ignore another rendered
+    # field, annotations, extra output keys or differences in sent fields.
+    if (
+        not isinstance(sent, dict)
+        or set(sent) != {"title", "summary"}
+        or not all(isinstance(item, str) for item in sent.values())
+        or not isinstance(output, dict)
+        or not set(output)
+        <= {"title", "summary", "text", "annotations_count", "annotations_url"}
+        or output.get("text") is not None
+    ):
+        return False
+    count = output.get("annotations_count", 0)
+    url = output.get("annotations_url")
+    if (
+        type(count) is not int
+        or count != 0
+        or ("annotations_url" in output and (not isinstance(url, str) or not url))
+    ):
+        return False
+    return _request_matches(
+        {**observed, "output": {key: output.get(key) for key in sent}}, expected
+    )
+
+
 def _validate(document: object) -> dict[str, Any]:
     fields = {
         "schema_version",
@@ -5150,7 +5183,7 @@ class FindingLifecycleJournal:
             isinstance(precondition, dict)
             and self._check_commitment(payload) == precondition
             and payload.get("errors") in (None, [])
-            and _request_matches(payload, effect["request"])
+            and _check_request_matches(payload, effect["request"])
         )
 
     def _body_receipts(self, review_id):
@@ -5634,14 +5667,12 @@ class FindingLifecycleJournal:
             if (
                 status == 200
                 and isinstance(runs, list)
+                and type(payload.get("total_count", len(runs))) is int
                 and payload.get("total_count", len(runs)) == len(runs)
                 and len(runs) < 100
             ):
                 candidates = [
-                    run
-                    for run in runs
-                    if isinstance(run, dict)
-                    and all(run.get(k) == v for k, v in request.items())
+                    run for run in runs if _check_request_matches(run, request)
                 ]
         elif path.endswith("/reviews") and effect["method"] == "POST":
             status, values = http.request(
@@ -5674,7 +5705,9 @@ class FindingLifecycleJournal:
             status, value = http.request("GET", object_path, token=token)
             if status == 200 and isinstance(value, dict):
                 expected_request = request
+                matches = _request_matches
                 if "/check-runs" in path:
+                    matches = _check_request_matches
                     # A later confirmed update in this same ordered intent log
                     # legitimately supersedes the earlier pending projection.
                     for later in self.effects[self.effects.index(effect) + 1 :]:
@@ -5697,9 +5730,7 @@ class FindingLifecycleJournal:
                             # not infer success from a generic failure state.
                             expected_request = {**expected_request, **later["request"]}
                             confirmed_check_successor = later
-                candidates = (
-                    [value] if _request_matches(value, expected_request) else []
-                )
+                candidates = [value] if matches(value, expected_request) else []
         if candidates is None or len(candidates) != 1:
             return None
         value = candidates[0]
@@ -5725,16 +5756,34 @@ class FindingLifecycleJournal:
         # ownership is independently selected by the ledger's evidence resolver.
         producer = self.ledger.evidence_producer()
         if "/check-runs" in path:
+            commitment = self._check_commitment(value)
+            source_app_id = getattr(self.ledger, "authenticated_app_id", None)
             expected_slug = (
                 self.app_slug[:-5]
                 if self.app_slug and self.app_slug.endswith("[bot]")
                 else self.app_slug
             )
-            if not isinstance(user, dict) or user.get("slug") != expected_slug:
+            if (
+                commitment is None
+                or "user" in value
+                or value["app"]["slug"] != expected_slug
+                or (
+                    response is None
+                    and effect["method"] == "POST"
+                    and source_app_id is not None
+                    and commitment["app_id"] != source_app_id
+                )
+                or value.get("errors") not in (None, [])
+                or (
+                    effect["method"] == "PATCH"
+                    and path
+                    != f"/repos/{self.identity.repository}/check-runs/{commitment['check_run_id']}"
+                )
+            ):
                 return None
             if response is not None and isinstance(response[1], dict):
                 old_app_id = response[1].get("app_id")
-                if old_app_id is not None and user.get("id") != old_app_id:
+                if old_app_id is not None and commitment["app_id"] != old_app_id:
                     return None
         elif producer.startswith("github-bot:"):
             if (

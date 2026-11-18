@@ -5,11 +5,24 @@ import tempfile
 import unittest
 from urllib.parse import urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github.session_ledger import parse_session_comment
 
 from review_sensei.api_work import ApiRunAccounting
 from tests import test_recovery_context_g17 as recovery
 from tests.test_api_work_persistence import IDENTITY
+
+
+def expose_check_output_metadata(check):
+    # The Checks API returns these members even when the request only sent
+    # a title and summary. Mutate the fixture's stored read representation.
+    check["output"].update(
+        text=None,
+        annotations_count=0,
+        annotations_url=(
+            f"https://api.github.test/repos/owner/repo/check-runs/{check['id']}/annotations"
+        ),
+    )
 
 
 class OrdinaryPublicationLostNativeTests(unittest.TestCase):
@@ -64,7 +77,7 @@ class OrdinaryPublicationLostNativeTests(unittest.TestCase):
                 )
                 self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
 
-    def test_stored_lost_check_intents_keep_one_check_and_terminal_receipt(self):
+    def test_stored_lost_check_intents_confirm_github_response_projection(self):
         for operations in ({"POST"}, {"PATCH"}, {"POST", "PATCH"}):
             with (
                 self.subTest(operations=operations),
@@ -80,20 +93,29 @@ class OrdinaryPublicationLostNativeTests(unittest.TestCase):
                     response = original(request, timeout)
                     method = request.get_method()
                     path = urlsplit(request.full_url).path
-                    if (
-                        method in operations
-                        and method not in lost
-                        and "/check-runs" in path
-                    ):
-                        lost.add(method)
-                        raise TimeoutError("synthetic stored check response loss")
+                    if "/check-runs" in path and method in {"POST", "PATCH"}:
+                        check = fixture.check_runs[0]
+                        expose_check_output_metadata(check)
+                        if method in operations and method not in lost:
+                            lost.add(method)
+                            raise TimeoutError("synthetic stored check response loss")
+                        return json_response(check, response.status)
                     return response
 
                 fixture.external = lose_after_store
                 self.assertEqual(fixture.invoke(), 0, fixture.error)
                 self.assertEqual(lost, operations)
+                self.assertEqual(fixture.provider_calls, 1)
                 self.assertEqual(len(fixture.check_runs), 1)
                 self.assertEqual(fixture.check_runs[0]["status"], "completed")
+                self.assertEqual(
+                    [
+                        method
+                        for _, method, path in fixture.trace
+                        if method in {"POST", "PATCH"} and "/check-runs" in path
+                    ],
+                    ["POST", "PATCH"],
+                )
                 self.assertEqual(
                     [review["state"] for review in fixture.reviews],
                     ["COMMENTED", "APPROVED"],
@@ -101,11 +123,17 @@ class OrdinaryPublicationLostNativeTests(unittest.TestCase):
                 current = parse_session_comment(
                     fixture.comment["body"], identity=IDENTITY
                 )
-                self.assertIsNotNone(
-                    ApiRunAccounting.from_document(
-                        current.api_run_accounting
-                    ).terminal_transaction
-                )
+                accounting = ApiRunAccounting.from_document(current.api_run_accounting)
+                self.assertIsNotNone(accounting.terminal_transaction)
+                self.assertEqual(accounting.configuration.limit, 512)
+                self.assertGreaterEqual(accounting.uncertain, len(lost))
+                unknown = {
+                    item["request_id"]
+                    for item in fixture.accounted.observations
+                    if item["outcome"] == "unknown" and item.get("mutation")
+                }
+                self.assertEqual(len(unknown), len(lost))
+                self.assertLessEqual(unknown, fixture.accounted._reconciled_mutations)
 
     def test_all_four_native_responses_lost_stay_within_original_allowance(self):
         with tempfile.TemporaryDirectory() as directory:
