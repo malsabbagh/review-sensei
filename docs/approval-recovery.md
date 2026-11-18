@@ -331,6 +331,9 @@ publication, corrupt receipt or unverified security requirement.
 Historical incidents and interrupted workflows must be classified from retained
 session, accounting, and native GitHub witnesses before any replay or restart is
 selected ([ADR 0133](adr/0133-historical-review-recovery-and-nonterminal-boundaries.md)).
+Use the [PR recovery state matrix](pr-recovery-state-matrix.md) to distinguish
+in-place recovery from a hold, a separately authorized successor, and an
+original attempt that cannot be proved from retained evidence.
 Offline classifiers, recovery descriptors, formatter comparisons, and
 attempt-evidence packets (`AttemptEvidencePacket`, `NoTransactionAttemptPacket`,
 `PendingReassessmentAttemptPacket`, and `PublicationOverflowAttemptPacket`)
