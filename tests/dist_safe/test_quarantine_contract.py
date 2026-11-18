@@ -75,11 +75,11 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 ),
                 (
                     "test_review_run.py",
-                    "15729836401e58acb754def3921aadbd80b44333073a0ca63ecf16b18044c43e",
+                    "1bf42f11032e9b5fb15c375dee615cffbd360eaa5ec414e25419bc9b3ad0599d",
                 ),
                 (
                     "test_api_work_lifecycle.py",
-                    "1634e38f532b05e4cf90c4c7d8332b9b3b2c7e1addd096127a2dfa48605cb61a",
+                    "cbae76b34264b7c224e6c437e7b6f2a5017bab21d30f7f7d573228b6b267b269",
                 ),
                 (
                     "test_api_work_public_review.py",
