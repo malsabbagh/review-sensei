@@ -2410,12 +2410,16 @@ def _request_matches(observed, expected):
     )
 
 
-def _check_request_matches(observed, expected):
+def _check_request_matches(observed, expected, *, recovering=False):
     """Match the sent check projection, not GitHub's larger output envelope."""
     if not isinstance(observed, dict):
         return False
+    # An acknowledged rescan update can reuse a completed check object. A
+    # later observation retaining its previous outcome cannot alone prove
+    # that an uncertain in-progress write was this operation's exact effect.
     if (
-        expected.get("status") == "in_progress"
+        recovering
+        and expected.get("status") == "in_progress"
         and expected.get("conclusion") is None
         and observed.get("conclusion") is not None
     ):
@@ -5189,7 +5193,7 @@ class FindingLifecycleJournal:
             isinstance(precondition, dict)
             and self._check_commitment(payload) == precondition
             and payload.get("errors") in (None, [])
-            and _check_request_matches(payload, effect["request"])
+            and _check_request_matches(payload, effect["request"], recovering=recovered)
         ):
             return False
         source_app_id = getattr(self.ledger, "authenticated_app_id", None)
@@ -5771,7 +5775,7 @@ class FindingLifecycleJournal:
                     if observed_external_id == external_id:
                         candidates.append(run)
                 if len(candidates) == 1 and not _check_request_matches(
-                    candidates[0], request
+                    candidates[0], request, recovering=True
                 ):
                     return None
         elif path.endswith("/reviews") and effect["method"] == "POST":

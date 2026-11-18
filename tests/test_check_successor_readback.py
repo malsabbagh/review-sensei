@@ -255,6 +255,7 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
             with self.subTest(returned=returned):
                 value = journal(retained=document((pending,)))
                 native = native_check(**{**CREATE, "conclusion": returned})
+                self.assertTrue(value._check_update_matches(value.effects[0], native))
                 http = FakeHTTP((200, native))
                 result = value._readback(http, value.effects[0], token="synthetic")
                 self.assertEqual(result, (200, native) if returned is None else None)
