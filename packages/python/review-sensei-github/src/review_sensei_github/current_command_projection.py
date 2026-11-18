@@ -7,6 +7,7 @@ all inputs and separately owns execution/root-transition custody.
 
 import copy
 import sys
+from functools import partial
 from typing import Any
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -189,6 +190,102 @@ def future_census_bound(plan, added_parts):
     return envelope.worst_read_calls()
 
 
+def _best_synthetic_inline_candidate(
+    journal,
+    current,
+    candidate,
+    *,
+    reg_ref,
+    reg_allowance,
+    binding,
+    item_count,
+    prior_settled_accounting,
+    base_env,
+    env_for_mid,
+    projected_ok: Any = None,
+):
+    from review_sensei import bounded_evidence as evidence
+    from review_sensei import finding_lifecycle_store as store
+    from review_sensei import session as core_session
+
+    base_inline = evidence.inline_manifest(
+        base_env, binding=binding, item_count=item_count
+    )
+    if base_inline is None:
+        return ()
+    lo = 0
+    hi = max(0, reg_allowance - len(canonical_bytes(base_inline)))
+    best_inline = None
+    witness = getattr(journal.ledger.caller, "_accepted_semantic_capacity", None)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand_env = env_for_mid(base_env, mid)
+        capped_inline = evidence.inline_manifest(
+            cand_env, binding=binding, item_count=item_count
+        )
+        fits = (
+            capped_inline is not None
+            and len(canonical_bytes(capped_inline)) <= reg_allowance
+        )
+        if fits:
+            evolve_kwargs: dict[str, Any] = {
+                "generation": current.generation + 1,
+                "transaction": candidate.transaction,
+                "finding_lifecycle": {**reg_ref, "manifest": capped_inline},
+            }
+            if prior_settled_accounting is not None:
+                evolve_kwargs["api_run_accounting"] = prior_settled_accounting
+            cand_rec = current.evolve(**evolve_kwargs)
+            try:
+                store._require_retained_snapshot_capacity(cand_rec)
+                if witness is not None:
+                    prosp_ref = store.normalize_reference(
+                        {
+                            **reg_ref,
+                            "schema_version": store.HISTORY_REFERENCE_VERSION,
+                            "accepted_semantic_history": witness["history"],
+                            "manifest": capped_inline,
+                        }
+                    )
+                    raw_doc = cand_rec.to_dict()
+                    raw_doc["finding_lifecycle"] = prosp_ref
+                    store._require_retained_snapshot_capacity(
+                        cand_rec, reference=prosp_ref
+                    )
+                    store.require_prospective_terminal_history_capacity(raw_doc)
+                    if (
+                        len(canonical_bytes(raw_doc))
+                        > core_session.MAX_SESSION_RECORD_BYTES
+                    ):
+                        fits = False
+            except ReviewInputError:
+                fits = False
+        if fits and projected_ok is not None:
+            try:
+                plain_cand = current.evolve(
+                    generation=current.generation + 1,
+                    transaction=candidate.transaction,
+                    finding_lifecycle={**reg_ref, "manifest": capped_inline},
+                )
+                if not projected_ok(plain_cand):
+                    fits = False
+            except ReviewInputError:
+                fits = False
+        if fits:
+            best_inline = capped_inline
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best_inline is None:
+        return ()
+    best_cand = current.evolve(
+        generation=current.generation + 1,
+        transaction=candidate.transaction,
+        finding_lifecycle={**reg_ref, "manifest": best_inline},
+    )
+    return (best_cand,)
+
+
 def _maximum_candidate(
     journal,
     current,
@@ -275,7 +372,7 @@ def _maximum_candidate(
                 finding_lifecycle={**reference, "manifest": maximum_inline},
             )
             store._require_retained_snapshot_capacity(candidate)
-        return candidate, 0, 0, ()
+        return candidate, 0, 0, None
     raw = len(canonical_bytes(envelope))
     packed = raw + (raw >> 12) + (raw >> 14) + (raw >> 25) + 13
     count = (packed + evidence.PACKED_CHUNK_BYTES - 1) // evidence.PACKED_CHUNK_BYTES
@@ -337,7 +434,7 @@ def _maximum_candidate(
         finding_lifecycle={**reference, "manifest": maximum},
     )
     store._require_retained_snapshot_capacity(candidate)
-    extra_candidates: tuple[Any, ...] = ()
+    extra_builder: Any = None
     if not exact:
         try:
             reg_ref, reg_env, _, reg_allowance, reg_cand = store._prepare_lifecycle(
@@ -391,99 +488,58 @@ def _maximum_candidate(
                         "native_atoms": lifecycle["native_atoms"],
                     },
                 }
-                base_inline = evidence.inline_manifest(
-                    base_env,
+                extra_builder = partial(
+                    _best_synthetic_inline_candidate,
+                    journal,
+                    current,
+                    candidate,
+                    reg_ref=reg_ref,
+                    reg_allowance=reg_allowance,
                     binding=selected["binding"],
                     item_count=item_count,
+                    prior_settled_accounting=prior_settled_accounting,
+                    base_env=base_env,
+                    env_for_mid=lambda env, mid: {
+                        **env,
+                        "lifecycle": {
+                            **env["lifecycle"],
+                            "journal": {
+                                **env["lifecycle"]["journal"],
+                                "data": "A" * mid,
+                            },
+                        },
+                    },
                 )
-                if base_inline is not None:
-                    from review_sensei import session as core_session
-
-                    lo = 0
-                    hi = max(0, reg_allowance - len(canonical_bytes(base_inline)))
-                    best_inline = None
-                    witness = getattr(
-                        journal.ledger.caller, "_accepted_semantic_capacity", None
-                    )
-                    while lo <= hi:
-                        mid = (lo + hi) // 2
-                        cand_env = {
-                            **base_env,
-                            "lifecycle": {
-                                **base_env["lifecycle"],
-                                "journal": {
-                                    **base_env["lifecycle"]["journal"],
-                                    "data": "A" * mid,
-                                },
-                            },
-                        }
-                        capped_inline = evidence.inline_manifest(
-                            cand_env,
-                            binding=selected["binding"],
-                            item_count=item_count,
-                        )
-                        fits = (
-                            capped_inline is not None
-                            and len(canonical_bytes(capped_inline)) <= reg_allowance
-                        )
-                        if fits:
-                            evolve_kwargs: dict[str, Any] = {
-                                "generation": current.generation + 1,
-                                "transaction": candidate.transaction,
-                                "finding_lifecycle": {
-                                    **reg_ref,
-                                    "manifest": capped_inline,
-                                },
-                            }
-                            if prior_settled_accounting is not None:
-                                evolve_kwargs["api_run_accounting"] = (
-                                    prior_settled_accounting
-                                )
-                            cand_rec = current.evolve(**evolve_kwargs)
-                            try:
-                                store._require_retained_snapshot_capacity(cand_rec)
-                                if witness is not None:
-                                    prosp_ref = store.normalize_reference(
-                                        {
-                                            **reg_ref,
-                                            "schema_version": store.HISTORY_REFERENCE_VERSION,
-                                            "accepted_semantic_history": witness[
-                                                "history"
-                                            ],
-                                            "manifest": capped_inline,
-                                        }
-                                    )
-                                    raw_doc = cand_rec.to_dict()
-                                    raw_doc["finding_lifecycle"] = prosp_ref
-                                    store._require_retained_snapshot_capacity(
-                                        cand_rec, reference=prosp_ref
-                                    )
-                                    store.require_prospective_terminal_history_capacity(
-                                        raw_doc
-                                    )
-                                    if (
-                                        len(canonical_bytes(raw_doc))
-                                        > core_session.MAX_SESSION_RECORD_BYTES
-                                    ):
-                                        fits = False
-                            except ReviewInputError:
-                                fits = False
-                        if fits:
-                            best_inline = capped_inline
-                            lo = mid + 1
-                        else:
-                            hi = mid - 1
-                    if best_inline is not None:
-                        best_cand = current.evolve(
-                            generation=current.generation + 1,
-                            transaction=candidate.transaction,
-                            finding_lifecycle={
-                                **reg_ref,
-                                "manifest": best_inline,
-                            },
-                        )
-                        extra_candidates = (best_cand,)
-    return candidate, count, retained, extra_candidates
+        if (
+            extra_builder is None
+            and reg_cand is not None
+            and isinstance(document, dict)
+            and document.get("schema_version") == "finding-lifecycle-packed-v3"
+        ):
+            compact_base_env: dict[str, Any] = {
+                "schema_version": store.DOCUMENT_VERSION,
+                "lifecycle": {
+                    "schema_version": "finding-lifecycle-packed-v6",
+                    "data": "",
+                },
+            }
+            extra_builder = partial(
+                _best_synthetic_inline_candidate,
+                journal,
+                current,
+                candidate,
+                reg_ref=reg_ref,
+                reg_allowance=reg_allowance,
+                binding=selected["binding"],
+                item_count=item_count,
+                prior_settled_accounting=prior_settled_accounting,
+                base_env=compact_base_env,
+                env_for_mid=lambda env, mid: {
+                    **env,
+                    "lifecycle": {**env["lifecycle"], "data": "A" * mid},
+                },
+            )
+    return candidate, count, retained, extra_builder
 
 
 def project(
@@ -562,6 +618,7 @@ def project(
             len(raw) + evidence.PART_FRAMING_RESERVE for raw in details["staged_parts"]
         )
         final_candidates: set[int] = set()
+        extra_builders: list[tuple[Any, bool]] = []
         has_own_write = (
             preview_record.record_sha256 != journal._record.record_sha256
             or bool(details["staged_parts"])
@@ -585,7 +642,7 @@ def project(
                         uncertain_ordinary=0,
                         deadline_ceiling=deadline_ceiling,
                     )
-            current, count, framed, extra = _maximum_candidate(
+            current, count, framed, extra_builder = _maximum_candidate(
                 journal,
                 current,
                 document,
@@ -596,10 +653,12 @@ def project(
             )
             parts += count
             retained += framed
-            candidates.extend(extra)
+            is_final_step = index == len(documents) - 1
+            if extra_builder is not None:
+                extra_builders.append((extra_builder, is_final_step))
             candidates.append(current)
-            if index == len(documents) - 1:
-                final_candidates = {id(item) for item in (*extra, current)}
+            if is_final_step:
+                final_candidates = {id(current)}
         branch_parts.append(parts)
         branch_bytes.append(retained)
         if accounting_context is not None:
@@ -629,7 +688,11 @@ def project(
                 uncertain_terminal=1,
                 deadline_ceiling=deadline_ceiling,
             )
-        for candidate in candidates:
+
+        def _project_candidate_rows(
+            candidate: Any, *, is_final: bool
+        ) -> list[dict[str, Any]]:
+            cand_rows = []
             ordinary_reference = store.normalize_reference(candidate.finding_lifecycle)
             terminal_reference = store.normalize_reference(
                 {
@@ -639,9 +702,7 @@ def project(
                 }
             )
             terminal_modes = (
-                (False, True)
-                if accounting_context is None or id(candidate) in final_candidates
-                else (False,)
+                (False, True) if accounting_context is None or is_final else (False,)
             )
             for terminal in terminal_modes:
                 if accounting_context is not None:
@@ -688,7 +749,7 @@ def project(
                     raise ReviewInputError(
                         "current complete future root or comment is unrepresentable"
                     )
-                rows.append(
+                cand_rows.append(
                     {
                         "terminal": terminal,
                         "record_bytes": root_bytes,
@@ -696,6 +757,27 @@ def project(
                         "parts": parts,
                     }
                 )
+            return cand_rows
+
+        for builder, is_final_step in extra_builders:
+
+            def _projected_ok(cand: Any, _final: bool = is_final_step) -> bool:
+                try:
+                    _project_candidate_rows(cand, is_final=_final)
+                except ReviewInputError:
+                    return False
+                return True
+
+            built = builder(projected_ok=_projected_ok)
+            candidates.extend(built)
+            if is_final_step:
+                final_candidates.update(id(item) for item in built)
+        for candidate in candidates:
+            rows.extend(
+                _project_candidate_rows(
+                    candidate, is_final=id(candidate) in final_candidates
+                )
+            )
     if (
         max(branch_parts) != quote["added_parts"]
         or max(branch_bytes) != quote["added_bytes"]

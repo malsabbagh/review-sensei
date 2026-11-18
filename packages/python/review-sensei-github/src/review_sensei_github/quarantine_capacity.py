@@ -1774,6 +1774,16 @@ def _comment_allocation_plan(
             and len(extra_operations) >= ordinary["new_objects"]
         ):
             evidence_slots = _spend_fitting_slots(evidence_slots, extra_evidence)
+            if len(known) >= 150:
+                spent_ordinary = _spend_fitting_slots(ordinary_slots, extra_operations)
+                candidate_plan = CommentAllocationPlan(
+                    known,
+                    (*evidence_slots, *spent_ordinary, *current),
+                    metadata_known=metadata_known,
+                    metadata_unknown=metadata_bound,
+                )
+                if candidate_plan.worst_read_calls() >= 5:
+                    ordinary_slots = spent_ordinary
     return CommentAllocationPlan(
         known,
         (*evidence_slots, *ordinary_slots, *current),

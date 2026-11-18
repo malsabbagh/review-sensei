@@ -283,12 +283,30 @@ def replace_quarantine_checkpoint(caller, ledger, identity, mutate, *, now=None)
     comment_id: int | None = None
     record = None
     from .publication_recovery import _publication_transport
-    from .quarantine_origin import rebind_same_lineage_owner
+    from .quarantine_origin import (
+        has_paged_v2_disposition_snapshot,
+        rebind_same_lineage_owner,
+    )
 
     authenticated = getattr(ledger, "_quarantine_authenticated", None)
     if (
-        getattr(_publication_transport(ledger.http), "_quarantine_capacity_guard", None)
-        is None
+        (
+            (
+                getattr(
+                    _publication_transport(ledger.http),
+                    "_quarantine_capacity_guard",
+                    None,
+                )
+                is None
+                and len(ledger._cached_comments()) >= 98
+            )
+            or (
+                type(caller.accounting.configuration.limit) is int
+                and caller.accounting.configuration.limit >= 1152
+                and caller._effect_record is not None
+                and has_paged_v2_disposition_snapshot(caller._effect_record)
+            )
+        )
         and getattr(ledger, "_quarantine_lifecycle_capacity", None) is None
         and caller._terminal_reason is None
         and caller._action_effect_boundary is None
@@ -301,7 +319,6 @@ def replace_quarantine_checkpoint(caller, ledger, identity, mutate, *, now=None)
             )
         )
         and getattr(ledger, "_inventory_complete", False) is True
-        and len(ledger._cached_comments()) >= 98
         and authenticated is not None
         and caller._checkpoint is None
         and caller._effect_record is not None

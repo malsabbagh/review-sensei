@@ -173,7 +173,7 @@ class QuarantineStagingPricingTests(unittest.TestCase):
                 if isinstance(code, types.CodeType) and code.co_name == "active"
             )
             yields = {
-                i.offset
+                i.end_offset if sys.version_info[:2] == (3, 13) else i.offset
                 for i in dis.get_instructions(activation_code)
                 if i.opname == "YIELD_VALUE"
             }

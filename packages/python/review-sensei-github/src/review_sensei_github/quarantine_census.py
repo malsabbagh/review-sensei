@@ -317,8 +317,15 @@ def _page_hint(ledger, seen_ids):
         amount += cost
     if not costs or size >= 100:
         return 100
+    if not seen_ids and size < 40:
+        return max(1, size)
     extra = (MAX_GITHUB_RESPONSE_BYTES - amount) // 66560
     return min(100, max(1, size + max(1, extra)))
+
+
+@dataclass
+class _CertifiedProfileBox:
+    sizes: dict[Any, int]
 
 
 def fetch_comments(
@@ -430,17 +437,28 @@ def fetch_comments(
 
     receipt_census = begin_receipt_census(ledger, identity)
     owner, name = identity.repository.split("/", 1)
-    profiles = getattr(ledger, "_quarantine_census_sizes", None)
-    if profiles is None:
-        profiles = {}
-        ledger._quarantine_census_sizes = profiles
+    certified = historical_reader is not None or getattr(
+        ledger, "_quarantine_capacity_cursor", False
+    )
+    if certified:
+        if historical_reader is not None:
+            profiles: dict[Any, int] = {}
+        else:
+            certified_box = getattr(ledger, "_quarantine_certified_profiles", None)
+            if type(certified_box) is not _CertifiedProfileBox:
+                certified_box = _CertifiedProfileBox({})
+                ledger._quarantine_certified_profiles = certified_box
+            profiles = certified_box.sizes
+    else:
+        existing_profiles = getattr(ledger, "_quarantine_census_sizes", None)
+        if existing_profiles is None:
+            existing_profiles = {}
+            ledger._quarantine_census_sizes = existing_profiles
+        profiles = existing_profiles
     collected = []
     seen_ids: set[int] = set()
     cursors: set[str] = set()
     after, total = None, None
-    certified = historical_reader is not None or getattr(
-        ledger, "_quarantine_capacity_cursor", False
-    )
     first = 100 if certified else _page_hint(ledger, seen_ids)
     requests = (
         MAX_PAGINATION_PAGES

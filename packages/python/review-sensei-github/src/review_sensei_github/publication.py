@@ -3511,6 +3511,9 @@ class ReviewApprovalFinalizer:
                 if entry.instance in active
                 or (entry.lifecycle is not None and entry.lifecycle in active)
             )
+            from .finding_lifecycle import register_compact_actor
+
+            register_compact_actor(actor)
             preview_check = apply_dispositions_to_drift_state(
                 drift_state,
                 honored_fingerprints=active,
@@ -3601,6 +3604,9 @@ class ReviewApprovalFinalizer:
         drift_state = self._drift_states.get((repository_id, pull_request))
         preview_drift: DriftEvaluationResult | None = None
         if drift_state is not None and drift_state.head_sha == head_sha:
+            from .finding_lifecycle import register_compact_actor
+
+            register_compact_actor(actor)
             preview_drift = apply_dispositions_to_drift_state(
                 drift_state,
                 honored_fingerprints=active,
@@ -3964,6 +3970,9 @@ class ReviewApprovalFinalizer:
                     )
                 )
         if drift_state is not None and drift_state.head_sha == head_sha:
+            from .finding_lifecycle import register_compact_actor
+
+            register_compact_actor(actor)
             for released in (False, True):
                 update_capacity_states.append(
                     apply_dispositions_to_drift_state(
@@ -4507,6 +4516,9 @@ class ReviewApprovalFinalizer:
                 )
             )
         if drift_state is not None and drift_state.head_sha == head_sha:
+            from .finding_lifecycle import register_compact_actor
+
+            register_compact_actor(actor)
             self._drift_states[(repository_id, pull_request)] = (
                 apply_dispositions_to_drift_state(
                     drift_state,

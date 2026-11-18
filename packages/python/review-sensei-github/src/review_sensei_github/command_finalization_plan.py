@@ -648,17 +648,18 @@ def pack_authorized_pending(journal, logical_document):
     pending = _PENDING.get(plan)
     if pending is None:
         raise ReviewInputError("command dictionary pending commitments are absent")
-    if (
-        canonical_bytes(_pack_current_journal(logical_document))
-        not in dict(pending).values()
-    ):
+    current_packed = _pack_current_journal(logical_document)
+    if canonical_bytes(current_packed) not in dict(pending).values():
         return None  # Confirmed/final snapshots stay self-contained, not v4.
-    return pack(
+    packed_dictionary = pack(
         logical_document,
         base=json.loads(context[0]),
         manifest=json.loads(context[1]),
         current_binding=journal._record.finding_lifecycle["manifest"]["binding"],
     )
+    if len(canonical_bytes(packed_dictionary)) >= len(canonical_bytes(current_packed)):
+        return None
+    return packed_dictionary
 
 
 def _bind_cleanup_prefixes(plan, instances):

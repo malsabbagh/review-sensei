@@ -122,6 +122,11 @@ _PACKED_TAIL_OPTIONAL = frozenset(
     }
 )
 _PACKED_TAIL_ALLOWED = _PACKED_TAIL_REQUIRED | _PACKED_TAIL_OPTIONAL
+_PACKED_PAGE_ZDICT = (
+    b'[["dismiss","accept-risk","defer","accept-coverage-uncertainty",'
+    b'"admin","maintain","write","RS-",null,0,'
+    b'"github-issue-comment:","github-review-comment:","T00:00:00Z","2026-"]]'
+)
 
 
 def pack_page_index(
@@ -144,7 +149,6 @@ def pack_page_index(
     # structured metadata so small indexes stay compact under Base85 framing.
     hashes = bytearray()
     meta_buf = bytearray()
-    hashes += bytes.fromhex(document["result_digest"])
     meta_buf += struct.pack(">HH", len(document["pages"]), len(document["tail"]))
     for page in document["pages"]:
         if (
@@ -208,10 +212,20 @@ def pack_page_index(
         fp = item["fingerprint"]
         hashes += bytes.fromhex(fp)
         fref = item.get("finding_reference")
-        if fref == "RS-" + fp[:12].upper():
-            fref_meta: object = 1
-        elif fref == "RS-" + fp[:12].lower():
-            fref_meta = 2
+        if (
+            isinstance(fref, str)
+            and fref.startswith("RS-")
+            and 1 <= len(fref) - 3 <= len(fp)
+            and fref == "RS-" + fp[: len(fref) - 3].upper()
+        ):
+            fref_meta: object = len(fref) - 3
+        elif (
+            isinstance(fref, str)
+            and fref.startswith("RS-")
+            and 1 <= len(fref) - 3 <= len(fp)
+            and fref == "RS-" + fp[: len(fref) - 3].lower()
+        ):
+            fref_meta = -(len(fref) - 3)
         else:
             if type(fref) is int:
                 return None
@@ -250,7 +264,8 @@ def pack_page_index(
     meta_buf += canonical_bytes(tail_meta)
     if len(hashes) > 0xFFFF or len(meta_buf) > MAX_PARTITION_DECODED_BYTES:
         return None
-    comp_meta = zlib.compress(bytes(meta_buf), level=9)
+    compressor = zlib.compressobj(level=9, wbits=-15, zdict=_PACKED_PAGE_ZDICT)
+    comp_meta = compressor.compress(bytes(meta_buf)) + compressor.flush()
     wire = struct.pack(">HI", len(hashes), len(meta_buf)) + bytes(hashes) + comp_meta
     packed = {
         "schema_version": PACKED_PAGE_INDEX_VERSION,
@@ -258,7 +273,11 @@ def pack_page_index(
         "d": base64.b85encode(wire).decode("ascii"),
     }
     try:
-        unpacked = _unpack_page_index(packed, expected_binding=binding)
+        unpacked = _unpack_page_index(
+            packed,
+            expected_binding=binding,
+            result_digest=document["result_digest"],
+        )
     except ReviewInputError:
         return None
     if canonical_bytes(unpacked) != canonical_bytes(document):
@@ -267,7 +286,10 @@ def pack_page_index(
 
 
 def _unpack_page_index(
-    value: object, *, expected_binding: Mapping[str, object]
+    value: object,
+    *,
+    expected_binding: Mapping[str, object],
+    result_digest: str,
 ) -> object:
     if (
         not isinstance(value, dict)
@@ -288,18 +310,17 @@ def _unpack_page_index(
             raise ReviewInputError("disposition page index does not match root")
         hashes_len, meta_len = struct.unpack_from(">HI", wire, 0)
         if (
-            not 32 <= hashes_len <= len(wire) - 6
+            not 0 <= hashes_len <= len(wire) - 6
             or not 4 <= meta_len <= MAX_PARTITION_DECODED_BYTES
         ):
             raise ReviewInputError("disposition page index does not match root")
         hashes = wire[6 : 6 + hashes_len]
-        decomp = zlib.decompressobj()
+        decomp = zlib.decompressobj(wbits=-15, zdict=_PACKED_PAGE_ZDICT)
         meta_buf = decomp.decompress(wire[6 + hashes_len :], meta_len + 1)
         meta_buf += decomp.flush(1)
         if not decomp.eof or decomp.unconsumed_tail or len(meta_buf) != meta_len:
             raise ReviewInputError("disposition page index does not match root")
-        result_digest = hashes[:32].hex()
-        hpos = 32
+        hpos = 0
         page_count, tail_count = struct.unpack_from(">HH", meta_buf, 0)
         mpos = 4
         if page_count != len(value["ids"]) or tail_count > 4096:
@@ -384,10 +405,12 @@ def _unpack_page_index(
             }
             if arole is not None:
                 item_dict["actor_role"] = arole
-            if type(fref_meta) is int and fref_meta == 1:
-                item_dict["finding_reference"] = "RS-" + fp[:12].upper()
-            elif type(fref_meta) is int and fref_meta == 2:
-                item_dict["finding_reference"] = "RS-" + fp[:12].lower()
+            if type(fref_meta) is int and 1 <= fref_meta <= len(fp):
+                item_dict["finding_reference"] = "RS-" + fp[:fref_meta].upper()
+            elif type(fref_meta) is int and -len(fp) <= fref_meta <= -1:
+                item_dict["finding_reference"] = "RS-" + fp[:-fref_meta].lower()
+            elif type(fref_meta) is int:
+                raise ReviewInputError("disposition page index does not match root")
             elif fref_meta is not None:
                 item_dict["finding_reference"] = fref_meta
             if rec_at is not None:
@@ -432,7 +455,9 @@ def validate_page_index(
         raise ReviewInputError("disposition page root is invalid")
     count = manifest["item_count"]
     expected = validate_binding(manifest.get("binding"))
-    value = _unpack_page_index(value, expected_binding=expected)
+    value = _unpack_page_index(
+        value, expected_binding=expected, result_digest=root["result_digest"]
+    )
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "result_digest", "pages", "tail"}
@@ -538,7 +563,9 @@ def read_paged_snapshot(
         values.extend(validated)
     assert isinstance(document, dict)
     unpacked = _unpack_page_index(
-        document, expected_binding=validate_binding(root["state_manifest"]["binding"])
+        document,
+        expected_binding=validate_binding(root["state_manifest"]["binding"]),
+        result_digest=root["result_digest"],
     )
     assert isinstance(unpacked, dict)
     values.extend(unpacked["tail"])

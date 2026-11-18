@@ -514,6 +514,7 @@ class HumanInventoryStore:
         from .api_run_requests import ApiRunRequestTransport, ApiRunSessionLedger
         from .current_command_execution import _ACTIVE as _CURRENT_COMMAND_ACTIVE
         from .publication_recovery import _publication_transport
+        from .quarantine_action import has_grouped_historical_lease
         from .quarantine_origin import (
             has_paged_v2_disposition_snapshot,
             rebind_same_lineage_owner,
@@ -548,7 +549,12 @@ class HumanInventoryStore:
             and (
                 (guard is None and len(self.ledger._cached_comments()) >= 98)
                 or (
-                    caller in _CURRENT_COMMAND_ACTIVE
+                    (
+                        caller in _CURRENT_COMMAND_ACTIVE
+                        or has_grouped_historical_lease(self.ledger, identity)
+                        or authenticated.record_sha256
+                        == caller._effect_record.record_sha256
+                    )
                     and type(caller.accounting.configuration.limit) is int
                     and caller.accounting.configuration.limit >= 1152
                     and has_paged_v2_disposition_snapshot(caller._effect_record)

@@ -666,9 +666,10 @@ def _read_lifecycle_published_record(
     if not isinstance(stored, dict) or stored.get("schema_version") not in {
         "finding-lifecycle-packed-v3",
         "finding-lifecycle-packed-v5",
+        "finding-lifecycle-packed-v6",
     }:
         raise ReviewInputError(
-            "quarantine lifecycle origin requires self-contained v3 or v5 evidence"
+            "quarantine lifecycle origin requires self-contained v3, v5 or v6 evidence"
         )
     document = validate_journal(_unpack_journal(stored))
     state = decode_lifecycle_state(document["lifecycle"]).state

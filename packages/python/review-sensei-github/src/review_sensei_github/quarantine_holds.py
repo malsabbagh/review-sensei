@@ -22,7 +22,6 @@ class QuarantineHoldReader:
         from review_sensei.session import SessionLoadResult
 
         from .api_run_requests import ApiRunSessionLedger
-        from .current_command_execution import _ACTIVE as _CURRENT_COMMAND_ACTIVE
         from .http import MAX_GITHUB_RESPONSE_BYTES
         from .publication_recovery import _publication_transport
         from .quarantine_origin import (
@@ -68,8 +67,7 @@ class QuarantineHoldReader:
                 > MAX_GITHUB_RESPONSE_BYTES
             )
             current_paged_v2_reuse = (
-                caller in _CURRENT_COMMAND_ACTIVE
-                and type(caller.accounting.configuration.limit) is int
+                type(caller.accounting.configuration.limit) is int
                 and caller.accounting.configuration.limit >= 1152
                 and has_paged_v2_disposition_snapshot(caller._effect_record)
             )

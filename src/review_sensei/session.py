@@ -4551,7 +4551,7 @@ def disposition_snapshot_capacity(record: SessionRecord) -> int:
                     and isinstance(b.get("pending", ()), list)
                     and type(b.get("undispatched")) is int
                 )
-                target_completed = min(total_slots, 175)
+                target_completed = min(total_slots, 168)
                 if len(completed) < target_completed:
                     pair_receipts = all(
                         isinstance(item, list)
@@ -4562,7 +4562,7 @@ def disposition_snapshot_capacity(record: SessionRecord) -> int:
                     )
                     id_width = max(
                         [
-                            8,
+                            6,
                             *(
                                 len(item[0])
                                 for item in completed

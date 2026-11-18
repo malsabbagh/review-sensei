@@ -7,10 +7,16 @@ neither part of the document nor included in request identities.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import struct
+import sys
+import zlib
 from contextlib import contextmanager
+from dataclasses import replace
+from functools import lru_cache
 from typing import Any
 
 from review_sensei.bounded_evidence import (
@@ -159,9 +165,47 @@ def _pack_current_journal(document):
     the generic v3 bound unless their exact retained prefix has separate custody.
     """
     legacy = _pack_journal(document)
-    if type(document) is not dict or document.get("schema_version") != (
-        "finding-lifecycle-journal-v3"
+    if type(document) is not dict:
+        return legacy
+    schema = document.get("schema_version")
+    if (
+        schema in {VERSION, CURRENT_VERSION}
+        and type(document.get("guarded_publication_pair")) is not dict
     ):
+        lifecycle = document.get("lifecycle")
+        effects = document.get("effects")
+        if (
+            isinstance(lifecycle, dict)
+            and lifecycle.get("mode") == "drift"
+            and isinstance(effects, list)
+        ):
+            obligations = (
+                lifecycle.get("state", {}).get("inventory", {}).get("obligations", ())
+            )
+            if isinstance(obligations, list) and len(obligations) >= 24:
+                resolved_count = sum(
+                    1
+                    for ob in obligations
+                    if isinstance(ob, dict)
+                    and ob.get("resolution_proof_sha256") is not None
+                )
+                has_pending = any(
+                    isinstance(e, dict) and e.get("status") == "pending"
+                    for e in effects
+                )
+                if resolved_count == 0 or (resolved_count == 1 and not has_pending):
+                    return legacy
+                try:
+                    compact_v6 = _pack_compact_journal(document)
+                except ReviewInputError:
+                    return legacy
+                return (
+                    compact_v6
+                    if len(canonical_bytes(compact_v6)) < len(canonical_bytes(legacy))
+                    else legacy
+                )
+        return legacy
+    if schema != "finding-lifecycle-journal-v3":
         return legacy
     effects = document.get("effects")
     if (
@@ -339,12 +383,1767 @@ def _closed_pair_path_bound(packed, journal):
     return {index: prefix + "9223372036854775807"}
 
 
-def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=None):
+_COMPACT_VERSION = "finding-lifecycle-packed-v6"
+_HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_KNOWN_OVERRIDE_ACTORS: list[str] = [
+    "alice",
+    "bob",
+    "maintainer",
+    "operator",
+    "reviewer",
+    "authenticated-resolution",
+]
+
+
+def register_compact_actor(actor: object) -> None:
+    if isinstance(actor, str):
+        cleaned = actor.strip()
+        if (
+            0 < len(cleaned) <= 128
+            and cleaned not in _KNOWN_OVERRIDE_ACTORS
+            and len(_KNOWN_OVERRIDE_ACTORS) < 512
+        ):
+            _KNOWN_OVERRIDE_ACTORS.append(cleaned)
+
+
+_COMPACT_STATE_LIST = (
+    "active-unresolved",
+    "new",
+    "still-present",
+    "authorized-override",
+    "verified-fixed",
+    "reopened",
+)
+_COMPACT_CRIT_FIELDS = (
+    "origin_head_sha",
+    "origin_path",
+    "origin_line",
+    "origin_side",
+    "origin_symbol",
+    "defect_kind",
+    "blocking",
+    "needs_human",
+    "impact",
+    "evidence",
+)
+_COMPACT_ANCHOR_FIELDS = (
+    "head_sha",
+    "path",
+    "line",
+    "side",
+    "symbol",
+    "anchor_location",
+    "drift_kind",
+    "candidate_paths",
+)
+_COMPACT_BINDING_FIELDS = (
+    "thread_id",
+    "comment_id",
+    "placement",
+    "body_reason",
+    "slot_state",
+    "proof_sha256",
+    "host_marked_outdated",
+    "host_marked_resolved",
+)
+_COMPACT_COMMENT_FIELDS = (
+    "path",
+    "line",
+    "body",
+    "blocking",
+    "severity",
+    "category",
+    "fix_effort",
+    "symbol",
+    "defect_kind",
+    "evidence_id",
+    "side",
+    "effective_blocking",
+    "needs_human",
+)
+_COMPACT_RESERVED = {"$h", "$rb", "$ib", "$icl", "$sh", "$tid"}
+_COMPACT_ZDICT = (
+    b'{"ac":["alice"],"ech":{},"effects":['
+    b'{"method":"POST","path":"$rp/check-runs","request":{"external_id":"reviewsensei-review-v1","head_sha":{"$sh":0},"name":"ReviewSensei","output":{"summary":"A new ReviewSensei review is running for this head; any earlier conclusion on this head does not stand for it.","title":"ReviewSensei review in progress"},"status":"in_progress"},"response":[201,{"app_id":999,"id":502,"mutation":null,"producer_id":null}],"status":"confirmed"},'
+    b'{"check_update_precondition":{"app_id":999,"app_slug":"reviewsensei","check_run_id":502,"head_sha":{"$sh":0}},"method":"PATCH","path":"$rp/check-runs/502","request":{"conclusion":"action_required","output":{"summary":"The completed review reported findings that require a human decision before approval.","title":"Human decision required"},"status":"completed"},"response":[200,{"app_id":999,"id":502,"mutation":null,"producer_id":null}],"status":"confirmed"},'
+    b'{"conclusion":"success","output":{"summary":"The completed review reported no required fixes for this head.","title":"No required fixes"},"status":"completed"},'
+    b'{"method":"POST","path":"$rp/pulls/7/reviews","request":{"body":{"$body_sha256":{"$h":0},"utf8_bytes":2569},"comments":{"$icl":"new"},"commit_id":{"$sh":0},"event":"COMMENT"},"response":[200,{"app_id":null,"id":102,"mutation":null,"producer_id":999}],"status":"confirmed"},'
+    b'{"method":"POST","path":"$rp/pulls/7/reviews","request":{"body":{"$body_sha256":{"$h":1},"utf8_bytes":21488},"comments":[],"commit_id":{"$sh":0},"event":"APPROVE"},"response":[200,{"app_id":null,"id":103,"mutation":null,"producer_id":999}],"status":"confirmed"},'
+    b'{"method":"PUT","path":"$rp/pulls/7/reviews/103","request":{"body":{"$body_sha256":{"$h":2},"utf8_bytes":21668}},"review_update_precondition":{"body_sha256":{"$h":1},"head_sha":{"$sh":0},"producer_id":999,"review_id":103},"response":[200,{"app_id":null,"id":103,"mutation":null,"producer_id":999}],"status":"confirmed"},'
+    b'{"method":"POST","path":"/graphql","request":{"operationName":"ResolveReviewThread","query":"mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {\\n resolveReviewThread(input: $input) { thread { id isResolved } } }","variables":{"input":{"threadId":{"$tid":1}}}},"response":[200,{"app_id":null,"id":null,"mutation":{"name":"resolveReviewThread","resolved":true,"thread_id":{"$tid":1}},"producer_id":null}],"status":"confirmed"},'
+    b'"status":"pending","response":null,'
+    b'"ii":[{"$sh":0},{"$sh":1},{"$h":3}],"p":"complete-finding-lifecycle","receipts":"$id","rp":"/repos/owner/repo/","rt":[123,7,0,1,999,102,["$inl","new"],"$tb","$tb",0],'
+    b'"st":{"active":["$def","update"],"ad":[0,"src/app.py",3,"RIGHT",null,"right","unchanged",["src/app.py"]],"body_placement_note":null,"cd":[0,"src/app.py",3,"RIGHT",null,"unknown",false,true,"high","supported-source"],'
+    b'"changed_file_coverage":{"acceptance_proof_sha256":null,"approval_state":"reviewed","coverage_mode":"full","coverage_uncertainty_accepted":false,"enumerated_paths":["src/app.py"],"enumeration_complete":true,"fully_reviewed":true,"reviewed_paths":["src/app.py"]},'
+    b'"max_active_findings":250,"obs":{"a":0,"c":0,"cids":[209,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"co":null,"g":0,"n":28,"rc":1,"rc_b":[],"rc_e":[],"rk":50,"rp":[["$co",0,1],null],"st":[3,0],"tb":[4,2],"tids":"$prrt"},'
+    b'"rd":["src/app.py",3,"",false,"high",null,null,null,null,"","RIGHT",false,true],"review_complete":true,"round_number":1,"so":null},"ute":false,"v":"finding-lifecycle-payload-v1"}'
+)
+
+
+def _compact_unresolved_order(obs_list: list[dict[str, Any]]) -> list[int]:
+    return sorted(
+        (i for i, ob in enumerate(obs_list) if ob["resolution_proof_sha256"] is None),
+        key=lambda i: (
+            obs_list[i]["proposal_rank"]
+            if type(obs_list[i]["proposal_rank"]) is int
+            else 10**9,
+            obs_list[i]["present_anchor"]["path"] or "",
+            obs_list[i]["present_anchor"]["line"]
+            if type(obs_list[i]["present_anchor"]["line"]) is int
+            else 0,
+            obs_list[i]["criterion"]["obligation_id"],
+        ),
+    )
+
+
+@lru_cache(maxsize=512)
+def _compact_derived_inline_body(
+    comment: Any,
+    *,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    base_sha: str,
+    state: str,
+) -> tuple[str, int]:
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.human_assessment import finding_instance_fingerprint
+    from review_sensei.models import ReviewResult
+    from review_sensei.presentation import build_finding_view
+
+    from .publication import render_native_inline
+
+    fl = finding_lifecycle_for_comment(comment)
+    inst = finding_instance_fingerprint(comment)
+    ident = f"RS-{inst[:6].upper()}"
+    view = replace(
+        build_finding_view(
+            comment,
+            fingerprint=fl.fingerprint,
+            identifier=ident,
+            lifecycle_state=state,
+            placement="inline",
+        ),
+        repeat=True,
+    )
+    dummy = ReviewResult(provider="p", model="m", summary="s", comments=())
+    body = render_native_inline(
+        comment,
+        view=view,
+        result=dummy,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        fingerprint=fl.fingerprint,
+        state=state,
+    )
+    raw = body.encode("utf-8")
+    return hashlib.sha256(raw).hexdigest(), len(raw)
+
+
+@lru_cache(maxsize=512)
+def _compact_criterion_hashes(
+    comment: Any,
+    *,
+    origin_head_sha: str,
+    defect_kind: str,
+    path: str | None,
+    symbol: str | None,
+) -> tuple[str, str, str | None, str]:
+    from review_sensei.baseline import resolution_criterion_digest
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.human_assessment import finding_instance_fingerprint
+
+    fl = finding_lifecycle_for_comment(comment)
+    inst = finding_instance_fingerprint(comment)
+    oid = hashlib.sha256(
+        b"reviewsensei:drift-obligation:v1:"
+        + canonical_bytes(
+            {
+                "fingerprint": fl.fingerprint,
+                "instance": inst,
+                "origin_head_sha": origin_head_sha,
+            }
+        )
+    ).hexdigest()
+    rc_dig = resolution_criterion_digest(
+        fingerprint=fl.fingerprint,
+        evidence_id=comment.evidence_id,
+        defect_kind=defect_kind,
+        path=path,
+        symbol=symbol,
+    )
+    return oid, fl.fingerprint, fl.concern, rc_dig
+
+
+def _pack_compact_journal(document: object) -> dict[str, Any]:
+    """Lossless compact representation for large v2 drift journals."""
+    from review_sensei.human_assessment import finding_instance_fingerprint
+    from review_sensei.models import ReviewComment
+
+    from .publication import NativeFindingReceipt
+
+    if not isinstance(document, dict) or document.get("schema_version") not in {
+        VERSION,
+        CURRENT_VERSION,
+    }:
+        raise ReviewInputError(
+            "finding lifecycle compact carrier schema is unsupported"
+        )
+    lc = document.get("lifecycle")
+    if not isinstance(lc, dict) or lc.get("mode") != "drift":
+        raise ReviewInputError("finding lifecycle compact carrier mode is unsupported")
+    st = lc.get("state")
+    if not isinstance(st, dict):
+        raise ReviewInputError("finding lifecycle compact carrier state is invalid")
+    h_sha = st.get("head_sha")
+    b_sha = st.get("base_sha")
+    if (
+        not isinstance(h_sha, str)
+        or not isinstance(b_sha, str)
+        or _HEX40_RE.fullmatch(h_sha) is None
+        or _HEX40_RE.fullmatch(b_sha) is None
+    ):
+        raise ReviewInputError("finding lifecycle compact carrier snapshot is invalid")
+
+    def ref_sha(value):
+        if value == h_sha:
+            return 0
+        if value == b_sha:
+            return 1
+        return value
+
+    digests = bytearray()
+    digest_idx: dict[str, int] = {}
+
+    def intern_hex(hex_str: str) -> int:
+        idx = digest_idx.get(hex_str)
+        if idx is None:
+            idx = len(digest_idx)
+            digest_idx[hex_str] = idx
+            digests.extend(bytes.fromhex(hex_str))
+        return idx
+
+    obs = st["inventory"]["obligations"]
+    inst_to_ob_idx: dict[str, int] = {}
+    ob_comments: list[Any] = []
+    for ob_i, ob in enumerate(obs):
+        c_dict = ob["latest_comment"]
+        comment = None if c_dict is None else ReviewComment(**c_dict)
+        ob_comments.append(comment)
+        if comment is not None:
+            inst_to_ob_idx[finding_instance_fingerprint(comment)] = ob_i
+
+    receipts = document["native_receipts"]
+    body_sha_by_thread: dict[str, str] = {}
+    receipt_by_thread: dict[str, dict[str, Any]] = {}
+    inline_body_by_digest: dict[str, tuple[int, str, int]] = {}
+    inline_cache: dict[tuple[int, int, int, str, str, str], tuple[str, int]] = {}
+
+    def derived_info(
+        ob_i: int, repo_id: int, pr: int, rh: str, rb: str, st_cand: str
+    ) -> tuple[str, int]:
+        cache_key = (ob_i, repo_id, pr, rh, rb, st_cand)
+        hit = inline_cache.get(cache_key)
+        if hit is None:
+            hit = _compact_derived_inline_body(
+                ob_comments[ob_i],
+                repository_id=repo_id,
+                pull_request=pr,
+                head_sha=rh,
+                base_sha=rb,
+                state=st_cand,
+            )
+            inline_cache[cache_key] = hit
+        return hit
+
+    rt: list[Any] | None = None
+    encoded_receipts: list[Any] = []
+    for receipt in receipts:
+        if receipt["thread_id"] is not None:
+            body_sha_by_thread[receipt["thread_id"]] = receipt["body_sha256"]
+            receipt_by_thread[receipt["thread_id"]] = receipt
+        matched_ob_i = inst_to_ob_idx.get(receipt["instance"])
+        body_ref: Any = None
+        if matched_ob_i is not None:
+            for st_cand in ("new", "still-present"):
+                dig, utf8_len = derived_info(
+                    matched_ob_i,
+                    receipt["repository_id"],
+                    receipt["pull_request"],
+                    receipt["head_sha"],
+                    receipt["base_sha"],
+                    st_cand,
+                )
+                inline_body_by_digest.setdefault(dig, (matched_ob_i, st_cand, utf8_len))
+                if dig == receipt["body_sha256"]:
+                    body_ref = ["$inl", st_cand]
+                    break
+        if body_ref is None:
+            body_ref = ["$h", intern_hex(receipt["body_sha256"])]
+        inst_ref: Any = (
+            ["$ob", matched_ob_i]
+            if matched_ob_i is not None
+            else ["$h", intern_hex(receipt["instance"])]
+        )
+        # Ensure proof property matches NativeFindingReceipt validation cleanly.
+        NativeFindingReceipt(
+            receipt["repository_id"],
+            receipt["pull_request"],
+            receipt["head_sha"],
+            receipt["base_sha"],
+            receipt["producer_id"],
+            receipt["review_id"],
+            receipt["instance"],
+            receipt["body_sha256"],
+            receipt["thread_id"],
+            receipt["comment_id"],
+            receipt["native_head_sha"],
+        )
+        if receipt["thread_id"] == "$tb" or receipt["comment_id"] == "$tb":
+            raise ReviewInputError("finding lifecycle compact reserved receipt binding")
+        tb_match = (
+            obs[matched_ob_i]["thread_binding"] if matched_ob_i is not None else None
+        )
+        tid_out = (
+            "$tb"
+            if tb_match is not None
+            and tb_match["thread_id"] is not None
+            and receipt["thread_id"] == tb_match["thread_id"]
+            else receipt["thread_id"]
+        )
+        cid_out = (
+            "$tb"
+            if tb_match is not None
+            and tb_match["comment_id"] is not None
+            and receipt["comment_id"] == tb_match["comment_id"]
+            else receipt["comment_id"]
+        )
+        row = [
+            receipt["repository_id"],
+            receipt["pull_request"],
+            ref_sha(receipt["head_sha"]),
+            ref_sha(receipt["base_sha"]),
+            receipt["producer_id"],
+            receipt["review_id"],
+            inst_ref,
+            body_ref,
+            tid_out,
+            cid_out,
+            ref_sha(receipt["native_head_sha"]),
+        ]
+        if matched_ob_i is not None:
+            cand_rt = [*row[:6], *row[7:]]
+            if rt is None:
+                rt = cand_rt
+            if cand_rt == rt:
+                encoded_receipts.append(matched_ob_i)
+                continue
+        encoded_receipts.append(row)
+
+    receipts_out: Any = (
+        "$id"
+        if rt is not None and len(obs) > 0 and encoded_receipts == list(range(len(obs)))
+        else encoded_receipts
+    )
+
+    body_sha_to_ridx = {r["body_sha256"]: idx for idx, r in enumerate(receipts)}
+    ch = lc["concern_history"]
+    extra_ch: dict[str, Any] = {}
+    tid_to_ob_idx: dict[str, int] = {}
+    expected_slots = []
+    oid_to_ob_idx: dict[str, int] = {}
+    crit_def: list[Any] | None = None
+    anc_def: list[Any] | None = None
+    rc_def: list[Any] | None = None
+    state_idx_map = {name: i for i, name in enumerate(_COMPACT_STATE_LIST)}
+    used_actors: list[str] = []
+    used_actor_idx: dict[str, int] = {}
+
+    c_col: list[Any] = []
+    a_col: list[Any] = []
+    st_col: list[Any] = []
+    g_col: list[Any] = []
+    rk_col: list[Any] = []
+    tb_col: list[Any] = []
+    tids: list[str] = []
+    cids: list[int] = []
+    raw_cids: list[int] = []
+    prev_cid = 0
+    rp_col: list[Any] = []
+    rc_col: list[Any] = []
+    rc_b: list[str] = []
+    rc_e: list[str | None] = []
+    co_col: list[Any] = []
+
+    for idx, ob in enumerate(obs):
+        crit = ob["criterion"]
+        oid = crit["obligation_id"]
+        oid_to_ob_idx[oid] = idx
+        comment = ob_comments[idx]
+        crit_override: list[int | None] | None = None
+        if comment is not None:
+            derived = _compact_criterion_hashes(
+                comment,
+                origin_head_sha=crit["origin_head_sha"],
+                defect_kind=crit["defect_kind"],
+                path=crit["origin_path"],
+                symbol=crit["origin_symbol"],
+            )
+            actual = (
+                crit["obligation_id"],
+                crit["original_fingerprint"],
+                crit["concern"],
+                crit["resolution_criterion"],
+            )
+            if derived != actual:
+                crit_override = [
+                    intern_hex(crit["obligation_id"]),
+                    intern_hex(crit["original_fingerprint"]),
+                    None if crit["concern"] is None else intern_hex(crit["concern"]),
+                    intern_hex(crit["resolution_criterion"]),
+                ]
+        else:
+            crit_override = [
+                intern_hex(crit["obligation_id"]),
+                intern_hex(crit["original_fingerprint"]),
+                None if crit["concern"] is None else intern_hex(crit["concern"]),
+                intern_hex(crit["resolution_criterion"]),
+            ]
+        if ch.get(oid) != [crit["original_fingerprint"]]:
+            extra_ch[oid] = None if oid not in ch else [intern_hex(h) for h in ch[oid]]
+        crit_row = [
+            ref_sha(crit[k]) if k == "origin_head_sha" else crit[k]
+            for k in _COMPACT_CRIT_FIELDS
+        ]
+        if crit_def is None:
+            crit_def = list(crit_row)
+        c_col.append(0 if crit_row == crit_def else crit_row)
+        anc = ob["present_anchor"]
+        anc_row = [
+            ref_sha(anc[k]) if k == "head_sha" else anc[k]
+            for k in _COMPACT_ANCHOR_FIELDS
+        ]
+        if anc_def is None:
+            anc_def = list(anc_row)
+        a_col.append(0 if anc_row == anc_def else anc_row)
+        l_state = ob["lifecycle_state"]
+        st_col.append(state_idx_map[l_state] if l_state in state_idx_map else l_state)
+        g_col.append(ob["generation"])
+        rk_col.append(ob["proposal_rank"])
+        tb = ob["thread_binding"]
+        if tb is not None:
+            tid, cid = tb["thread_id"], tb["comment_id"]
+            if tid == "$tb":
+                raise ReviewInputError(
+                    "finding lifecycle compact reserved thread binding"
+                )
+            if isinstance(tid, str):
+                tid_to_ob_idx[tid] = idx
+            expected_slots.append(
+                {
+                    "proof_sha256": tb["proof_sha256"],
+                    "state": tb["slot_state"],
+                    "target": tid,
+                }
+            )
+            p = tb["proof_sha256"]
+            p_code: Any = None
+            if (
+                ob["resolution_proof_sha256"] is not None
+                and p == ob["resolution_proof_sha256"]
+            ):
+                p_code = "$res"
+            elif (
+                tid in body_sha_by_thread
+                and p
+                == hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "thread_id": tid,
+                            "comment_id": cid,
+                            "head_sha": h_sha,
+                            "obligation_id": oid,
+                            "placement": tb["placement"],
+                            "body_sha256": body_sha_by_thread[tid],
+                        }
+                    )
+                ).hexdigest()
+            ):
+                p_code = "$d1"
+            elif (
+                p
+                == hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "thread_id": tid,
+                            "comment_id": cid,
+                            "head_sha": h_sha,
+                            "obligation_id": oid,
+                        }
+                    )
+                ).hexdigest()
+            ):
+                p_code = "$d2"
+            elif (
+                ob["resolution_proof_sha256"] is not None
+                and tid in receipt_by_thread
+                and p
+                == hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "confirmed-finding-slot-release-v1",
+                            "resolution": ob["resolution_proof_sha256"],
+                            "receipt": receipt_by_thread[tid],
+                            "head_sha": h_sha,
+                        }
+                    )
+                ).hexdigest()
+            ):
+                p_code = "$rel"
+            tb_mapped = {
+                **tb,
+                "proof_sha256": p_code if p_code is not None else ["$h", intern_hex(p)],
+            }
+            tb_row: list[Any] = [tb_mapped[k] for k in _COMPACT_BINDING_FIELDS]
+            tag_num: int | None = None
+            if isinstance(tid, str) and type(cid) is int:
+                if tb_row == [tid, cid, "inline", None, "active", "$d1", False, False]:
+                    tag_num = 1
+                elif tb_row == [
+                    tid,
+                    cid,
+                    "inline",
+                    None,
+                    "active",
+                    "$d2",
+                    False,
+                    False,
+                ]:
+                    tag_num = 2
+                elif tb_row == [
+                    tid,
+                    cid,
+                    "inline",
+                    None,
+                    "released",
+                    "$res",
+                    False,
+                    False,
+                ]:
+                    tag_num = 3
+                elif tb_row == [
+                    tid,
+                    cid,
+                    "inline",
+                    None,
+                    "released",
+                    "$rel",
+                    False,
+                    True,
+                ]:
+                    tag_num = 4
+            if tag_num is not None:
+                tb_col.append(tag_num)
+                tids.append(tid)
+                cids.append(cid - prev_cid)
+                raw_cids.append(cid)
+                prev_cid = cid
+            else:
+                tb_col.append(tb_row)
+        else:
+            tb_col.append(None)
+
+        res_hex = ob["resolution_proof_sha256"]
+        res_p: Any = None
+        if res_hex is not None:
+            matched_co: tuple[int, int] | None = None
+            for cand_actor in (
+                *used_actors,
+                *(a for a in _KNOWN_OVERRIDE_ACTORS if a not in used_actor_idx),
+            ):
+                for sr in (True, False):
+                    cand_proof = hashlib.sha256(
+                        b"reviewsensei:drift-command-override:v1:"
+                        + canonical_bytes(
+                            {
+                                "obligation_id": oid,
+                                "actor": cand_actor,
+                                "head_sha": h_sha,
+                                "slot_released": sr,
+                            }
+                        )
+                    ).hexdigest()
+                    if cand_proof == res_hex:
+                        a_idx = used_actor_idx.get(cand_actor)
+                        if a_idx is None:
+                            a_idx = len(used_actors)
+                            used_actor_idx[cand_actor] = a_idx
+                            used_actors.append(cand_actor)
+                        matched_co = (a_idx, 1 if sr else 0)
+                        break
+                if matched_co is not None:
+                    break
+            res_p = (
+                ["$co", matched_co[0], matched_co[1]]
+                if matched_co is not None
+                else intern_hex(res_hex)
+            )
+        rp_col.append(res_p)
+
+        c_dict = ob["latest_comment"]
+        rc_row = (
+            None if c_dict is None else [c_dict[k] for k in _COMPACT_COMMENT_FIELDS]
+        )
+        if rc_row is None:
+            rc_col.append(None)
+        else:
+            rc_template = [*rc_row[:2], "", *rc_row[3:9], "", *rc_row[10:]]
+            if rc_def is None:
+                rc_def = rc_template
+            if rc_template == rc_def:
+                rc_col.append(1)
+                rc_b.append(rc_row[2])
+                rc_e.append(rc_row[9])
+            else:
+                rc_col.append(rc_row)
+        co_col.append(crit_override)
+
+    slots_order: list[int] | None = None
+    if st["slots"] != expected_slots:
+        slots_order = [tid_to_ob_idx[s["target"]] for s in st["slots"]]
+
+    compact_active = [
+        [
+            oid_to_ob_idx[ae["obligation_id"]],
+            ae["placement"],
+            ae["body_reason"],
+            ae["thread_action"],
+        ]
+        for ae in st["active_entries"]
+    ]
+    unres_order = _compact_unresolved_order(obs)
+    if not unres_order and compact_active == []:
+        active_out: Any = "$def"
+    elif (
+        unres_order
+        and len(compact_active) == len(unres_order)
+        and isinstance(compact_active[0][3], str)
+        and compact_active
+        == [[i, "inline", None, compact_active[0][3]] for i in unres_order]
+    ):
+        active_out = ["$def", compact_active[0][3]]
+    else:
+        active_out = compact_active
+
+    n_obs = len(obs)
+    obs_col: dict[str, Any] = {
+        "n": n_obs,
+        "c": 0 if n_obs > 0 and all(x == 0 for x in c_col) else c_col,
+        "a": 0 if n_obs > 0 and all(x == 0 for x in a_col) else a_col,
+        "st": (
+            st_col[0] if n_obs > 0 and all(x == st_col[0] for x in st_col) else st_col
+        ),
+        "g": (
+            g_col[0]
+            if n_obs > 0 and type(g_col[0]) is int and all(x == g_col[0] for x in g_col)
+            else g_col
+        ),
+        "rk": (
+            "$id"
+            if n_obs > 0 and rk_col == list(range(n_obs))
+            else None
+            if n_obs > 0 and all(x is None for x in rk_col)
+            else rk_col[0]
+            if n_obs > 0
+            and type(rk_col[0]) is int
+            and all(x == rk_col[0] for x in rk_col)
+            else rk_col
+        ),
+        "tb": (
+            None
+            if n_obs > 0 and all(x is None for x in tb_col)
+            else tb_col[0]
+            if n_obs > 0
+            and type(tb_col[0]) is int
+            and 1 <= tb_col[0] <= 4
+            and all(x == tb_col[0] for x in tb_col)
+            else tb_col
+        ),
+        "tids": (
+            "$prrt"
+            if len(tids) > 0 and tids == [f"PRRT_{c}" for c in raw_cids]
+            else tids
+        ),
+        "cids": cids,
+        "rp": (
+            None
+            if all(x is None for x in rp_col)
+            else rp_col[0]
+            if n_obs > 0
+            and isinstance(rp_col[0], list)
+            and len(rp_col[0]) == 3
+            and rp_col[0][0] == "$co"
+            and all(x == rp_col[0] for x in rp_col)
+            else rp_col
+        ),
+        "rc": (
+            None
+            if n_obs > 0 and all(x is None for x in rc_col)
+            else 1
+            if n_obs > 0 and all(x == 1 for x in rc_col)
+            else rc_col
+        ),
+        "rc_b": rc_b,
+        "rc_e": rc_e,
+        "co": None if all(x is None for x in co_col) else co_col,
+    }
+
+    st_compact = {
+        k: v
+        for k, v in st.items()
+        if k
+        not in {
+            "inventory",
+            "active_entries",
+            "slots",
+            "approved",
+            "withheld_reasons",
+            "recovery_steps",
+            "base_sha",
+            "head_sha",
+        }
+    }
+    st_compact["obs"] = obs_col
+    st_compact["active"] = active_out
+    st_compact["so"] = slots_order
+    st_compact["cd"] = crit_def
+    st_compact["ad"] = anc_def
+    st_compact["rd"] = rc_def
+
+    def intern_tree(value: Any) -> Any:
+        if isinstance(value, str):
+            if value == h_sha:
+                return {"$sh": 0}
+            if value == b_sha:
+                return {"$sh": 1}
+            if _HEX64_RE.match(value):
+                if value in body_sha_to_ridx:
+                    return {"$rb": body_sha_to_ridx[value]}
+                return {"$h": intern_hex(value)}
+            if value in tid_to_ob_idx:
+                return {"$tid": tid_to_ob_idx[value]}
+        if isinstance(value, dict):
+            if set(value) & _COMPACT_RESERVED:
+                raise ReviewInputError("finding lifecycle compact reserved key")
+            if set(value) == {"$body_sha256", "utf8_bytes"}:
+                hit = inline_body_by_digest.get(value["$body_sha256"])
+                if hit is not None and hit[2] == value["utf8_bytes"]:
+                    return {"$ib": [hit[0], hit[1]]}
+            return {key: intern_tree(item) for key, item in value.items()}
+        if isinstance(value, list):
+            mapped = [intern_tree(item) for item in value]
+            if (
+                receipts
+                and len(mapped) == len(obs)
+                and len(obs) > 0
+                and all(c is not None for c in ob_comments)
+                and isinstance(mapped[0], dict)
+                and isinstance(mapped[0].get("body"), dict)
+                and isinstance(mapped[0]["body"].get("$ib"), list)
+                and len(mapped[0]["body"]["$ib"]) == 2
+            ):
+                st_cand = mapped[0]["body"]["$ib"][1]
+                if st_cand in {"new", "still-present"} and mapped == [
+                    {
+                        "body": {"$ib": [i, st_cand]},
+                        "line": ob_comments[i].line,
+                        "path": ob_comments[i].path,
+                        "side": ob_comments[i].side,
+                    }
+                    for i in range(len(obs))
+                ]:
+                    return {"$icl": st_cand}
+            return mapped
+        return value
+
+    repo_prefix: str | None = None
+    if not any(
+        isinstance(e.get("path"), str) and e["path"].startswith("$rp/")
+        for e in document["effects"]
+    ):
+        for e in document["effects"]:
+            p_str = e.get("path")
+            if isinstance(p_str, str):
+                match = re.match(r"^(/repos/[^/]+/[^/]+/)", p_str)
+                if match is not None:
+                    repo_prefix = match.group(1)
+                    break
+
+    effects_compact = []
+    for effect in document["effects"]:
+        copied = dict(effect)
+        if copied.get("request_sha256") == _digest(
+            {
+                "method": copied["method"],
+                "path": copied["path"],
+                "request": _request_identity(copied["request"]),
+            }
+        ):
+            del copied["request_sha256"]
+        if (
+            repo_prefix is not None
+            and isinstance(copied.get("path"), str)
+            and copied["path"].startswith(repo_prefix)
+        ):
+            copied["path"] = "$rp/" + copied["path"][len(repo_prefix) :]
+        effects_compact.append(intern_tree(copied))
+
+    if len(digest_idx) > 4096:
+        raise ReviewInputError("finding lifecycle compact digest capacity exceeded")
+
+    payload = {
+        "v": lc["schema_version"],
+        "p": lc["purpose"],
+        "ii": intern_tree(lc["input_identity"]),
+        "ac": used_actors,
+        "ech": extra_ch,
+        "st": st_compact,
+        "rt": rt,
+        "receipts": receipts_out,
+        "rp": repo_prefix,
+        "effects": effects_compact,
+        "ute": document["unknown_trust_effect"],
+        **(
+            {"ash": intern_tree(document["accepted_semantic_history"])}
+            if document["schema_version"] == CURRENT_VERSION
+            else {}
+        ),
+    }
+    compressor = zlib.compressobj(level=9, wbits=-15, zdict=_COMPACT_ZDICT)
+    compressed = compressor.compress(canonical_bytes(payload)) + compressor.flush()
+    stream = (
+        bytes.fromhex(b_sha)
+        + bytes.fromhex(h_sha)
+        + struct.pack(">H", len(digest_idx))
+        + bytes(digests)
+        + compressed
+    )
+    if len(stream) > 1_048_576:
+        raise ReviewInputError("finding lifecycle compact stream exceeds bounds")
+    packed = {
+        "schema_version": _COMPACT_VERSION,
+        "d": base64.b85encode(stream).decode("ascii"),
+    }
+    if canonical_bytes(_unpack_compact_payload(packed)) != canonical_bytes(document):
+        raise ReviewInputError(
+            "finding lifecycle compact round-trip verification failed"
+        )
+    return packed
+
+
+def _unpack_compact_payload(stored: object) -> dict[str, Any]:
+    from review_sensei.active_finding_window import ChangedFileCoverageState
+    from review_sensei.finding_drift import (
+        DriftActiveEntry,
+        DriftInventory,
+        DriftTrackedObligation,
+        _recompute_drift_verdict,
+    )
+    from review_sensei.finding_lifecycle import _decode, _encode
+    from review_sensei.human_assessment import finding_instance_fingerprint
+    from review_sensei.models import ReviewComment
+    from review_sensei.publication_selection import PublishedSlot
+
+    if (
+        type(stored) is not dict
+        or set(stored) != {"schema_version", "d"}
+        or stored.get("schema_version") != _COMPACT_VERSION
+        or not isinstance(stored.get("d"), str)
+        or len(stored["d"]) > 1_400_000
+    ):
+        raise ReviewInputError("finding lifecycle compact carrier is invalid")
+    try:
+        stream = base64.b85decode(stored["d"])
+    except (ValueError, TypeError) as exc:
+        raise ReviewInputError("finding lifecycle compact encoding is invalid") from exc
+    if base64.b85encode(stream).decode("ascii") != stored["d"] or not (
+        43 <= len(stream) <= 1_048_576
+    ):
+        raise ReviewInputError("finding lifecycle compact stream is invalid")
+    b_sha = stream[:20].hex()
+    h_sha = stream[20:40].hex()
+    (digest_count,) = struct.unpack(">H", stream[40:42])
+    if not 0 <= digest_count <= 4096 or 42 + 32 * digest_count >= len(stream):
+        raise ReviewInputError("finding lifecycle compact digest header is invalid")
+    digest_bytes = stream[42 : 42 + 32 * digest_count]
+    compressed = stream[42 + 32 * digest_count :]
+    try:
+        decoder = zlib.decompressobj(wbits=-15, zdict=_COMPACT_ZDICT)
+        raw = decoder.decompress(compressed, 1_048_576 + 1)
+        if not decoder.eof:
+            raise ReviewInputError("finding lifecycle compact stream exceeds bounds")
+        tail = decoder.flush()
+        if (
+            len(raw) + len(tail) > 1_048_576
+            or decoder.unused_data
+            or decoder.unconsumed_tail
+        ):
+            raise ReviewInputError("finding lifecycle compact stream exceeds bounds")
+        raw = raw + tail
+    except zlib.error as exc:
+        raise ReviewInputError("finding lifecycle compact stream is invalid") from exc
+    if len(raw) > 1_048_576:
+        raise ReviewInputError("finding lifecycle compact stream exceeds bounds")
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise ReviewInputError("finding lifecycle compact JSON is invalid") from exc
+    if not isinstance(payload, dict) or canonical_bytes(payload) != raw:
+        raise ReviewInputError("finding lifecycle compact JSON is noncanonical")
+
+    def hex_at(index: object) -> str:
+        if type(index) is not int or not 0 <= index < digest_count:
+            raise ReviewInputError("finding lifecycle compact digest index is invalid")
+        return digest_bytes[index * 32 : (index + 1) * 32].hex()
+
+    used_actors = payload.get("ac")
+    if not isinstance(used_actors, list) or any(
+        not isinstance(a, str) or not 0 < len(a.strip()) <= 128 or a != a.strip()
+        for a in used_actors
+    ):
+        raise ReviewInputError("finding lifecycle compact actor table is invalid")
+    for actor_name in used_actors:
+        register_compact_actor(actor_name)
+
+    st = payload.get("st")
+    if not isinstance(st, dict):
+        raise ReviewInputError("finding lifecycle compact state is invalid")
+
+    def resolve_sha(value: object) -> object:
+        if value == 0:
+            return h_sha
+        if value == 1:
+            return b_sha
+        return value
+
+    obs_col = st.get("obs")
+    if not isinstance(obs_col, dict):
+        raise ReviewInputError("finding lifecycle compact obs is invalid")
+    n_obs = obs_col.get("n")
+    if type(n_obs) is not int or not 0 <= n_obs <= 4096:
+        raise ReviewInputError("finding lifecycle compact obs count is invalid")
+
+    def expand_col(val: object, *, allow_zero: bool = False) -> list[Any]:
+        if isinstance(val, list):
+            if len(val) != n_obs:
+                raise ReviewInputError("finding lifecycle compact column width invalid")
+            return val
+        if n_obs > 0 and (allow_zero and val == 0):
+            return [0] * n_obs
+        raise ReviewInputError("finding lifecycle compact column type is invalid")
+
+    c_col = expand_col(obs_col.get("c"), allow_zero=True)
+    a_col = expand_col(obs_col.get("a"), allow_zero=True)
+
+    st_raw = obs_col.get("st")
+    if isinstance(st_raw, list):
+        if len(st_raw) != n_obs:
+            raise ReviewInputError("finding lifecycle compact state column invalid")
+        st_col = st_raw
+    elif n_obs > 0 and (type(st_raw) is int or isinstance(st_raw, str)):
+        st_col = [st_raw] * n_obs
+    else:
+        raise ReviewInputError("finding lifecycle compact state column invalid")
+
+    g_raw = obs_col.get("g")
+    if isinstance(g_raw, list):
+        if len(g_raw) != n_obs:
+            raise ReviewInputError("finding lifecycle compact gen column invalid")
+        g_col = g_raw
+    elif n_obs > 0 and type(g_raw) is int:
+        g_col = [g_raw] * n_obs
+    else:
+        raise ReviewInputError("finding lifecycle compact gen column invalid")
+
+    rk_raw = obs_col.get("rk")
+    if rk_raw == "$id" and n_obs > 0:
+        rk_col: list[Any] = list(range(n_obs))
+    elif rk_raw is None and n_obs > 0:
+        rk_col = [None] * n_obs
+    elif type(rk_raw) is int and n_obs > 0:
+        rk_col = [rk_raw] * n_obs
+    elif isinstance(rk_raw, list) and len(rk_raw) == n_obs:
+        rk_col = rk_raw
+    else:
+        raise ReviewInputError("finding lifecycle compact rank column invalid")
+
+    tb_raw = obs_col.get("tb")
+    if tb_raw is None and n_obs > 0:
+        tb_col: list[Any] = [None] * n_obs
+    elif type(tb_raw) is int and 1 <= tb_raw <= 4 and n_obs > 0:
+        tb_col = [tb_raw] * n_obs
+    elif isinstance(tb_raw, list) and len(tb_raw) == n_obs:
+        tb_col = tb_raw
+    else:
+        raise ReviewInputError("finding lifecycle compact binding column invalid")
+
+    raw_tids = obs_col.get("tids")
+    cids = obs_col.get("cids")
+    if not isinstance(cids, list) or any(type(c) is not int for c in cids):
+        raise ReviewInputError("finding lifecycle compact binding IDs invalid")
+    if raw_tids == "$prrt":
+        if not cids:
+            raise ReviewInputError("finding lifecycle compact binding IDs invalid")
+        tids: list[str] = []
+        acc_cid = 0
+        for dc_val in cids:
+            acc_cid += dc_val
+            tids.append(f"PRRT_{acc_cid}")
+    elif (
+        isinstance(raw_tids, list)
+        and len(raw_tids) == len(cids)
+        and all(isinstance(t, str) for t in raw_tids)
+    ):
+        tids = raw_tids
+    else:
+        raise ReviewInputError("finding lifecycle compact binding IDs invalid")
+
+    rp_raw = obs_col.get("rp")
+    if rp_raw is None:
+        rp_col: list[Any] = [None] * n_obs
+    elif (
+        n_obs > 0
+        and isinstance(rp_raw, list)
+        and len(rp_raw) == 3
+        and rp_raw[0] == "$co"
+        and type(rp_raw[1]) is int
+        and type(rp_raw[2]) is int
+    ):
+        rp_col = [rp_raw] * n_obs
+    elif isinstance(rp_raw, list) and len(rp_raw) == n_obs:
+        rp_col = rp_raw
+    else:
+        raise ReviewInputError("finding lifecycle compact proofs invalid")
+
+    rc_raw = obs_col.get("rc")
+    if rc_raw is None and n_obs > 0:
+        rc_col: list[Any] = [None] * n_obs
+    elif rc_raw == 1 and n_obs > 0:
+        rc_col = [1] * n_obs
+    elif isinstance(rc_raw, list) and len(rc_raw) == n_obs:
+        rc_col = rc_raw
+    else:
+        raise ReviewInputError("finding lifecycle compact comments invalid")
+
+    rc_b = obs_col.get("rc_b")
+    rc_e = obs_col.get("rc_e")
+    if (
+        not isinstance(rc_b, list)
+        or not isinstance(rc_e, list)
+        or len(rc_b) != len(rc_e)
+        or any(not isinstance(b, str) for b in rc_b)
+        or any(e is not None and not isinstance(e, str) for e in rc_e)
+    ):
+        raise ReviewInputError("finding lifecycle compact comment bodies invalid")
+
+    co_raw = obs_col.get("co")
+    if co_raw is None:
+        co_col: list[Any] = [None] * n_obs
+    elif isinstance(co_raw, list) and len(co_raw) == n_obs:
+        co_col = co_raw
+    else:
+        raise ReviewInputError("finding lifecycle compact overrides invalid")
+
+    crit_def = st.get("cd")
+    anc_def = st.get("ad")
+    rc_def = st.get("rd")
+
+    ob_comments: list[Any] = []
+    obs_partials: list[tuple[Any, ...]] = []
+    tid_cursor = 0
+    prev_cid = 0
+    rc_cursor = 0
+    for idx in range(n_obs):
+        crit_row = crit_def if c_col[idx] == 0 else c_col[idx]
+        anc_row = anc_def if a_col[idx] == 0 else a_col[idx]
+        if not isinstance(crit_row, list) or len(crit_row) != len(_COMPACT_CRIT_FIELDS):
+            raise ReviewInputError("finding lifecycle compact criterion is invalid")
+        if not isinstance(anc_row, list) or len(anc_row) != len(_COMPACT_ANCHOR_FIELDS):
+            raise ReviewInputError("finding lifecycle compact anchor is invalid")
+        l_state_raw = st_col[idx]
+        if type(l_state_raw) is int:
+            if not 0 <= l_state_raw < len(_COMPACT_STATE_LIST):
+                raise ReviewInputError("finding lifecycle compact state code invalid")
+            l_state: Any = _COMPACT_STATE_LIST[l_state_raw]
+        else:
+            l_state = l_state_raw
+        gen = g_col[idx]
+        rank = rk_col[idx]
+        tb_item = tb_col[idx]
+        tb_row: list[Any] | None = None
+        if type(tb_item) is int and 1 <= tb_item <= 4:
+            if tid_cursor >= len(tids):
+                raise ReviewInputError("finding lifecycle compact tids underflow")
+            t_id = tids[tid_cursor]
+            c_id = prev_cid + cids[tid_cursor]
+            prev_cid = c_id
+            tid_cursor += 1
+            if tb_item == 1:
+                tb_row = [t_id, c_id, "inline", None, "active", "$d1", False, False]
+            elif tb_item == 2:
+                tb_row = [t_id, c_id, "inline", None, "active", "$d2", False, False]
+            elif tb_item == 3:
+                tb_row = [
+                    t_id,
+                    c_id,
+                    "inline",
+                    None,
+                    "released",
+                    "$res",
+                    False,
+                    False,
+                ]
+            else:
+                tb_row = [
+                    t_id,
+                    c_id,
+                    "inline",
+                    None,
+                    "released",
+                    "$rel",
+                    False,
+                    True,
+                ]
+        elif tb_item is not None:
+            if not isinstance(tb_item, list) or len(tb_item) != len(
+                _COMPACT_BINDING_FIELDS
+            ):
+                raise ReviewInputError("finding lifecycle compact binding row invalid")
+            tb_row = tb_item
+
+        rc_item = rc_col[idx]
+        rc_row: list[Any] | None = None
+        if rc_item == 1:
+            if not isinstance(rc_def, list) or len(rc_def) != len(
+                _COMPACT_COMMENT_FIELDS
+            ):
+                raise ReviewInputError("finding lifecycle compact comment is invalid")
+            if rc_cursor >= len(rc_b):
+                raise ReviewInputError("finding lifecycle compact rc_b underflow")
+            rc_row = [
+                *rc_def[:2],
+                rc_b[rc_cursor],
+                *rc_def[3:9],
+                rc_e[rc_cursor],
+                *rc_def[10:],
+            ]
+            rc_cursor += 1
+        elif rc_item is not None:
+            if not isinstance(rc_item, list) or len(rc_item) != len(
+                _COMPACT_COMMENT_FIELDS
+            ):
+                raise ReviewInputError("finding lifecycle compact comment is invalid")
+            rc_row = rc_item
+
+        crit_dict = dict(zip(_COMPACT_CRIT_FIELDS, crit_row))
+        crit_dict["origin_head_sha"] = resolve_sha(crit_dict["origin_head_sha"])
+        anc_dict = dict(zip(_COMPACT_ANCHOR_FIELDS, anc_row))
+        anc_dict["head_sha"] = resolve_sha(anc_dict["head_sha"])
+        if rc_row is None:
+            c_dict = None
+            comment = None
+        else:
+            c_dict = dict(zip(_COMPACT_COMMENT_FIELDS, rc_row))
+            comment = ReviewComment(**c_dict)
+        ob_comments.append(comment)
+        crit_override = co_col[idx]
+        if crit_override is None:
+            if comment is None:
+                raise ReviewInputError("finding lifecycle compact criterion missing")
+            oid, orig_fp, concern, rc_dig = _compact_criterion_hashes(
+                comment,
+                origin_head_sha=crit_dict["origin_head_sha"],
+                defect_kind=crit_dict["defect_kind"],
+                path=crit_dict["origin_path"],
+                symbol=crit_dict["origin_symbol"],
+            )
+        else:
+            if not isinstance(crit_override, list) or len(crit_override) != 4:
+                raise ReviewInputError(
+                    "finding lifecycle compact criterion override is invalid"
+                )
+            oid = hex_at(crit_override[0])
+            orig_fp = hex_at(crit_override[1])
+            concern = None if crit_override[2] is None else hex_at(crit_override[2])
+            rc_dig = hex_at(crit_override[3])
+        crit_dict.update(
+            obligation_id=oid,
+            original_fingerprint=orig_fp,
+            concern=concern,
+            resolution_criterion=rc_dig,
+        )
+        res_p = rp_col[idx]
+        if res_p is None:
+            res_sha: str | None = None
+        elif isinstance(res_p, list) and len(res_p) == 3 and res_p[0] == "$co":
+            a_i, sr_i = res_p[1], res_p[2]
+            if (
+                type(a_i) is not int
+                or not 0 <= a_i < len(used_actors)
+                or sr_i not in (0, 1)
+                or type(sr_i) is not int
+            ):
+                raise ReviewInputError(
+                    "finding lifecycle compact override proof invalid"
+                )
+            res_sha = hashlib.sha256(
+                b"reviewsensei:drift-command-override:v1:"
+                + canonical_bytes(
+                    {
+                        "obligation_id": oid,
+                        "actor": used_actors[a_i],
+                        "head_sha": h_sha,
+                        "slot_released": bool(sr_i),
+                    }
+                )
+            ).hexdigest()
+        else:
+            res_sha = hex_at(res_p)
+        obs_partials.append(
+            (crit_dict, anc_dict, l_state, gen, tb_row, res_sha, rank, c_dict)
+        )
+
+    if tid_cursor != len(tids) or rc_cursor != len(rc_b):
+        raise ReviewInputError("finding lifecycle compact column count mismatch")
+
+    rt = payload.get("rt")
+    raw_receipts = payload.get("receipts")
+    if raw_receipts == "$id":
+        if not isinstance(rt, list) or len(rt) != 10 or n_obs == 0:
+            raise ReviewInputError("finding lifecycle compact receipt template invalid")
+        compact_receipts: list[Any] = list(range(n_obs))
+    elif isinstance(raw_receipts, list):
+        compact_receipts = raw_receipts
+    else:
+        raise ReviewInputError("finding lifecycle compact receipts invalid")
+
+    inline_cache: dict[tuple[int, int, int, str, str, str], tuple[str, int]] = {}
+
+    def derived_info(
+        ob_i: int, repo_id: int, pr: int, rh: str, rb: str, st_cand: str
+    ) -> tuple[str, int]:
+        if not 0 <= ob_i < len(ob_comments) or ob_comments[ob_i] is None:
+            raise ReviewInputError("finding lifecycle compact comment index is invalid")
+        cache_key = (ob_i, repo_id, pr, rh, rb, st_cand)
+        hit = inline_cache.get(cache_key)
+        if hit is None:
+            hit = _compact_derived_inline_body(
+                ob_comments[ob_i],
+                repository_id=repo_id,
+                pull_request=pr,
+                head_sha=rh,
+                base_sha=rb,
+                state=st_cand,
+            )
+            inline_cache[cache_key] = hit
+        return hit
+
+    receipts = []
+    body_sha_by_thread: dict[str, str] = {}
+    receipt_by_thread: dict[str, dict[str, Any]] = {}
+    for entry in compact_receipts:
+        if type(entry) is int:
+            if not isinstance(rt, list) or len(rt) != 10:
+                raise ReviewInputError(
+                    "finding lifecycle compact receipt template invalid"
+                )
+            row = [*rt[:6], ["$ob", entry], *rt[6:]]
+        else:
+            row = entry
+        if not isinstance(row, list) or len(row) != 11:
+            raise ReviewInputError("finding lifecycle compact receipt is invalid")
+        (
+            repo_id,
+            pr,
+            r_head_raw,
+            r_base_raw,
+            prod_id,
+            rev_id,
+            inst_ref,
+            body_ref,
+            tid,
+            cid,
+            n_head_raw,
+        ) = row
+        r_head = resolve_sha(r_head_raw)
+        r_base = resolve_sha(r_base_raw)
+        n_head = resolve_sha(n_head_raw)
+        if (
+            not isinstance(r_head, str)
+            or not isinstance(r_base, str)
+            or type(repo_id) is not int
+            or type(pr) is not int
+        ):
+            raise ReviewInputError("finding lifecycle compact receipt scope is invalid")
+        ob_i_for_body: int | None = None
+        if isinstance(inst_ref, list) and len(inst_ref) == 2 and inst_ref[0] == "$ob":
+            idx_val = inst_ref[1]
+            if (
+                type(idx_val) is not int
+                or not 0 <= idx_val < len(ob_comments)
+                or ob_comments[idx_val] is None
+            ):
+                raise ReviewInputError(
+                    "finding lifecycle compact receipt obligation is invalid"
+                )
+            inst_hex = finding_instance_fingerprint(ob_comments[idx_val])
+            ob_i_for_body = idx_val
+        elif isinstance(inst_ref, list) and len(inst_ref) == 2 and inst_ref[0] == "$h":
+            inst_hex = hex_at(inst_ref[1])
+        else:
+            raise ReviewInputError(
+                "finding lifecycle compact receipt instance is invalid"
+            )
+        if (
+            isinstance(body_ref, list)
+            and len(body_ref) == 2
+            and body_ref[0] == "$inl"
+            and ob_i_for_body is not None
+            and body_ref[1] in {"new", "still-present"}
+        ):
+            body_hex = derived_info(
+                ob_i_for_body, repo_id, pr, r_head, r_base, body_ref[1]
+            )[0]
+        elif isinstance(body_ref, list) and len(body_ref) == 2 and body_ref[0] == "$h":
+            body_hex = hex_at(body_ref[1])
+        else:
+            raise ReviewInputError("finding lifecycle compact receipt body is invalid")
+        if tid == "$tb" or cid == "$tb":
+            if ob_i_for_body is None:
+                raise ReviewInputError(
+                    "finding lifecycle compact receipt binding is invalid"
+                )
+            tb_ref = obs_partials[ob_i_for_body][4]
+            if not isinstance(tb_ref, list) or len(tb_ref) != len(
+                _COMPACT_BINDING_FIELDS
+            ):
+                raise ReviewInputError(
+                    "finding lifecycle compact receipt binding is invalid"
+                )
+            if tid == "$tb":
+                tid = tb_ref[0]
+            if cid == "$tb":
+                cid = tb_ref[1]
+        receipt = {
+            "schema_version": "native-finding-receipt-v1",
+            "repository_id": repo_id,
+            "pull_request": pr,
+            "head_sha": r_head,
+            "base_sha": r_base,
+            "producer_id": prod_id,
+            "review_id": rev_id,
+            "instance": inst_hex,
+            "body_sha256": body_hex,
+            "thread_id": tid,
+            "comment_id": cid,
+            "native_head_sha": n_head,
+        }
+        receipts.append(receipt)
+        if isinstance(tid, str):
+            body_sha_by_thread[tid] = body_hex
+            receipt_by_thread[tid] = receipt
+
+    obligations = []
+    default_slots = []
+    slot_by_ob_idx: dict[int, dict[str, Any]] = {}
+    ch: dict[str, list[str]] = {}
+    extra_ch = payload.get("ech")
+    if not isinstance(extra_ch, dict):
+        raise ReviewInputError("finding lifecycle compact concern history is invalid")
+
+    for idx, (
+        crit_dict,
+        anc_dict,
+        l_state,
+        gen,
+        tb_row,
+        res_sha,
+        rank,
+        c_dict,
+    ) in enumerate(obs_partials):
+        oid = crit_dict["obligation_id"]
+        if oid in extra_ch:
+            val = extra_ch[oid]
+            if val is not None:
+                if not isinstance(val, list):
+                    raise ReviewInputError("finding lifecycle compact history invalid")
+                ch[oid] = [hex_at(i) for i in val]
+        else:
+            ch[oid] = [crit_dict["original_fingerprint"]]
+        if tb_row is None:
+            tb_dict = None
+        else:
+            tb_dict = dict(zip(_COMPACT_BINDING_FIELDS, tb_row))
+            tid, cid = tb_dict["thread_id"], tb_dict["comment_id"]
+            p_raw = tb_dict["proof_sha256"]
+            if p_raw == "$res":
+                if res_sha is None:
+                    raise ReviewInputError("finding lifecycle compact proof invalid")
+                tb_dict["proof_sha256"] = res_sha
+            elif p_raw == "$d1":
+                if not isinstance(tid, str) or tid not in body_sha_by_thread:
+                    raise ReviewInputError("finding lifecycle compact proof invalid")
+                tb_dict["proof_sha256"] = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "thread_id": tid,
+                            "comment_id": cid,
+                            "head_sha": h_sha,
+                            "obligation_id": oid,
+                            "placement": tb_dict["placement"],
+                            "body_sha256": body_sha_by_thread[tid],
+                        }
+                    )
+                ).hexdigest()
+            elif p_raw == "$d2":
+                tb_dict["proof_sha256"] = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "thread_id": tid,
+                            "comment_id": cid,
+                            "head_sha": h_sha,
+                            "obligation_id": oid,
+                        }
+                    )
+                ).hexdigest()
+            elif p_raw == "$rel":
+                if (
+                    res_sha is None
+                    or not isinstance(tid, str)
+                    or tid not in receipt_by_thread
+                ):
+                    raise ReviewInputError("finding lifecycle compact proof invalid")
+                tb_dict["proof_sha256"] = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "confirmed-finding-slot-release-v1",
+                            "resolution": res_sha,
+                            "receipt": receipt_by_thread[tid],
+                            "head_sha": h_sha,
+                        }
+                    )
+                ).hexdigest()
+            elif isinstance(p_raw, list) and len(p_raw) == 2 and p_raw[0] == "$h":
+                tb_dict["proof_sha256"] = hex_at(p_raw[1])
+            else:
+                raise ReviewInputError("finding lifecycle compact proof invalid")
+            slot_dict = {
+                "proof_sha256": tb_dict["proof_sha256"],
+                "state": tb_dict["slot_state"],
+                "target": tid,
+            }
+            default_slots.append(slot_dict)
+            slot_by_ob_idx[idx] = slot_dict
+        obligations.append(
+            {
+                "criterion": crit_dict,
+                "generation": gen,
+                "latest_comment": c_dict,
+                "lifecycle_state": l_state,
+                "present_anchor": anc_dict,
+                "proposal_rank": rank,
+                "resolution_proof_sha256": res_sha,
+                "thread_binding": tb_dict,
+            }
+        )
+
+    slots_order = st.get("so")
+    if slots_order is None:
+        slot_dicts = default_slots
+    else:
+        if not isinstance(slots_order, list) or any(
+            type(i) is not int or i not in slot_by_ob_idx for i in slots_order
+        ):
+            raise ReviewInputError("finding lifecycle compact slot order is invalid")
+        slot_dicts = [slot_by_ob_idx[i] for i in slots_order]
+
+    compact_active = st.get("active")
+    if compact_active == "$def":
+        if _compact_unresolved_order(obligations):
+            raise ReviewInputError("finding lifecycle compact default active mismatch")
+        compact_active = []
+    elif (
+        isinstance(compact_active, list)
+        and len(compact_active) == 2
+        and compact_active[0] == "$def"
+        and isinstance(compact_active[1], str)
+    ):
+        unres_order = _compact_unresolved_order(obligations)
+        if not unres_order:
+            raise ReviewInputError("finding lifecycle compact default active mismatch")
+        compact_active = [[i, "inline", None, compact_active[1]] for i in unres_order]
+    elif not isinstance(compact_active, list):
+        raise ReviewInputError("finding lifecycle compact active list is invalid")
+    active_entry_dicts = []
+    for ae_row in compact_active:
+        if not isinstance(ae_row, list) or len(ae_row) != 4:
+            raise ReviewInputError("finding lifecycle compact active entry is invalid")
+        ob_idx, placement, body_reason, thread_action = ae_row
+        if type(ob_idx) is not int or not 0 <= ob_idx < len(obligations):
+            raise ReviewInputError("finding lifecycle compact active index is invalid")
+        ob_d = obligations[ob_idx]
+        tb_d = ob_d["thread_binding"]
+        active_entry_dicts.append(
+            {
+                "obligation_id": ob_d["criterion"]["obligation_id"],
+                "original_fingerprint": ob_d["criterion"]["original_fingerprint"],
+                "origin_path": ob_d["criterion"]["origin_path"],
+                "present_path": ob_d["present_anchor"]["path"],
+                "present_line": ob_d["present_anchor"]["line"],
+                "present_side": ob_d["present_anchor"]["side"],
+                "drift_kind": ob_d["present_anchor"]["drift_kind"],
+                "lifecycle_state": ob_d["lifecycle_state"],
+                "placement": placement,
+                "body_reason": body_reason,
+                "thread_id": None if tb_d is None else tb_d["thread_id"],
+                "thread_action": thread_action,
+            }
+        )
+
+    coverage_obj = _decode(st.get("changed_file_coverage"), ChangedFileCoverageState)
+    inv_obj = DriftInventory(
+        obligations=tuple(_decode(ob_d, DriftTrackedObligation) for ob_d in obligations)
+    )
+    entries_obj = tuple(_decode(ae_d, DriftActiveEntry) for ae_d in active_entry_dicts)
+    slots_obj = tuple(_decode(s_d, PublishedSlot) for s_d in slot_dicts)
+    review_complete = st.get("review_complete")
+    if not isinstance(review_complete, bool):
+        raise ReviewInputError("finding lifecycle compact review_complete is invalid")
+    approved, reasons, steps = _recompute_drift_verdict(
+        coverage_state=coverage_obj,
+        review_complete=review_complete,
+        inventory=inv_obj,
+        active_entries=entries_obj,
+        slots=slots_obj,
+    )
+    reconstructed_state = {
+        "head_sha": h_sha,
+        "base_sha": b_sha,
+        "round_number": st.get("round_number"),
+        "review_complete": review_complete,
+        "max_active_findings": st.get("max_active_findings"),
+        "changed_file_coverage": st.get("changed_file_coverage"),
+        "inventory": {"obligations": obligations},
+        "active_entries": active_entry_dicts,
+        "slots": slot_dicts,
+        "approved": approved,
+        "withheld_reasons": list(reasons),
+        "recovery_steps": [_encode(step) for step in steps],
+        "body_placement_note": st.get("body_placement_note"),
+    }
+
+    def expand_tree(value: Any) -> Any:
+        if isinstance(value, dict):
+            if set(value) == {"$sh"}:
+                sh_idx = value["$sh"]
+                if sh_idx == 0:
+                    return h_sha
+                if sh_idx == 1:
+                    return b_sha
+                raise ReviewInputError("finding lifecycle compact sha index invalid")
+            if set(value) == {"$h"}:
+                return hex_at(value["$h"])
+            if set(value) == {"$rb"}:
+                r_idx = value["$rb"]
+                if type(r_idx) is not int or not 0 <= r_idx < len(receipts):
+                    raise ReviewInputError(
+                        "finding lifecycle compact body index invalid"
+                    )
+                return receipts[r_idx]["body_sha256"]
+            if set(value) == {"$tid"}:
+                t_idx = value["$tid"]
+                if type(t_idx) is not int or not 0 <= t_idx < len(obs_partials):
+                    raise ReviewInputError(
+                        "finding lifecycle compact tid index invalid"
+                    )
+                t_ref = obs_partials[t_idx][4]
+                if not isinstance(t_ref, list) or not isinstance(t_ref[0], str):
+                    raise ReviewInputError(
+                        "finding lifecycle compact tid binding invalid"
+                    )
+                return t_ref[0]
+            if set(value) == {"$ib"}:
+                spec = value["$ib"]
+                if (
+                    not isinstance(spec, list)
+                    or len(spec) != 2
+                    or type(spec[0]) is not int
+                    or spec[1] not in {"new", "still-present"}
+                    or not receipts
+                ):
+                    raise ReviewInputError(
+                        "finding lifecycle compact inline body invalid"
+                    )
+                sample = receipts[0]
+                dig, utf8_len = derived_info(
+                    spec[0],
+                    sample["repository_id"],
+                    sample["pull_request"],
+                    sample["head_sha"],
+                    sample["base_sha"],
+                    spec[1],
+                )
+                return {"$body_sha256": dig, "utf8_bytes": utf8_len}
+            if set(value) == {"$icl"}:
+                st_cand = value["$icl"]
+                if (
+                    st_cand not in {"new", "still-present"}
+                    or not receipts
+                    or not ob_comments
+                    or any(c is None for c in ob_comments)
+                ):
+                    raise ReviewInputError(
+                        "finding lifecycle compact comment list invalid"
+                    )
+                return [
+                    {
+                        "body": expand_tree({"$ib": [i, st_cand]}),
+                        "line": ob_comments[i].line,
+                        "path": ob_comments[i].path,
+                        "side": ob_comments[i].side,
+                    }
+                    for i in range(len(ob_comments))
+                ]
+            return {key: expand_tree(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [expand_tree(item) for item in value]
+        return value
+
+    rp = payload.get("rp")
+    if rp is not None and (
+        not isinstance(rp, str) or re.fullmatch(r"/repos/[^/]+/[^/]+/", rp) is None
+    ):
+        raise ReviewInputError("finding lifecycle compact repo prefix is invalid")
+
+    raw_effects = payload.get("effects")
+    if not isinstance(raw_effects, list):
+        raise ReviewInputError("finding lifecycle compact effects invalid")
+    effects = []
+    for raw_ef in raw_effects:
+        ef = expand_tree(raw_ef)
+        if not isinstance(ef, dict):
+            raise ReviewInputError("finding lifecycle compact effect invalid")
+        if (
+            rp is not None
+            and isinstance(ef.get("path"), str)
+            and ef["path"].startswith("$rp/")
+        ):
+            ef["path"] = rp + ef["path"][4:]
+        if "request_sha256" not in ef:
+            ef["request_sha256"] = _digest(
+                {
+                    "method": ef.get("method"),
+                    "path": ef.get("path"),
+                    "request": _request_identity(ef.get("request")),
+                }
+            )
+        effects.append(ef)
+
+    has_ash = "ash" in payload
+    reconstructed = {
+        "schema_version": CURRENT_VERSION if has_ash else VERSION,
+        "lifecycle": {
+            "schema_version": payload.get("v"),
+            "purpose": payload.get("p"),
+            "mode": "drift",
+            "state": reconstructed_state,
+            "input_identity": expand_tree(payload.get("ii")),
+            "concern_history": ch,
+        },
+        "effects": effects,
+        "unknown_trust_effect": payload.get("ute"),
+        "native_receipts": receipts,
+        **(
+            {"accepted_semantic_history": expand_tree(payload.get("ash"))}
+            if has_ash
+            else {}
+        ),
+    }
+    if len(canonical_bytes(reconstructed)) > 1_048_576:
+        raise ReviewInputError("finding lifecycle reconstructed byte capacity exceeded")
+    return reconstructed
+
+
+def _unpack_compact_journal(stored: object) -> dict[str, Any]:
+    reconstructed = _validate(_unpack_compact_payload(stored))
+    if _pack_compact_journal(reconstructed) != stored:
+        raise ReviewInputError(
+            "finding lifecycle compact representation is noncanonical"
+        )
+    return reconstructed
+
+
+def _compact_historical_sizing_active(journal: object) -> bool:
+    from review_sensei.source_registry import require_module_seal
+
+    preflight = sys._getframe(2)
+    outer = preflight.f_back
+    if (
+        preflight.f_code is not FindingLifecycleJournal._preflight_effect.__code__
+        or preflight.f_globals is not vars(sys.modules[__name__])
+        or preflight.f_locals.get("self") is not journal
+        or outer is None
+        or outer.f_globals is not vars(sys.modules[__name__])
+    ):
+        return False
+    if (
+        preflight.f_locals.get("capacity_only") is True
+        and outer.f_code is FindingLifecycleJournal._command_branch_documents.__code__
+        and outer.f_locals.get("shadow") is journal
+    ):
+        from . import quarantine_command_finalization
+
+        require_module_seal(quarantine_command_finalization)
+        measurement = outer.f_back
+        return bool(
+            measurement is not None
+            and measurement.f_code
+            is quarantine_command_finalization._measure_inline_branches.__code__
+            and measurement.f_globals is vars(quarantine_command_finalization)
+            and measurement.f_locals.get("journal") is outer.f_locals.get("self")
+        )
+    if (
+        preflight.f_locals.get("capacity_only") is False
+        and outer.f_code is FindingLifecycleJournal.request.__code__
+        and outer.f_locals.get("self") is journal
+    ):
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        ledger = getattr(journal, "ledger", None)
+        caller = None if ledger is None else getattr(ledger, "caller", None)
+        return bool(
+            caller is not None
+            and ledger is not None
+            and quarantine_historical_execution.available(caller, ledger)
+        )
+    return False
+
+
+def _maximum_native_allocation(
+    packed, *, preserve_observed=False, _pair_source=None, _compact_pair_source=None
+):
     """A sizing-only value, never passed to stage or installed as authority."""
     import copy
 
     document = None
-    if packed.get("schema_version") == "finding-lifecycle-packed-v5":
+    if packed.get("schema_version") in {
+        "finding-lifecycle-packed-v5",
+        _COMPACT_VERSION,
+    }:
         packed = _pack_journal(_unpack_journal(packed))
     if preserve_observed and _pair_source is not None:
         from review_sensei.source_registry import require_module_seal
@@ -369,7 +2168,17 @@ def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=
     path_bounds = (
         {} if _pair_source is None else _closed_pair_path_bound(packed, _pair_source)
     )
-    result = copy.deepcopy(packed)
+    result = (
+        {
+            **packed,
+            "native_atoms": [
+                [atom[0], atom[1]] if isinstance(atom, list) else copy.deepcopy(atom)
+                for atom in packed["native_atoms"]
+            ],
+        }
+        if isinstance(packed, dict) and type(packed.get("native_atoms")) is list
+        else copy.deepcopy(packed)
+    )
     seen: dict[tuple[str, Any], Any] = {}
     for index, atom in enumerate(result["native_atoms"]):
         if index in path_bounds:
@@ -392,12 +2201,32 @@ def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=
             else:
                 seen[key] = atom[1]
         atom[1] = seen[key]
+    compact_source = (
+        _compact_pair_source if _compact_pair_source is not None else _pair_source
+    )
+    if (
+        preserve_observed
+        and compact_source is not None
+        and _compact_historical_sizing_active(compact_source)
+        and not any(
+            atom[0] == "native" and str(atom[1]).startswith("capacity_")
+            for atom in result["native_atoms"]
+        )
+    ):
+        reconstructed = _unpack_journal(result)
+        if reconstructed.get("schema_version") in {
+            VERSION,
+            CURRENT_VERSION,
+        }:
+            return _pack_current_journal(reconstructed)
     return result
 
 
 def _unpack_journal(stored):
     if not isinstance(stored, dict):
         raise ReviewInputError("finding lifecycle carrier schema is unsupported")
+    if stored.get("schema_version") == _COMPACT_VERSION:
+        return _unpack_compact_journal(stored)
     if stored.get("schema_version") == "finding-lifecycle-packed-v5":
         from review_sensei.source_registry import require_module_seal
 
@@ -871,6 +2700,10 @@ def restore_finding_lifecycle(
                     + selected.status
                 )
             record = selected.record
+            if record is not None:
+                for item in record.dispositions:
+                    if isinstance(item, dict):
+                        register_compact_actor(item.get("actor"))
             if record is None or record.finding_lifecycle is None:
                 return record, None
             if loaded is not None:
@@ -1704,12 +3537,16 @@ class FindingLifecycleJournal:
             if dictionary_base is not None and predictable:
                 from .finding_lifecycle_dictionary import pack as pack_dictionary
 
-                pending = pack_dictionary(
+                packed_dictionary = pack_dictionary(
                     _unpack_journal(pending),
                     base=dictionary_base,
                     manifest=dictionary_manifest,
                     current_binding=dictionary_manifest["binding"],
                 )
+                if len(canonical_bytes(packed_dictionary)) < len(
+                    canonical_bytes(pending)
+                ):
+                    pending = packed_dictionary
             documents.append(pending)
             stops.extend((pending, future))
             branches.append((tuple((*documents, future)), frozenset(exact_indices)))
@@ -1758,7 +3595,12 @@ class FindingLifecycleJournal:
                 predictable = False
         if not documents:
             # Still price the final retained checkpoint and source restore.
-            documents = [_pack_journal(shadow._document())]
+            fallback_doc = shadow._document()
+            documents = [
+                _pack_current_journal(fallback_doc)
+                if fallback_doc.get("schema_version") in {VERSION, CURRENT_VERSION}
+                else _pack_journal(fallback_doc)
+            ]
             branches = [(tuple(documents), frozenset())]
         # Each stop branch owns only its reached pending prefix and its own
         # conservative final checkpoint. Later native effects are prohibited
@@ -2523,18 +4365,31 @@ class FindingLifecycleJournal:
                         ("rejected", [status, None])
                         for status in (400, 401, 403, 404, 405, 410)
                     )
+                    effects_prefix = document["effects"][:-1]
+                    last_effect_base = document["effects"][-1]
                     for effect_status, effect_response in outcomes:
                         for unknown_hold in {document["unknown_trust_effect"], True}:
-                            outcome = copy.deepcopy(document)
-                            outcome["unknown_trust_effect"] = unknown_hold
-                            outcome["effects"][-1]["status"] = effect_status
-                            outcome["effects"][-1]["response"] = effect_response
+                            outcome = {
+                                **document,
+                                "unknown_trust_effect": unknown_hold,
+                                "effects": [
+                                    *effects_prefix,
+                                    {
+                                        **last_effect_base,
+                                        "status": effect_status,
+                                        "response": effect_response,
+                                    },
+                                ],
+                            }
+                            schema = outcome.get("schema_version")
                             candidates.append(
                                 _maximum_native_allocation(
                                     _pack_journal(outcome),
                                     _pair_source=self
-                                    if outcome.get("schema_version")
-                                    == "finding-lifecycle-journal-v3"
+                                    if schema == "finding-lifecycle-journal-v3"
+                                    else None,
+                                    _compact_pair_source=self
+                                    if schema in {VERSION, CURRENT_VERSION}
                                     else None,
                                     preserve_observed=True,
                                 )

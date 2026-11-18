@@ -1342,6 +1342,7 @@ class ApiRunRequestTransport:
         owner: ApiExecutionOwner,
         *,
         trust_source: tuple[Any, Any] | None = None,
+        now: datetime | None = None,
     ) -> ApiRunAccounting:
         """Confirm a first run record before enabling its ordinary tranche.
 
@@ -1405,7 +1406,7 @@ class ApiRunRequestTransport:
             self._activation = updated, "hosted-review"
             return updated
 
-        confirmed = ledger.initialize_with_mutation(identity, prepare)
+        confirmed = ledger.initialize_with_mutation(identity, prepare, now=now)
         # A genuinely missing ledger has no observed marker author yet. The
         # native initializer authenticates the configured Bot on exact readback.
         self._producer = ledger.evidence_producer()

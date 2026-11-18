@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import weakref
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Mapping, cast
 from urllib.parse import quote
@@ -368,13 +369,47 @@ def _state_before_post_publication_overrides(state, document, record, head_sha):
         and isinstance(receipt.get("thread_id"), str)
         and receipt["thread_id"]
     }
+    from .finding_lifecycle import _KNOWN_OVERRIDE_ACTORS
+
     actors = {
         item["actor"].strip()
         for item in record.dispositions
         if isinstance(item, dict)
         and isinstance(item.get("actor"), str)
         and item["actor"].strip()
-    }
+    } | set(_KNOWN_OVERRIDE_ACTORS)
+    if isinstance(record.disposition_snapshot, dict):
+        snap_manifest = record.disposition_snapshot.get("state_manifest")
+        if (
+            isinstance(snap_manifest, dict)
+            and snap_manifest.get("encoding") == "inline-json-v1"
+            and isinstance(snap_manifest.get("binding"), Mapping)
+        ):
+            snap_state = read_inline_evidence(
+                snap_manifest,
+                expected_binding=cast(Mapping[str, object], snap_manifest["binding"]),
+            )
+            if isinstance(record.disposition_snapshot.get("result_digest"), str):
+                from review_sensei.disposition_snapshot import _unpack_page_index
+
+                snap_state = _unpack_page_index(
+                    snap_state,
+                    expected_binding=cast(
+                        Mapping[str, object], snap_manifest["binding"]
+                    ),
+                    result_digest=record.disposition_snapshot["result_digest"],
+                )
+            if isinstance(snap_state, dict):
+                for rows_key in ("dispositions", "tail"):
+                    rows = snap_state.get(rows_key)
+                    if isinstance(rows, list):
+                        for item in rows:
+                            if (
+                                isinstance(item, dict)
+                                and isinstance(item.get("actor"), str)
+                                and item["actor"].strip()
+                            ):
+                                actors.add(item["actor"].strip())
     overridden_ids: set[str] = set()
     for ob in obligations:
         if ob.lifecycle_state != "authorized-override":
@@ -586,7 +621,10 @@ def _current_publication_digest(
     )
     from review_sensei.finding_drift import project_drift_review_result
     from review_sensei.finding_lifecycle import decode_lifecycle_state
-    from review_sensei.finding_lifecycle_store import read_finding_lifecycle
+    from review_sensei.finding_lifecycle_store import (
+        _decode_selected_lifecycle,
+        read_finding_lifecycle,
+    )
     from review_sensei.models import ReviewResult
     from review_sensei.session import SessionLoadResult
 
@@ -594,6 +632,7 @@ def _current_publication_digest(
     from .finding_lifecycle import _require_effect_scope, _unpack_journal, _validate
     from .finding_lifecycle_dictionary import resolve_stored
     from .publication import review_result_digest
+    from .quarantine_origin import has_paged_v2_disposition_snapshot
 
     load = getattr(ledger, "load_retained_checkpoint_result", None)
     retained = (
@@ -655,12 +694,20 @@ def _current_publication_digest(
         and authenticated.archive["target_isolation"].get("contract")
         == "failed-published-tail-isolation-v1"
     )
+    is_paged_v2_guarded = (
+        is_quarantine
+        and isinstance(caller, ApiRunRequestTransport)
+        and type(caller.accounting.configuration.limit) is int
+        and caller.accounting.configuration.limit >= 1152
+        and has_paged_v2_disposition_snapshot(record)
+    )
     reuse_selected_load = (
         not is_quarantine
         or is_partitioned
         or (not is_unguarded and cached_body_wire > 512 * 1024)
         or is_v3_guarded
         or (is_unguarded and len(cached_comments) >= 80)
+        or is_paged_v2_guarded
     )
     resolved_stored = None
     if (
@@ -668,7 +715,14 @@ def _current_publication_digest(
         and isinstance(caller, ApiRunRequestTransport)
         and type(caller) is ApiRunRequestTransport
         and caller._effect_record is not None
-        and record is caller._effect_record
+        and (
+            record is caller._effect_record
+            or (
+                record.record_sha256 == caller._effect_record.record_sha256
+                and canonical_bytes(record.to_dict())
+                == canonical_bytes(caller._effect_record.to_dict())
+            )
+        )
         and record.record_sha256 == caller._root
         and getattr(ledger, "_inventory_complete", False)
         and caller._checkpoint is None
@@ -678,10 +732,17 @@ def _current_publication_digest(
             prior_reuse = getattr(ledger, "_reuse_listed_parts", False)
             ledger._reuse_listed_parts = True
             try:
-                stored = read_finding_lifecycle(
-                    ledger, record, _selected_load=selected_load
-                )
-                if is_v3_guarded or (is_unguarded and len(cached_comments) >= 80):
+                if is_paged_v2_guarded and not is_partitioned:
+                    stored = _decode_selected_lifecycle(ledger, record)
+                else:
+                    stored = read_finding_lifecycle(
+                        ledger, record, _selected_load=selected_load
+                    )
+                if (
+                    is_v3_guarded
+                    or is_paged_v2_guarded
+                    or (is_unguarded and len(cached_comments) >= 80)
+                ):
                     resolved_stored = resolve_stored(ledger, record, stored)
             finally:
                 ledger._reuse_listed_parts = prior_reuse
@@ -718,6 +779,27 @@ def _current_publication_digest(
     # retains its transaction when publication content is unchanged; do not
     # turn that same authenticated content into an unbound digest on cold load.
     if projected.content_digest() == original.content_digest():
+        return review_result_digest(original)
+    if (
+        not isinstance(publication_state, ActiveWindowRoundState)
+        and original.review_verdict is None
+        and len(projected.comments) == len(original.comments)
+        and len(projected.finding_lifecycles) == len(original.finding_lifecycles)
+        and Counter(canonical_bytes(item.to_dict()) for item in projected.comments)
+        == Counter(canonical_bytes(item.to_dict()) for item in original.comments)
+        and Counter(
+            canonical_bytes(item.to_dict()) for item in projected.finding_lifecycles
+        )
+        == Counter(
+            canonical_bytes(item.to_dict()) for item in original.finding_lifecycles
+        )
+        and replace(
+            projected,
+            comments=original.comments,
+            finding_lifecycles=original.finding_lifecycles,
+        ).content_digest()
+        == original.content_digest()
+    ):
         return review_result_digest(original)
     return review_result_digest(projected)
 
@@ -1235,16 +1317,33 @@ def apply_quarantine_target(run, authority, command, target, app):
         from review_sensei.session import SessionLoadResult
 
         from .publication_recovery import _publication_transport
-        from .quarantine_origin import rebind_same_lineage_owner
+        from .quarantine_origin import (
+            has_paged_v2_disposition_snapshot,
+            rebind_same_lineage_owner,
+        )
 
+        loaded = None
+        current = None
         active_authenticated = getattr(run.ledger, "_quarantine_authenticated", None)
         if (
-            getattr(
-                _publication_transport(run.http), "_quarantine_capacity_guard", None
+            (
+                (
+                    getattr(
+                        _publication_transport(run.http),
+                        "_quarantine_capacity_guard",
+                        None,
+                    )
+                    is None
+                    and len(run.ledger._cached_comments()) >= 80
+                )
+                or (
+                    type(run.caller.accounting.configuration.limit) is int
+                    and run.caller.accounting.configuration.limit >= 1152
+                    and run.caller._effect_record is not None
+                    and has_paged_v2_disposition_snapshot(run.caller._effect_record)
+                )
             )
-            is None
             and getattr(run.ledger, "_inventory_complete", False)
-            and len(run.ledger._cached_comments()) >= 80
             and run.caller._checkpoint is None
             and run.caller._effect_record is not None
             and run.caller._effect_record.record_sha256 == run.caller._root
@@ -1255,15 +1354,22 @@ def apply_quarantine_target(run, authority, command, target, app):
             and canonical_bytes(run.caller._effect_record.quarantine_lineage)
             == before.lineage_bytes
         ):
-            loaded = SessionLoadResult(status="ok", record=run.caller._effect_record)
-            current = rebind_same_lineage_owner(
-                active_authenticated,
-                run.ledger,
-                run.caller,
-                run.identity,
-                run.caller._effect_record,
-            )
-        else:
+            try:
+                current = rebind_same_lineage_owner(
+                    active_authenticated,
+                    run.ledger,
+                    run.caller,
+                    run.identity,
+                    run.caller._effect_record,
+                )
+            except ReviewInputError:
+                loaded = None
+                current = None
+            else:
+                loaded = SessionLoadResult(
+                    status="ok", record=run.caller._effect_record
+                )
+        if loaded is None:
             loaded = run.ledger.load(run.identity)
             current = getattr(run.ledger, "_quarantine_authenticated", None)
         if (
@@ -1358,6 +1464,7 @@ def _confirmed_own_decision(run, target, confirmed, *, decision):
     from .quarantine_command_projection import require_projection_source
     from .quarantine_origin import (
         advance_confirmed_decision_owner,
+        has_paged_v2_disposition_snapshot,
         require_authenticated_read_owner,
     )
 
@@ -1401,11 +1508,23 @@ def _confirmed_own_decision(run, target, confirmed, *, decision):
     )
     active_authenticated = getattr(run.ledger, "_quarantine_authenticated", None)
     if (
-        getattr(_publication_transport(run.http), "_quarantine_capacity_guard", None)
-        is None
-        and getattr(run.ledger, "_inventory_complete", False)
-        and len(cast(Any, run.ledger)._cached_comments()) >= 80
+        getattr(run.ledger, "_inventory_complete", False)
         and active_authenticated is not None
+        and (
+            (
+                getattr(
+                    _publication_transport(run.http),
+                    "_quarantine_capacity_guard",
+                    None,
+                )
+                is None
+                and len(cast(Any, run.ledger)._cached_comments()) >= 80
+            )
+            or (
+                has_grouped_historical_lease(run.ledger, run.identity)
+                and has_paged_v2_disposition_snapshot(confirmed)
+            )
+        )
     ):
         advance_confirmed_decision_owner(
             active_authenticated,

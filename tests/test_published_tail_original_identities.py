@@ -1,13 +1,12 @@
 """Real original producers retain criteria, not prose-count display guesses."""
 
 import copy
-import dis
 import json
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from original_source_observation import watch_code
 from review_sensei_github.finding_lifecycle import _unpack_journal
 from review_sensei_github.publication_recovery import retain_checkpoint_review_result
 from review_sensei_github.session_ledger import parse_session_comment
@@ -38,7 +37,6 @@ class PublishedTailOriginalIdentityTests(unittest.TestCase):
         snapshots, retained, carriers = [], {}, {}
         self.native_writes = []
         self.accounting_receipts = []
-        invoke_code = PublishedTailJourneyFixture.invoke.__code__
         result_code = retain_checkpoint_review_result.__code__
         partition_code = read_partitioned_evidence.__code__
         with (
@@ -47,23 +45,22 @@ class PublishedTailOriginalIdentityTests(unittest.TestCase):
         ):
             fixture = fixture_type(directory)
 
-            def observe(frame, event, value):
-                if frame.f_code not in (result_code, partition_code, invoke_code):
-                    return
-                if event != "return" or not dis.opname[
-                    frame.f_code.co_code[frame.f_lasti]
-                ].startswith("RETURN"):
-                    return
-                if frame.f_code is result_code and value is not None:
+            def on_result(_frame, value):
+                if value is not None:
                     retained[fixture.run_id] = value
-                if frame.f_code is partition_code and isinstance(value, dict):
+
+            def on_partition(frame, value):
+                if isinstance(value, dict):
                     # Actual authenticated native part readbacks already paid
                     # by the producer; inspection adds no reader or allowance.
                     carriers[frame.f_locals["manifest"]["sha256"]] = copy.deepcopy(
                         value
                     )
-                if frame.f_code is not invoke_code:
-                    return
+
+            original_invoke = fixture.invoke
+
+            def record_invoke(*args, **kwargs):
+                value = original_invoke(*args, **kwargs)
                 record = parse_session_comment(
                     fixture.comment["body"], identity=fixture.selected.identity
                 )
@@ -95,28 +92,29 @@ class PublishedTailOriginalIdentityTests(unittest.TestCase):
                         and ("/pulls/" in path or "/check-runs" in path)
                     ]
                 )
-                state = fixture.accounted.accounting
-                self.assertEqual(state.configuration.limit, 512)
+                accounted_state = fixture.accounted.accounting
+                self.assertEqual(accounted_state.configuration.limit, 512)
                 self.accounting_receipts.append(
                     {
-                        "limit": state.configuration.limit,
-                        "confirmed": state.confirmed,
-                        "uncertain": state.uncertain,
-                        "remaining": state.remaining,
-                        "reserved_undispatched": state.reserved_undispatched,
+                        "limit": accounted_state.configuration.limit,
+                        "confirmed": accounted_state.confirmed,
+                        "uncertain": accounted_state.uncertain,
+                        "remaining": accounted_state.remaining,
+                        "reserved_undispatched": accounted_state.reserved_undispatched,
                         "physical_attempts": sum(
                             a == fixture.attempt for a, _, _ in fixture.trace
                         ),
                         "durable": copy.deepcopy(record.api_run_accounting),
                     }
                 )
+                return value
 
-            previous = sys.getprofile()
-            try:
-                sys.setprofile(observe)
+            fixture.invoke = record_invoke
+            with (
+                watch_code(result_code, returned=on_result),
+                watch_code(partition_code, returned=on_partition),
+            ):
                 fixture.original_origins(failed_count=9, published_count=5)
-            finally:
-                sys.setprofile(previous)
             self.assertEqual(fixture.provider_calls, 2)
             self.assertEqual(len(snapshots), 2)
             self.assertEqual([s[3:] for s in snapshots], [(1, 0), (2, 130)])

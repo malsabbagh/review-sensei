@@ -2198,6 +2198,7 @@ def preflight_finding_lifecycle(
                     nonexact_packed_bound=(
                         branch_documents is not None
                         and checkpoint_index not in exact_indices
+                        and getattr(ledger, "_quarantine_required", False) is True
                     ),
                 )
             )
