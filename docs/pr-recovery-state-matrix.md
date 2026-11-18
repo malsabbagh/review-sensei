@@ -80,6 +80,14 @@ each say something different from terminal accounting.
 | 6. Verify the exact code candidate (G11) | Run affected deterministic and ordinary-entry tests and the repository's relevant checks; publish the reviewed branch per repository procedure. | Separately record exact candidate CI, substantive review, installed runtime provenance, and live applicability. Do not rerun or relabel an old failure, or infer deployment from source or CI. |
 | 7. Separate operational qualification | For targets with adequate evidence, identify the compatible installed caller and broker and the precise authority still needed. For historical targets, keep read-only evidence custody. | Deployment, changes to access, registration, live canaries, actions with approval effects, and restart are separate gated operations. No source change or green CI supplies those grants. |
 
+For a new in-place route after an ambiguous abort or cleanup write, first show
+that the original producer can durably bind the charged request ID to the exact
+attempt, native effect, and confirmed checkpoint. The witness must survive a
+process kill without refunding the request or settling a second effect. An old
+record holding an opaque request ID and a stored root is not enough to retrofit
+that correlation. Qualification requires a funded pre-effect layout and exact
+readback or an explicit durable hold at every interruption point.
+
 Relevant source fixtures include `test_no_transaction_abort_g29`,
 `test_review_run`, `test_ordinary_native_recovery_cold`,
 `test_ordinary_native_recovery_crash`, `test_historical_recovery_matrix_g03`,
@@ -91,6 +99,12 @@ Their names indicate qualification scope, not evidence that any particular
 candidate or installation has passed. To close a row, retain its exact source,
 ordinary entry path, passed and held scenarios, original budget/effect trace,
 CI/runtime status, and any still-missing historical witness.
+
+Leave intact the explicit limits on [event routing and merge queues](event-routing-and-triggers.md)
+and [supported operational envelopes](operational-limits-and-quotas.md). More
+trigger subscriptions, background polling, authority for synthetic queue SHAs,
+or even more attempts at a permanently indivisible operation are not recovery
+of the existing bounded PR operation.
 
 For historical counterexamples, see [ADR 0133](adr/0133-historical-review-recovery-and-nonterminal-boundaries.md).
 Its #443, SiteVault #142/#153, #408 and TaskAlong #41 examples are distinct.

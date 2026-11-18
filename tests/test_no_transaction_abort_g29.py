@@ -971,6 +971,12 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             {
                 "missing_predicates": ("some_predicate",),
             },
+            {"owner_ceased": False},
+            {"provider_entry_proven_absent": False},
+            {"reservation_release_confirmed": False},
+            {"dispatch_clean": False},
+            {"late_effects_absent": False},
+            {"primary_route": "controlled_serialized_restart"},
             {"conservative_nonstartup_caller_liability": -1},
             {
                 "conservative_nonstartup_caller_liability": 5,

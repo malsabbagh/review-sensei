@@ -159,9 +159,23 @@ class NoTransactionAbortQualification:
             raise ReviewInputError(
                 "missing transaction cannot imply no-operation outside qualified pre-entry abort"
             )
-        if self.qualifies_rollover and self.missing_predicates:
+        if self.qualifies_rollover and (
+            self.state_code != "qualified_pre_entry_abort"
+            or self.primary_route != "pre_entry_abort_rollover"
+            or self.missing_predicates
+            or any(
+                proof is not True
+                for proof in (
+                    self.owner_ceased,
+                    self.provider_entry_proven_absent,
+                    self.reservation_release_confirmed,
+                    self.dispatch_clean,
+                    self.late_effects_absent,
+                )
+            )
+        ):
             raise ReviewInputError(
-                "qualified pre-entry abort rollover cannot carry missing predicates"
+                "qualified pre-entry abort rollover requires all explicit witnesses"
             )
         if (
             self.conservative_nonstartup_caller_liability < 0

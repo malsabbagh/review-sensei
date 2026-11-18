@@ -384,8 +384,21 @@ native receipts are recorded:
   (`uncertain == 0`), zero provider entry, and absence of late native effects
   are proven. Owner cessation requires a recognized terminal run conclusion and
   a complete, nonempty attempt-job listing with distinct positive job IDs and
-  recognized terminal conclusions; absent or malformed evidence preserves the
-  hold. Any run that entered provider execution, held a live reservation,
+  recognized terminal conclusions. An unreadable row, conflicting attribution,
+  or incomplete native inventory makes absence unproven
+  (`complete_late_native_effects_readback`); it does not certify that an effect
+  happened. An attributable effect fails `zero_late_native_effects` instead.
+  Omitting the offline cessation or negative-effect witness cannot qualify the
+  inspector; its result is not ordinary admission authority. The ordinary
+  caller independently checks the review and inline inventories before any
+  archive or activation write, using the original startup allowance and
+  preserving the protected write and readback tail. A same-head row from an
+  older terminal operation is excluded only if its exact retained native
+  identity and body commitment authenticate it, not because it appears older.
+  A stored abort or cleanup root does not settle an opaque original request
+  whose exact effect correlation did not survive the process. Keep that
+  dispatch charged and held across restart.
+  Any run that entered provider execution, held a live reservation,
   left an uncertain request, or lacks an abort receipt stays held under
   `no_transaction_provider_entered`, `no_transaction_active_reservation`,
   `no_transaction_unknown_dispatch`, or `no_transaction_unconfirmed_predecessor`,
