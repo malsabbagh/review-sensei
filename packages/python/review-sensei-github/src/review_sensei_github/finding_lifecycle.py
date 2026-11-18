@@ -44,9 +44,20 @@ def _digest(value: object) -> str:
 
 _ATOM_FIELDS = {"native_target", "target", "thread_id", "node_id"}
 _NUMERIC_FIELDS = {"id", "review_id", "comment_id", "producer_id", "app_id"}
+_CHECK_RUN_PATH_RE = re.compile(r"/repos/[^/]+/[^/]+/check-runs/[0-9]+")
+_HEX64_RE = re.compile(r"[a-f0-9]{64}")
 
 
-def _pack_journal(document):
+def _append_unique_state(target: list[Any], candidate: Any) -> None:
+    for existing in target:
+        if candidate is existing or (
+            type(candidate) is type(existing) and candidate == existing
+        ):
+            return
+    target.append(candidate)
+
+
+def _pack_journal_with_skeleton(document):
     """Separate unknown native scalars from the deterministically packed state.
 
     Independent scalar allocation makes the future wire bound insensitive to
@@ -85,7 +96,7 @@ def _pack_journal(document):
                     paired
                     and field == "path"
                     and isinstance(value, str)
-                    and re.fullmatch(r"/repos/[^/]+/[^/]+/check-runs/[0-9]+", value)
+                    and _CHECK_RUN_PATH_RE.fullmatch(value) is not None
                 )
             )
             and isinstance(value, str)
@@ -120,7 +131,8 @@ def _pack_journal(document):
                 or (paired and field in variable_digests)
             )
             and isinstance(value, str)
-            and re.fullmatch(r"[a-f0-9]{64}", value)
+            and len(value) == 64
+            and _HEX64_RE.fullmatch(value) is not None
         ):
             kind = "digest"
         if kind is not None:
@@ -151,20 +163,33 @@ def _pack_journal(document):
     skeleton = visit(document)
     if len(atoms) > 8192:
         raise ReviewInputError("finding lifecycle scalar capacity exceeded")
-    return {
-        "schema_version": "finding-lifecycle-packed-v3",
-        "journal": encode_evidence(skeleton, max_decoded_bytes=1_048_576),
-        "native_atoms": atoms,
-    }
+    return (
+        {
+            "schema_version": "finding-lifecycle-packed-v3",
+            "journal": encode_evidence(skeleton, max_decoded_bytes=1_048_576),
+            "native_atoms": atoms,
+        },
+        skeleton,
+    )
 
 
-def _pack_current_journal(document):
+def _pack_journal(document):
+    """Separate unknown native scalars from the deterministically packed state.
+
+    Independent scalar allocation makes the future wire bound insensitive to
+    how well an as-yet-unobserved GitHub ID happens to compress. These are
+    representation indexes, never native identities or authority.
+    """
+    return _pack_journal_with_skeleton(document)[0]
+
+
+def _pack_current_journal(document, *, _legacy=None):
     """Select a self-contained representation without changing legacy v3 bytes.
 
     This is serialization only. Unknown future values must still be sized with
     the generic v3 bound unless their exact retained prefix has separate custody.
     """
-    legacy = _pack_journal(document)
+    legacy = _pack_journal(document) if _legacy is None else _legacy
     if type(document) is not dict:
         return legacy
     schema = document.get("schema_version")
@@ -2134,7 +2159,12 @@ def _compact_historical_sizing_active(journal: object) -> bool:
 
 
 def _maximum_native_allocation(
-    packed, *, preserve_observed=False, _pair_source=None, _compact_pair_source=None
+    packed,
+    *,
+    preserve_observed=False,
+    _pair_source=None,
+    _compact_pair_source=None,
+    _source_document=None,
 ):
     """A sizing-only value, never passed to stage or installed as authority."""
     import copy
@@ -2213,6 +2243,12 @@ def _maximum_native_allocation(
             for atom in result["native_atoms"]
         )
     ):
+        if (
+            _source_document is not None
+            and not path_bounds
+            and _source_document.get("schema_version") in {VERSION, CURRENT_VERSION}
+        ):
+            return _pack_current_journal(_source_document, _legacy=result)
         reconstructed = _unpack_journal(result)
         if reconstructed.get("schema_version") in {
             VERSION,
@@ -3069,16 +3105,21 @@ class FindingLifecycleJournal:
         documents: list[dict[str, Any]] = []
         stop_documents: list[dict[str, Any]] = []
         confirmed_instances: set[str] = set()
-        prefix_states = list(getattr(shadow, "_finalizer_capacity_states", ()))
+        prefix_states: list[Any] = []
+        for state in getattr(shadow, "_finalizer_capacity_states", ()):
+            _append_unique_state(prefix_states, state)
         lifecycle_key = (self.identity.repository_id, self.identity.pull_request)
         current_state = (
             shadow._planned
             or self.reviewer._drift_states.get(lifecycle_key)
             or self.reviewer._active_window_states.get(lifecycle_key)
         )
-        projection_sources = tuple(
-            state for state in (current_state, *prefix_states) if state is not None
-        )
+        projection_sources_list: list[Any] = []
+        for state in (current_state, *prefix_states):
+            if state is not None:
+                _append_unique_state(projection_sources_list, state)
+        projection_sources = tuple(projection_sources_list)
+        receipts_by_instance = {receipt["instance"]: receipt for receipt in receipts}
         for effect in new:
             if ordered is not None:
                 from .finding_lifecycle_consumers import project_confirmed_slot_release
@@ -3091,16 +3132,17 @@ class FindingLifecycleJournal:
                     for receipt in receipts
                     if receipt["thread_id"] == target[1]
                 )
-                prefix_states.extend(
-                    project_confirmed_slot_release(
-                        state,
-                        key=lifecycle_key,
-                        receipts={receipt["instance"]: receipt for receipt in receipts},
-                        instances=confirmed_instances,
-                        head_sha=self.head_sha,
+                for state in projection_sources:
+                    _append_unique_state(
+                        prefix_states,
+                        project_confirmed_slot_release(
+                            state,
+                            key=lifecycle_key,
+                            receipts=receipts_by_instance,
+                            instances=confirmed_instances,
+                            head_sha=self.head_sha,
+                        ),
                     )
-                    for state in projection_sources
-                )
                 shadow._finalizer_capacity_states = tuple(prefix_states)
             shadow.effects.append(effect)
             _require_effect_scope(shadow._document(), self.identity, self.head_sha)
@@ -3436,11 +3478,11 @@ class FindingLifecycleJournal:
             or self.reviewer._drift_states.get(key)
             or self.reviewer._active_window_states.get(key)
         )
-        states = tuple(
-            state
-            for state in (initial_state, *cleanup_capacity_states(plan))
-            if state is not None
-        )
+        states_list: list[Any] = []
+        for state in (initial_state, *cleanup_capacity_states(plan)):
+            if state is not None:
+                _append_unique_state(states_list, state)
+        states = tuple(states_list)
         cleanup_complete = False
         for method, path, raw in requests:
             if [method, path, raw] == payload.get("conditional_approval"):
@@ -3580,16 +3622,20 @@ class FindingLifecycleJournal:
                 confirmed_instances.update(
                     r["instance"] for r in receipts if r["thread_id"] == target[1]
                 )
-                shadow._finalizer_capacity_states = tuple(
-                    project_confirmed_slot_release(
-                        state,
-                        key=key,
-                        receipts={r["instance"]: r for r in receipts},
-                        instances=confirmed_instances,
-                        head_sha=self.head_sha,
+                receipts_by_instance = {r["instance"]: r for r in receipts}
+                released_states: list[Any] = []
+                for state in states:
+                    _append_unique_state(
+                        released_states,
+                        project_confirmed_slot_release(
+                            state,
+                            key=key,
+                            receipts=receipts_by_instance,
+                            instances=confirmed_instances,
+                            head_sha=self.head_sha,
+                        ),
                     )
-                    for state in states
-                )
+                shadow._finalizer_capacity_states = tuple(released_states)
             elif "check_update_precondition" not in effect:
                 # New check/approval identities are not predictable source IDs.
                 predictable = False
@@ -4096,10 +4142,10 @@ class FindingLifecycleJournal:
                 for e in entries
                 if e.target_action in {"create", "reopen"}
             }
-            variants = [
-                commit_window_publication(state, created_targets=targets),
-                commit_window_publication(state, uncertain_targets=targets),
-            ]
+            variants = [commit_window_publication(state, created_targets=targets)]
+            _append_unique_state(
+                variants, commit_window_publication(state, uncertain_targets=targets)
+            )
             comments = {
                 o.obligation_id: o.comment
                 for o in state.authoritative_decision_inventory.obligations
@@ -4114,8 +4160,9 @@ class FindingLifecycleJournal:
                 for i, e in enumerate(entries)
                 if e.thread_action in {"create", "reopen"}
             }
-            variants = [
-                commit_drift_publication(state, created_threads=targets),
+            variants = [commit_drift_publication(state, created_threads=targets)]
+            _append_unique_state(
+                variants,
                 commit_drift_publication(
                     state,
                     uncertain_threads={
@@ -4129,7 +4176,7 @@ class FindingLifecycleJournal:
                         for k, v in targets.items()
                     },
                 ),
-            ]
+            )
             projected = project_drift_review_result(
                 ReviewResult(summary="capacity-only", comments=(), provider="internal"),
                 state,
@@ -4147,7 +4194,7 @@ class FindingLifecycleJournal:
                 raise ReviewInputError(
                     "finding lifecycle review update sizing scope changed"
                 )
-            variants.append(preview)
+            _append_unique_state(variants, preview)
         receipts = {
             r["instance"]: r
             for r in self.reviewer.native_finding_receipts(
@@ -4367,6 +4414,15 @@ class FindingLifecycleJournal:
                     )
                     effects_prefix = document["effects"][:-1]
                     last_effect_base = document["effects"][-1]
+                    schema = document.get("schema_version")
+                    is_paired_schema = schema == "finding-lifecycle-journal-v3" or (
+                        schema == "finding-lifecycle-journal-v4"
+                        and document.get("base_schema_version")
+                        == "finding-lifecycle-journal-v3"
+                    )
+                    nonconfirmed_base: tuple[dict[str, Any], list[list[Any]]] | None = (
+                        None
+                    )
                     for effect_status, effect_response in outcomes:
                         for unknown_hold in {document["unknown_trust_effect"], True}:
                             outcome = {
@@ -4381,16 +4437,53 @@ class FindingLifecycleJournal:
                                     },
                                 ],
                             }
-                            schema = outcome.get("schema_version")
+                            if not is_paired_schema and effect_status != "confirmed":
+                                if nonconfirmed_base is None:
+                                    packed_outcome, base_skeleton = (
+                                        _pack_journal_with_skeleton(outcome)
+                                    )
+                                    nonconfirmed_base = (
+                                        base_skeleton,
+                                        packed_outcome["native_atoms"],
+                                    )
+                                else:
+                                    base_skeleton, base_atoms = nonconfirmed_base
+                                    if len(canonical_bytes(outcome)) > 1_048_576:
+                                        raise ReviewInputError(
+                                            "finding lifecycle complete byte capacity exceeded"
+                                        )
+                                    outcome_skeleton = {
+                                        **base_skeleton,
+                                        "effects": [
+                                            *base_skeleton["effects"][:-1],
+                                            {
+                                                **base_skeleton["effects"][-1],
+                                                "response": effect_response,
+                                                "status": effect_status,
+                                            },
+                                        ],
+                                        "unknown_trust_effect": unknown_hold,
+                                    }
+                                    packed_outcome = {
+                                        "schema_version": "finding-lifecycle-packed-v3",
+                                        "journal": encode_evidence(
+                                            outcome_skeleton,
+                                            max_decoded_bytes=1_048_576,
+                                        ),
+                                        "native_atoms": base_atoms,
+                                    }
+                            else:
+                                packed_outcome = _pack_journal(outcome)
                             candidates.append(
                                 _maximum_native_allocation(
-                                    _pack_journal(outcome),
+                                    packed_outcome,
                                     _pair_source=self
                                     if schema == "finding-lifecycle-journal-v3"
                                     else None,
                                     _compact_pair_source=self
                                     if schema in {VERSION, CURRENT_VERSION}
                                     else None,
+                                    _source_document=outcome,
                                     preserve_observed=True,
                                 )
                             )

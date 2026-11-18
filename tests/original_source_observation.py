@@ -60,56 +60,78 @@ def _code_events(code):
         return result
 
 
-class _ProfileDispatcher:
-    def __init__(self, thread: int, previous):
-        self.thread = thread
-        self.previous = previous
-        self.watches: dict = {}
-
-    def __call__(self, frame, event: str, value) -> None:
-        if self.previous is not None:
-            self.previous(frame, event, value)
-        entries = self.watches.get(frame.f_code)
-        if not entries:
-            return
-        frame_globals = frame.f_globals
-        frame_id = id(frame)
-        lasti = frame.f_lasti
-        for (
-            namespace,
-            entered,
-            returned,
-            yielded,
-            resumed,
-            starts,
-            resumes,
-            returns,
-            yields,
-            thrown_offsets,
-        ) in tuple(entries):
-            if namespace is not None and frame_globals is not namespace:
-                continue
-            if event == "call":
-                if lasti in starts or (not starts and not resumes):
-                    thrown_offsets.pop(frame_id, None)
-                    if entered is not None:
-                        entered(frame)
-                elif lasti in resumes:
-                    if lasti in yields:
-                        thrown_offsets[frame_id] = lasti
-                    else:
-                        thrown_offsets.pop(frame_id, None)
-                    if resumed is not None:
-                        resumed(frame)
-                elif lasti in yields:
+def _dispatch_profile_entries(entries, frame, event: str, value) -> None:
+    if event != "call" and event != "return":
+        return
+    frame_globals = frame.f_globals
+    frame_id = id(frame)
+    lasti = frame.f_lasti
+    for (
+        namespace,
+        entered,
+        returned,
+        yielded,
+        resumed,
+        starts,
+        resumes,
+        returns,
+        yields,
+        thrown_offsets,
+    ) in tuple(entries):
+        if namespace is not None and frame_globals is not namespace:
+            continue
+        if event == "call":
+            if lasti in starts or (not starts and not resumes):
+                thrown_offsets.pop(frame_id, None)
+                if entered is not None:
+                    entered(frame)
+            elif lasti in resumes:
+                if lasti in yields:
                     thrown_offsets[frame_id] = lasti
-            elif event == "return":
-                thrown_at = thrown_offsets.pop(frame_id, None)
-                if returned is not None and lasti in returns:
-                    returned(frame, value)
-                elif yielded is not None and lasti in yields:
-                    if lasti != thrown_at or value is not None:
-                        yielded(frame, value)
+                else:
+                    thrown_offsets.pop(frame_id, None)
+                if resumed is not None:
+                    resumed(frame)
+            elif lasti in yields:
+                thrown_offsets[frame_id] = lasti
+        else:
+            thrown_at = thrown_offsets.pop(frame_id, None)
+            if returned is not None and lasti in returns:
+                returned(frame, value)
+            elif yielded is not None and lasti in yields:
+                if lasti != thrown_at or value is not None:
+                    yielded(frame, value)
+
+
+def _make_profile_dispatcher(thread: int, previous):
+    watches: dict = {}
+    get_entries = watches.get
+    if previous is None:
+
+        def dispatch(frame, event: str, value) -> None:
+            entries = get_entries(frame.f_code)
+            if entries is not None:
+                _dispatch_profile_entries(entries, frame, event, value)
+
+    elif callable(previous):
+
+        def dispatch(frame, event: str, value) -> None:
+            previous(frame, event, value)
+            entries = get_entries(frame.f_code)
+            if entries is not None:
+                _dispatch_profile_entries(entries, frame, event, value)
+
+    else:
+
+        def dispatch(frame, event: str, value) -> None:
+            entries = get_entries(frame.f_code)
+            if entries is not None:
+                _dispatch_profile_entries(entries, frame, event, value)
+
+    dispatch._watch_thread = thread  # type: ignore[attr-defined]
+    dispatch._watch_previous = previous  # type: ignore[attr-defined]
+    dispatch._watch_watches = watches  # type: ignore[attr-defined]
+    return dispatch
 
 
 def _watched_start(code, offset):
@@ -234,12 +256,13 @@ def watch_code(
         starts, resumes, returns, yields = _code_events(code)
         thread = threading.get_ident()
         current = sys.getprofile()
-        if isinstance(current, _ProfileDispatcher) and current.thread == thread:
+        if getattr(current, "_watch_thread", None) == thread:
             dispatcher = current
             installed = False
         else:
-            dispatcher = _ProfileDispatcher(thread, current)
+            dispatcher = _make_profile_dispatcher(thread, current)
             installed = True
+        watches = dispatcher._watch_watches  # type: ignore[attr-defined]
         watch = (
             namespace,
             entered,
@@ -252,22 +275,22 @@ def watch_code(
             yields,
             {},
         )
-        dispatcher.watches.setdefault(code, []).append(watch)
+        watches.setdefault(code, []).append(watch)
         try:
             if installed:
                 sys.setprofile(dispatcher)
             yield
         finally:
-            entries = dispatcher.watches.get(code)
+            entries = watches.get(code)
             if entries is not None:
                 for index, item in enumerate(entries):
                     if item is watch:
                         del entries[index]
                         break
                 if not entries:
-                    dispatcher.watches.pop(code, None)
-            if not dispatcher.watches:
-                sys.setprofile(dispatcher.previous)
+                    watches.pop(code, None)
+            if not watches:
+                sys.setprofile(dispatcher._watch_previous)  # type: ignore[attr-defined]
         return
     try:
         yield
