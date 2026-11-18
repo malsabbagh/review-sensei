@@ -623,3 +623,8 @@ class DefaultHumanInventoryReader:
                 )
         if self._retained_source is not None:
             self.store.revalidate_snapshot()
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -74,3 +74,8 @@ class CallerRunBudget(EvidenceReadBudget):
 
     def snapshot(self) -> dict[str, object]:
         raise ReviewInputError("caller accounting uses the authenticated run record")
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

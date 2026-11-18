@@ -88,7 +88,7 @@ class ProductionDecisionFixture(ProductionCommandEntryFixture):
                 return response
         return super().external(request, timeout)
 
-    def seed(self):
+    def seed(self, *, count=25):
         self.provider_comments = [
             {
                 "path": "src/app.py",
@@ -99,7 +99,7 @@ class ProductionDecisionFixture(ProductionCommandEntryFixture):
                 "blocking": False,
                 "needs_human": True,
             }
-            for index in range(25)
+            for index in range(count)
         ]
         if self.invoke() != 0:
             raise AssertionError(self.error)
@@ -119,7 +119,7 @@ class ProductionDecisionFixture(ProductionCommandEntryFixture):
     def override(self, start, identifier):
         return self.command(
             "@reviewsensei override "
-            + " ".join(self.labels[start : start + 10])
+            + " ".join(self.labels[start : start + 5])
             + " acceptable risk",
             identifier,
         )
@@ -134,21 +134,29 @@ class ProductionDecisionFixture(ProductionCommandEntryFixture):
     os.environ.get("REVIEWSENSEI_MEDIA_BROKER_QUALIFICATION") == "1",
     "explicit production broker qualification required",
 )
-class HostedDecisionSnapshotTests(unittest.TestCase):
+class LegacyHostedDecisionSnapshotTests(unittest.TestCase):
+    """Historical snapshot carrier, still exercised through the real Worker.
+
+    Five batches of five retain all 25 decisions at the original 512 limit.
+    Ten-at-once no longer fits the complete semantic terminal carrier reserve;
+    The separate current-lifecycle tests below never opt out.
+    """
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.f = ProductionDecisionFixture(self.directory.name)
         self.addCleanup(self.f.bridge.close)
+        self.f.legacy_publication_fixture = True
         self.f.seed()
 
     def batches(self):
-        for start, event in ((0, 20), (10, 21), (20, 22)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23), (20, 24)):
             self.assertEqual(
                 self.f.override(start, event), 0, (self.f.error, self.f.exception)
             )
             record, decisions = self.f.decisions()
-            self.assertEqual(len(decisions), min(start + 10, 25))
+            self.assertEqual(len(decisions), min(start + 5, 25))
             ledger = self.f.selected.ledger
             before = len(self.f.trace)
             parts = ledger.snapshot_preview_parts(IDENTITY, record)
@@ -209,10 +217,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assert_accounting()
 
     def test_final_override_reports_graphql_failure_without_claiming_approval(self):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         self.f.graphql_refused = True
-        self.f.override(20, 22)
+        self.f.override(20, 24)
         self.assertEqual(len(self.f.decisions()[1]), 25)
         self.assertFalse(any(r["state"] == "APPROVED" for r in self.f.reviews))
         self.assertNotIn("SECRET", self.f.stdout + self.f.error)
@@ -221,10 +229,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assert_accounting()
 
     def test_lost_part_response_does_not_activate_or_invent_decisions(self):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         self.f.part_fault = "stored"
-        self.assertEqual(self.f.override(20, 22), 1, self.f.error)
+        self.assertEqual(self.f.override(20, 24), 1, self.f.error)
         record, decisions = self.f.decisions()
         self.assertEqual(len(decisions), 20)
         self.assertIsNone(record.disposition_snapshot)
@@ -253,10 +261,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assertEqual(self.f.part_posts, writes)
 
     def test_absent_part_response_never_reposts_or_activates_a_snapshot(self):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         self.f.part_fault = "absent"
-        self.assertEqual(self.f.override(20, 22), 1, self.f.error)
+        self.assertEqual(self.f.override(20, 24), 1, self.f.error)
         record, decisions = self.f.decisions()
         self.assertEqual(len(decisions), 20)
         self.assertIsNone(record.disposition_snapshot)
@@ -278,10 +286,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assertEqual(self.f.part_posts, 1)
 
     def test_unfunded_part_and_root_tails_refuse_before_part_dispatch(self):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         with patch("review_sensei_github.api_run_plan.NATIVE_OPERATION_REQUESTS", 5):
-            self.assertEqual(self.f.override(20, 22), 1, self.f.error)
+            self.assertEqual(self.f.override(20, 24), 1, self.f.error)
         self.assertIn("part and root tails are unfunded", self.f.error)
         self.assertEqual(self.f.part_posts, 0)
         record, decisions = self.f.decisions()
@@ -291,10 +299,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assert_accounting()
 
     def test_lost_root_response_reloads_committed_decisions_without_duplicate(self):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         self.f.snapshot_fault = "stored"
-        self.assertEqual(self.f.override(20, 22), 0, self.f.error)
+        self.assertEqual(self.f.override(20, 24), 0, self.f.error)
         record, decisions = self.f.decisions()
         self.assertEqual(len(decisions), 25)
         self.assertIsNotNone(record.disposition_snapshot)
@@ -305,7 +313,7 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assertEqual(len(approved), 1)
         # A new duplicate override cannot reach past the newer native approval
         # to an older finding index. Its refusal must preserve the stored proof.
-        self.assertEqual(self.f.override(20, 23), 1, self.f.error)
+        self.assertEqual(self.f.override(20, 25), 1, self.f.error)
         self.assertIn("complete current review index", self.f.error)
         replay, replayed = self.f.decisions()
         self.assertEqual(decisions, replayed)
@@ -320,10 +328,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
     def test_concurrent_root_change_leaves_orphan_parts_without_decision_authority(
         self,
     ):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         self.f.part_fault = "concurrent-root"
-        self.assertEqual(self.f.override(20, 22), 1, self.f.error)
+        self.assertEqual(self.f.override(20, 24), 1, self.f.error)
         record, decisions = self.f.decisions()
         self.assertEqual(len(decisions), 20)
         self.assertIsNone(record.disposition_snapshot)
@@ -332,7 +340,7 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assert_accounting()
 
     def test_command_reserve_funds_check_and_approval_when_cleanup_refuses(self):
-        for start, event in ((0, 20), (10, 21)):
+        for start, event in ((0, 20), (5, 21), (10, 22), (15, 23)):
             self.assertEqual(self.f.override(start, event), 0, self.f.error)
         resolved = self.f.resolved_threads.copy()
         # Failure to obtain cleanup authority does not fabricate resolved threads.
@@ -349,7 +357,7 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             return original(request, timeout)
 
         self.f.external = refused
-        self.f.override(20, 22)
+        self.f.override(20, 24)
         self.assertEqual(len(self.f.decisions()[1]), 25)
         self.assertEqual(self.f.resolved_threads, resolved)
         self.assertEqual(sum(r["state"] == "APPROVED" for r in self.f.reviews), 1)
@@ -371,4 +379,86 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(len(self.f.decisions()[1]), 25)
         self.assertIn("check.capability", self.f.stdout + self.f.error)
+        self.assert_accounting()
+
+
+@unittest.skipUnless(
+    os.environ.get("REVIEWSENSEI_MEDIA_BROKER_QUALIFICATION") == "1",
+    "explicit production broker qualification required",
+)
+class CurrentHostedDecisionCapacityTests(unittest.TestCase):
+    """Current lifecycle stays enabled; each Worker-backed run keeps 512."""
+
+    assert_accounting = LegacyHostedDecisionSnapshotTests.assert_accounting
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.f = ProductionDecisionFixture(self.directory.name)
+        self.addCleanup(self.f.bridge.close)
+        self.assertFalse(self.f.legacy_publication_fixture)
+
+    def test_two_current_decisions_and_cold_verify_finish_at_original_512(self):
+        self.f.seed(count=2)
+        transaction = parse_session_comment(
+            self.f.comment["body"], identity=IDENTITY
+        ).transaction
+        for body, identifier in (
+            (
+                "@reviewsensei override "
+                + " ".join(self.f.labels)
+                + " acceptable risk",
+                20,
+            ),
+            ("@reviewsensei verify", 21),
+        ):
+            self.assertEqual(self.f.command(body, identifier), 0, self.f.error)
+            self.assertNotIn("before business writes", self.f.stdout)
+            record, decisions = self.f.decisions()
+            self.assertEqual(len(decisions), 2)
+            self.assertIsNotNone(record.finding_lifecycle)
+            self.assertEqual(record.transaction, transaction)
+            self.assertEqual(self.f.accounted.accounting.action["phase"], "terminal")
+            self.assert_accounting()
+        self.assertEqual(len(self.f.resolved_threads), 2)
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in self.f.reviews), 1)
+        self.assertEqual(self.f.check_runs[-1]["conclusion"], "success")
+        self.assertEqual(self.f.provider_calls, 1)
+
+    def test_twenty_five_current_findings_refuse_unfunded_batch_before_business(self):
+        self.f.seed()
+        before = parse_session_comment(self.f.comment["body"], identity=IDENTITY)
+        native = copy.deepcopy(
+            (self.f.reviews, self.f.check_runs, self.f.inline, self.f.resolved_threads)
+        )
+        body = (
+            "@reviewsensei override "
+            + " ".join(self.f.labels[:10])
+            + " acceptable risk"
+        )
+        self.assertEqual(self.f.command(body, 20), 0, self.f.error)
+        self.assertIn("before business writes", self.f.stdout)
+        self.assertIn("cannot fund the complete operation", self.f.stdout)
+        record, decisions = self.f.decisions()
+        self.assertEqual(decisions, ())
+        self.assertEqual(record.transaction, before.transaction)
+        # Rollover may attach authenticated accepted semantic history (v2)
+        # without changing the committed finding inventory or its lineage.
+        for key in (
+            "manifest",
+            "operation_id",
+            "previous_root_sha256",
+            "previous_snapshot_sha256",
+        ):
+            self.assertEqual(
+                record.finding_lifecycle[key], before.finding_lifecycle[key]
+            )
+        self.assertTrue(record.finding_lifecycle.get("accepted_semantic_history"))
+        self.assertEqual(
+            (self.f.reviews, self.f.check_runs, self.f.inline, self.f.resolved_threads),
+            native,
+        )
+        self.assertEqual(self.f.part_posts, 0)
+        self.assertEqual(self.f.snapshot_writes, 0)
+        self.assertEqual(self.f.accounted.accounting.action["phase"], "terminal")
         self.assert_accounting()

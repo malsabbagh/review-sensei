@@ -426,7 +426,7 @@ async function sessionGrant(
     const values = body as Record<string, unknown>;
     const bodyKeys = Object.keys(values);
     if (
-      bodyKeys.length !== (Object.hasOwn(values, "control_budget") ? 3 : 2) ||
+      bodyKeys.some(key => !["session_grant", "session_attestation", "control_budget", "refresh_effect_sha256"].includes(key)) ||
       !Object.hasOwn(values, "session_grant") ||
       !Object.hasOwn(values, "session_attestation")
     ) {
@@ -452,6 +452,10 @@ async function sessionGrant(
       throw new Error("broker_request_deadline_invalid");
     }
     const broker = new TokenBroker(env, undefined, observation);
+    if (Object.hasOwn(values, "refresh_effect_sha256")) {
+      const refreshed = await broker.refreshSessionObservation(values.session_grant, values.session_attestation, values.refresh_effect_sha256, control, parsedDeadline);
+      return response({ ...refreshed, ...(control === undefined ? {} : { control_receipt: control.receipt() }) }, 200, true);
+    }
     const attestation = await broker.verifySessionGrant(
       values.session_grant,
       values.session_attestation,

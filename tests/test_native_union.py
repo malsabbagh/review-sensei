@@ -54,6 +54,26 @@ class NativeUnionTests(unittest.TestCase):
             backend.assembled.index_entries,
         )
         self.assertEqual(receipt.reconstruct_plan(backend.result, index), backend.plan)
+        from review_sensei_github.native_union import reconstruct_original_plan
+
+        self.assertEqual(
+            reconstruct_original_plan(
+                backend.result,
+                index,
+                repository_id=receipt.repository_id,
+                pull_request=receipt.pull_request,
+                base_sha=receipt.base_sha,
+                head_sha=receipt.head_sha,
+                transaction_id=receipt.transaction_id,
+                result_sha256=receipt.result_sha256,
+                result_digest=receipt.result_digest,
+                plan_sha256=receipt.plan_sha256,
+                inline_count=receipt.inline_count,
+                reused_roots=receipt.reused_roots,
+                main_body=None,
+            ),
+            receipt.reconstruct_plan(backend.result, index),
+        )
         with self.assertRaises(ReviewInputError):
             receipt.reconstruct_plan(replace(backend.result, summary="Changed"), index)
         altered = replace(

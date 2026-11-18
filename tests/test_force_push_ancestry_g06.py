@@ -62,6 +62,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.session import read_session_baseline
 from review_sensei.workflow import prepare_diff
+from tests.publication_timing_observers import at_empty_original_publication_fence
 
 
 def _init_git_repo(root: Path) -> dict[str, str]:
@@ -595,6 +596,7 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
 
             # 3. Force-push reverts head back to previously approved H1.
             # Must NOT discard H2's obligation or blindly reuse H1's superseded approval!
+            original_obligations = fixture.retained_finding_obligations()
             fixture.advance_run_to_head(h1)
             code_3, out_3 = fixture.run_and_read(human=False)
             self.assertEqual(code_3, 0)
@@ -604,11 +606,12 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                 fixture.comment["body"], identity=IDENTITY
             )
             self.assertTrue(session_has_unresolved_obligations(record_revert))
-            # Only the original H1 approval from step 1 exists; step 3 emitted COMMENT, NOT APPROVE.
+            # Only the original H1 approval from step 1 exists; step 3 requests changes for retained uncertainty, NOT APPROVE.
             self.assertEqual(
                 [r["event"] for r in fixture.review_posts],
-                ["COMMENT", "APPROVE", "COMMENT", "COMMENT"],
+                ["COMMENT", "APPROVE", "COMMENT", "REQUEST_CHANGES"],
             )
+            fixture.assert_preserved_omitted_obligations(self, original_obligations)
 
     def test_force_push_identical_tree_new_sha_invalidates_prior_sha_approval(
         self,
@@ -646,33 +649,33 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
         # ZERO fresh model inference!
         with tempfile.TemporaryDirectory() as tmp:
             fixture = LifecycleEntryFixture(Path(tmp))
-            original_preflight = ReviewPublisher._preflight_pr
-            retargeted = False
-
-            def retarget_on_final_preflight(publisher, **kwargs):
-                nonlocal retargeted
-                # Anchor on the post-staging pre-mutation fence (immediately after
-                # `human_inventory_store.stage` records the default human inventory
-                # part comment), rather than a brittle preflight call counter.
-                if not retargeted and any(
-                    "default-human-inventory" in str(item.get("body", ""))
-                    for item in fixture.extra_comments.values()
-                ):
-                    retargeted = True
-                    fixture.base_ref = "release/1.0"
-                return original_preflight(publisher, **kwargs)
-
-            with patch.object(
-                ReviewPublisher, "_preflight_pr", retarget_on_final_preflight
-            ):
+            with at_empty_original_publication_fence(
+                lambda: setattr(fixture, "base_ref", "release/1.0")
+            ) as retargeted:
                 code_mid, out_mid = fixture.run_and_read(human=False)
-            self.assertTrue(retargeted)
+            self.assertEqual(retargeted, [True])
             self.assertEqual(code_mid, 1)
             assert out_mid is not None
             self.assertEqual(out_mid["status"], "skipped_stale_base")
             self.assertFalse(out_mid["accounting_terminal"])
             self.assertEqual(fixture.provider_calls, 1)
             self.assertEqual(fixture.review_posts, [])
+            self.assertEqual(fixture.check_runs, [])
+            from review_sensei_github.finding_lifecycle import _unpack_journal
+
+            from review_sensei.bounded_evidence import read_inline_evidence
+
+            stopped = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertIsNone(stopped.quarantine_lineage)
+            manifest = stopped.finding_lifecycle["manifest"]
+            retained = read_inline_evidence(
+                manifest, expected_binding=manifest["binding"]
+            )
+            journal = _unpack_journal(retained["lifecycle"])
+            self.assertEqual(journal["effects"], [])
+            self.assertEqual(journal["native_receipts"], [])
+            self.assertFalse(journal["unknown_trust_effect"])
+            self.assertIsNone(stopped.api_run_accounting["terminal_transaction"])
 
             # Live gate explicitly classifies same-SHA base-ref retarget as `stale_base_ref`.
             gate = evaluate_live_pr_write_gate(
@@ -1501,6 +1504,7 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertEqual([r["event"] for r in fx.review_posts], ["COMMENT"])
             rec_h1 = parse_session_comment(fx.comment["body"], identity=IDENTITY)
             self.assertTrue(session_has_unresolved_obligations(rec_h1))
+            original_obligations = fx.retained_finding_obligations()
 
             # 2. Rebase PR #7 from (main@B1, H1) onto (main@B2, H1_rebased), explicitly
             # preserving the distinction between `same_sha_base_ref_retarget` and `base_sha` drift.
@@ -1585,19 +1589,35 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             orig_preflight = ReviewPublisher._preflight_pr
 
             def run_with_final_preflight_502() -> tuple[int, dict[str, object] | None]:
-                before_inv = sum(
-                    "default-human-inventory" in str(item.get("body", ""))
-                    for item in fx.extra_comments.values()
-                )
                 armed = False
+                before_reviews = len(fx.review_posts)
 
                 def arm_final_preflight(publisher, **kwargs):
                     nonlocal armed
-                    now_inv = sum(
-                        "default-human-inventory" in str(item.get("body", ""))
-                        for item in fx.extra_comments.values()
+                    # Observe the actual source-owned lifecycle checkpoint for
+                    # this exact new head/base/accepted result. The old detached
+                    # human-inventory part is no longer this route's producer.
+                    record = parse_session_comment(
+                        fx.comment["body"], identity=IDENTITY
                     )
-                    if not armed and now_inv > before_inv:
+                    reference = record.finding_lifecycle
+                    transaction = record.transaction
+                    if (
+                        not armed
+                        and reference is not None
+                        and transaction is not None
+                        and transaction.result_sha256 is not None
+                        and reference["operation_id"] == transaction.transaction_id
+                        and reference["manifest"]["binding"]["head_sha"]
+                        == kwargs["head_sha"]
+                        and reference["manifest"]["binding"]["base_sha"]
+                        == kwargs["base_sha"]
+                    ):
+                        self.assertEqual(len(fx.review_posts), before_reviews)
+                        self.assertIn(
+                            transaction.phase,
+                            {"publication_pending", "publication_failed"},
+                        )
                         armed = True
                         fx.fail_next_pull_get = True
                     return orig_preflight(publisher, **kwargs)
@@ -1605,7 +1625,15 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                 with patch.object(
                     ReviewPublisher, "_preflight_pr", arm_final_preflight
                 ):
-                    return fx.run_and_read(human=False)
+                    result = fx.run_and_read(human=False)
+                self.assertTrue(
+                    armed, "current lifecycle checkpoint fault was not exercised"
+                )
+                self.assertFalse(
+                    fx.fail_next_pull_get, "fault did not reach physical PR read"
+                )
+                self.assertEqual(len(fx.review_posts), before_reviews)
+                return result
 
             fx.run_id += 1
             fx.attempt = 1
@@ -1614,7 +1642,10 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             fx.worker_observations.clear()
             code_rb_1, out_rb_1 = run_with_final_preflight_502()
             self.assertEqual(code_rb_1, 1)
-            self.assertIsNone(out_rb_1)
+            self.assertEqual(out_rb_1["status"], "publication_incomplete")
+            self.assertEqual(out_rb_1["publication_status"], "unknown")
+            self.assertFalse(out_rb_1["accounting_terminal"])
+            self.assertIsNone(out_rb_1["review_id"])
             self.assertEqual(fx.provider_calls, 2)
             self.assertEqual([r["event"] for r in fx.review_posts], ["COMMENT"])
 
@@ -1629,11 +1660,12 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertTrue(out_rb_2["accounting_terminal"])
             self.assertEqual(fx.provider_calls, 2)
             self.assertEqual(
-                [r["event"] for r in fx.review_posts], ["COMMENT", "COMMENT"]
+                [r["event"] for r in fx.review_posts], ["COMMENT", "REQUEST_CHANGES"]
             )
             self.assertEqual(fx.review_posts[-1]["commit_id"], h1_rebased)
             rec_rebased = parse_session_comment(fx.comment["body"], identity=IDENTITY)
             self.assertTrue(session_has_unresolved_obligations(rec_rebased))
+            fx.assert_preserved_omitted_obligations(self, original_obligations)
 
             # 4. Non-fast-forward force-push (B2, H1_rebased) -> (B2, H2_force_push) with
             # transient pre-mutation read error on attempt 1 + zero-inference retry on attempt 2.
@@ -1655,11 +1687,12 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertEqual(fx.provider_calls, 3)
             self.assertEqual(
                 [r["event"] for r in fx.review_posts],
-                ["COMMENT", "COMMENT", "COMMENT"],
+                ["COMMENT", "REQUEST_CHANGES", "REQUEST_CHANGES"],
             )
             self.assertEqual(fx.review_posts[-1]["commit_id"], h2_force_push)
             rec_fp = parse_session_comment(fx.comment["body"], identity=IDENTITY)
             self.assertTrue(session_has_unresolved_obligations(rec_fp))
+            fx.assert_preserved_omitted_obligations(self, original_obligations)
 
 
 if __name__ == "__main__":

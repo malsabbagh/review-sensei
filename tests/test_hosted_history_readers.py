@@ -188,6 +188,7 @@ class CurrentLargeEntryFixture:
                 super().__init__(directory, limit=limit)
                 self.comment_page_reads = []
                 self.review_page_reads = []
+                self.seed_comment_ids = ()
 
             def external(self, request, timeout):
                 path = urlsplit(request.full_url).path
@@ -203,9 +204,20 @@ class CurrentLargeEntryFixture:
                         int(query.get("page", [1])[0]),
                     )
                     self.comment_page_reads.append((size, page))
-                    rows = ([self.comment] if self.comment else []) + list(
-                        self.extra_comments.values()
-                    )
+                    # Historical comments existed before the synthetic POST
+                    # that creates the root; later immutable parts append.
+                    # Keep their declared creation order, not numeric-ID sort.
+                    rows = [
+                        self.extra_comments[k]
+                        for k in self.seed_comment_ids
+                        if k in self.extra_comments
+                    ]
+                    rows += [self.comment] if self.comment else []
+                    rows += [
+                        item
+                        for k, item in self.extra_comments.items()
+                        if k not in self.seed_comment_ids
+                    ]
                     since = query.get("since", [None])[0]
                     if since:
                         rows = [
@@ -238,6 +250,7 @@ class CurrentLargeEntryFixture:
                 **json.loads(json.dumps(item)),
                 "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
+        f.seed_comment_ids = tuple(f.extra_comments)
         f.reviews = json.loads(json.dumps(reviews or []))
         return f
 
@@ -319,9 +332,11 @@ class HostedHistoryReaderTests(unittest.TestCase):
                     f.comment["body"], identity=CURRENT_IDENTITY
                 )
                 self.assertEqual(current.transaction.phase, "publication_succeeded")
+                from review_sensei_github.finding_lifecycle import _unpack_journal
                 from review_sensei_github.publication import parse_finding_index
 
-                from review_sensei.human_assessment import finding_instance_fingerprint
+                from review_sensei.finding_lifecycle import decode_lifecycle_state
+                from review_sensei.finding_lifecycle_store import read_finding_lifecycle
                 from review_sensei.models import ReviewResult
 
                 result = ReviewResult.from_dict(
@@ -340,9 +355,17 @@ class HostedHistoryReaderTests(unittest.TestCase):
                 self.assertEqual(len(result.comments), 77)
                 self.assertEqual(len(indexes), 1)
                 self.assertEqual(len(indexes[0].entries), 77)
+                # Current durable identities include the source context, unlike
+                # the legacy body-only fingerprint. Read the actual committed
+                # complete inventory and its native publication receipts rather
+                # than recomputing a different legacy ID.
+                stored = read_finding_lifecycle(f.selected.ledger, current)
+                journal = _unpack_journal(stored)
+                state = decode_lifecycle_state(journal["lifecycle"]).state
+                self.assertEqual(len(state.inventory.obligations), 77)
                 self.assertEqual(
                     {entry.instance for entry in indexes[0].entries},
-                    {finding_instance_fingerprint(c) for c in result.comments},
+                    {item["instance"] for item in journal["native_receipts"]},
                 )
                 complete_text = "\n".join(r["body"] for r in f.reviews) + "\n".join(
                     c["body"] for c in f.inline

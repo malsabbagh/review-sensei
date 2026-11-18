@@ -1172,3 +1172,8 @@ __all__ = [
     "qualification_state_for_configuration",
     "qualification_state_for_publication",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

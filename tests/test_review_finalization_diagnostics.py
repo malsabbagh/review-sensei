@@ -195,19 +195,32 @@ class ReviewFinalizationDiagnosticsTests(unittest.TestCase):
 
     def test_unconfirmed_cleanup_does_not_enter_accounting_close(self):
         with tempfile.TemporaryDirectory() as directory:
-            f = _CompletionFixture(directory, mode="refused")
-            patch = f.root / "review.patch"
-            original = patch.read_text()
-            patch.write_text(
+            # This diagnostic concerns historical supersession cleanup. Current
+            # lifecycle publication reuses the original thread instead, so it
+            # never dispatches the resolve operation faulted by this fixture.
+            f = _CompletionFixture(directory, mode="refused", legacy_publication=True)
+            patch_file = f.root / "review.patch"
+            original = patch_file.read_text()
+            patch_file.write_text(
                 original
                 + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
                 encoding="utf-8",
                 newline="\n",
             )
             self.assertEqual(f.invoke(human=True), 0, f.error)
-            patch.write_text(original, encoding="utf-8", newline="\n")
+            original_thread = f.threads[0]["id"]
+            self.assertEqual(f.mutations, [])
+            patch_file.write_text(original, encoding="utf-8", newline="\n")
             f.next_run()
-            self.assertEqual(f.invoke(human=True), 1, f.error)
+            with patch.object(ApiRunRequestTransport, "finish_review_run") as close:
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                close.assert_not_called()
+            self.assertIn(original_thread, f.mutations)
+            self.assertFalse(
+                next(t for t in f.threads if t["id"] == original_thread)["isResolved"]
+            )
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(record.api_run_accounting["terminal_transaction"])
             observed = observations(f.error)
             self.assertEqual(len(observed), 1)
             self.assertEqual(observed[0]["stage"], "not_entered")

@@ -3,7 +3,6 @@
 import base64
 import copy
 import hashlib
-import itertools
 import json
 import random
 import re
@@ -16,6 +15,8 @@ from urllib.parse import urlsplit
 
 import test_quarantine_journey as journey_contract
 from fake_github_http import json_response
+from original_finish_interrupt import interrupt_original_finish
+from quarantine_fixture_identity import PUBLISHED_TAIL_RUNS
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import (
     approval_eligibility_from_body,
@@ -28,18 +29,25 @@ from review_sensei_github.quarantine_published_tail import (
     execution_manifest_digest,
 )
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_quarantine_activation import event, registered_resource
-from test_quarantine_evidence import original_objects
+from test_quarantine_evidence import git, original_objects
 from test_quarantine_journey import JourneyFixture
 from test_quarantine_published_tail_isolation import contract_fixture
 
 from review_sensei.bounded_evidence import canonical_bytes
 
-_RUNS = itertools.count(3900)
+_RUNS = PUBLISHED_TAIL_RUNS
 
 
 class PublishedTailJourneyFixture(JourneyFixture):
     tail_runs = None
+    # The intended 5+9 origins contain distinct criteria. Prose ordinals and
+    # moved line numbers alone deliberately do not establish finding identity.
+    stable_assessment_identities = True
+    # This origin-count fixture is not a five-thread rewrite scenario. Keep
+    # overlapping criteria unchanged; only four additional criteria are new.
+    unchanged_original_overlap = True
 
     def creator(self):
         return {**super().creator(), "created_at": "2026-10-28T00:01:00Z"}
@@ -79,26 +87,31 @@ class PublishedTailJourneyFixture(JourneyFixture):
             "id": 8_100_000,
             "body": "Late old bot reply: @reviewsensei verify. This is not a new human decision.",
             "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
-            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
         }
         self.late_effects.extend(("old-reply-comment", "old-reaction-and-metadata"))
 
     def external(self, request, timeout):
         path = urlsplit(request.full_url).path
+        # Ordinary producers use the same complete, head-scoped native listing
+        # as cold successors. The base fixture omits GitHub's total_count.
+        if (
+            request.get_method() == "GET"
+            and path.endswith("/check-runs")
+            and "/commits/" in path
+        ):
+            assert (
+                request.get_header("Authorization") != "Bearer synthetic-workflow-read"
+            )
+            self._meter(request)
+            head = path.split("/commits/", 1)[1].split("/", 1)[0]
+            rows = [
+                copy.deepcopy(item)
+                for item in self.check_runs
+                if item.get("head_sha") == head
+            ]
+            return json_response({"total_count": len(rows), "check_runs": rows})
         if self.tail_runs is not None and request.get_method() == "GET":
-            if path.endswith("/check-runs") and "/commits/" in path:
-                assert (
-                    request.get_header("Authorization")
-                    != "Bearer synthetic-workflow-read"
-                )
-                self._meter(request)
-                head = path.split("/commits/", 1)[1].split("/", 1)[0]
-                rows = [
-                    copy.deepcopy(item)
-                    for item in self.check_runs
-                    if item.get("head_sha") == head
-                ]
-                return json_response({"total_count": len(rows), "check_runs": rows})
             if path.endswith("/reactions"):
                 self._meter(request)
                 return json_response([])
@@ -137,6 +150,11 @@ class PublishedTailJourneyFixture(JourneyFixture):
                 "severity": "high",
                 "blocking": False,
                 "needs_human": True,
+                **(
+                    {"evidence_id": f"published-tail-assessment-{n}"}
+                    if self.stable_assessment_identities
+                    else {}
+                ),
             }
             for n in range(published_count)
         ]
@@ -146,19 +164,35 @@ class PublishedTailJourneyFixture(JourneyFixture):
         self.provider_comments = [
             {
                 "path": "src/app.py",
-                "line": 3,
+                "line": 2
+                if self.stable_assessment_identities
+                and self.unchanged_original_overlap
+                and n < published_count
+                else 3,
                 "side": "RIGHT",
-                "body": f"Current published assessment {n} requires independent human judgment.",
+                "body": (
+                    f"Earlier published assessment {n} requires independent human judgment."
+                    if self.stable_assessment_identities
+                    and self.unchanged_original_overlap
+                    and n < published_count
+                    else f"Current published assessment {n} requires independent human judgment."
+                ),
                 "severity": "high",
                 "blocking": False,
                 "needs_human": True,
+                **(
+                    {"evidence_id": f"published-tail-assessment-{n}"}
+                    if self.stable_assessment_identities
+                    else {}
+                ),
             }
             for n in range(failed_count)
         ]
-        with patch.object(
-            ApiRunRequestTransport, "finish_review_run", side_effect=KeyboardInterrupt
-        ):
+        with interrupt_original_finish(
+            ApiRunRequestTransport, run_id=self.run_id, attempt=self.attempt
+        ) as interrupted:
             assert self.invoke(human=True) == 130, self.error
+        assert interrupted == [True], "original finish entry was not interrupted"
         old = parse_session_comment(
             self.comment["body"], identity=self.selected.identity
         )
@@ -318,7 +352,7 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
                 self._meter(request)
                 assert self.accounted.observations[-1]["mutation"] is False
                 snapshot = object.__new__(NativeCensusBackend)
-                snapshot.http = GitHubHttp(api_url="https://api.github.test")
+                snapshot.http = GitHubHttp(api_url=self.api_url)
                 snapshot.plan = SimpleNamespace(
                     repository_id=123,
                     pull_request=7,
@@ -459,11 +493,18 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
                     snapshot.change = close_frames
                 return snapshot.opened(request, timeout)
         before = len(self.inline)
+        before_threads = len(self.threads)
         response = super().external(request, timeout)
         if request.get_method() == "POST" and path.endswith("/pulls/7/reviews"):
             payload = json.loads(request.data)
-            for comment in self.inline[before:]:
+            for comment, thread in zip(
+                self.inline[before:],
+                self.threads[before_threads:],
+                strict=True,
+            ):
                 comment["commit_id"] = payload["commit_id"]
+                thread["id"] = "PRRT_" + str(comment["id"])
+                thread["comments"]["nodes"][0]["commit"]["oid"] = payload["commit_id"]
             if payload["event"] == "REQUEST_CHANGES":
                 self.reviews[-1]["state"] = "CHANGES_REQUESTED"
         return response
@@ -519,12 +560,33 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     self.assertEqual(fixture.root_posts, 1)
 
     def test_fresh_recurrence_stays_independent_of_fourteen_historical_decisions(self):
+        from hot_original_entry import invoke_original
+
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
+            fixture.config_bytes = fixture.config_bytes.replace(
+                b"api_request_limit: 512", b"api_request_limit: 1152"
+            )
+            (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+            fixture.limit = 1152
+            git(fixture.root, "add", ".reviewsensei.yml")
+            git(
+                fixture.root,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "Offline bounded profile",
+            )
+            fixture.policy = fixture.policy_ref = git(fixture.root, "rev-parse", "HEAD")
+            fixture.creation_metadata = fixture.creator()
             fixture.provider_comments = [
                 {
                     "path": "src/app.py",
@@ -534,10 +596,16 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     "severity": "high",
                     "blocking": False,
                     "needs_human": True,
+                    "evidence_id": "published-tail-assessment-0",
                 }
             ]
             with registered_resource([registration]):
-                self.assertEqual(fixture.invoke(), 0, fixture.error)
+                # A populated current admission authenticates the actual
+                # engine and owner. Keep its definitions intact and fake only
+                # the external wire, not EntryFixture's legacy engine wrapper.
+                with forbid_replacement_phase_budget():
+                    result, _ = invoke_original(fixture)
+                self.assertEqual(result, 0, fixture.error)
                 # Inspect the displayed current obligations structurally. The
                 # unaware parser must still refuse v8; runtime commands below
                 # must use the independently authenticated complete union.
@@ -568,14 +636,23 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     for inventory in authenticated.inventories.values()
                     for a in inventory["assessments"]
                 ]
-                self.assertTrue(
+                self.assertEqual(len(historical), 14)
+                self.assertFalse(
                     any(a["instance"] == fresh.instance for a in historical)
+                )
+                self.assertFalse(
+                    any(a["concern"] == fresh.lifecycle for a in historical)
                 )
                 self.assertTrue(
                     any(
-                        a["instance"] != fresh.instance
-                        and a["concern"] == fresh.lifecycle
-                        for a in historical
+                        entry.lifecycle == fresh.lifecycle
+                        for review in fixture.old_reviews
+                        for entry in parse_finding_index(
+                            review["body"],
+                            repository_id=123,
+                            pull_request=7,
+                            head_sha=review["commit_id"],
+                        ).entries
                     )
                 )
                 original_dispositions = fixture.current_record().dispositions
@@ -584,6 +661,7 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 self.assertNotIn(fresh_thread, original_threads)
                 for number, pending in enumerate(view["pending"]):
                     fixture.quarantine_predecessor_comment_id = None
+                    fixture.SOURCE_ID += 1
                     fixture.select_command(
                         (
                             "@reviewsensei dismiss "
@@ -637,16 +715,8 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     ][-1]["conclusion"],
                     "action_required",
                 )
-                fixture.select_command(fixture.command_body, new_run=True)
-                self.assertEqual(
-                    fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
-                )
-                self.assertEqual(
-                    fixture.selected.ledger._quarantine_authenticated.state[
-                        "settlements"
-                    ],
-                    settlements,
-                )
+                last_historical_command = fixture.command_body
+                fixture.SOURCE_ID += 1
                 fixture.select_command("@reviewsensei verify", new_run=True)
                 self.assertEqual(
                     fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
@@ -658,6 +728,7 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     )
                 )
                 self.assertIsNone(old.api_run_accounting["terminal_transaction"])
+                fixture.SOURCE_ID += 1
                 fixture.select_command(
                     "@reviewsensei dismiss "
                     + fresh.instance
@@ -666,6 +737,24 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
+                )
+                self.assertEqual(
+                    sum(
+                        r["state"] == "APPROVED" and r["commit_id"] == fixture.live_head
+                        for r in fixture.reviews
+                    ),
+                    1,
+                )
+                fixture.SOURCE_ID += 1
+                fixture.select_command(last_historical_command, new_run=True)
+                self.assertEqual(
+                    fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
+                )
+                self.assertEqual(
+                    fixture.selected.ledger._quarantine_authenticated.state[
+                        "settlements"
+                    ],
+                    settlements,
                 )
                 self.assertEqual(
                     sum(
@@ -725,7 +814,7 @@ class HeavyPublishedTailJourneyFixture(PublishedTailJourneyFixture):
                 "id": identifier,
                 "body": body,
                 "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
-                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
                 "created_at": "2026-10-28T00:02:00Z",
                 "updated_at": "2026-10-28T00:02:00Z",
             }

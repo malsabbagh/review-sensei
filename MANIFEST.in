@@ -103,6 +103,7 @@ include tests/test_api_work_operations.py
 include tests/test_api_work_rescan.py
 include tests/test_api_work_root_bounds.py
 include tests/test_review_run.py
+include tests/hot_original_entry.py
 include tests/test_review_run_rescan.py
 include tests/test_action_reply_entry.py
 include tests/test_current_command_inventory.py
@@ -115,6 +116,7 @@ include tests/test_quarantine_creation.py
 include tests/test_quarantine_evidence.py
 include tests/test_quarantine_isolation.py
 include tests/test_quarantine_journey.py
+include tests/quarantine_fixture_identity.py
 include tests/test_quarantine_lineage.py
 include tests/test_quarantine_origin.py
 include tests/test_quarantine_record.py
@@ -144,6 +146,8 @@ include tests/test_quarantine_decision_conflict.py
 include tests/test_quarantine_published_tail.py
 include tests/test_quarantine_published_tail_isolation.py
 include tests/test_quarantine_published_tail_journey.py
+include tests/original_finish_interrupt.py
+include tests/original_source_observation.py
 include tests/test_quarantine_v3_journey.py
 include tests/test_quarantine_v3_publication.py
 include tests/test_quarantine_v3_check_capacity.py

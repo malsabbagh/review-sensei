@@ -20,6 +20,9 @@ if not is_disarmed():
 
 import provider_common_flow_contract as contract  # noqa: E402
 
+# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ())
+
 
 def load_tests(loader, tests, pattern):
     return contract.load_common_flow_tests(loader)

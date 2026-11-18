@@ -19,7 +19,12 @@ from typing import Sequence, cast
 from .diff import analyze_diff
 from .errors import ReviewInputError
 from .outcomes import RunOutcome, outcome_for_skip_reason
-from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, read_bounded_utf8
+from .validation import (
+    DEFAULT_REVIEW_LIMITS,
+    DEFAULT_TOTAL_WORK_BUDGET,
+    ReviewLimits,
+    read_bounded_utf8,
+)
 
 _REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -537,7 +542,12 @@ def _stream_diff_to_patch(
     head_oid: str,
     output: Path,
     limits: ReviewLimits,
+    aggregate_work: bool = False,
 ) -> None:
+    budget = DEFAULT_TOTAL_WORK_BUDGET
+    byte_limit = (
+        budget.max_total_diff_bytes if aggregate_work else limits.max_diff_bytes
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix="review-sensei-diff-", dir=output.parent
@@ -559,7 +569,7 @@ def _stream_diff_to_patch(
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > limits.max_diff_bytes:
+                    if total > byte_limit:
                         process.kill()
                         process.wait()
                         raise _invalid("diff exceeds the configured byte limit")
@@ -574,10 +584,21 @@ def _stream_diff_to_patch(
                     process.stderr.close()
         diff = read_bounded_utf8(
             temporary,
-            maximum=limits.max_diff_bytes,
+            maximum=byte_limit,
             label="diff",
         )
-        analyze_diff(diff, limits=limits)
+        if aggregate_work:
+            analyze_diff(
+                diff,
+                limits=limits,
+                allow_incomplete=True,
+                max_bytes=budget.max_total_diff_bytes,
+                max_lines=budget.max_total_diff_lines,
+                max_files=budget.max_total_files,
+                max_hunks=budget.max_total_hunks,
+            )
+        else:
+            analyze_diff(diff, limits=limits)
         temporary.replace(output)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -596,8 +617,21 @@ def prepare_diff(
     max_diff_lines: object = None,
     max_diff_files: object = None,
     max_diff_hunks: object = None,
+    aggregate_work: bool = False,
 ) -> Path:
-    """Validate inputs, fetch refs, and atomically publish a bounded diff."""
+    """Validate inputs, fetch refs, and atomically publish a bounded diff.
+
+    Aggregate input uses the existing total-work ceilings, leaving per-request
+    limits unchanged. Review planning and provider funding remain separate.
+    """
+
+    if type(aggregate_work) is not bool:
+        raise _invalid("aggregate_work must be a boolean")
+    if aggregate_work and any(
+        value is not None
+        for value in (max_diff_bytes, max_diff_lines, max_diff_files, max_diff_hunks)
+    ):
+        raise _invalid("aggregate input cannot override per-request diff limits")
 
     args = parse_prepare_diff_args(
         base_ref=base_ref,
@@ -660,5 +694,6 @@ def prepare_diff(
         head_oid=head_oid,
         output=args.output,
         limits=limits,
+        aggregate_work=aggregate_work,
     )
     return args.output

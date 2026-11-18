@@ -95,6 +95,8 @@ QUALIFICATION_LIMIT = PLAN.liability + 2 * NEXT_REPLACE_LIABILITY
 
 
 class StartupFixture:
+    api_url = "https://api.github.test"
+
     def __init__(self, directory, *, fanout=30, limit=128):
         self.directory = Path(directory)
         self.fanout = fanout
@@ -302,9 +304,7 @@ class StartupFixture:
             opener=self._external_open,
         )
         self.transports.append(self.accounted)
-        self.http = GitHubHttp(
-            api_url="https://api.github.test", opener=self.accounted.open
-        )
+        self.http = GitHubHttp(api_url=self.api_url, opener=self.accounted.open)
         budget = EvidenceReadBudget()
         client = BrokerClient(
             broker_url="https://broker.github.test/api/github/token",

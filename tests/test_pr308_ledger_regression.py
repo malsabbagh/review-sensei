@@ -429,6 +429,7 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
                     IDENTITY,
                     FrozenApiConfiguration("b" * 40, "c" * 64, 512),
                     ApiExecutionOwner(1, "hosted", 0),
+                    now=NOW,
                 )
             self.assertTrue(caller.observations)
             self.assertIsNone(caller._state)

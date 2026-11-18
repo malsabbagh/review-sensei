@@ -102,6 +102,10 @@ class CommentAllocationPlan:
             tuple(self.known.values()),
             self.unknown,
             closing_metadata_bytes=2 * sum(metadata[:100]),
+            known_metadata=tuple(
+                self.metadata_known.get(key, NODE_METADATA_BYTES) for key in self.known
+            ),
+            unknown_metadata=self.metadata_unknown,
         )
 
 
@@ -110,6 +114,8 @@ def packed_request_bound(
     unknown: tuple[int, ...],
     *,
     closing_metadata_bytes: int | None = None,
+    known_metadata: tuple[int, ...] | None = None,
+    unknown_metadata: int = NODE_METADATA_BYTES,
 ) -> int:
     """Certify the actual prefix algorithm under every unknown interleaving.
 
@@ -127,16 +133,67 @@ def packed_request_bound(
     """
     rejected = MAX_PAGINATION_PAGES + 1
     framing_calls = 2 if closing_metadata_bytes is None else 1
-    if len(known) + len(unknown) > MAX_COMMENTS:
+    known_length, unknown_length = len(known), len(unknown)
+    if known_length + unknown_length > MAX_COMMENTS:
         return rejected
+    if known_metadata is None:
+        known_metadata = (NODE_METADATA_BYTES,) * known_length
+    if (
+        type(known_metadata) is not tuple
+        or len(known_metadata) != known_length
+        or any(
+            type(value) is not int or not 0 < value <= NODE_METADATA_BYTES
+            for value in (*known_metadata, unknown_metadata)
+        )
+    ):
+        return rejected
+    # Include each known node's fixed metadata once; every interval then has
+    # the same exact cost without repeating its multiplication at each state.
+    # These are the original plan's envelopes, checked at opening and compared
+    # exactly on every body page. No metadata or unobserved slot is omitted.
+    known_costs = tuple(
+        body + metadata for body, metadata in zip(known, known_metadata)
+    )
     prefix = [0]
-    for bound in known:
-        prefix.append(prefix[-1] + bound)
+    for cost in known_costs:
+        prefix.append(prefix[-1] + cost)
+    if not unknown and all(type(cost) is int and cost > 0 for cost in known_costs):
+        # With no unknown slots there is exactly one ordered greedy packing,
+        # not a family of interleavings. Find each original maximal boundary
+        # directly. The unchanged 200-node bound makes this at most200 steps;
+        # it cannot reach the exhaustive proof's 500000-work refusal threshold.
+        # This never removes unknown slots from a caller's supplied plan.
+        if not known:
+            return 2  # Opening and fresh closing, including an empty census.
+        start = body_pages = 0
+        while start < known_length:
+            end = min(
+                start + 100,
+                bisect_right(
+                    prefix,
+                    prefix[start] + MAX_GITHUB_RESPONSE_BYTES - OUTER_BYTES,
+                    lo=start + 1,
+                )
+                - 1,
+            )
+            if end <= start:
+                return rejected
+            body_pages += 1
+            if end == known_length:
+                cost = OUTER_BYTES + prefix[end] - prefix[start]
+                if closing_metadata_bytes is not None:
+                    body_pages += int(
+                        cost + closing_metadata_bytes > MAX_GITHUB_RESPONSE_BYTES
+                    )
+                return min(rejected, framing_calls + body_pages)
+            if framing_calls + body_pages > MAX_PAGINATION_PAGES:
+                return rejected
+            start = end
     largest = sorted(unknown, reverse=True)
     upper = [0]
     for bound in largest:
         upper.append(upper[-1] + bound)
-    unknown_cost = [value + NODE_METADATA_BYTES * i for i, value in enumerate(upper)]
+    unknown_cost = [value + unknown_metadata * i for i, value in enumerate(upper)]
     work = 0
 
     class ProofWorkExceeded(Exception):
@@ -145,37 +202,40 @@ def packed_request_bound(
     @lru_cache(maxsize=40_401)
     def pages(ki: int, ui: int) -> int:
         nonlocal work
-        if ki == len(known) and ui == len(unknown):
+        if ki == known_length and ui == unknown_length:
             return 0 if closing_metadata_bytes is None else 1
         worst = 0
-        for end_known in range(ki, len(known) + 1):
+        for end_known in range(ki, known_length + 1):
             work += 1
             if work > 500_000:
                 raise ProofWorkExceeded
             known_count = end_known - ki
             if known_count > 100:
                 break
-            known_cost = (
-                prefix[end_known] - prefix[ki] + NODE_METADATA_BYTES * known_count
-            )
+            known_cost = prefix[end_known] - prefix[ki]
             capacity = MAX_GITHUB_RESPONSE_BYTES - OUTER_BYTES - known_cost
             if capacity < 0:
                 break
             maximum = min(
-                len(unknown) - ui,
+                unknown_length - ui,
                 100 - known_count,
                 bisect_right(unknown_cost, capacity) - 1,
             )
             # Only maximal page boundaries recurse. Skip all prefixes for
             # which another known and unknown item would both still fit.
-            candidates = {maximum}
-            if end_known < len(known):
-                minimum = bisect_right(
-                    unknown_cost,
-                    capacity - NODE_METADATA_BYTES - known[end_known],
+            minimum = maximum
+            if end_known < known_length:
+                minimum = min(
+                    maximum,
+                    bisect_right(
+                        unknown_cost,
+                        capacity - known_costs[end_known],
+                    ),
                 )
-                candidates.update(range(minimum, maximum + 1))
-            for added_unknown in sorted(candidates):
+            # The candidate union is one inclusive interval: either the
+            # known-item boundary through maximum, or maximum alone. Preserve
+            # its original order and proof-work charges without set/sort work.
+            for added_unknown in range(minimum, maximum + 1):
                 work += 1
                 if work > 500_000:
                     raise ProofWorkExceeded
@@ -184,15 +244,14 @@ def packed_request_bound(
                 if not count:
                     continue
                 end_unknown = ui + added_unknown
-                terminal = end_known == len(known) and end_unknown == len(unknown)
+                terminal = end_known == known_length and end_unknown == unknown_length
                 next_known_fails = (
-                    end_known < len(known)
-                    and cost + NODE_METADATA_BYTES + known[end_known]
-                    > MAX_GITHUB_RESPONSE_BYTES
+                    end_known < known_length
+                    and cost + known_costs[end_known] > MAX_GITHUB_RESPONSE_BYTES
                 )
                 next_unknown_fails = (
-                    end_unknown < len(unknown)
-                    and cost + NODE_METADATA_BYTES + largest[added_unknown]
+                    end_unknown < unknown_length
+                    and cost + unknown_metadata + largest[added_unknown]
                     > MAX_GITHUB_RESPONSE_BYTES
                 )
                 if terminal or count == 100 or next_known_fails or next_unknown_fails:
@@ -292,6 +351,129 @@ def _membership(payload: Any, ledger: Any, identity: Any, plan: CommentAllocatio
         raise ReviewInputError("packed comment metadata is malformed") from error
 
 
+def _single_plain(value, depth=0):
+    if depth > 20:
+        raise ReviewInputError("packed single census data is too deep")
+    kind = type(value)
+    if value is None or kind is str or kind is int or kind is bool:
+        return
+    if kind is dict:
+        if any(type(key) is not str for key in value):
+            raise ReviewInputError("packed single census keys are not plain")
+        children = value.values()
+    elif kind is list:
+        children = value
+    else:
+        raise ReviewInputError("packed single census data is not plain")
+    if len(value) > 1000:
+        raise ReviewInputError("packed single census data exceeds its bound")
+    for child in children:
+        _single_plain(child, depth + 1)
+
+
+def _single_plan_snapshot(plan):
+    import gc
+
+    if type(plan) is not CommentAllocationPlan:
+        raise ReviewInputError("packed single census plan is not original")
+    fields = vars(plan)
+    if any(type(key) is not str for key in fields) or set(fields) != {
+        "known",
+        "unknown",
+        "metadata_known",
+        "metadata_unknown",
+    }:
+        raise ReviewInputError("packed single census plan fields changed")
+    maps = []
+    for name in ("known", "metadata_known"):
+        mapping = fields[name]
+        if type(mapping) is not MappingProxyType:
+            raise ReviewInputError("packed single census plan mapping changed")
+        backing = gc.get_referents(mapping)
+        if len(backing) != 1 or type(backing[0]) is not dict:
+            raise ReviewInputError("packed single census plan backing changed")
+        if any(type(k) is not int or type(v) is not int for k, v in backing[0].items()):
+            raise ReviewInputError("packed single census plan values changed")
+        maps.append(tuple(backing[0].items()))
+    if (
+        type(fields["unknown"]) is not tuple
+        or any(type(n) is not int for n in fields["unknown"])
+        or type(fields["metadata_unknown"]) is not int
+    ):
+        raise ReviewInputError("packed single census plan slots changed")
+    # Reuse the original plan constructor's complete capacity-domain checks.
+    CommentAllocationPlan(
+        dict(maps[0]), fields["unknown"], dict(maps[1]), fields["metadata_unknown"]
+    )
+    return (*maps, fields["unknown"], fields["metadata_unknown"])
+
+
+def _complete_single_response(response, ledger, identity, plan, first):
+    """Fresh complete evidence; the scheduling hint supplies no bound/identity."""
+    _single_plain(response)
+    try:
+        repository = response["data"]["repository"]
+        _repository(repository, identity)
+        pr = repository["pullRequest"]
+        connection = pr["comments"]
+        nodes, info = connection["nodes"], connection["pageInfo"]
+        if (
+            type(first) is not int
+            or not 2 <= first <= 100
+            or type(pr["number"]) is not int
+            or pr["number"] != identity.pull_request
+            or type(nodes) is not list
+            or not len(nodes) < first
+            or type(connection["totalCount"]) is not int
+            or connection["totalCount"] != len(nodes)
+            or info["hasNextPage"] is not False
+            or (nodes and not _cursor(info["endCursor"]))
+            or wire(response) > MAX_GITHUB_RESPONSE_BYTES
+            or wire(response) - sum(wire(node) for node in nodes) > OUTER_BYTES
+        ):
+            raise ReviewInputError("packed single census is not complete")
+        collected, order, unknown = [], [], sorted(plan.unknown)
+        for node in nodes:
+            normalized = _comment(node, ledger, identity)
+            identifier = normalized["id"]
+            if identifier in order:
+                raise ReviewInputError("packed single census duplicates an identity")
+            order.append(identifier)
+            metadata = {key: value for key, value in node.items() if key != "body"}
+            bound = (
+                plan.metadata_known.get(identifier, NODE_METADATA_BYTES)
+                if identifier in plan.known
+                else plan.metadata_unknown
+            )
+            if wire(metadata) > bound:
+                raise ReviewInputError(
+                    "packed single census metadata exceeds its bound"
+                )
+            body_wire = wire({"body": node["body"]})
+            if identifier in plan.known:
+                if body_wire > plan.known[identifier]:
+                    raise ReviewInputError(
+                        "packed single census body exceeds its reserve"
+                    )
+            else:
+                match = next(
+                    (i for i, limit in enumerate(unknown) if body_wire <= limit), None
+                )
+                if match is None:
+                    raise ReviewInputError(
+                        "packed single census allocation exceeds its reserve"
+                    )
+                unknown.pop(match)
+            collected.append(normalized)
+        if tuple(i for i in order if i in plan.known) != tuple(plan.known):
+            raise ReviewInputError("packed single census retained identities changed")
+        return collected
+    except ReviewInputError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReviewInputError("packed single census response is malformed") from error
+
+
 def fetch_packed_comments(
     ledger,
     identity,
@@ -302,7 +484,20 @@ def fetch_packed_comments(
     before_read=None,
     observe_request=None,
 ):
-    """One cold complete walk, including opening and closing membership."""
+    """Complete walk: original opening/closing or optional single response.
+
+    Cold checkpoint custody retains its original multi-read protocol. Receipt
+    observers already accept one complete physical read and still validate the
+    original frame, plan, rows, owner and actual observations unchanged.
+    """
+    from .quarantine_command_checkpoint import begin_census, completed_census
+    from .quarantine_command_execution import (
+        begin_receipt_census,
+        observe_receipt_census,
+    )
+
+    receipt_census = begin_receipt_census(ledger, identity, plan)
+    cold_census = begin_census(ledger, identity, plan)
     requests = MAX_PAGINATION_PAGES if max_requests is None else max_requests
     if type(requests) is not int or not 2 <= requests <= MAX_PAGINATION_PAGES:
         raise ReviewInputError("packed comment physical request bound is invalid")
@@ -332,6 +527,9 @@ def fetch_packed_comments(
             body={"query": query, "variables": variables},
             timeout_seconds=remaining,
         )
+        if hinted_first is not None:
+            require_module_seal(sys.modules[__name__])
+            _single_plain(response)
         if (
             status != 200
             or not isinstance(response, dict)
@@ -342,6 +540,33 @@ def fetch_packed_comments(
         ):
             raise ReviewInputError("packed comment complete response is unavailable")
         return response
+
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    from . import body_census_hint
+
+    require_module_seal(body_census_hint)
+    hinted_first = body_census_hint.first() if cold_census is None else None
+    if hinted_first is not None:
+        require_module_seal(sys.modules[__name__])
+        plan_snapshot = _single_plan_snapshot(plan)
+        variables = {**scope, "first": hinted_first, "after": None}
+        if wire({"query": QUERY, "variables": variables}) > 8192:
+            raise ReviewInputError("packed single census query exceeds its bound")
+        response = read(QUERY, variables)
+        require_module_seal(sys.modules[__name__])
+        if _single_plan_snapshot(plan) != plan_snapshot:
+            raise ReviewInputError(
+                "packed single census original plan changed during read"
+            )
+        collected = _complete_single_response(
+            response, ledger, identity, plan, hinted_first
+        )
+        return completed_census(
+            cold_census, observe_receipt_census(receipt_census, collected)
+        )
 
     opening = read(METADATA_QUERY, scope)
     order, metadata, original_scope = _membership(opening, ledger, identity, plan)
@@ -372,7 +597,12 @@ def fetch_packed_comments(
             )
             bound = (
                 OUTER_BYTES
-                + NODE_METADATA_BYTES * count
+                + sum(
+                    plan.metadata_known.get(identifier, NODE_METADATA_BYTES)
+                    if identifier in plan.known
+                    else plan.metadata_unknown
+                    for identifier in identifiers
+                )
                 + sum(
                     plan.known[identifier]
                     for identifier in identifiers
@@ -453,7 +683,13 @@ def fetch_packed_comments(
                     raise ReviewInputError(
                         "packed comment fresh closing membership changed"
                     )
-                return collected
+                require_module_seal(body_census_hint)
+                return completed_census(
+                    cold_census,
+                    observe_receipt_census(
+                        receipt_census, body_census_hint.observed(collected)
+                    ),
+                )
         except (KeyError, TypeError, ValueError) as error:
             raise ReviewInputError(
                 "packed comment complete body page is malformed"
@@ -461,4 +697,25 @@ def fetch_packed_comments(
     closing = _membership(read(METADATA_QUERY, scope), ledger, identity, plan)
     if closing != (order, metadata, original_scope):
         raise ReviewInputError("packed comment fresh closing membership changed")
-    return collected
+    require_module_seal(body_census_hint)
+    return completed_census(
+        cold_census,
+        observe_receipt_census(receipt_census, body_census_hint.observed(collected)),
+    )
+
+
+from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402
+
+_install_cold_source("census", fetch_packed_comments)
+del _install_cold_source
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_packed as _install_materialized_packed,
+)
+
+_install_materialized_packed(globals())
+del _install_materialized_packed
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -815,3 +815,31 @@ describe("post-header PR lookup transport evidence", () => {
     } finally { fetchMock.mockRestore(); }
   });
 });
+
+describe("current observation extraction uses existing authenticated endpoints", () => {
+  it("retains installation selection and permissions with one existing lookup", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({ status: 200, data: { id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "write" } } });
+    await expect(client.installationObservationFor("acme/widgets")).resolves.toEqual({ id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "write" } });
+    expect(request).toHaveBeenCalledExactlyOnceWith("GET", "/repos/acme/widgets/installation", "app-jwt");
+  });
+  it.each([{ id: 2468 }, { id: true, repository_selection: "all", permissions: { metadata: "read" } }, { id: 2468, repository_selection: "unknown", permissions: { metadata: "read" } }, { id: 2468, repository_selection: "selected", permissions: { metadata: "admin" } }])("rejects incomplete installation evidence", async data => {
+    const client = api(); vi.spyOn(client, "request").mockResolvedValue({ status: 200, data });
+    await expect(client.installationObservationFor("acme/widgets")).rejects.toThrow();
+  });
+  it("retains numeric owner and canonical repository from one metadata read", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({ status: 200, data: { id: 23, fork: false, full_name: "Acme/Widgets", owner: { id: 17, login: "Acme" } } });
+    await expect(client.repositoryInfo("acme/widgets", "metadata-token", true)).resolves.toEqual({ id: 23, fork: false, full_name: "Acme/Widgets", owner_id: 17, owner_login: "Acme" });
+    expect(request).toHaveBeenCalledExactlyOnceWith("GET", "/repos/acme/widgets", "metadata-token");
+  });
+  it.each([{ id: 23, fork: false }, { id: 23, fork: false, full_name: "other/widgets", owner: { id: 17, login: "other" } }, { id: 23, fork: false, full_name: "acme/widgets", owner: { id: true, login: "acme" } }])("refuses absent or mismatched owner without another lookup", async data => {
+    const client = api(); const request = vi.spyOn(client, "request").mockResolvedValue({ status: 200, data });
+    await expect(client.repositoryInfo("acme/widgets", "metadata-token", true)).rejects.toThrow(); expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("returns actual validated token scopes rather than requested-scope fiction", async () => {
+    const client = api(); const request = vi.spyOn(client, "request").mockResolvedValue({ status: 201, data: { token: "synthetic", expires_at: new Date(Date.now() + 60000).toISOString(), permissions: { metadata: "read", pull_requests: "write", contents: "read" } } });
+    await expect(client.capabilityTokenObservation(2468, "acme/widgets", { pull_requests: "write" }, true)).resolves.toEqual({ token: "synthetic", permissions: { metadata: "read", pull_requests: "write", contents: "read" } });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});

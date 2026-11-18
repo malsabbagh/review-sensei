@@ -103,7 +103,7 @@ class CreationFixture(OriginFixture):
                             "login": "reviewsensei[bot]",
                             "type": "Bot",
                         },
-                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                        "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
                     }
                     self.extra_comments[identifier] = item
                     if self.creation_fault == "stored":
@@ -132,7 +132,7 @@ class CreationFixture(OriginFixture):
         self.run_id = next(_RUN_IDS)
         self.event_name = "workflow_dispatch"
         self.source_previous = old
-        self.comment["issue_url"] = "https://api.github.test/repos/owner/repo/issues/7"
+        self.comment["issue_url"] = f"{self.api_url}/repos/owner/repo/issues/7"
         from review_sensei_github.api_run_host import review_startup_plan
         from review_sensei_github.api_run_requests import ApiRunRequestTransport
         from review_sensei_github.http import GitHubHttp
@@ -153,7 +153,7 @@ class CreationFixture(OriginFixture):
         )
         self.transports.append(self.accounted)
         self.http = _PaginationObservationHttp(
-            GitHubHttp(api_url="https://api.github.test", opener=self.accounted.open),
+            GitHubHttp(api_url=self.api_url, opener=self.accounted.open),
             self.accounted.budget_view,
         )
         native = StartupRunLedger(

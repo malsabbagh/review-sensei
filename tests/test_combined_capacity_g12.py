@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import dis
+import inspect
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -113,6 +116,43 @@ def _make_recovery_bundle(index: int = 1) -> OriginalRecoveryContextBundle:
         runtime_only_fields=(),
         authority=False,
     )
+
+
+@contextmanager
+def _observe_original_source(observer):
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(observer)
+        yield
+    finally:
+        sys.setprofile(previous)
+
+
+@contextmanager
+def _capture_checkpoint_documents(documents):
+    import copy
+
+    from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
+
+    checkpoint = inspect.unwrap(FindingLifecycleJournal.checkpoint)
+    # A profile return on exception unwind is not a committed checkpoint.
+    returns = {
+        item.offset
+        for item in dis.get_instructions(checkpoint)
+        if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+    }
+
+    def observe(frame, event, arg):
+        if (
+            frame.f_code is checkpoint.__code__
+            and frame.f_globals is checkpoint.__globals__
+            and event == "return"
+            and frame.f_lasti in returns
+        ):
+            documents.append(copy.deepcopy(frame.f_locals["self"]._document()))
+
+    with _observe_original_source(observe):
+        yield
 
 
 class CombinedCapacityG12Tests(unittest.TestCase):
@@ -460,6 +500,253 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     ):
                         self.assertTrue(replay.accounting_closed_after_replay)
                         self.assertFalse(replay.gate_succeeded_after_replay)
+
+    def test_actual_body_placement_owned_updates_survive_cold_command_reads(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _G34CommandFixture(directory, limit=512)
+            fixture.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": None,
+                    "side": "FILE",
+                    "body": body,
+                    "severity": "high",
+                    "blocking": False,
+                    "needs_human": True,
+                }
+                for body in (
+                    "Confirm the external caller contract.",
+                    "Confirm the database isolation contract.",
+                )
+            ]
+            documents = []
+            with _capture_checkpoint_documents(documents):
+                self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
+                initial = documents[-1]
+                index = parse_finding_index(
+                    fixture.reviews[-1]["body"],
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
+                )
+                self.assertEqual(len(index.entries), 2)
+                self.assertTrue(all(item.body_placed for item in index.entries))
+                self.assertEqual(fixture.inline, [])
+                receipts = {r["instance"]: r for r in initial["native_receipts"]}
+                self.assertEqual(len(receipts), 2)
+                for step, finding in enumerate(index.entries, start=1):
+                    fixture.SOURCE_ID = 700 + step
+                    fixture.select_command(
+                        f"@reviewsensei override RS-{finding.instance[:6].upper()} acceptable risk",
+                        new_run=True,
+                    )
+                    self.assertEqual(fixture.invoke_command(), 0, fixture.error)
+                    updated = documents[-1]
+                    native = next(
+                        r
+                        for r in fixture.reviews
+                        if r["id"] == receipts[finding.instance]["review_id"]
+                    )
+                    digest = hashlib.sha256(native["body"].encode()).hexdigest()
+                    for receipt in updated["native_receipts"]:
+                        self.assertEqual(
+                            receipt,
+                            {**receipts[receipt["instance"]], "body_sha256": digest},
+                        )
+                    self.assertTrue(
+                        any(
+                            "review_update_precondition" in e
+                            for e in updated["effects"]
+                        )
+                    )
+                    record = parse_session_comment(
+                        fixture.comment["body"], identity=IDENTITY
+                    )
+                    self.assertEqual(
+                        record.api_run_accounting["action"]["phase"], "terminal"
+                    )
+                    self.assertEqual(
+                        record.api_run_accounting["configuration"]["limit"], 512
+                    )
+                    self.assertEqual(
+                        sum(r["state"] == "APPROVED" for r in fixture.reviews),
+                        int(step == 2),
+                    )
+                self.assertEqual(fixture.review_put_attempts, 2)
+                self.assertEqual(fixture.provider_calls, 1)
+
+    def test_actual_body_placement_foreign_edit_or_missing_precondition_holds(self):
+        import copy
+
+        from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
+
+        from review_sensei.session import read_session_dispositions
+
+        for fault in ("foreign-edit", "missing-proof"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture = _G34CommandFixture(directory, limit=512)
+                fixture.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": None,
+                        "side": "FILE",
+                        "body": "Confirm the external caller contract.",
+                        "severity": "high",
+                        "blocking": False,
+                        "needs_human": True,
+                    }
+                ]
+                self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
+                index = parse_finding_index(
+                    fixture.reviews[-1]["body"],
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
+                )
+                if fault == "foreign-edit":
+                    fixture.reviews[-1]["body"] += (
+                        "\nUntrusted human edit to retained finding prose."
+                    )
+                fixture.SOURCE_ID = 710
+                fixture.select_command(
+                    f"@reviewsensei override RS-{index.entries[0].instance[:6].upper()} acceptable risk",
+                    new_run=True,
+                )
+                before_native = copy.deepcopy(
+                    (fixture.reviews, fixture.check_runs, fixture.inline)
+                )
+                if fault == "missing-proof":
+                    issue = FindingLifecycleJournal.issue_review_update_precondition
+                    removed = []
+
+                    def lose_issued_proof(frame, event, arg):
+                        if (
+                            frame.f_code is issue.__code__
+                            and event == "return"
+                            and arg is not None
+                            and not removed
+                        ):
+                            record = parse_session_comment(
+                                fixture.comment["body"], identity=IDENTITY
+                            )
+                            if (
+                                record.api_run_accounting["action"]["phase"]
+                                != "pending"
+                            ):
+                                return
+                            journal = frame.f_locals["self"]
+                            self.assertIs(
+                                journal._issued_review_update_precondition[0], arg
+                            )
+                            removed.append(arg)
+                            journal._issued_review_update_precondition = None
+
+                    with _observe_original_source(lose_issued_proof):
+                        self.assertNotEqual(fixture.invoke_command(), 0)
+                    self.assertEqual(len(removed), 1)
+                    self.assertIn("gate re-evaluation failed", fixture.error)
+                else:
+                    # A foreign body detected by admission is a known refusal,
+                    # not uncertainty after entering the disposition mutation.
+                    self.assertEqual(fixture.invoke_command(), 0, fixture.error)
+                    self.assertIn("before business writes", fixture.stdout)
+                    self.assertEqual(fixture.business_writes, 0)
+                    self.assertEqual(
+                        (fixture.reviews, fixture.check_runs, fixture.inline),
+                        before_native,
+                    )
+                self.assertEqual(fixture.review_put_attempts, 0)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+                record = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                action = record.api_run_accounting["action"]
+                if fault == "foreign-edit":
+                    self.assertEqual(action["phase"], "terminal")
+                    self.assertEqual(action["outcome"]["kind"], "explicit_noop")
+                    self.assertEqual(
+                        read_session_dispositions(fixture.selected.ledger, record), ()
+                    )
+                else:
+                    self.assertNotEqual(action["phase"], "terminal")
+
+    def test_actual_body_put_response_loss_keeps_original_intent_and_never_reposts(
+        self,
+    ):
+        import copy
+        import hashlib
+
+        for fault in ("stored", "absent"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture = _G34CommandFixture(directory, limit=512)
+                fixture.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": None,
+                        "side": "FILE",
+                        "body": "Confirm the external caller contract.",
+                        "severity": "high",
+                        "blocking": False,
+                        "needs_human": True,
+                    }
+                ]
+                documents = []
+                with _capture_checkpoint_documents(documents):
+                    self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
+                    before = documents[-1]["native_receipts"][0]
+                    index = parse_finding_index(
+                        fixture.reviews[-1]["body"],
+                        repository_id=123,
+                        pull_request=7,
+                        head_sha=HEAD,
+                    )
+                    fixture.SOURCE_ID = 720
+                    fixture.select_command(
+                        f"@reviewsensei override RS-{index.entries[0].instance[:6].upper()} acceptable risk",
+                        new_run=True,
+                    )
+                    fixture.put_fault = fault
+                    self.assertNotEqual(fixture.invoke_command(), 0)
+                effect = next(
+                    e for e in documents[-1]["effects"] if e["method"] == "PUT"
+                )
+                self.assertEqual(
+                    effect["review_update_precondition"]["body_sha256"],
+                    before["body_sha256"],
+                )
+                self.assertEqual(fixture.review_put_attempts, 1)
+                self.assertEqual(fixture.review_updates, int(fault == "stored"))
+                self.assertEqual(
+                    effect["status"], "confirmed" if fault == "stored" else "pending"
+                )
+                native = next(
+                    r for r in fixture.reviews if r["id"] == before["review_id"]
+                )
+                self.assertEqual(
+                    documents[-1]["native_receipts"][0]["body_sha256"],
+                    hashlib.sha256(native["body"].encode()).hexdigest(),
+                )
+                record = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(
+                    record.api_run_accounting["action"]["phase"], "pending"
+                )
+                self.assertGreaterEqual(fixture.accounted.accounting.uncertain, 1)
+                blocks = copy.deepcopy(record.api_run_accounting["blocks"])
+                fixture.attempt = 2
+                self.assertNotEqual(fixture.invoke_command(), 0)
+                after = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                for block in blocks:
+                    self.assertIn(block, after.api_run_accounting["blocks"])
+                self.assertEqual(after.api_run_accounting["action"]["phase"], "pending")
+                self.assertEqual(fixture.review_put_attempts, 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+                self.assertEqual(fixture.provider_calls, 1)
 
     def test_end_to_end_hosted_interruption_fresh_process_recovery_and_convergence(
         self,

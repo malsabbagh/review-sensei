@@ -1414,7 +1414,13 @@ def refresh_native_thread_nodes(
                             "body": row["b"],
                             "path": row["p"],
                             "line": row["l"],
-                            "author": {"login": app_slug, "__typename": "Bot"},
+                            "author": {
+                                "login": app_slug,
+                                "__typename": "Bot",
+                                "databaseId": current.producer_id,
+                            },
+                            "pullRequestReview": {"databaseId": current.review_id},
+                            "commit": {"oid": current.head_sha},
                         }
                     ]
                 },

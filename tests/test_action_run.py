@@ -14,13 +14,14 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import test_review_run as review_run_fixtures
 from fake_github_http import json_response
+from original_source_observation import watch_code
 from review_sensei_github import action_run, review_run
 from review_sensei_github import cli as package_cli
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
@@ -28,6 +29,7 @@ from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_api_work_persistence import HEAD, IDENTITY
 from test_review_run import (
     EntryFixture,
@@ -36,7 +38,6 @@ from test_review_run import (
 )
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
-from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 
 
@@ -183,6 +184,10 @@ class CommandEntryFixture(EntryFixture):
             payload = json.loads(request.data)
             if payload.get("operationName") == "ResolveReviewThread":
                 identifier = payload["variables"]["input"]["threadId"]
+                selected = next(
+                    thread for thread in self.threads if thread["id"] == identifier
+                )
+                selected["isResolved"] = True
                 self.resolved_threads.add(identifier)
                 return json_response(
                     {
@@ -213,23 +218,11 @@ class CommandEntryFixture(EntryFixture):
                                 "reviewThreads": {
                                     "nodes": [
                                         {
-                                            "id": "PRRT_" + str(item["id"]),
-                                            "isResolved": "PRRT_" + str(item["id"])
-                                            in self.resolved_threads,
-                                            "comments": {
-                                                "nodes": [
-                                                    {
-                                                        "databaseId": item["id"],
-                                                        "body": item["body"],
-                                                        "author": {
-                                                            "login": "reviewsensei[bot]",
-                                                            "__typename": "Bot",
-                                                        },
-                                                    }
-                                                ]
-                                            },
+                                            **copy.deepcopy(thread),
+                                            "isResolved": thread["isResolved"]
+                                            or thread["id"] in self.resolved_threads,
                                         }
-                                        for item in self.inline
+                                        for thread in self.threads
                                     ],
                                     "pageInfo": {
                                         "hasNextPage": False,
@@ -315,7 +308,7 @@ class CommandEntryFixture(EntryFixture):
             "updated_at": self.SOURCE_STAMP,
             "user": {"login": "alice", "type": "User", "id": 42},
             "author_association": "OWNER",
-            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
         }
 
     def invoke_command(self, body=None, *, extra=(), event_override=None):
@@ -331,6 +324,8 @@ class CommandEntryFixture(EntryFixture):
         event_file.write_text(json.dumps(event))
         fixture = self
         original_bootstrap = action_run.bootstrap
+        original_code = getattr(original_bootstrap, "__code__", None)
+        original_globals = getattr(original_bootstrap, "__globals__", None)
 
         def caller_factory(**kwargs):
             caller = ApiRunRequestTransport(**kwargs)
@@ -344,17 +339,27 @@ class CommandEntryFixture(EntryFixture):
             )
 
         def http_factory(**kwargs):
-            http = GitHubHttp(api_url="https://api.github.test", **kwargs)
+            http = GitHubHttp(api_url=fixture.api_url, **kwargs)
             fixture.http = http
             return http
 
-        def capture_run(*args, **kwargs):
-            run = original_bootstrap(*args, **kwargs)
-            fixture.selected = run
-            after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
-            if after_bootstrap is not None:
-                after_bootstrap(run)
-            return run
+        @contextmanager
+        def capture_scope():
+            if original_code is None:
+                yield
+                return
+
+            def selected(frame, arg):
+                if isinstance(arg, review_run.ReviewRun):
+                    fixture.selected = arg
+                    after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
+                    if after_bootstrap is not None:
+                        after_bootstrap(arg)
+
+            with watch_code(
+                original_code, namespace=original_globals, returned=selected
+            ):
+                yield
 
         environment = {
             **fixture_process_environment(),
@@ -389,12 +394,8 @@ class CommandEntryFixture(EntryFixture):
                         review_run, "BrokerClient", side_effect=broker_factory
                     ),
                     patch.object(review_run, "GitHubHttp", side_effect=http_factory),
-                    patch.object(action_run, "bootstrap", side_effect=capture_run),
-                    patch.object(
-                        EvidenceReadBudget,
-                        "__init__",
-                        side_effect=AssertionError("no replacement phase budget"),
-                    ),
+                    capture_scope(),
+                    forbid_replacement_phase_budget(),
                     redirect_stdout(output),
                     redirect_stderr(errors),
                 ):
@@ -466,14 +467,19 @@ class PublishedPartialCommandAdmissionTests(unittest.TestCase):
         # non-dispatch or a reconstruction of any deployed failure's cause.
         with ExitStack() as stack:
             if not closed:
-                stack.enter_context(
-                    patch.object(
+                from original_finish_interrupt import interrupt_original_finish
+
+                interrupted = stack.enter_context(
+                    interrupt_original_finish(
                         ApiRunRequestTransport,
-                        "finish_review_run",
-                        side_effect=ReviewInputError("synthetic close refusal"),
+                        run_id=f.run_id,
+                        attempt=f.attempt,
+                        exception=ReviewInputError("synthetic close refusal"),
                     )
                 )
             self.assertEqual(f.invoke(human=True), 0 if closed else 1, f.error)
+            if not closed:
+                self.assertEqual(interrupted, [True])
         result = json.loads((f.root / "review.json").read_text(encoding="utf-8"))
         self.assertEqual(result["review_status"], "partial")
         record = parse_session_comment(f.comment["body"], identity=IDENTITY)
@@ -1366,6 +1372,7 @@ class CurrentCommandEntryTests(unittest.TestCase):
         from review_sensei_github.publication import parse_finding_index
 
         from review_sensei.bounded_evidence import MAX_MANIFEST_BYTES, canonical_bytes
+        from review_sensei.session import read_session_dispositions
 
         with tempfile.TemporaryDirectory() as directory:
             f = CommandEntryFixture(directory)
@@ -1401,7 +1408,10 @@ class CurrentCommandEntryTests(unittest.TestCase):
                 )
                 self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
                 current = parse_session_comment(f.comment["body"], identity=IDENTITY)
-                self.assertEqual(len(current.dispositions), start + 10)
+                self.assertEqual(
+                    len(read_session_dispositions(f.selected.ledger, current)),
+                    start + 10,
+                )
                 self.assertEqual(
                     current.transaction.transaction_id,
                     original.transaction.transaction_id,
@@ -1429,12 +1439,16 @@ class CurrentCommandEntryTests(unittest.TestCase):
                 self.assertEqual(f.provider_calls, 1)
             self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
             self.assertEqual(len(f.resolved_threads), 20)
-            decisions = copy.deepcopy(current.dispositions)
+            decisions = copy.deepcopy(
+                read_session_dispositions(f.selected.ledger, current)
+            )
             f.SOURCE_ID += 1
             f.select_command("@reviewsensei verify", new_run=True)
             self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
             verified = parse_session_comment(f.comment["body"], identity=IDENTITY)
-            self.assertEqual(verified.dispositions, decisions)
+            self.assertEqual(
+                read_session_dispositions(f.selected.ledger, verified), decisions
+            )
             self.assertEqual(verified.api_run_accounting["action"]["phase"], "terminal")
             self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
             self.assertEqual(f.provider_calls, 1)
@@ -1443,7 +1457,9 @@ class CurrentCommandEntryTests(unittest.TestCase):
             f.action_fault = "business-absent"
             self.assertNotEqual(f.invoke_command(), 0)
             refused = parse_session_comment(f.comment["body"], identity=IDENTITY)
-            self.assertEqual(refused.dispositions, decisions)
+            self.assertEqual(
+                read_session_dispositions(f.selected.ledger, refused), decisions
+            )
             self.assertEqual(refused.api_run_accounting["action"]["phase"], "pending")
             refused_root = f.comment["body"]
             f.SOURCE_ID += 1

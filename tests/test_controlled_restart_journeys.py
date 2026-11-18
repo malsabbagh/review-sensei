@@ -711,8 +711,8 @@ else:
                 self.assertEqual(journey.invoke(), 1)
             self.assertIn("diff cannot use retained history", journey.fixture.error)
             self.assertEqual(journey.fixture.provider_calls, 0)
-            self.assertTrue((journey.fixture.root / "abandoned-history.json").exists())
-            self.assertEqual(len(list(journey.fixture.root.glob("*.claim"))), 1)
+            self.assertFalse((journey.fixture.root / "abandoned-history.json").exists())
+            self.assertFalse(list(journey.fixture.root.glob("*.claim")))
             self.assertFalse((journey.fixture.root / "review.patch").exists())
             self.assertFalse(list(journey.fixture.root.glob("review-sensei-restart-*")))
 

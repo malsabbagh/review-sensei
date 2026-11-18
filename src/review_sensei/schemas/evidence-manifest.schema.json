@@ -85,7 +85,8 @@
             "feedback",
             "evidence",
             "queue",
-            "dispositions"
+            "dispositions",
+            "finding-lifecycle"
           ]
         },
         "schema_version": {

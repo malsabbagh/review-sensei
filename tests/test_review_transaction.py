@@ -3101,6 +3101,153 @@ class PublicationTransactionTests(SessionFixtureClockMixin, unittest.TestCase):
             "publication_succeeded",
         )
 
+    def test_builtin_selector_revalidates_changed_token_transport_and_budget(self):
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.session import SessionLoadResult
+
+        for mutation in ("token", "transport", "budget", "source"):
+            with self.subTest(mutation=mutation):
+                memory = InMemorySessionLedger()
+                result = _checkpoint(memory)
+                complete_review_publication(
+                    memory, IDENTITY, result.transaction, published=True, now=NOW
+                )
+                record = memory.load(IDENTITY).record
+                budget = EvidenceReadBudget()
+                http, _ = make_http([])
+                ledger = GitHubIssueCommentSessionLedger(
+                    http, token="original-session", evidence_budget=budget
+                )
+                broker, reviewer = _Broker(), _Reviewer()
+                application = GitHubApplication(
+                    broker=broker,
+                    http=None,
+                    reviewer=reviewer,
+                    learner=_Noop(),
+                    replier=_Noop(),
+                    session_ledger=ledger,
+                )
+                loads = []
+
+                def load(selected, identity, **kwargs):
+                    # Authority-selection unit seam: only the pre-exchange
+                    # source has the authenticated original transaction. A new
+                    # selection must be read and cannot borrow that snapshot.
+                    loads.append(selected)
+                    return (
+                        SessionLoadResult("ok", record=record)
+                        if len(loads) == 1
+                        else SessionLoadResult("missing")
+                    )
+
+                exchange = broker.exchange
+
+                def changed_exchange(token, *, capability=None):
+                    if mutation == "token":
+                        ledger.token = "changed-session"
+                    elif mutation == "transport":
+                        ledger.http, _ = make_http([])
+                    elif mutation == "budget":
+                        ledger.evidence_budget = EvidenceReadBudget()
+                    else:
+                        application.session_ledger = InMemorySessionLedger()
+                    return exchange(token, capability=capability)
+
+                broker.exchange = changed_exchange
+                with patch.object(
+                    GitHubIssueCommentSessionLedger,
+                    "load",
+                    autospec=True,
+                    side_effect=load,
+                ):
+                    with self.assertRaisesRegex(
+                        GitHubPublicationError,
+                        "budget identity mismatches"
+                        if mutation == "budget"
+                        else "transaction validation failed",
+                    ):
+                        application.publish_review(
+                            options=GitHubWriteOptions(
+                                auto_review=True,
+                                github_writes=True,
+                                github_session_ledger=True,
+                            ),
+                            oidc_token="oidc",
+                            repository=IDENTITY.repository,
+                            repository_id=IDENTITY.repository_id,
+                            pull_request=IDENTITY.pull_request,
+                            head_sha=HEAD_SHA,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            result=result,
+                            diff="diff",
+                            app_slug="review-sensei[bot]",
+                            convergence_policy=POLICY,
+                            configuration_context=CONFIGURATION,
+                            evidence_context=EVIDENCE,
+                            publication_budget=budget,
+                        )
+                self.assertEqual(reviewer.calls, 0)
+                self.assertEqual(broker.capabilities, ["review_publish"])
+                self.assertEqual(
+                    len(loads), 2 if mutation in {"token", "transport"} else 1
+                )
+                if mutation == "token":
+                    self.assertEqual(loads[-1].token, "changed-session")
+                if mutation == "transport":
+                    self.assertIs(loads[-1].http.transport, ledger.http)
+                self.assertEqual(memory.load(IDENTITY).record, record)
+
+    def test_completed_preflight_cannot_replace_missing_token_bound_authority(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=True, now=NOW
+        )
+        original = ledger.load(IDENTITY).record
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+        with patch.object(
+            application, "_session_ledger_for_token", return_value=None
+        ) as select:
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "publication context is incomplete"
+            ):
+                application.publish_review(
+                    options=GitHubWriteOptions(
+                        auto_review=True,
+                        github_writes=True,
+                        github_session_ledger=True,
+                    ),
+                    oidc_token="oidc",
+                    repository=IDENTITY.repository,
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=HEAD_SHA,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=result,
+                    diff="diff",
+                    app_slug="review-sensei[bot]",
+                    convergence_policy=POLICY,
+                    configuration_context=CONFIGURATION,
+                    evidence_context=EVIDENCE,
+                )
+        select.assert_called_once()
+        self.assertEqual(broker.capabilities, ["review_publish"])
+        self.assertEqual(reviewer.calls, 0)
+        self.assertEqual(ledger.load(IDENTITY).record, original)
+
     def test_application_rejects_mismatched_token_bound_ledger(self):
         local_ledger = InMemorySessionLedger()
         remote_ledger = InMemorySessionLedger()

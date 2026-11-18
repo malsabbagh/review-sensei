@@ -140,6 +140,7 @@ def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
                         "id": queried_run,
                         "repository": {"id": 123, "full_name": "owner/repo"},
                         "status": "completed" if is_completed else "in_progress",
+                        "conclusion": "failure" if is_completed else None,
                         "run_attempt": 1,
                     }
                 )
@@ -152,6 +153,7 @@ def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
                             "run_id": queried_run,
                             "run_attempt": 1,
                             "status": "completed" if is_completed else "in_progress",
+                            "conclusion": "failure" if is_completed else None,
                         }
                     ],
                 }
@@ -782,6 +784,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                                 "id": old_run_id,
                                 "repository": {"id": 123, "full_name": "owner/repo"},
                                 "status": "completed",
+                                "conclusion": "failure",
                                 "run_attempt": 1,
                             }
                         )
@@ -796,6 +799,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                                         "run_id": old_run_id,
                                         "run_attempt": 1,
                                         "status": "completed",
+                                        "conclusion": "failure",
                                     }
                                 ],
                             }
@@ -1192,13 +1196,14 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                         "id": 1001,
                         "repository": {"id": 123, "full_name": "owner/repo"},
                         "status": "completed",
+                        "conclusion": "failure",
                         "run_attempt": 1,
                     }
                 )
             return json_response(
                 {
                     "total_count": 2,  # incomplete page (only 1 job returned) -> fail closed!
-                    "jobs": [{"id": 1, "status": "completed"}],
+                    "jobs": [{"id": 1, "status": "completed", "conclusion": "failure"}],
                 }
             )
 
@@ -1642,7 +1647,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         # 1. SiteVault #142 (`phase=no-transaction`, `record.transaction=None`,
         #    `analysis_abort=None`, released reservation, no live settlement receipt):
         sv_142_id = SessionIdentity(
-            repository="org/sitevault",
+            repository="malsabbagh/site-vault",
             pull_request=SITEVAULT_142_PULL_REQUEST,
             repository_id=900142,
         )
@@ -1692,6 +1697,34 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             diagnostics_available=False,
             session_comment_ref={"id": 14201, "bytes": 1024, "sha256": "9" * 64},
         )
+
+        # A lookalike/foreign repository must not inherit this historical incident label.
+        for foreign_repository in ("other/site-vault", "malsabbagh/site-vault-copy"):
+            with self.subTest(foreign_repository=foreign_repository):
+                foreign_packet = build_no_transaction_attempt_packet(
+                    SessionRecord._construct(
+                        **{
+                            **{
+                                key: value
+                                for key, value in vars(sv_142_rec).items()
+                                if key != "record_sha256" and not key.startswith("_")
+                            },
+                            "repository": foreign_repository,
+                        }
+                    ),
+                    owner_ceased=True,
+                    diagnostics_available=False,
+                    session_comment_ref={
+                        "id": 14201,
+                        "bytes": 1024,
+                        "sha256": "9" * 64,
+                    },
+                )
+                self.assertNotEqual(foreign_packet.case_id, SITEVAULT_142_CASE_ID)
+                self.assertTrue(
+                    foreign_packet.case_id.startswith(foreign_repository + "#")
+                )
+                self.assertFalse(foreign_packet.authority)
         self.assertEqual(sv_142_rec.record_sha256, sv_142_orig_sha)
         self.assertFalse(pkt_142_cold.authority)
         self.assertFalse(pkt_142_cold.reenroll_permitted)
@@ -1738,7 +1771,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         # 2. SiteVault #153 (distinct PR & case_id; unconfirmed abort / unknown dispatch
         #    and active reservation shapes without resetting or reenrolling):
         sv_153_id = SessionIdentity(
-            repository="org/sitevault",
+            repository="malsabbagh/site-vault",
             pull_request=SITEVAULT_153_PULL_REQUEST,
             repository_id=900142,
         )
@@ -1908,6 +1941,96 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         for bad_repo_id in (None, 0, -1, True):
             with self.assertRaisesRegex(ReviewInputError, "positive integer"):
                 replace(pkt_142_cold, repository_id=bad_repo_id)  # type: ignore[arg-type]
+
+
+class OwnerCessationEvidenceTests(unittest.TestCase):
+    """Malformed Actions evidence must never release a predecessor hold."""
+
+    def probe(self, run_changes=None, page_changes=None):
+        from types import SimpleNamespace
+
+        from review_sensei_github.pre_entry_abort_recovery import _probe_owner_ceased
+
+        run = {
+            "id": 1001,
+            "repository": {"id": 123, "full_name": "owner/repo"},
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": 1,
+        }
+        page = {
+            "total_count": 1,
+            "jobs": [{"id": 10, "status": "completed", "conclusion": "failure"}],
+        }
+        run.update(run_changes or {})
+        page.update(page_changes or {})
+        requests = []
+
+        def opener(request, timeout=None):
+            path = urlsplit(request.full_url).path
+            requests.append(path)
+            if path.endswith("/actions/runs/1001"):
+                return json_response(run)
+            self.assertTrue(path.endswith("/actions/runs/1001/attempts/1/jobs"))
+            return json_response(page)
+
+        result = _probe_owner_ceased(
+            SimpleNamespace(
+                http=GitHubHttp(api_url="https://api.github.test", opener=opener)
+            ),
+            IDENTITY,
+            _base_accounting(),
+            "synthetic-token",
+        )
+        self.assertLessEqual(len(requests), 2)
+        return result
+
+    def test_terminal_failure_and_cancellation_are_cessation_only(self):
+        for conclusion in ("failure", "cancelled", "success", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                self.assertTrue(self.probe(run_changes={"conclusion": conclusion}))
+
+    def test_missing_or_unknown_terminal_conclusions_refuse(self):
+        for conclusion in (None, "pending", [], {}):
+            with self.subTest(run_conclusion=conclusion):
+                self.assertFalse(self.probe(run_changes={"conclusion": conclusion}))
+            with self.subTest(job_conclusion=conclusion):
+                self.assertFalse(
+                    self.probe(
+                        page_changes={
+                            "jobs": [
+                                {
+                                    "id": 10,
+                                    "status": "completed",
+                                    "conclusion": conclusion,
+                                }
+                            ]
+                        }
+                    )
+                )
+
+    def test_empty_or_unidentified_jobs_refuse(self):
+        self.assertFalse(self.probe(page_changes={"total_count": 0, "jobs": []}))
+        for job_id in (None, True, 0, -1, "10"):
+            with self.subTest(job_id=job_id):
+                self.assertFalse(
+                    self.probe(
+                        page_changes={
+                            "jobs": [
+                                {
+                                    "id": job_id,
+                                    "status": "completed",
+                                    "conclusion": "failure",
+                                }
+                            ]
+                        }
+                    )
+                )
+
+    def test_unconfirmed_job_count_refuses(self):
+        for total in (None, True, 0, 2, "1"):
+            with self.subTest(total=total):
+                self.assertFalse(self.probe(page_changes={"total_count": total}))
 
 
 if __name__ == "__main__":

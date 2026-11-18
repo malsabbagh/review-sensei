@@ -61,16 +61,17 @@ const keyPair = crypto.subtle.generateKey(
   true, ["sign", "verify"],
 );
 
-export async function consumingBroker(_filename = ":memory:", traceFile?: string) {
+export async function consumingBroker(_filename = ":memory:", traceFile?: string, publicApi = false) {
   const keys = await keyPair;
   const pem = Buffer.from(await crypto.subtle.exportKey("pkcs8", keys.privateKey)).toString("base64");
   const jwk = { ...await crypto.subtle.exportKey("jwk", keys.publicKey), kid: "synthetic-fixture", alg: "RS256", use: "sig" };
   const ledgerRequests: string[] = [];
+  const apiUrl = publicApi ? "https://api.github.com" : "https://api.github.test";
   const env = {
     PUBLIC_WORKFLOW_TAG: "v5",
     GITHUB_APP_ID: "12345",
     GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${pem}\n-----END PRIVATE KEY-----`,
-    GITHUB_API_URL: "https://api.github.test",
+    GITHUB_API_URL: apiUrl,
     REVIEWSENSEI_SIGNING_KEY: "test-signing-key",
   } as unknown as WorkerEnv;
   void traceFile;
@@ -85,13 +86,13 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
       id: 13579, body: "@sensei review continue", login: "octocat",
       authorId: 12345678, updatedAt: "2026-10-09T00:00:00Z",
       userType: "User", association: "OWNER",
-      url: "https://api.github.test/repos/acme/widgets/issues/7", status: 200,
+      url: `${apiUrl}/repos/acme/widgets/issues/7`, status: 200,
     },
     inlineSource: {
       id: 24680, body: "The linked caller rejects remote input.", login: "collaborator",
       authorId: 42, updatedAt: "2026-10-10T00:00:01Z",
       userType: "User", association: "COLLABORATOR", rootCommentId: 24680,
-      url: "https://api.github.test/repos/acme/widgets/pulls/7", status: 200,
+      url: `${apiUrl}/repos/acme/widgets/pulls/7`, status: 200,
     },
   };
   const configureFeedback = () => {
@@ -117,7 +118,7 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
     let body: unknown;
     let status = 200;
     if (url.href === "https://token.actions.githubusercontent.com/.well-known/jwks") body = { keys: [jwk] };
-    else if (url.hostname !== "api.github.test") throw new Error("unexpected fixture transport host");
+    else if (url.hostname !== new URL(apiUrl).hostname) throw new Error("unexpected fixture transport host");
     else if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5") body = { object: { type: "commit", sha: SHA } };
     else if (url.pathname === `/repos/${githubInputs.repository}/installation`) body = { id: 2468 };
     else if (url.pathname === "/app/installations/2468/access_tokens" && method === "POST") {

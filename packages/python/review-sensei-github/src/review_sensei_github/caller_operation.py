@@ -74,14 +74,17 @@ def http_read_operation(
 
 def prewrite_fence_requests(caller: Any) -> int:
     """Price an issued restart guard within the original caller allowance."""
+    from .trust_effects import verification_calls
+
+    trust = verification_calls(caller)
     proof = getattr(caller, "_controlled_restart_admission", None)
     if proof is None:
-        return 0
+        return trust
     from .controlled_restart import RestartAdmission
 
     if type(proof) is not RestartAdmission:
         raise ReviewInputError("caller restart fence proof is invalid")
-    return proof.prewrite_fence_requests(caller)
+    return proof.prewrite_fence_requests(caller) + trust
 
 
 def http_write_operation(http: Any, key: str) -> Any:
@@ -89,3 +92,8 @@ def http_write_operation(http: Any, key: str) -> Any:
     if caller is None or caller._state is None:
         return nullcontext()
     return caller.mutation_operation(key)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

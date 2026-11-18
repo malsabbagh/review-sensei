@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import tempfile
@@ -30,7 +31,6 @@ from review_sensei_github.conversation import (
     ReplyResult,
 )
 from review_sensei_github.errors import GitHubConversationError
-from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.session_ledger import parse_session_comment
 
 CHANGED_BASE = "c" * 40
@@ -147,24 +147,13 @@ def human_fixture(directory):
     fixture.prepare_reply()
     fixture.initialize_freshness()
     fixture.include_learning = False
-    fixture.thread_rows = [
-        {
-            "id": "native-thread-" + str(comment["id"]),
-            "isResolved": True,
-            "comments": {
-                "nodes": [
-                    {
-                        "databaseId": comment["id"],
-                        "body": comment["body"],
-                        "path": comment["path"],
-                        "line": comment["line"],
-                        "author": {"login": "reviewsensei", "__typename": "Bot"},
-                    }
-                ]
-            },
-        }
-        for comment in fixture.inline
-    ]
+    # Preserve the producer's exact opaque targets, criterion bodies and owner.
+    # This fixture observes externally resolved threads, not invented bindings.
+    fixture.thread_rows = copy.deepcopy(fixture.threads)
+    for node in fixture.thread_rows:
+        node["isResolved"] = True
+        for comment in node["comments"]["nodes"]:
+            comment["author"].pop("databaseId", None)  # Actual GraphQL query shape.
     fixture.source["body"] = (
         "@reviewsensei The caller contract is intentional; the added change is checked."
     )
@@ -185,15 +174,49 @@ def human_fixture(directory):
 
 
 def invoke_human_with_late_change(fixture, change):
-    """Inject after capability acquisition; preserve the real human write fences."""
-    original = HumanAssessmentPublisher.publish
+    """Change native state at the final capability response, before publish.
 
-    def publish(publisher, **arguments):
-        mutate_after_context(fixture, change)
-        return original(publisher, **arguments)
+    No authorization/source read or business write occurs between this response
+    and entering the real publisher. Do not replace its source-owned method.
+    """
+    external = fixture.external
+    injected = []
+    fenced = []
+    before = (fixture.reply_posts, len(fixture.reviews))
+    source_path = f"/repos/owner/repo/issues/comments/{fixture.source['id']}"
 
-    with patch.object(HumanAssessmentPublisher, "publish", publish):
-        return fixture.invoke_reply()
+    def service_response(request, timeout):
+        target = urlsplit(request.full_url)
+        body = json.loads(request.data) if request.data else {}
+        if injected and request.get_method() == "GET" and target.path == source_path:
+            if not fenced:
+                # The changed source is seen by the real publication fence,
+                # before either the visible reply or assessment authority POST.
+                assert (fixture.reply_posts, len(fixture.reviews)) == before
+                fenced.append(len(fixture.trace))
+        response = external(request, timeout)
+        if (
+            target.hostname == "broker.github.test"
+            and body.get("capability") == "check_publish"
+        ):
+            assert not injected
+            assert (fixture.reply_posts, len(fixture.reviews)) == before
+            assert fixture.provider_requests  # Inference/context already completed.
+            mutate_after_context(fixture, change)
+            injected.append(len(fixture.trace))
+        return response
+
+    fixture.external = service_response
+    try:
+        result = fixture.invoke_reply()
+    finally:
+        fixture.external = external
+    assert len(injected) == 1
+    # Head/base failures may stop at their earlier fresh PR fence; source and
+    # positive cases must reach the subsequent source fence before publication.
+    if change in {"unchanged", "base-ref", "source-edit"}:
+        assert fenced and fenced[0] >= injected[0]
+    return result
 
 
 class HostedReplyFreshnessCharacterizationTests(unittest.TestCase):

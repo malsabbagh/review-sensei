@@ -13,6 +13,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -864,6 +865,29 @@ def _require_private_store_platform() -> None:
         )
 
 
+def _read_private_file(path: Path, *, maximum: int, label: str) -> bytes:
+    """Validate the opened POSIX object, not a stale pathname observation.
+
+    Nonblocking open prevents a replaced FIFO/device from hanging recovery;
+    only a private, owned regular file may be read. O_NOFOLLOW closes the final
+    component symlink race without changing permissions or repairing evidence.
+    """
+    _require_private_store_platform()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_mode & 0o077
+        ):
+            raise ReviewInputError(f"recovery context {label} must be private")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read(maximum + 1)
+    finally:
+        os.close(descriptor)
+
+
 class RecoveryContextStore:
     """Private, HMAC-authenticated handoff store for original recovery bundles."""
 
@@ -1009,13 +1033,18 @@ class RecoveryContextStore:
                 "tampered_authentication_or_digest", ("symlink_handoff_rejected",)
             )
         try:
-            with path.open("rb") as stream:
-                raw = stream.read(MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
+            raw = _read_private_file(
+                path, maximum=MAX_RECOVERY_CONTEXT_BUNDLE_BYTES, label="handoff file"
+            )
             if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
                 return _refusal_decision(
                     "truncated_or_corrupt_context", ("invalid_envelope_size",)
                 )
             envelope = json.loads(raw.decode("utf-8", errors="strict"))
+        except ReviewInputError:
+            return _refusal_decision(
+                "tampered_authentication_or_digest", ("non_private_handoff_rejected",)
+            )
         except (OSError, UnicodeDecodeError, ValueError, RecursionError):
             return _refusal_decision(
                 "truncated_or_corrupt_context", ("truncated_or_invalid_json",)
@@ -1171,12 +1200,21 @@ class RecoveryContextStore:
                     raise ReviewInputError(
                         "recovery context directory entry is invalid"
                     )
-                with entry.open("rb") as stream:
-                    raw = stream.read(MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
+                raw = _read_private_file(
+                    entry,
+                    maximum=MAX_RECOVERY_CONTEXT_BUNDLE_BYTES,
+                    label="handoff file",
+                )
                 if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
                     continue
                 envelope = json.loads(raw.decode("utf-8", errors="strict"))
-            except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            except (
+                OSError,
+                ReviewInputError,
+                UnicodeDecodeError,
+                ValueError,
+                RecursionError,
+            ):
                 continue
             if (
                 not isinstance(envelope, Mapping)
@@ -1251,8 +1289,7 @@ def resolve_recovery_context_store(
             )
         ):
             raise ReviewInputError("recovery context key file must be private")
-        with key_path.open("rb") as stream:
-            key = stream.read(4097)
+        key = _read_private_file(key_path, maximum=4096, label="key file")
         if not 32 <= len(key) <= 4096:
             raise ValueError("key size")
     except ReviewInputError:

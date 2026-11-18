@@ -130,6 +130,17 @@ class _G34CommandFixture(CommandEntryFixture):
         )
 
     def external(self, request, timeout):  # type: ignore[no-untyped-def]
+        native_path = urlsplit(request.full_url).path
+        if self.command_active and (
+            native_path == "/graphql"
+            or request.method == "GET"
+            and "/check-runs/" in native_path
+        ):
+            # The ordinary producer owns these opaque native IDs. Reuse its
+            # persisted thread response/mutations, never derive IDs from comments.
+            from test_review_run import EntryFixture
+
+            return EntryFixture.external(self, request, timeout)
         response = super().external(request, timeout)
         path = urlsplit(request.full_url).path
         if (

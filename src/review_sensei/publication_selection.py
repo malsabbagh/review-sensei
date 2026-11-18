@@ -565,3 +565,8 @@ def validate_publication_selection_source(
     )
     if expected.publication_selection != handoff:
         raise ReviewInputError("publication selection source or criteria changed")
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -3,13 +3,15 @@
 import copy
 import tempfile
 import unittest
-from unittest.mock import PropertyMock, patch
+from contextlib import contextmanager
+from unittest.mock import patch
 
+from hot_original_entry import invoke_original
+from original_source_observation import watch_code
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.approval import ReviewApprovalEligibility
 from review_sensei_github.native_union import native_union_frame_document
 from review_sensei_github.publication import parse_finding_index
-from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
 from test_quarantine_evidence import git
 from test_quarantine_published_tail_journey import (
     BROKER_QUALIFICATIONS,
@@ -39,6 +41,7 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             f = BoundedLifecycleFixture(directory)
+            f.api_url = "https://api.github.com"
             old, registration = f.original_origins()
             old_accounting = copy.deepcopy(old.api_run_accounting)
             # Existing audited frozen profile; production defaults stay intact.
@@ -66,6 +69,7 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
                     "line": 3,
                     "side": "RIGHT",
                     "body": f"Independent current human decision {i} needs assessment.",
+                    "evidence_id": f"bounded-current-assessment-{i}",
                     "severity": "high",
                     "blocking": False,
                     "needs_human": True,
@@ -75,33 +79,37 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
             original_batch = ApiRunSessionLedger.stage_disposition_snapshot_batch
             batches = []
 
-            def stage(ledger, identity, **kwargs):
+            @contextmanager
+            def observe_batches():
+                frames = {}
+                code = original_batch.__code__
+
                 def count():
                     return sum(
                         "evidence-part:v1" in row["body"]
                         for row in f.extra_comments.values()
                     )
 
-                before = count()
-                manifest = original_batch(ledger, identity, **kwargs)
-                added = count() - before
-                batches.append((len(kwargs["values"]), added))
-                self.assertLessEqual(added, 1)
-                return manifest
+                def entered(frame):
+                    frames[id(frame)] = count()
+
+                def returned(frame, _value):
+                    before = frames.pop(id(frame))
+                    added = count() - before
+                    batches.append((len(frame.f_locals["kwargs"]["values"]), added))
+                    self.assertLessEqual(added, 1)
+
+                with watch_code(code, entered=entered, returned=returned):
+                    yield
 
             with (
                 registered_resource([registration]),
-                patch.object(
-                    GitHubIssueCommentSessionLedger,
-                    "supports_paged_disposition_snapshot_writes",
-                    new_callable=PropertyMock,
-                    return_value=True,
-                ),
-                patch.object(
-                    ApiRunSessionLedger, "stage_disposition_snapshot_batch", stage
-                ),
+                observe_batches(),
             ):
-                self.assertEqual(f.invoke(), 0, f.error)
+                # Populated grouped publication authenticates the original
+                # engine and admission owner; replace only synthetic HTTP.
+                result, _ = invoke_original(f)
+                self.assertEqual(result, 0, f.error)
                 provider_calls = f.provider_calls
                 index = parse_finding_index(
                     f.reviews[-1]["body"],

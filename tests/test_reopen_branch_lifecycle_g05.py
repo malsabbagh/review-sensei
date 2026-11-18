@@ -135,6 +135,34 @@ class LifecycleEntryFixture(EntryFixture):
             return code, None
         return code, json.loads(out_file.read_text(encoding="utf-8"))
 
+    def retained_finding_obligations(self):
+        """Inspect the actual source-produced inline carrier, without new HTTP.
+
+        This is a test observation of the authenticated writer output, not an
+        alternate runtime authority loader or another caller budget.
+        """
+        from review_sensei_github.finding_lifecycle import _unpack_journal
+
+        from review_sensei.bounded_evidence import read_inline_evidence
+        from review_sensei.finding_lifecycle import decode_lifecycle_state
+
+        record = parse_session_comment(self.comment["body"], identity=IDENTITY)
+        manifest = record.finding_lifecycle["manifest"]
+        envelope = read_inline_evidence(manifest, expected_binding=manifest["binding"])
+        journal = _unpack_journal(envelope["lifecycle"])
+        return decode_lifecycle_state(journal["lifecycle"]).state.inventory.obligations
+
+    def assert_preserved_omitted_obligations(self, testcase, previous):
+        current = {
+            item.obligation_id: item for item in self.retained_finding_obligations()
+        }
+        testcase.assertTrue(previous)
+        for prior in previous:
+            retained = current[prior.obligation_id]
+            testcase.assertEqual(retained.criterion, prior.criterion)
+            testcase.assertEqual(retained.lifecycle_state, "omitted-uncertain")
+            testcase.assertTrue(retained.unresolved)
+
     def external(self, request, timeout):
         path = urlsplit(request.full_url).path
         method = request.get_method()
@@ -482,7 +510,7 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
 
             # Case B: Delete and recreate branch `feature` at a DIFFERENT commit SHA H2.
             # Because PR #7 had an unresolved baseline obligation from H1, omission on H2
-            # is NOT treated as a silent wipe: H2 publishes COMMENT, preserves obligations,
+            # is NOT treated as a silent wipe: H2 requests changes for retained uncertainty,
             # withholds spurious APPROVE, and closes caller accounting terminally.
             recreated_changed = PullRequestLifecycleSnapshot.from_pull_request_payload(
                 _sample_pr_payload(
@@ -505,6 +533,7 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
                 "rebind_obligations_and_verify_new_snapshot",
             )
 
+            original_obligations = fixture.retained_finding_obligations()
             fixture.advance_run_to_head(HEAD_SHA_2)
             code_changed, out_changed = fixture.run_and_read(human=False)
             self.assertEqual(code_changed, 0)
@@ -512,7 +541,8 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
             self.assertEqual(out_changed["status"], "published")
             self.assertTrue(out_changed["accounting_terminal"])
             self.assertEqual(fixture.provider_calls, 2)
-            self.assertEqual(fixture.review_posts[-1]["event"], "COMMENT")
+            self.assertEqual(fixture.review_posts[-1]["event"], "REQUEST_CHANGES")
+            fixture.assert_preserved_omitted_obligations(self, original_obligations)
             self.assertEqual(fixture.review_posts[-1]["commit_id"], HEAD_SHA_2)
             record_h2 = parse_session_comment(
                 fixture.comment["body"], identity=IDENTITY
@@ -1375,6 +1405,7 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
 
             # Current H2 run converges cleanly while preserving H1's unresolved obligation
             # and withholding spurious APPROVE.
+            original_obligations = fixture.retained_finding_obligations()
             fixture.advance_run_to_head(h2)
             code_h2, out_h2 = fixture.run_and_read(human=False)
             self.assertEqual(code_h2, 0, fixture.error)
@@ -1383,9 +1414,11 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
             self.assertTrue(out_h2["accounting_terminal"])
             self.assertEqual(fixture.provider_calls, 2)
             self.assertEqual(
-                [r["event"] for r in fixture.review_posts], ["COMMENT", "COMMENT"]
+                [r["event"] for r in fixture.review_posts],
+                ["COMMENT", "REQUEST_CHANGES"],
             )
             self.assertEqual(fixture.review_posts[-1]["commit_id"], h2)
+            fixture.assert_preserved_omitted_obligations(self, original_obligations)
             record_h2 = parse_session_comment(
                 fixture.comment["body"], identity=IDENTITY
             )

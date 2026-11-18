@@ -281,3 +281,8 @@ def is_full_analysis_transaction(record, current_key):
     return transaction.reservation_id == full_analysis_reservation(
         lineage["scope_sha256"], ordinary
     )
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

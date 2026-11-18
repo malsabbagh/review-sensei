@@ -24,6 +24,7 @@ _CAPTURES: dict[int, tuple[Any, Any]] = {}
 _CONTEXTS: dict[int, tuple[Any, Any]] = {}
 _PUBLICATIONS: dict[int, tuple[Any, Any]] = {}
 _CLEANUPS: dict[int, tuple[Any, Any]] = {}
+_PROJECTIONS: dict[int, tuple[Any, Any]] = {}
 
 
 def _remember(table: dict[int, tuple[Any, Any]], value: Any, proof: Any) -> None:
@@ -386,6 +387,70 @@ def _same_business(before: Any, after: Any) -> bool:
     return left == right
 
 
+def _confirm_publication_projection(
+    source_result: Any,
+    projected_result: Any,
+    *,
+    repository: str,
+    pull_request: int,
+    head_sha: str,
+) -> None:
+    """Bind the trusted publisher's display projection to its exact input object.
+
+    This is process-local evidence only. It does not authenticate caller-supplied
+    serialized results, confer approval, or replace physical rejection receipts.
+    The caller is the real publisher immediately after its validated projection.
+    """
+    from review_sensei.models import ReviewResult
+
+    from .publication import review_result_digest
+
+    if (
+        type(source_result) is not ReviewResult
+        or type(projected_result) is not ReviewResult
+    ):
+        return
+    transaction = source_result.transaction
+    if (
+        transaction is None
+        or projected_result.transaction not in (None, transaction)
+        or transaction.repository != repository
+        or transaction.pull_request != pull_request
+        or transaction.head_sha != head_sha
+    ):
+        return
+    _remember(
+        _PROJECTIONS,
+        source_result,
+        (
+            source_result.content_digest(),
+            FinalizationSubject(
+                repository,
+                pull_request,
+                head_sha,
+                review_result_digest(projected_result),
+            ),
+        ),
+    )
+
+
+def _publication_subject(source_result, repository, pull_request, head_sha):
+    from .publication import review_result_digest
+
+    projection = _lookup(_PROJECTIONS, source_result)
+    if projection is not None:
+        digest, subject = projection
+        if digest == source_result.content_digest() and (
+            subject.repository,
+            subject.pull_request,
+            subject.head_sha,
+        ) == (repository, pull_request, head_sha):
+            return subject
+    return FinalizationSubject(
+        repository, pull_request, head_sha, review_result_digest(source_result)
+    )
+
+
 def confirm_denied_publication(
     publication,
     *,
@@ -402,7 +467,6 @@ def confirm_denied_publication(
     from review_sensei.models import ReviewResult
 
     from .caller_operation import caller_for_http
-    from .publication import review_result_digest
 
     if type(source_result) is not ReviewResult:
         return
@@ -428,9 +492,7 @@ def confirm_denied_publication(
         or review_id <= 0
         or publication.review_id != review_id
         or approval.finalization_completion.subject
-        != FinalizationSubject(
-            repository, pull_request, head_sha, review_result_digest(source_result)
-        )
+        != _publication_subject(source_result, repository, pull_request, head_sha)
         or capture.target
         not in {(repository, pull_request, head_sha), (repository, None, head_sha)}
         or capture.transaction

@@ -212,11 +212,15 @@ class GitHubHttp:
         api_url: str = "https://api.github.com",
         opener: Opener = urlopen,
         timeout: int = 30,
+        evidence_monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(api_url, str) or not api_url.strip():
             raise GitHubHTTPError("GitHub API URL must be non-empty")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise GitHubHTTPError("GitHub HTTP timeout must be positive")
+        if not callable(evidence_monotonic):
+            raise GitHubHTTPError("GitHub evidence clock must be callable")
+        self.evidence_monotonic = evidence_monotonic
         self.api_url = api_url.rstrip("/")
         self.opener = opener
         self.timeout = timeout
@@ -453,6 +457,20 @@ class GitHubHttp:
                 before_read=before_read,
                 expected_items=expected_items,
             )
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_scan_capacity
+
+        require_module_seal(quarantine_scan_capacity)
+        review_walk = quarantine_scan_capacity.capacity_review_walk(self, path)
+        if review_walk is not None:
+            # No adaptive probes/retries: the installed lifetime frontier pays
+            # for this exact safe width, including the final empty/short page.
+            page_sizes = (review_walk.width,)
+            max_requests = min(
+                max_requests if max_requests is not None else MAX_PAGINATION_PAGES,
+                review_walk.requests,
+            )
         requests = 0
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"
@@ -535,6 +553,30 @@ class GitHubHttp:
                 raise GitHubHTTPPaginationLimitError(
                     "GitHub pagination exceeded its expected inventory"
                 )
+            if review_walk is not None:
+                if (
+                    len(
+                        json.dumps(
+                            body, ensure_ascii=True, separators=(",", ":")
+                        ).encode()
+                    )
+                    > MAX_GITHUB_RESPONSE_BYTES
+                ):
+                    raise GitHubHTTPResponseTooLargeError(
+                        "quarantine review page exceeds response bound"
+                    )
+                from review_sensei.source_registry import (
+                    require_instance_source,
+                    require_module_seal,
+                )
+
+                from . import historical_review_census, quarantine_scan_capacity
+
+                # Response code must not replace the selected completion seam.
+                require_module_seal(quarantine_scan_capacity)
+                require_module_seal(historical_review_census)
+                require_instance_source(review_walk, methods=("validate",))
+                review_walk.validate([*collected, *body])
             collected.extend(body)
             if len(body) < page_size:
                 if expected_items is not None and len(collected) != expected_items:
@@ -558,7 +600,7 @@ class GitHubHttp:
         include_all_changed: bool = False,
         timeout_seconds: float = 60,
         max_requests: int = 64,
-        monotonic: Callable[[], float] = time.monotonic,
+        monotonic: Callable[[], float] | None = None,
         before_read: Callable[[], float] | None = None,
     ) -> EvidenceBundle:
         """Read one exhaustive file inventory between exact snapshot/count fences.
@@ -596,6 +638,8 @@ class GitHubHttp:
             or not 0 < timeout_seconds <= 60
         ):
             raise GitHubHTTPError("GitHub evidence acquisition budget is invalid")
+        if monotonic is None:
+            monotonic = self.evidence_monotonic
         deadline = monotonic() + timeout_seconds
         reads = 0
 
@@ -711,3 +755,8 @@ class GitHubHttp:
             ) from exc
         remaining()
         return bundle
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

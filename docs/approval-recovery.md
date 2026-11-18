@@ -367,6 +367,11 @@ native receipts are recorded:
   with `terminal_settlement_form="unsettled"`, `inferred_cause="unknown"`, and
   explicit missing proofs rather than inventing a diagnosis from absent logs.
 - **Pre-entry abort vs provider-entered holds (`pre_entry_abort_recovery`, G29):**
+  Generated and supplied review diffs are validated before durable caller
+  enrollment using the configured review mode. Unified/orchestrated input uses
+  the existing 8 MiB aggregate input ceiling; ordinary input retains the 1 MiB
+  ceiling. This changes neither per-request limits nor provider/caller funding.
+  Rejecting new input before enrollment does not settle an older retained ledger.
   `NoTransactionAttemptPacket` binds original entry, reservation, caller
   dispatch, owner cessation, executor provenance, and abort/cleanup evidence for
   `SiteVault #142` and `SiteVault #153` shapes without resetting or reenrolling
@@ -374,7 +379,10 @@ native receipts are recorded:
   (`pre_entry_abort_rollover`) only when an authenticated `analysis_abort`
   receipt, ceased owner, confirmed reservation release, clean caller dispatch
   (`uncertain == 0`), zero provider entry, and absence of late native effects
-  are proven. Any run that entered provider execution, held a live reservation,
+  are proven. Owner cessation requires a recognized terminal run conclusion and
+  a complete, nonempty attempt-job listing with distinct positive job IDs and
+  recognized terminal conclusions; absent or malformed evidence preserves the
+  hold. Any run that entered provider execution, held a live reservation,
   left an uncertain request, or lacks an abort receipt stays held under
   `no_transaction_provider_entered`, `no_transaction_active_reservation`,
   `no_transaction_unknown_dispatch`, or `no_transaction_unconfirmed_predecessor`,

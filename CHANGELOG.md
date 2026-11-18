@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Add a purpose-bound durable finding lifecycle, cold reply/command consumers,
+  exact native receipt reconciliation and complete-tail capacity guards. Retain
+  hidden obligations, uncertainty and original funding across restarts.
+- Compress complete pending checkpoints against authenticated immutable base
+  snapshots without dropping history or increasing storage and response limits.
+- Carry bounded accepted-action semantic history through authenticated terminal
+  accounting, and preserve original recovery-context file privacy on cold reads.
+- Refuse incomplete enrolled trust observations rather than inventing actor IDs
+  or copying missing live facts from enrollment. Keep historical incident packet
+  labels bound to their exact repository identities.
+- Add an opt-in signed broker current-observation contract using existing reads.
+  Legacy requests stay the default; durable trust enrollment and permission
+  history continuity remain separately required.
+- These are source changes, not deployment, historical settlement or completion
+  of every lifecycle gap. Missing original evidence and decision-gated authority
+  contracts remain explicit holds.
+
 ## 0.8.21 - 2026-11-12
 
 Changes since [v0.8.20](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.20), from [a4c605c51162dd37dc1b938e6e77fb535ff6a566](https://github.com/malsabbagh/review-sensei/commit/a4c605c51162dd37dc1b938e6e77fb535ff6a566) through [98ec9789e5f060a4dc0b73144780ba6a89a0082b](https://github.com/malsabbagh/review-sensei/commit/98ec9789e5f060a4dc0b73144780ba6a89a0082b).

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -157,7 +158,11 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
         (script,) = _run_blocks(_step_block(_job_section(workflow, lane), name))
         bin_dir = Path(env["RUNNER_TEMP"]) / "review-sensei-venv/bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        (bin_dir / "python").symlink_to(sys.executable)
+        # A relocated interpreter symlink loses its original virtualenv prefix.
+        # Execute the exact test interpreter instead, retaining its dependencies.
+        python = bin_dir / "python"
+        python.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n')
+        python.chmod(0o755)
         binary = bin_dir / "review-sensei-github"
         binary.write_text(
             "#!" + sys.executable + "\nimport os,sys,json\n"
@@ -236,11 +241,24 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
                 original = cli.main
                 prepared = []
                 evidence = {}
+                startup_claim = {}
                 observed_live_diff = []
 
                 def diff(**kwargs):
                     path = kwargs["output"]
                     prepared.append(path)
+                    self.assertFalse((retained / "abandoned-history.json").exists())
+                    startup_claim.update(
+                        {p.name: p.read_bytes() for p in retained.glob("*.claim")}
+                    )
+                    self.assertEqual(len(startup_claim), 1)
+                    path.write_text(
+                        HostedAnalysisCliTests.ANALYSIS_DIFF,
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+
+                def publication_boundary():
                     evidence.update(
                         {
                             p.name: p.read_bytes()
@@ -249,13 +267,6 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
                             or p.suffix == ".claim"
                         }
                     )
-                    path.write_text(
-                        HostedAnalysisCliTests.ANALYSIS_DIFF,
-                        encoding="utf-8",
-                        newline="\n",
-                    )
-
-                def publication_boundary():
                     observed_live_diff.append(prepared[0].read_text())
                     if outcome == "error":
                         raise ReviewInputError("synthetic post-diff failure")
@@ -283,6 +294,7 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
                 self.assertFalse(prepared[0].exists())
                 self.assertFalse(prepared[0].parent.exists())
                 self.assertEqual(len(evidence), 2)
+                self.assertEqual({k: evidence[k] for k in startup_claim}, startup_claim)
                 self.assertEqual(
                     {p.name: p.read_bytes() for p in retained.iterdir()},
                     evidence,

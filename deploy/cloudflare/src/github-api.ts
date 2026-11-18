@@ -1,3 +1,4 @@
+import { observationPermissions } from "./current-observation";
 import { PullRequestLookupError, type PullRequestLookupOutcome } from "./pull-request-lookup-diagnostic";
 import { WorkflowLookupError, lookupFailure, lookupHeaders, type LookupDiagnostic } from "./broker-lookup-diagnostic";
 import { BrokerLifetime, type BrokerUpstream } from "./broker-lifetime";
@@ -531,10 +532,30 @@ export class GitHubApi {
     return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
   }
 
+  /** One authenticated lookup. Association and caller-supplied role are not permission. */
+  async actorRepositoryPermission(repository: string, token: string, id: number, login: string): Promise<{ repository_permission: string; repository_role: string }> {
+    if (!Number.isSafeInteger(id) || id <= 0 || !/^[A-Za-z0-9-]{1,39}$/.test(login)) throw new Error("github_actor_permission_invalid");
+    const response = await this.request("GET", `${repositoryPath(repository)}/collaborators/${encodeURIComponent(login)}/permission`, token);
+    const data = response.data;
+    if (response.status !== 200 || !isObject(data) || !isObject(data.user) || data.user.id !== id ||
+        typeof data.user.login !== "string" || data.user.login.toLowerCase() !== login.toLowerCase() || data.user.type !== "User" ||
+        !["none", "read", "write", "admin"].includes(data.permission as string) ||
+        typeof data.role_name !== "string" || !/^[A-Za-z0-9_. -]{1,100}$/.test(data.role_name)) throw new Error("github_actor_permission_invalid");
+    return { repository_permission: data.permission as string, repository_role: data.role_name };
+  }
+
+  async installationObservationFor(repository: string): Promise<{ id: number; repository_selection: "all" | "selected"; permissions: Record<string, string> } | null> {
+    const response = await this.request("GET", `${repositoryPath(repository)}/installation`, await this.appJwt());
+    if (response.status === 404 || response.status === 403) return null;
+    if (response.status !== 200 || !isObject(response.data) || !Number.isSafeInteger(response.data.id) || (response.data.id as number) <= 0 || !["all", "selected"].includes(response.data.repository_selection as string)) throw new Error("github_installation_observation_invalid");
+    return { id: response.data.id as number, repository_selection: response.data.repository_selection as "all" | "selected", permissions: observationPermissions(response.data.permissions) };
+  }
+
   async repositoryInfo(
     repository: string,
     token: string,
-  ): Promise<{ id: number; fork: boolean } | null> {
+    observed = false,
+  ): Promise<{ id: number; fork: boolean; full_name?: string; owner_id?: number; owner_login?: string } | null> {
     const response = await this.request("GET", repositoryPath(repository), token);
     if (response.status === 404 || response.status === 403) {
       return null;
@@ -546,6 +567,12 @@ export class GitHubApi {
     const fork = response.data.fork;
     if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 || typeof fork !== "boolean") {
       throw new Error("github_repository_response_invalid");
+    }
+    if (observed) {
+      const owner = response.data.owner;
+      const fullName = response.data.full_name;
+      if (!isObject(owner) || !Number.isSafeInteger(owner.id) || (owner.id as number) <= 0 || typeof owner.login !== "string" || !/^[A-Za-z0-9-]{1,100}$/.test(owner.login) || typeof fullName !== "string" || fullName.toLowerCase() !== repository.toLowerCase() || fullName.split("/")[0].toLowerCase() !== owner.login.toLowerCase()) throw new Error("github_repository_observation_invalid");
+      return { id, fork, full_name: fullName, owner_id: owner.id as number, owner_login: owner.login };
     }
     return { id, fork };
   }
@@ -855,12 +882,16 @@ export class GitHubApi {
   }
 
   /** Issue one short-lived GitHub App installation token for the exact scope. */
-  async capabilityToken(
+  async capabilityToken(installationId: number, repository: string, permissions: Record<string, "read" | "write">, acceptReturnedContentsRead = false): Promise<string> {
+    return (await this.capabilityTokenObservation(installationId, repository, permissions, acceptReturnedContentsRead)).token;
+  }
+
+  async capabilityTokenObservation(
     installationId: number,
     repository: string,
     permissions: Record<string, "read" | "write">,
     acceptReturnedContentsRead = false,
-  ): Promise<string> {
+  ): Promise<{ token: string; permissions: Record<string, string> }> {
     if (!Number.isSafeInteger(installationId) || installationId <= 0) {
       throw new Error("github_installation_invalid");
     }
@@ -896,7 +927,7 @@ export class GitHubApi {
     if (!hasExactPermissions(granted, permissions, acceptReturnedContentsRead)) {
       throw new Error("github_capability_permissions_invalid");
     }
-    return token;
+    return { token, permissions: observationPermissions(normalizePermissionMap(granted)) };
   }
 
   async installationToken(

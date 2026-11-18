@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
+import sys
 import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 from urllib.request import Request
 
 from review_sensei_github.action_completion import (
@@ -56,7 +59,7 @@ from review_sensei.models import ConversationReply
 ENV = {"GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "1"}
 
 
-def add_current_index(state):
+def add_current_index(state, *, blocking=True):
     eligibility = state.eligibility
     entries = tuple(
         IndexedFinding(
@@ -68,7 +71,8 @@ def add_current_index(state):
         )
         for item in eligibility.human_review.findings
     )
-    entries += (IndexedFinding("d" * 64, "d" * 64, True, False, body_placed=True),)
+    if blocking:
+        entries += (IndexedFinding("d" * 64, "d" * 64, True, False, body_placed=True),)
     state.reviews[0]["body"] += "\n" + finding_index_marker(
         repository_id=1,
         pull_request=1,
@@ -293,19 +297,34 @@ class SourceCompletionTests(unittest.TestCase):
         )
 
     def test_actual_masked_finalizer_exception_keeps_default_unconfirmed(self):
-        state = State(prior(blocking=True))
-        add_current_index(state)
-        with (
-            patch.dict("os.environ", ENV, clear=True),
-            patch.object(
-                ReviewApprovalFinalizer,
-                "finalize",
-                side_effect=GitHubPublicationTransientError("unknown approval write"),
-            ),
-        ):
-            result, _ = state.application_reply(
-                Provider(response_for(state.eligibility))
-            )
+        state = State(prior())
+        add_current_index(state, blocking=False)
+        original = inspect.unwrap(ReviewApprovalFinalizer.finalize)
+        code, globals_ = original.__code__, original.__globals__
+        faults = []
+
+        def interrupt(current, method, path, body):
+            if method != "GET" or path != "/repos/owner/repo/pulls/1":
+                return
+            frame = sys._getframe(1)
+            while frame is not None:
+                if frame.f_code is code and frame.f_globals is globals_:
+                    self.assertEqual(current.events(), ["COMMENT"])
+                    faults.append((method, path))
+                    raise TimeoutError("interrupted original finalizer PR read")
+                frame = frame.f_back
+
+        state.hook = interrupt
+        try:
+            with patch.dict("os.environ", ENV, clear=True):
+                result, _ = state.application_reply(
+                    Provider(response_for(state.eligibility))
+                )
+        finally:
+            state.hook = None
+        self.assertTrue(faults, "original finalizer PR read was not reached")
+        self.assertIs(original.__code__, code)
+        self.assertEqual(state.events(), ["COMMENT"])
         self.assertEqual(result.approval_status, "approval_withheld")
         self.assertIsNone(result.finalization_completion)
         self.assertFalse(
@@ -563,8 +582,8 @@ class NativeWithholdingActionTests(unittest.TestCase):
             with self.assertRaises(ReviewInputError):
                 self.rollover(fixture, run, directory)
 
-    def prepare_finalizer(self, fixture, run):
-        eligibility = prior(blocking=True)
+    def prepare_finalizer(self, fixture, run, *, blocking=True):
+        eligibility = prior(blocking=blocking)
         eligibility = replace(
             eligibility,
             human_review=replace(
@@ -593,7 +612,9 @@ class NativeWithholdingActionTests(unittest.TestCase):
                         IndexedFinding(
                             "d" * 64, "d" * 64, True, False, body_placed=True
                         ),
-                    ),
+                    )
+                    if blocking
+                    else (),
                 ),
             }
         ]
@@ -689,28 +710,42 @@ class NativeWithholdingActionTests(unittest.TestCase):
             self.assertEqual(archived.to_dict(), before.to_dict())
 
     def test_actual_masked_error_stays_pending_and_prevents_next_run(self):
+        original = inspect.unwrap(ReviewApprovalFinalizer.finalize)
+        code, globals_ = original.__code__, original.__globals__
+        faults = []
+
+        class InterruptedFixture(ReplyFixture):
+            def _external_open(inner, request, timeout):
+                response = super()._external_open(request, timeout)
+                if (
+                    request.method == "GET"
+                    and urlsplit(request.full_url).path == "/repos/owner/repo/pulls/7"
+                ):
+                    frame = sys._getframe(1)
+                    while frame is not None:
+                        if frame.f_code is code and frame.f_globals is globals_:
+                            faults.append(request.full_url)
+                            raise TimeoutError("interrupted original finalizer PR read")
+                        frame = frame.f_back
+                return response
+
         with tempfile.TemporaryDirectory() as directory:
-            fixture = ReplyFixture(directory)
+            fixture = InterruptedFixture(directory)
             run, args = fixture.prepare()
-            finalizer, eligibility = self.prepare_finalizer(fixture, run)
+            finalizer, eligibility = self.prepare_finalizer(
+                fixture, run, blocking=False
+            )
 
             def incomplete(**_kwargs):
-                with patch.object(
-                    finalizer,
-                    "finalize",
-                    side_effect=GitHubPublicationTransientError(
-                        "unknown approval write"
-                    ),
-                ):
-                    publication = finalizer.finalize_recorded_decisions(
-                        token=run.ledger.token,
-                        check_token="synthetic-check",
-                        repository=IDENTITY.repository,
-                        pull_request=7,
-                        head_sha=HEAD,
-                        app_slug="reviewsensei[bot]",
-                        eligibility=eligibility,
-                    )
+                publication = finalizer.finalize_recorded_decisions(
+                    token=run.ledger.token,
+                    check_token="synthetic-check",
+                    repository=IDENTITY.repository,
+                    pull_request=7,
+                    head_sha=HEAD,
+                    app_slug="reviewsensei[bot]",
+                    eligibility=eligibility,
+                )
                 self.assertFalse(finalization_confirmed(publication))
                 return ReplyResult(
                     "replied",
@@ -722,6 +757,9 @@ class NativeWithholdingActionTests(unittest.TestCase):
 
             with self.assertRaises(ReviewInputError):
                 fixture.invoke(run, args, incomplete)
+            self.assertTrue(faults, "original finalizer PR read was not reached")
+            self.assertIs(original.__code__, code)
+            self.assertFalse(any(row["state"] == "APPROVED" for row in fixture.reviews))
             self.assertEqual(fixture.action()["phase"], "pending")
             with self.assertRaises(ReviewInputError):
                 self.rollover(fixture, run, directory)

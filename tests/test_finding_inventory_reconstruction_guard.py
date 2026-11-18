@@ -538,6 +538,21 @@ print(json.dumps({'status':outcome.status, 'diagnostic':outcome.diagnostic,
             self.assertEqual(app.session_ledger.load(self.identity).record, before)
             self.assertEqual(host.calls, [])
 
+    def test_restore_cleanup_preserves_nonweakref_ledger_error(self):
+        from review_sensei_github.quarantine_lifecycle_transfer import (
+            clear_namespace_restore,
+        )
+
+        from review_sensei.errors import ReviewInputError
+
+        # Cleanup must retain a selected-reader error when no weak token could
+        # ever have been registered for the object.
+        with self.assertRaisesRegex(ReviewInputError, "original selected refusal"):
+            try:
+                raise ReviewInputError("original selected refusal")
+            finally:
+                clear_namespace_restore(SimpleNamespace())
+
     def test_bad_selected_ledger_cannot_be_treated_as_new_inventory(self):
         for status in ("conflict", "integrity-failed", "expired"):
             with (

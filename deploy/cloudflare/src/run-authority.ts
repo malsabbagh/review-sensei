@@ -1,4 +1,5 @@
 /** Current caller authority. Accounting remains exclusively in the caller root. */
+import { parseCurrentObservation, type CurrentObservation } from "./current-observation";
 import type { GitHubApi } from "./github-api";
 import type { OidcClaims } from "./oidc";
 
@@ -17,7 +18,7 @@ export interface RunActionSource {
   body_sha256: string | null;
 }
 export interface RunAuthorityRequest {
-  version: 3;
+  version: 3 | 4;
   purpose: "review" | "command" | "reply";
   repository: string;
   repository_id: number;
@@ -34,6 +35,7 @@ export interface RunAuthorityRequest {
   source: RunActionSource;
 }
 export interface RunAuthority extends RunAuthorityRequest {
+  current_observation?: CurrentObservation;
   actor: { login: string; type: "User"; association: string } | null;
 }
 
@@ -52,10 +54,10 @@ function invalid(): never { throw new Error("broker_session_attestation_invalid"
 export function parseRunAuthority(value: unknown, grant: true): RunAuthority;
 export function parseRunAuthority(value: unknown, grant?: false): RunAuthorityRequest;
 export function parseRunAuthority(value: unknown, grant = false): RunAuthorityRequest | RunAuthority {
-  if (!object(value) || !exact(value, grant ? [...REQUEST_KEYS, "actor"] : REQUEST_KEYS)) invalid();
+  if (!object(value) || !exact(value, grant ? [...REQUEST_KEYS, "actor", ...(value.version === 4 ? ["current_observation"] : [])] : REQUEST_KEYS)) invalid();
   const source = value.source;
   const now = Date.now() / 1000;
-  if (value.version !== 3 || typeof value.purpose !== "string" || !["review", "command", "reply"].includes(value.purpose) ||
+  if (![3, 4].includes(value.version as number) || typeof value.purpose !== "string" || !["review", "command", "reply"].includes(value.purpose) ||
     typeof value.repository !== "string" || !REPOSITORY.test(value.repository) ||
     !positive(value.repository_id) || !positive(value.pull_request) ||
     typeof value.head_sha !== "string" || !SHA.test(value.head_sha) ||
@@ -78,7 +80,7 @@ export function parseRunAuthority(value: unknown, grant = false): RunAuthorityRe
     typeof source.updated_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(source.updated_at) ||
     typeof source.body_sha256 !== "string" || !DIGEST.test(source.body_sha256)) invalid();
   const parsed: RunAuthorityRequest = {
-    version: 3, purpose: value.purpose as RunAuthorityRequest["purpose"],
+    version: value.version as 3 | 4, purpose: value.purpose as RunAuthorityRequest["purpose"],
     repository: value.repository, repository_id: value.repository_id,
     pull_request: value.pull_request, head_sha: value.head_sha,
     run_id: value.run_id, run_attempt: value.run_attempt,
@@ -93,12 +95,16 @@ export function parseRunAuthority(value: unknown, grant = false): RunAuthorityRe
   const actor = value.actor;
   if (parsed.purpose === "review") {
     if (actor !== null) invalid();
-    return { ...parsed, actor: null };
+    const result: RunAuthority = { ...parsed, actor: null };
+    if (parsed.version === 4) result.current_observation = parseCurrentObservation(value.current_observation, result);
+    return result;
   }
   if (!object(actor) || !exact(actor, ["login", "type", "association"]) ||
     typeof actor.login !== "string" || actor.login.length === 0 || actor.login.length > 256 ||
     actor.type !== "User" || typeof actor.association !== "string" || !ASSOCIATIONS.has(actor.association)) invalid();
-  return { ...parsed, actor: { login: actor.login, type: "User", association: actor.association } };
+  const result: RunAuthority = { ...parsed, actor: { login: actor.login, type: "User", association: actor.association } };
+  if (parsed.version === 4) result.current_observation = parseCurrentObservation(value.current_observation, result);
+  return result;
 }
 
 export function bindRunAuthority(value: unknown, claims: OidcClaims): RunAuthorityRequest {

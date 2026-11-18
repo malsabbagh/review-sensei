@@ -360,6 +360,27 @@ class TrustTransitionDecision:
             raise ReviewInputError("unknown trust transition kind")
 
 
+def missing_trust_observation(
+    *, phase: str, has_unknown_effect: bool = False
+) -> TrustTransitionDecision:
+    """Hold an enrolled boundary without claiming missing fields were observed."""
+    if phase not in TRANSITION_PHASES:
+        raise ReviewInputError("phase must be a valid TRANSITION_PHASES value")
+    _require_bool(has_unknown_effect, label="has_unknown_effect")
+    return TrustTransitionDecision(
+        phase=phase,
+        allowed=False,
+        detected_transitions=(),
+        reason_code="trust-observation-incomplete",
+        cross_repository_write_blocked=True,
+        fresh_allowance_minted=False,
+        obligations_preserved=True,
+        charges_held=True,
+        unknown_effect_held=has_unknown_effect or phase == "after_unknown_effect",
+        recovery_routes=("operator-reconcile",),
+    )
+
+
 def evaluate_trust_boundary(
     enrolled: AuthenticatedTrustSnapshot,
     observed: AuthenticatedTrustSnapshot,

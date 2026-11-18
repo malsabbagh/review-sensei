@@ -47,6 +47,14 @@ def _run_blocks(text: str) -> list[str]:
     return blocks
 
 
+REQUIRED_CHECKS_NEEDS = (
+    "needs: [compatibility, quality, schemas, package, npm, linux-standalone, "
+    "intel-standalone, native-candidate, candidate-npm, candidate-consumer, "
+    "workers, codeql, compatibility-shard, static-quality, coverage-shard, "
+    "package-build, package-verify, installed-shard]"
+)
+
+
 def _run_block_containing(text: str, marker: str) -> str:
     matches = [block for block in _run_blocks(text) if marker in block]
     if len(matches) != 1:
@@ -565,11 +573,108 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
         )
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("language: [python, javascript-typescript]", text)
-        self.assertIn(
-            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql]",
-            text,
-        )
+        self.assertIn(REQUIRED_CHECKS_NEEDS, text)
         self.assertIn('require_success "${{ needs.codeql.result }}"', text)
+
+    def test_required_checks_require_every_shard_and_lane_aggregate(self):
+        import yaml
+
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        jobs = yaml.safe_load(text)["jobs"]
+        required = jobs["required-checks"]
+        self.assertEqual(set(required["needs"]), set(jobs) - {"required-checks"})
+        script = required["steps"][0]["run"]
+        for name in required["needs"]:
+            with self.subTest(job=name):
+                self.assertIn(
+                    f'require_success "${{{{ needs.{name}.result }}}}"', script
+                )
+        for aggregate, shards in (
+            ("compatibility", "compatibility-shard"),
+            ("quality", "coverage-shard"),
+            ("package", "installed-shard"),
+        ):
+            with self.subTest(aggregate=aggregate):
+                self.assertIn(shards, jobs[aggregate]["needs"])
+                self.assertEqual(jobs[aggregate]["if"], "${{ !cancelled() }}")
+                self.assertTrue(
+                    any(
+                        "scripts/verify_test_shards.py" in step.get("run", "")
+                        for step in jobs[aggregate]["steps"]
+                    )
+                )
+
+    def test_shard_matrices_match_the_counts_their_aggregates_verify(self):
+        import shlex
+
+        import yaml
+
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        )
+        jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
+        matrix = jobs["compatibility-shard"]["strategy"]["matrix"]
+        excluded = {(item["lane"], item["shard"]) for item in matrix["exclude"]}
+        lanes = {item["lane"]: item for item in matrix["include"]}
+        self.assertEqual(set(lanes), set(matrix["lane"]))
+        expanded = {}
+        for lane, item in lanes.items():
+            owned = [s for s in matrix["shard"] if (lane, s) not in excluded]
+            self.assertEqual(owned, list(range(1, item["shards"] + 1)), lane)
+            expanded[(item["os"], item["python-version"])] = item["shards"]
+        aggregate = {
+            (item["os"], item["python-version"]): item["shards"]
+            for item in jobs["compatibility"]["strategy"]["matrix"]["include"]
+        }
+        self.assertEqual(aggregate, expanded)
+        self.assertEqual(
+            sorted(expanded),
+            sorted(
+                [
+                    ("ubuntu-latest", "3.11"),
+                    ("windows-latest", "3.12"),
+                    ("macos-latest", "3.13"),
+                    ("ubuntu-latest", "3.14"),
+                ]
+            ),
+        )
+
+        def shard_arguments(job, marker):
+            runs = "\n".join(step.get("run", "") for step in jobs[job]["steps"])
+            commands = [
+                shlex.split(line)
+                for line in runs.replace("\\\n", " ").splitlines()
+                if marker in line
+            ]
+            self.assertTrue(commands, job)
+            return [command[command.index("--shard") + 1] for command in commands]
+
+        self.assertEqual(
+            shard_arguments("compatibility-shard", "scripts/run_checkout_tests.py"),
+            ["${{ matrix.shard }}/${{ matrix.shards }}"] * 3,
+        )
+        for shard_job, aggregate_job, marker in (
+            ("coverage-shard", "quality", "scripts/run_checkout_tests.py"),
+            ("installed-shard", "package", "scripts/run_installed_test_suites.py"),
+        ):
+            count = len(jobs[shard_job]["strategy"]["matrix"]["shard"])
+            self.assertEqual(
+                jobs[shard_job]["strategy"]["matrix"]["shard"],
+                list(range(1, count + 1)),
+            )
+            self.assertEqual(
+                shard_arguments(shard_job, marker), [f"${{{{ matrix.shard }}}}/{count}"]
+            )
+            verify = next(
+                shlex.split(line)
+                for step in jobs[aggregate_job]["steps"]
+                for line in step.get("run", "").splitlines()
+                if "scripts/verify_test_shards.py" in line
+            )
+            self.assertEqual(verify[verify.index("--shards") + 1], str(count))
 
     def test_codeql_job_is_read_only_and_not_pull_request_target(self):
         workflow = (
@@ -1426,12 +1531,14 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
         self.assertIn("--fail-under=80", ci_text)
         self.assertNotIn("--fail-under=75", ci_text)
         jobs = yaml.safe_load(ci_text)["jobs"]
-        coverage = next(
+        shard_coverage = next(
             step
-            for step in jobs["quality"]["steps"]
+            for step in jobs["coverage-shard"]["steps"]
             if step.get("name") == "Branch coverage"
         )
-        commands = [shlex.split(line) for line in coverage["run"].splitlines() if line]
+        commands = [
+            shlex.split(line) for line in shard_coverage["run"].splitlines() if line
+        ]
         command = next(c for c in commands if "scripts/run_checkout_tests.py" in c)
         self.assertIn("--coverage", command)
         self.assertEqual(command[command.index("--workers") + 1], "4")
@@ -1440,11 +1547,36 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
             coverage_costs,
             "tests/fixtures/checkout-class-seconds-coverage.json",
         )
+        self.assertFalse(shard_coverage.get("continue-on-error", False))
+        self.assertEqual(shard_coverage["env"], {"COVERAGE_CORE": "sysmon"})
+        # Branch data is measured and reported by the same interpreter.
+        for job in ("coverage-shard", "quality"):
+            setup = next(
+                step
+                for step in jobs[job]["steps"]
+                if "actions/setup-python@" in step.get("uses", "")
+            )
+            self.assertEqual(setup["with"]["python-version"], "3.14", job)
+        self.assertIn(
+            ("ubuntu-latest", "3.11"),
+            [
+                (item["os"], item["python-version"])
+                for item in jobs["compatibility-shard"]["strategy"]["matrix"]["include"]
+            ],
+        )
+        coverage = next(
+            step
+            for step in jobs["quality"]["steps"]
+            if step.get("name") == "Branch coverage"
+        )
+        commands = [shlex.split(line) for line in coverage["run"].splitlines() if line]
+        self.assertTrue(any("scripts/verify_test_shards.py" in c for c in commands))
+        self.assertTrue(any(c[2:4] == ["coverage", "combine"] for c in commands))
         self.assertTrue(any("--fail-under=80" in c for c in commands))
         self.assertFalse(coverage.get("continue-on-error", False))
         windows = next(
             step
-            for step in jobs["compatibility"]["steps"]
+            for step in jobs["compatibility-shard"]["steps"]
             if step.get("if") == "runner.os == 'Windows'"
         )
         windows_command = shlex.split(windows["run"])
@@ -2098,15 +2230,36 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
         )
         self.assertIn('--start-directory "$suite/dist_safe" --workers 4', text)
         self.assertIn("--split-module test_quarantine_contract.py", text)
-        self.assertIn("tests/fixtures/installed-unit-log-delta-seconds.json", text)
+        self.assertEqual(
+            re.findall(r"--reviewed-local-hook ([a-z_]+)", text),
+            [
+                "test_approval_lifecycle_contract",
+                "test_controlled_restart_contract",
+                "test_default_human_inventory_contract",
+                "test_native_group_contract",
+                "test_provider_common_flow_contract",
+                "test_quarantine_contract",
+            ],
+        )
+        self.assertIn("tests/fixtures/installed-unit-seconds.json", text)
         self.assertIn('unittest discover -s "$suite/downstream" -v', text)
         self.assertNotIn(
             'unittest discover -s "$GITHUB_WORKSPACE/tests" -v',
             text,
         )
-        block = _run_block_containing(text, "REVIEWSENSEI_DIST_SAFE_LANE")
-        self.assertNotIn("requirements/ci.txt", block)
-        self.assertIn('test ! -e "$suite/test_ci_policy.py"', block)
+        blocks = [
+            block
+            for block in _run_blocks(text)
+            if "REVIEWSENSEI_DIST_SAFE_LANE" in block
+        ]
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            self.assertNotIn("requirements/ci.txt", block)
+            self.assertIn('test ! -e "$suite/test_ci_policy.py"', block)
+        installed = _run_block_containing(text, "run_installed_test_suites.py")
+        self.assertEqual(
+            installed.strip().splitlines()[0], "sha256sum -c dist/SHA256SUMS"
+        )
 
     def test_installed_suite_runner_preserves_wrappers_fixtures_and_failures(self):
         runner = (
@@ -2693,10 +2846,7 @@ class Second(unittest.TestCase):
         self.assertNotIn("OLLAMA_API_KEY", canary)
         self.assertNotIn("secrets:", canary)
         self.assertIn("Required checks", ci)
-        self.assertIn(
-            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql]",
-            ci,
-        )
+        self.assertIn(REQUIRED_CHECKS_NEEDS, ci)
         self.assertNotIn("downstream-canary", ci)
         self.assertNotIn("Downstream canary", ci)
 

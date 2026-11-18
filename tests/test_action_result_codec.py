@@ -44,6 +44,81 @@ def carrier(value):
 
 
 class ActionResultCodecTests(unittest.TestCase):
+    def test_v2_reference_commitment_is_closed_lossless_and_fixed_width(self):
+        from review_sensei.action_result_codec import encode_action_result_carrier
+
+        history = {
+            "schema_version": "accepted-semantic-history-v1",
+            "qualification": "unavailable",
+            "reason": "complete_inventory_required",
+        }
+        original = envelope(
+            {"summary": "Complete.", "accepted_semantic_history": history}
+        )
+        prepared = encode_action_result_carrier(original, reference_history=True)
+        self.assertEqual(prepared["schema_version"], "caller-action-result-v2")
+        self.assertEqual(
+            decode_action_result_carrier(prepared, history=history), original
+        )
+        alternate = {**history, "reason": "other_reason"}
+        other = encode_action_result_carrier(
+            envelope({"summary": "Complete.", "accepted_semantic_history": alternate}),
+            reference_history=True,
+        )
+        self.assertEqual(prepared["payload"], other["payload"])
+        self.assertEqual(len(canonical_bytes(prepared)), len(canonical_bytes(other)))
+        for supplied in (None, {}, alternate):
+            with self.assertRaisesRegex(ReviewInputError, "commitment"):
+                decode_action_result_carrier(prepared, history=supplied)
+        for key, value in (
+            ("schema_version", "caller-action-result-v3"),
+            ("accepted_semantic_history_sha256", "f" * 64),
+            ("extra", None),
+        ):
+            changed = {**prepared, key: value}
+            with self.assertRaises(ReviewInputError):
+                decode_action_result_carrier(changed, history=history)
+        mixed = {**prepared, "payload": carrier(original)["payload"]}
+        with self.assertRaises(ReviewInputError):
+            decode_action_result_carrier(mixed, history=history)
+        # Legacy full-history results and no-history ordinary results stay v1.
+        legacy = encode_action_result_carrier(original)
+        self.assertEqual(legacy["schema_version"], "caller-action-result-v1")
+        self.assertEqual(decode_action_result_carrier(legacy), original)
+        self.assertEqual(
+            encode_action_result_carrier(
+                envelope({"summary": "Complete."}), reference_history=True
+            )["schema_version"],
+            "caller-action-result-v1",
+        )
+
+    def test_v2_preserves_full_logical_decoded_limit(self):
+        from review_sensei.action_result_codec import encode_action_result_carrier
+
+        history = {
+            "schema_version": "accepted-semantic-history-v1",
+            "qualification": "unavailable",
+            "reason": "complete_inventory_required",
+        }
+        document = envelope({"padding": "", "accepted_semantic_history": history})
+        document["result"]["padding"] = "x" * (
+            MAX_PARTITION_DECODED_BYTES - len(canonical_bytes(document))
+        )
+        prepared = encode_action_result_carrier(document, reference_history=True)
+        self.assertEqual(
+            decode_action_result_carrier(prepared, history=history), document
+        )
+        document["result"]["padding"] += "x"
+        with self.assertRaisesRegex(ReviewInputError, "decoded byte bound"):
+            encode_action_result_carrier(document, reference_history=True)
+        business = copy.deepcopy(document)
+        del business["result"]["accepted_semantic_history"]
+        # A foreign producer cannot hide expansion in the separately retained
+        # history even though the compressed business part individually fits.
+        oversized = {**prepared, "payload": carrier(business)["payload"]}
+        with self.assertRaisesRegex(ReviewInputError, "decoded byte bound"):
+            decode_action_result_carrier(oversized, history=history)
+
     def test_existing_decoded_limit_is_exact_and_lossless(self):
         document = envelope({"padding": ""})
         overhead = len(canonical_bytes(document))

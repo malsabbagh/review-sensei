@@ -2,12 +2,16 @@
 
 import copy
 import hashlib
+import inspect
 import json
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from fake_github_http import json_response, make_http
+from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication_recovery import _publication_transport
 from review_sensei_github.quarantine_capacity import NativeCapacityGuard
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
@@ -155,10 +159,42 @@ class QuarantineNativeCapacityTests(unittest.TestCase):
         calls = []
         original = NativeCapacityGuard.before_request
 
-        def before(guard, method, path, body):
-            if method in {"POST", "PATCH", "PUT"} and path.startswith("/repos/"):
-                calls.append((method, path))
-            return original(guard, method, path, body)
+        @contextmanager
+        def observe_source():
+            previous = sys.getprofile()
+            source = original.__wrapped__.__code__
+            physical_source = inspect.unwrap(GitHubHttp.request)
+
+            def observe(frame, event, value):
+                if previous is not None:
+                    previous(frame, event, value)
+                if event == "call" and frame.f_code is source:
+                    # Detached complete-tail pricing invokes the same genuine
+                    # method on a copied guard. Only the original HTTP caller
+                    # with this installed guard is a physical request.
+                    wrapper = frame.f_back
+                    caller = None if wrapper is None else wrapper.f_back
+                    if (
+                        caller is None
+                        or caller.f_code is not physical_source.__code__
+                        or caller.f_globals is not physical_source.__globals__
+                    ):
+                        return
+                    self.assertIs(
+                        caller.f_locals["self"]._quarantine_capacity_guard,
+                        frame.f_locals["self"],
+                    )
+                    method, path = frame.f_locals["method"], frame.f_locals["path"]
+                    if method in {"POST", "PATCH", "PUT"} and path.startswith(
+                        "/repos/"
+                    ):
+                        calls.append((method, path))
+
+            sys.setprofile(observe)
+            try:
+                yield
+            finally:
+                sys.setprofile(previous)
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -169,7 +205,7 @@ class QuarantineNativeCapacityTests(unittest.TestCase):
             mutations = []
             with (
                 registered_resource([registration]),
-                patch.object(NativeCapacityGuard, "before_request", before),
+                observe_source(),
             ):
                 self.assertEqual(f.invoke(), 0, f.error)
                 mutations.extend(
@@ -201,27 +237,31 @@ class QuarantineNativeCapacityTests(unittest.TestCase):
             self.assertEqual(calls, mutations)
 
     def test_public_entry_capacity_refusal_precedes_physical_staging(self):
-        original = NativeCapacityGuard.before_request
-
-        def before(guard, method, path, body):
-            if method == "POST" and path.endswith("/issues/7/comments"):
-                guard.reserve["issue_comments"]["new_objects"] = 1001
-            return original(guard, method, path, body)
-
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             f = PublishedTailJourneyFixture(directory)
             _, registration = f.original_origins()
+            # Supply an excessive reserve at the external qualification
+            # boundary. Replacing a sealed guard method would test source
+            # rejection before ever reaching the capacity invariant.
+            contract = registration["published_tail"]
+            qualification = copy.deepcopy(
+                BROKER_QUALIFICATIONS[contract["broker_qualification_sha256"]]
+            )
+            qualification["exposure"]["surfaces"]["issue_comments"]["new_objects"] = (
+                1001
+            )
+            digest = hashlib.sha256(canonical_bytes(qualification)).hexdigest()
+            contract["broker_qualification_sha256"] = digest
+            BROKER_QUALIFICATIONS[digest] = qualification
             old_body, provider_calls = f.comment["body"], f.provider_calls
             start = len(f.trace)
-            with (
-                registered_resource([registration]),
-                patch.object(NativeCapacityGuard, "before_request", before),
-            ):
+            with registered_resource([registration]):
                 self.assertEqual(f.invoke(), 1, f.error)
             self.assertIn("capacity", f.error)
+            self.assertEqual(f.root_posts, 0)
             self.assertEqual(f.comment["body"], old_body)
             self.assertEqual(f.provider_calls, provider_calls)
             self.assertFalse(

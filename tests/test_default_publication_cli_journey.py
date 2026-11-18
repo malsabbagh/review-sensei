@@ -69,8 +69,26 @@ def current_paged_entry(directory, *, limit=512):
         def __init__(self):
             super().__init__(directory, limit=limit)
             self.comment_page_reads = []
+            self.comment_creation_order = []
+
+        def _ordered_comment_rows(self):
+            rows = ([self.comment] if self.comment else []) + list(
+                self.extra_comments.values()
+            )
+            # Native issue comments retain creation order. A newly POSTed
+            # session root appends after existing comments rather than moving
+            # to the front simply because the fixture stores it separately.
+            for item in rows:
+                if item["id"] not in self.comment_creation_order:
+                    self.comment_creation_order.append(item["id"])
+            order = {
+                identifier: i
+                for i, identifier in enumerate(self.comment_creation_order)
+            }
+            return sorted(rows, key=lambda item: order[item["id"]])
 
         def external(self, request, timeout):
+            self._ordered_comment_rows()
             target = urlparse(request.full_url)
             if request.method == "GET" and target.path.endswith("/issues/7/comments"):
                 assert (
@@ -82,9 +100,7 @@ def current_paged_entry(directory, *, limit=512):
                 size = int(query.get("per_page", [100])[0])
                 page = int(query.get("page", [1])[0])
                 self.comment_page_reads.append((size, page))
-                rows = ([self.comment] if self.comment else []) + list(
-                    self.extra_comments.values()
-                )
+                rows = self._ordered_comment_rows()
                 since = query.get("since", [None])[0]
                 if since:
                     rows = [
@@ -95,6 +111,7 @@ def current_paged_entry(directory, *, limit=512):
                     ]
                 return json_response(rows[(page - 1) * size : page * size])
             response = super().external(request, timeout)
+            self._ordered_comment_rows()
             if self.comment is not None:
                 self.comment["updated_at"] = "2026-10-26T00:00:00Z"
             return response

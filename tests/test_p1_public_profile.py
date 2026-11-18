@@ -139,7 +139,7 @@ class P1PublicProfileTests(unittest.TestCase):
                 self.assertEqual(current.extra_comments[key], value)
 
     def test_ordinary_comment_threads_complete_inside_the_repository_limit(self):
-        for count in (25, 300):
+        for count in (25,):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
                 comments = [(3000 + index, "note", False) for index in range(count)]
                 current = self._entry(directory, comments)
@@ -147,6 +147,39 @@ class P1PublicProfileTests(unittest.TestCase):
                 self._assert_complete(current)
                 for identifier, body, _ in comments:
                     self.assertEqual(current.extra_comments[identifier]["body"], body)
+
+    def test_native_fixture_preserves_creation_order_when_the_session_root_is_created(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            current = self._entry(directory, [(3000, "earlier native comment", False)])
+            self.assertEqual(current.invoke(), 0, current.error)
+            self._assert_complete(current)
+            order = current.comment_creation_order
+            self.assertEqual(order[0], 3000)
+            self.assertGreater(order.index(current.comment["id"]), 0)
+            self.assertEqual(len(order), len(set(order)))
+            self.assertEqual(
+                [row["id"] for row in current._ordered_comment_rows()], order
+            )
+
+    def test_three_hundred_comments_hold_at_the_unchanged_lifecycle_allocation_bound(
+        self,
+    ):
+        # The old REST observation profile could read 300 comments. The new
+        # complete lifecycle allocation proof remains limited to 200 observed
+        # plus prospective objects; no filtering or larger profile is implied.
+        with tempfile.TemporaryDirectory() as directory:
+            comments = [(3000 + index, "note", False) for index in range(300)]
+            current = self._entry(directory, comments)
+            self.assertEqual(current.invoke(), 1, current.error)
+            self.assertIn("comment allocation capacity exceeded", current.error)
+            self.assertFalse(current.reviews)
+            self.assertFalse(current.check_runs)
+            self.assertFalse(current.inline)
+            self.assertEqual(current.accounted.accounting.configuration.limit, 512)
+            for identifier, body, _ in comments:
+                self.assertEqual(current.extra_comments[identifier]["body"], body)
 
     def test_maximum_size_comments_adapt_to_larger_pages_within_a_bounded_walk(self):
         with tempfile.TemporaryDirectory() as directory:

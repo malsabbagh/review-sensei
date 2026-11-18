@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
+import weakref
+from copy import copy, deepcopy
+from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -19,7 +22,11 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.quarantine_assessments import pending_assessments
 
 from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_ITEMS, MAX_PAGINATION_PAGES
-from .quarantine_scan_capacity import cold_cursor_requests, cold_rest_requests
+from .quarantine_scan_capacity import (
+    bounded_review_page,
+    cold_cursor_requests,
+    cold_rest_requests,
+)
 
 _SURFACES = (
     "issue_comments",
@@ -104,6 +111,129 @@ def native_reserve(receipt):
     return surfaces
 
 
+# Only a completed authentic installation enters this registry. Constructors
+# and detached capacity previews never acquire an installed source identity.
+_INSTALLED_GUARDS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _guard_state(guard):
+    from review_sensei.bounded_evidence import canonical_bytes
+
+    plan = guard.comment_plan
+    values = {
+        key: value
+        for key, value in vars(guard).items()
+        if key
+        not in {"identity", "comment_reader", "comment_plan", "objects", "certificates"}
+    }
+    if guard.native_profile is not None:
+        from .native_reader_projection import HistoricalRoot, ReaderProjection
+
+        projection = guard.native_profile.get("projection")
+        projection_fields = (
+            "repository_id",
+            "pull_request",
+            "producer_id",
+            "execution_manifest_sha256",
+            "source_contract_sha256",
+            "fixed_explicit_review_heads",
+            "fixed_check_heads",
+            "implicit_review_objects",
+            "roots",
+        )
+        root_fields = ("root_id", "thread_id", "review_id", "head_sha")
+        if (
+            type(projection) is not ReaderProjection
+            or set(vars(projection)) != set(projection_fields)
+            or type(projection.roots) is not tuple
+            or any(
+                type(root) is not HistoricalRoot or set(vars(root)) != set(root_fields)
+                for root in projection.roots
+            )
+        ):
+            raise ReviewInputError("quarantine capacity reader projection type changed")
+        # This is a process-local custody commitment, not a new projection
+        # authority. Keep every authenticated field and the original objects;
+        # never stringify or drop typed source evidence to make JSON fit.
+        encoded = {name: getattr(projection, name) for name in projection_fields}
+        encoded["roots"] = [
+            {name: getattr(root, name) for name in root_fields}
+            for root in projection.roots
+        ]
+        values["native_profile"] = {
+            **guard.native_profile,
+            "projection": encoded,
+        }
+        from .native_review_census import RootMetadata
+
+        metadata_fields = (
+            "comment_id",
+            "review_id",
+            "producer_id",
+            "resolved",
+            "side",
+            "subject_type",
+            "head_sha",
+            "updated_at",
+        )
+        metadata = guard.native_profile.get("root_metadata", {})
+        if type(metadata) is not dict or any(
+            type(key) is not int
+            or type(row) is not RootMetadata
+            or set(vars(row)) != set(metadata_fields)
+            for key, row in metadata.items()
+        ):
+            raise ReviewInputError("quarantine capacity root metadata type changed")
+        values["native_profile"]["root_metadata"] = {
+            key: {name: getattr(row, name) for name in metadata_fields}
+            for key, row in metadata.items()
+        }
+        values["projection_metadata_identities"] = sorted(
+            (key, id(row)) for key, row in metadata.items()
+        )
+        values["projection_identity"] = id(projection)
+        values["projection_root_identities"] = [id(root) for root in projection.roots]
+    values["identity"] = vars(guard.identity)
+    values["reader_identity"] = id(guard.comment_reader)
+    values["objects"] = sorted(
+        (key[0], str(key[1]), value) for key, value in guard.objects.items()
+    )
+    values["plan"] = (
+        None
+        if plan is None
+        else {
+            "known": list(plan.known.items()),
+            "unknown": plan.unknown,
+            "metadata_known": list(plan.metadata_known.items()),
+            "metadata_unknown": plan.metadata_unknown,
+        }
+    )
+    return canonical_bytes(values)
+
+
+def _tracked_guard_mutation(method):
+    @wraps(method)
+    def tracked(self, *args, **kwargs):
+        installed = _INSTALLED_GUARDS.get(self)
+        if installed is not None and (
+            installed[3] != _guard_state(self)
+            or any(
+                getattr(getattr(self, name), "__func__", None) is not source
+                for name, source in _GUARD_SOURCE_METHODS.items()
+            )
+        ):
+            raise ReviewInputError(
+                "quarantine installed capacity state or source changed"
+            )
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            if installed is not None:
+                _INSTALLED_GUARDS[self] = (*installed[:3], _guard_state(self))
+
+    return tracked
+
+
 class NativeCapacityGuard:
     def __init__(
         self,
@@ -154,6 +284,16 @@ class NativeCapacityGuard:
         self.comment_read_calls = (
             comment_plan.worst_read_calls() if comment_plan is not None else None
         )
+        # Slots removed because reserved archive/operation bodies already
+        # landed. require() still adds the full exposure count, so this many
+        # objects must not be counted a second time.
+        self._spent_reserved_slots = 0
+        # Seeded late historical-head reviews outside authenticated origin
+        # review IDs already consume old review exposure once archive exposure lands.
+        self._spent_review_slots = 0
+        self._known_old_review_ids: tuple[int, ...] = ()
+        self._old_review_heads: tuple[str, ...] = ()
+        self._evidence_author_id: int | None = None
         self.issue_update_bytes = 2 * closure_wire + receipt_update_bytes
         self.comment_bounds = (
             list(comment_bounds) if comment_bounds is not None else None
@@ -179,6 +319,7 @@ class NativeCapacityGuard:
         self._pending_create = None
         self.require(self.stats)
 
+    @_tracked_guard_mutation
     def admit_comment_batch(self, bodies):
         """Prepare the complete immutable batch before its first POST.
 
@@ -211,6 +352,7 @@ class NativeCapacityGuard:
             self.comment_bounds, self.future_parts, self.future_bytes = old
             raise
 
+    @_tracked_guard_mutation
     def admit_grouped_publication(self, *, plan, review_wire=None, inline_wires=None):
         """Refine the complete before-startup promise; never add native room.
 
@@ -278,6 +420,7 @@ class NativeCapacityGuard:
             raise
         self._native_prepared = requested
 
+    @_tracked_guard_mutation
     def admit_publication(self, *, review_wire, inline_wires):
         """Reserve the prepared publication, approval, checks and root close."""
         if not self.cursor:
@@ -331,7 +474,12 @@ class NativeCapacityGuard:
                     raise ReviewInputError(
                         "quarantine current-check response capacity exceeded"
                     )
-            count = current["count"] + old["new_objects"]
+            old_objects = (
+                max(0, old["new_objects"] - self._spent_review_slots)
+                if surface == "reviews"
+                else old["new_objects"]
+            )
+            count = current["count"] + old_objects
             size = (
                 current["bytes"] + old["new_wire_bytes"] + old["positive_update_bytes"]
             )
@@ -355,7 +503,7 @@ class NativeCapacityGuard:
             count += len(tail)
             size += sum(tail) + len(tail) * _RESPONSE_METADATA_BYTES
             # Native response metadata is additional to emitted mutation bytes.
-            size += old["new_objects"] * _RESPONSE_METADATA_BYTES
+            size += old_objects * _RESPONSE_METADATA_BYTES
             largest = max(
                 current["largest"],
                 old["max_object_wire_bytes"] + _RESPONSE_METADATA_BYTES,
@@ -464,9 +612,8 @@ class NativeCapacityGuard:
                 }
                 continue
             if surface == "issue_comments" and self.comment_plan is not None:
-                if count > len(self.comment_plan.known) + len(
-                    self.comment_plan.unknown
-                ):
+                admitted = len(self.comment_plan.known) + len(self.comment_plan.unknown)
+                if count - self._spent_reserved_slots > admitted:
                     raise ReviewInputError(
                         "quarantine comment allocation membership exceeds admission"
                     )
@@ -485,6 +632,9 @@ class NativeCapacityGuard:
                 pages = max(
                     pages, cold_rest_requests(count, largest, (100, 50, 20, 10, 5, 1))
                 )
+            bounded_reviews = surface == "reviews" and not self.complete_tail
+            if bounded_reviews:
+                _width, pages = bounded_review_page(count, largest)
             if pages > MAX_PAGINATION_PAGES:
                 raise ReviewInputError(
                     f"quarantine {surface} page/encoded-byte capacity exceeded"
@@ -494,15 +644,29 @@ class NativeCapacityGuard:
                 "encoded_bytes_upper_bound": size,
                 "largest_upper_bound": largest,
                 "physical_reads_upper_bound": pages,
-                "reader": "packed-comments"
+                "reader": "bounded-cold-reviews"
+                if bounded_reviews
+                else "packed-comments"
                 if surface == "issue_comments" and self.comment_plan is not None
                 else "closed-comment-cursor"
                 if surface == "issue_comments" and self.cursor
                 else "cold-rest",
             }
 
+    @_tracked_guard_mutation
     def seed(self, surface, rows):
         seen = set()
+        spent_reviews = 0
+        track_reviews = (
+            surface == "reviews"
+            and self._spent_reserved_slots > 0
+            and not self.complete_tail
+            and self.old_check_head is not None
+        )
+        old_review_heads = set(self._old_review_heads) if track_reviews else set()
+        known_old_review_ids = (
+            set(self._known_old_review_ids) if track_reviews else set()
+        )
         for row in rows:
             if (
                 not isinstance(row, dict)
@@ -519,8 +683,28 @@ class NativeCapacityGuard:
             state["bytes"] += size
             state["largest"] = max(state["largest"], size)
             self.objects[surface, row["id"]] = _wire({"body": row.get("body", "")})
+            if (
+                track_reviews
+                and row.get("commit_id") in old_review_heads
+                and row["id"] not in known_old_review_ids
+                and (
+                    self._evidence_author_id is None
+                    or (
+                        isinstance(row.get("user"), dict)
+                        and row["user"].get("type") == "Bot"
+                        and row["user"].get("id") == self._evidence_author_id
+                    )
+                )
+            ):
+                spent_reviews += 1
+        if track_reviews and spent_reviews:
+            max_old = self.reserve["reviews"]["new_objects"]
+            self._spent_review_slots = min(
+                max_old, self._spent_review_slots + spent_reviews
+            )
         self.require(self.stats)
 
+    @_tracked_guard_mutation
     def seed_projected_roots(self):
         """Count actual root identities with their source-enforced body bounds.
 
@@ -546,6 +730,30 @@ class NativeCapacityGuard:
                 self.objects[surface, identifier] = bound
         self.require(self.stats)
 
+    def preflight_native_edits(self, edits):
+        """Prove the whole edit batch fits without spending its dispatch tail.
+
+        Preview the existing guard rather than inventing a parallel accounting
+        formula. Physical requests still consume the original guard once each.
+        """
+        from copy import copy
+
+        preview = copy(self)
+        for field in (
+            "stats",
+            "objects",
+            "certificates",
+            "comment_bounds",
+            "review_bounds",
+            "check_bounds",
+            "inline_bounds",
+            "reaction_bounds",
+        ):
+            setattr(preview, field, deepcopy(getattr(self, field)))
+        for method, path, body in edits:
+            preview.before_request(method, path, body)
+
+    @_tracked_guard_mutation
     def before_request(self, method, path, body):
         # A response may bind only its own physical create. A later GraphQL
         # POST or a read after an unknown write cannot inherit that pending ID.
@@ -758,6 +966,7 @@ class NativeCapacityGuard:
             (surface, object_wire, deepcopy(object_body)) if new else None
         )
 
+    @_tracked_guard_mutation
     def after_response(self, method, value):
         if (
             self._pending_create is not None
@@ -812,6 +1021,627 @@ class NativeCapacityGuard:
         self._pending_create = None
 
 
+_GUARD_SOURCE_METHODS = {
+    name: getattr(NativeCapacityGuard, name)
+    for name in (
+        "require",
+        "before_request",
+        "after_response",
+        "admit_comment_batch",
+        "admit_publication",
+        "admit_grouped_publication",
+        "seed",
+        "seed_projected_roots",
+        "_before_request",
+        "_bind_immutable_comment_capacity",
+        "preflight_native_edits",
+    )
+}
+
+
+def installed_capacity(ledger, identity):
+    """Return only the actual installed, unchanged native capacity owner."""
+    from .publication_recovery import _publication_transport
+
+    transport = _publication_transport(ledger.http)
+    guard = getattr(transport, "_quarantine_capacity_guard", None)
+    installed = (
+        _INSTALLED_GUARDS.get(guard) if type(guard) is NativeCapacityGuard else None
+    )
+    if (
+        installed is None
+        or installed[0]() is not ledger
+        or installed[1]() is not transport
+        or not isinstance(guard, NativeCapacityGuard)
+        or guard.identity != identity
+        or installed[3] != _guard_state(guard)
+        or any(
+            getattr(getattr(guard, name), "__func__", None) is not method
+            for name, method in _GUARD_SOURCE_METHODS.items()
+        )
+    ):
+        raise ReviewInputError("quarantine lifecycle installed capacity source changed")
+    NativeCapacityGuard.require(guard, guard.stats)
+    return guard
+
+
+def review_walk_owner(transport):
+    """Read current installed custody, including an authenticated owner transfer."""
+    guard = getattr(transport, "_quarantine_capacity_guard", None)
+    if not isinstance(guard, NativeCapacityGuard):
+        raise ReviewInputError("quarantine review capacity is not installed")
+    installed = _INSTALLED_GUARDS.get(guard)
+    if installed is None or installed[1]() is not transport:
+        raise ReviewInputError("quarantine review capacity is not installed")
+    ledger = installed[0]()
+    if ledger is None:
+        raise ReviewInputError("quarantine review capacity owner is unavailable")
+    return ledger, installed_capacity(ledger, guard.identity)
+
+
+_CAPACITY_EXTENSIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
+class _LifecycleExtension:
+    guard: Any
+    ledger: Any
+    identity: Any
+    state: bytes
+    plan: Any
+    bounds: tuple[int, ...]
+    sizing: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = None
+    historical_execution: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = (
+        None
+    )
+    current_execution: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = None
+    # Census membership for checkpoint enumeration. Activation installs `plan`.
+    census_plan: Any = None
+
+
+def _current_lifecycle_sizing(ledger, identity, known, added_parts):
+    """Obtain only a source-issued detached proposal, never runtime authority."""
+    import importlib
+
+    from review_sensei.source_registry import require_module_seal
+
+    name = "review_sensei_github.current_quarantine_finalization"
+    try:
+        issuer = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name != name:
+            raise
+        return None
+    require_module_seal(issuer)
+    token = issuer.lifecycle_sizing_context(
+        ledger, identity, known=known, added_parts=added_parts
+    )
+    if token is None:
+        return None
+    issuer.validate_lifecycle_sizing_context(
+        token, ledger, identity, known=known, added_parts=added_parts
+    )
+    return issuer, token, tuple(known.items()), added_parts
+
+
+def _historical_lifecycle_execution(ledger, identity, known, added_parts):
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_historical_execution as issuer
+
+    require_module_seal(issuer)
+    token = issuer.lifecycle_execution_context(
+        ledger, identity, known=known, added_parts=added_parts
+    )
+    return None if token is None else (issuer, token, tuple(known.items()), added_parts)
+
+
+def _current_lifecycle_execution(ledger, identity, known, added_parts):
+    """A separate current invocation context, never a promoted sizing token."""
+    import importlib
+
+    from review_sensei.source_registry import require_module_seal
+
+    name = "review_sensei_github.current_quarantine_finalization"
+    try:
+        issuer = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name != name:
+            raise
+        return None
+    require_module_seal(issuer)
+    token = issuer.lifecycle_execution_context(
+        ledger, identity, known=known, added_parts=added_parts
+    )
+    return None if token is None else (issuer, token, tuple(known.items()), added_parts)
+
+
+def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
+    """Pure append-only capacity proposal; retain every original unknown slot."""
+    from review_sensei.bounded_evidence import MAX_STORED_PART_BYTES, MAX_STORED_PARTS
+
+    from .packed_comment_census import CommentAllocationPlan
+
+    guard = installed_capacity(ledger, identity)
+    old = guard.comment_plan
+    if (
+        old is None
+        or guard.comment_bounds is None
+        or type(added_parts) is not int
+        or not 0 <= added_parts <= MAX_STORED_PARTS
+    ):
+        raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
+    sizing = None
+    historical_execution = None
+    current_execution = None
+    if not guard.complete_tail:
+        sizing = _current_lifecycle_sizing(ledger, identity, known, added_parts)
+        if sizing is None:
+            historical_execution = _historical_lifecycle_execution(
+                ledger, identity, known, added_parts
+            )
+            current_execution = _current_lifecycle_execution(
+                ledger, identity, known, added_parts
+            )
+        if historical_execution is not None and current_execution is not None:
+            raise ReviewInputError("quarantine lifecycle execution scopes overlap")
+        if (
+            sizing is None
+            and historical_execution is None
+            and current_execution is None
+        ):
+            from review_sensei.source_registry import require_module_seal
+
+            from . import quarantine_action
+
+            require_module_seal(quarantine_action)
+            if not quarantine_action.has_grouped_historical_lease(ledger, identity):
+                raise ReviewInputError(
+                    "quarantine lifecycle installed tail is unsupported"
+                )
+    bounds = (MAX_PART_BYTES + 512,) * added_parts
+    if set(old.known) - set(known):
+        raise ReviewInputError(
+            "quarantine lifecycle retained capacity member disappeared"
+        )
+    # Keep the authenticated complete listing order; an original unknown root
+    # may precede later immutable IDs already bound by exact create echoes.
+    merged = {
+        identifier: max(old.known.get(identifier, 0), amount)
+        for identifier, amount in known.items()
+    }
+    metadata_known = dict(old.metadata_known)
+    # A complete lifecycle census can introduce exact IDs for our previously
+    # unknown allocations. Keep the original configured-Bot envelope for those
+    # members, rather than silently replacing it with the generic author bound.
+    # This grants no ownership/content authority: every subsequent fresh walk
+    # checks the declared envelope and the complete opening/closing metadata.
+    slug = ledger.app_slug
+    if not isinstance(slug, str) or not slug.isascii():
+        raise ReviewInputError("quarantine comment metadata capacity is unsupported")
+    aliases = {slug.casefold(), slug.removesuffix("[bot]").casefold()}
+    for row in ledger._cached_comments():
+        identifier, author = row.get("id"), row.get("user")
+        if (
+            identifier in merged
+            and identifier not in metadata_known
+            and isinstance(author, dict)
+            and author.get("type") == "Bot"
+            and isinstance(author.get("login"), str)
+            and author["login"].isascii()
+            and author["login"].casefold() in aliases
+        ):
+            metadata_known[identifier] = old.metadata_unknown
+    stacked = CommentAllocationPlan(
+        merged,
+        (*old.unknown, *bounds),
+        metadata_known=metadata_known,
+        metadata_unknown=old.metadata_unknown,
+    )
+    if (
+        stacked.worst_read_calls() > MAX_PAGINATION_PAGES
+        or sum(stacked.known.values()) + sum(stacked.unknown) > MAX_STORED_PART_BYTES
+        or guard.future_parts + added_parts > MAX_STORED_PARTS
+    ):
+        raise ReviewInputError("quarantine lifecycle original capacity bound exceeded")
+    # Rediscovery lists bodies whose unknown slots were already reserved.
+    # Stacking those wires on the leased multiset spends another physical
+    # read. Keep that multiset and the admitted read proof for activation.
+    # Checkpoint enumeration still uses the stacked census plan.
+    plan = stacked
+    census_plan = None
+    if historical_execution is not None and added_parts == 0:
+        extra_sizes = [
+            amount
+            for identifier, amount in merged.items()
+            if identifier not in old.known
+        ]
+        if extra_sizes and all(
+            any(slot >= size for slot in old.unknown) for size in extra_sizes
+        ):
+            retained = CommentAllocationPlan(
+                {
+                    identifier: max(old.known[identifier], merged[identifier])
+                    for identifier in old.known
+                },
+                old.unknown,
+                metadata_known={
+                    identifier: metadata_known[identifier]
+                    for identifier in old.known
+                    if identifier in metadata_known
+                },
+                metadata_unknown=old.metadata_unknown,
+            )
+            if (
+                stacked.worst_read_calls() > retained.worst_read_calls()
+                and retained.worst_read_calls() <= old.worst_read_calls()
+            ):
+                plan = retained
+                census_plan = stacked
+    preview = copy(guard)
+    preview.comment_plan = plan
+    preview.comment_read_calls = plan.worst_read_calls()
+    preview.comment_bounds = [*guard.comment_bounds, *bounds]
+    preview.future_parts = len(preview.comment_bounds)
+    preview.future_bytes = sum(preview.comment_bounds)
+    preview.certificates = deepcopy(guard.certificates)
+    NativeCapacityGuard.require(preview, preview.stats)
+    proof = _LifecycleExtension(
+        guard,
+        ledger,
+        identity,
+        _guard_state(guard),
+        plan,
+        bounds,
+        sizing,
+        historical_execution,
+        current_execution,
+        census_plan,
+    )
+    _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
+    if (
+        sizing is not None
+        and sizing[0].__name__ == "review_sensei_github.current_quarantine_finalization"
+    ):
+        from review_sensei.source_registry import require_module_seal
+
+        require_module_seal(sizing[0])
+        sizing[0].capture_lifecycle_extension(proof, ledger, identity)
+    return proof
+
+
+def lifecycle_extension_plan(proof, *, ledger, identity):
+    """Read an unchanged full lifetime proposal, never consume or activate it.
+
+    Sizing-token expiry cannot convert this data accessor into writer authority.
+    A consumer must pin this exact immutable plan and revalidate before each use.
+    """
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    require_module_seal(sys.modules[__name__])
+    if (
+        type(proof) is not _LifecycleExtension
+        or _CAPACITY_EXTENSIONS.get(proof) != _extension_seal(proof)
+        or proof.ledger is not ledger
+        or proof.identity != identity
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle plan proposal is unissued or changed"
+        )
+    guard = installed_capacity(ledger, identity)
+    if guard is not proof.guard or _guard_state(guard) != proof.state:
+        raise ReviewInputError("quarantine lifecycle plan proposal is stale")
+    return proof.plan
+
+
+def _extension_seal(proof):
+    plan = proof.plan
+    return (
+        id(proof.guard),
+        id(proof.ledger),
+        proof.identity,
+        proof.state,
+        id(plan),
+        tuple(plan.known.items()),
+        tuple(plan.unknown),
+        tuple(plan.metadata_known.items()),
+        plan.metadata_unknown,
+        proof.bounds,
+        None
+        if proof.sizing is None
+        else (
+            id(proof.sizing[0]),
+            id(proof.sizing[1]),
+            proof.sizing[2],
+            proof.sizing[3],
+        ),
+        None
+        if proof.historical_execution is None
+        else (
+            id(proof.historical_execution[0]),
+            id(proof.historical_execution[1]),
+            proof.historical_execution[2],
+            proof.historical_execution[3],
+        ),
+        None
+        if proof.current_execution is None
+        else (
+            id(proof.current_execution[0]),
+            id(proof.current_execution[1]),
+            proof.current_execution[2],
+            proof.current_execution[3],
+        ),
+        None
+        if proof.census_plan is None
+        else (
+            id(proof.census_plan),
+            tuple(proof.census_plan.known.items()),
+            tuple(proof.census_plan.unknown),
+            tuple(proof.census_plan.metadata_known.items()),
+            proof.census_plan.metadata_unknown,
+        ),
+    )
+
+
+_GUARDED_WRITER_SOURCE = None
+_GUARDED_REPLACES: dict[Any, Any] = {}
+_WRITER_ACTIVATIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
+class _GuardedActivation:
+    pass
+
+
+def _guarded_lifecycle_writer(method):
+    """Inject an activation issuer only into the installed actual writer."""
+
+    @wraps(method)
+    def writer(ledger, identity, mutate, **kwargs):
+        if "_guarded_authorize" in kwargs:
+            raise ReviewInputError("quarantine writer capability cannot be supplied")
+        from .publication_recovery import _publication_transport
+
+        if (
+            not ledger._quarantine_required
+            or getattr(
+                _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+            )
+            is None
+        ):
+            return method(ledger, identity, mutate, **kwargs)
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .quarantine_action import decision_fence_capacity
+
+        source = _GUARDED_WRITER_SOURCE
+        record = kwargs.get("record")
+        if record is None:
+            raise ReviewInputError("quarantine lifecycle writer record is absent")
+        parts, retained_bytes = kwargs.get("parts"), kwargs.get("retained_bytes")
+        tail = kwargs.get("reserved_tail_calls", 0)
+        caller = ledger.caller
+        root = caller._root
+        record_bytes = canonical_bytes(record.to_dict())
+        business = decision_fence_capacity(ledger)
+        live = [True]
+        capabilities: list[_GuardedActivation] = []
+
+        def require_source():
+            if (
+                not live[0]
+                or source is None
+                or source[0] is not writer
+                or type(ledger) not in _GUARDED_REPLACES
+                or getattr(ledger.replace, "__func__", None)
+                is not _GUARDED_REPLACES[type(ledger)]
+                or getattr(ledger.replace_finding_lifecycle_parts, "__func__", None)
+                is not writer
+                or any(
+                    getattr(getattr(caller, name), "__func__", None) is not fn
+                    for name, fn in source[1].items()
+                )
+                or any(
+                    getattr(getattr(ledger, name), "__func__", None) is not fn
+                    for name, fn in source[2].items()
+                )
+                or caller._root != root
+                or caller._effect_record is not record
+                or canonical_bytes(record.to_dict()) != record_bytes
+                or type(parts) is not int
+                or type(retained_bytes) is not int
+                or type(tail) is not int
+                or parts < 0
+                or retained_bytes < 0
+                or tail < 0
+                or record.identity() != identity
+                or decision_fence_capacity(ledger) != business
+                or business is None
+            ):
+                raise ReviewInputError("quarantine lifecycle writer source changed")
+            caller._require_ledger(ledger, identity)
+
+        require_source()
+
+        def authorize(scope):
+            require_source()
+            from .quarantine_census import _LifecycleCapacity
+
+            _LifecycleCapacity._require_scope(scope, ledger, identity)
+            if (
+                scope.record is not record
+                or scope.parts != parts
+                or scope.extension is None
+                or capabilities
+            ):
+                raise ReviewInputError("quarantine lifecycle writer target changed")
+            cost = scope.plan.worst_read_calls() + 6 + 2 * parts
+            caller.budget_view.preflight(cost + business[0] + tail)
+            capability = _GuardedActivation()
+
+            def validate(operation):
+                require_source()
+                _LifecycleCapacity._require_scope(scope, ledger, identity)
+                if (
+                    operation is not caller._active_operation
+                    or operation is not caller._checkpoint_operation
+                    or operation.key
+                    != "native:" + getattr(mutate, "__qualname__", "checkpoint")
+                    or operation.write_attempted
+                    or operation.confirmed
+                    or operation.remaining < cost
+                    or operation.write_tail != 3
+                    or not any(
+                        operation is issued and block == caller._block
+                        for issued, block in caller._issued_operations
+                    )
+                ):
+                    raise ReviewInputError(
+                        "quarantine lifecycle writer operation changed"
+                    )
+
+            _WRITER_ACTIVATIONS[capability] = (scope, scope.extension, validate)
+            capabilities.append(capability)
+            from .quarantine_census import _bind_lifecycle_activation
+
+            _bind_lifecycle_activation(scope, capability)
+
+        try:
+            return method(
+                ledger, identity, mutate, _guarded_authorize=authorize, **kwargs
+            )
+        finally:
+            live[0] = False
+            for capability in capabilities:
+                _WRITER_ACTIVATIONS.pop(capability, None)
+
+    return writer
+
+
+def _install_guarded_lifecycle_writer(ledger_type, caller_type):
+    global _GUARDED_WRITER_SOURCE
+    if _GUARDED_WRITER_SOURCE is not None:
+        raise ReviewInputError("quarantine lifecycle writer source already installed")
+    _GUARDED_WRITER_SOURCE = (
+        ledger_type.replace_finding_lifecycle_parts,
+        {
+            name: getattr(caller_type, name)
+            for name in (
+                "replace_checkpoint",
+                "_operation",
+                "_require_ledger",
+                "open",
+                "_accept_checkpoint",
+                "reconcile_checkpoint",
+                "close_analysis_abort",
+            )
+        },
+        {
+            name: getattr(ledger_type, name)
+            for name in (
+                "preflight_finding_lifecycle_retention",
+                "evidence_producer",
+                "_discover",
+                "_request",
+                "_fetch_pages",
+                "_verify_mutation_grant",
+                "_part_owner",
+                "_render_comment",
+            )
+        },
+    )
+    _GUARDED_REPLACES[ledger_type] = ledger_type.replace
+
+
+def _install_guarded_ledger_replaces(review_type, action_type):
+    if (
+        len(_GUARDED_REPLACES) != 1
+        or review_type in _GUARDED_REPLACES
+        or action_type in _GUARDED_REPLACES
+    ):
+        raise ReviewInputError("quarantine lifecycle ledger sources already installed")
+    _GUARDED_REPLACES.update(
+        {review_type: review_type.replace, action_type: action_type.replace}
+    )
+
+
+def activate_lifecycle_extension(proof, *, capability=None, operation=None):
+    """Consume once before I/O; a failed operation never replenishes this pool."""
+    issued = (
+        _WRITER_ACTIVATIONS.get(capability)
+        if type(capability) is _GuardedActivation
+        else None
+    )
+    if issued is None or issued[1] is not proof:
+        raise ReviewInputError("quarantine lifecycle writer capability is unissued")
+    if type(proof) is not _LifecycleExtension or _CAPACITY_EXTENSIONS.get(
+        proof
+    ) != _extension_seal(proof):
+        raise ReviewInputError("quarantine lifecycle capacity extension is unissued")
+    if proof.current_execution is not None and proof.historical_execution is not None:
+        raise ReviewInputError("quarantine lifecycle execution scopes overlap")
+    if proof.sizing is not None:
+        raise ReviewInputError(
+            "quarantine lifecycle sizing proposal cannot authorize execution"
+        )
+    issued[2](operation)
+    guard = installed_capacity(proof.ledger, proof.identity)
+    if guard is not proof.guard or _guard_state(guard) != proof.state:
+        raise ReviewInputError("quarantine lifecycle capacity extension is stale")
+    if proof.historical_execution is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        issuer, token, known, parts = proof.historical_execution
+        require_module_seal(issuer)
+        issuer.consume_lifecycle_execution_context(
+            token, proof, operation, known=dict(known), added_parts=parts
+        )
+    if proof.current_execution is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        issuer, token, known, parts = proof.current_execution
+        require_module_seal(issuer)
+        issuer.consume_lifecycle_execution_context(
+            token, proof, operation, known=dict(known), added_parts=parts
+        )
+    _WRITER_ACTIVATIONS.pop(capability)
+    _CAPACITY_EXTENSIONS.pop(proof)
+    guard.comment_plan = proof.plan
+    guard.comment_read_calls = proof.plan.worst_read_calls()
+    guard.comment_bounds = [*guard.comment_bounds, *proof.bounds]
+    guard.future_parts = len(guard.comment_bounds)
+    guard.future_bytes = sum(guard.comment_bounds)
+    installed = _INSTALLED_GUARDS[guard]
+    _INSTALLED_GUARDS[guard] = (*installed[:3], _guard_state(guard))
+
+
+def _verified_part_ids(ledger):
+    verified = getattr(ledger, "_verified_parts", None)
+    if not isinstance(verified, dict):
+        return set()
+    identifiers = set()
+    for storage_id in verified:
+        if (
+            isinstance(storage_id, str)
+            and storage_id.isdecimal()
+            and not storage_id.startswith("0")
+        ):
+            identifiers.add(int(storage_id))
+    return identifiers
+
+
+def _spend_fitting_slots(slots, sizes):
+    """Drop the smallest slot that can hold each already observed body."""
+    remaining = list(slots)
+    for size in sizes:
+        choices = [bound for bound in remaining if bound >= size]
+        if choices:
+            remaining.remove(min(choices))
+    return remaining
+
+
 def _comment_allocation_plan(
     ledger,
     receipt,
@@ -826,10 +1656,12 @@ def _comment_allocation_plan(
 
     The qualified old writers PATCH only session/operation roots. Result,
     inventory-intent and evidence carriers are append-only; their known native
-    IDs retain their complete observed sizes. Old allocations remain reserved
-    even when other old objects are already visible. No hint selects membership.
+    IDs retain their complete observed sizes. The evidence exposure reserve
+    stays intact until its own archive and operation bodies have already landed
+    outside the authenticated manifest; ordinary issue-comment slots remain
+    intact. Other old objects do not spend it. No hint selects membership.
     """
-    from .operation_host import OPERATION_COMMENT_MARKER
+    from .operation_host import OPERATION_COMMENT_MARKER, RESULT_COMMENT_MARKER
     from .packed_comment_census import NODE_METADATA_BYTES, CommentAllocationPlan
     from .session_ledger import SESSION_MARKER_ANY_VERSION
 
@@ -899,13 +1731,62 @@ def _comment_allocation_plan(
         if type(root_slot) is not int or not 0 <= root_slot < len(current):
             raise ReviewInputError("quarantine mutable root allocation is invalid")
         current[root_slot] = max(current[root_slot], closure_wire)
+    evidence_slots = [parts["max_object_wire_bytes"]] * parts["new_objects"]
+    ordinary_slots = [ordinary["max_object_wire_bytes"]] * ordinary["new_objects"]
+    # Creation installs this plan before a successor manifest exists. Command
+    # installs run after that manifest is authenticated, so only bodies outside
+    # it can be the reserve that has already landed.
+    if getattr(ledger, "_quarantine_authenticated", None) is not None:
+        verified = _verified_part_ids(ledger)
+        evidence_prefix = "ReviewSensei immutable evidence part v1\n```json\n"
+        evidence_suffix = "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+        landed_evidence = []
+        landed_operations = []
+        for row in ledger._cached_comments():
+            identifier, body = row.get("id"), row.get("body")
+            if (
+                type(identifier) is not int
+                or identifier not in known
+                or not isinstance(body, str)
+                or SESSION_MARKER_ANY_VERSION in body
+            ):
+                continue
+            amount = known[identifier]
+            if body.startswith(evidence_prefix) and body.endswith(evidence_suffix):
+                if identifier not in verified and any(
+                    bound >= amount for bound in evidence_slots
+                ):
+                    landed_evidence.append(amount)
+            elif body.startswith(RESULT_COMMENT_MARKER + "\n") and any(
+                bound >= amount for bound in ordinary_slots
+            ):
+                landed_operations.append(amount)
+        # One full exposure reserve is already present on the ordinary census
+        # and must stay. A second full reserve of archive bodies and operation
+        # bodies is the late landed set; only those surplus evidence-part bodies
+        # spend fitting evidence slots, keeping ordinary_slots intact.
+        extra_evidence = landed_evidence[parts["new_objects"] :]
+        extra_operations = landed_operations[ordinary["new_objects"] :]
+        if (
+            parts["new_objects"] > 0
+            and ordinary["new_objects"] > 0
+            and len(extra_evidence) >= parts["new_objects"]
+            and len(extra_operations) >= ordinary["new_objects"]
+        ):
+            evidence_slots = _spend_fitting_slots(evidence_slots, extra_evidence)
+            if len(known) >= 150:
+                spent_ordinary = _spend_fitting_slots(ordinary_slots, extra_operations)
+                candidate_plan = CommentAllocationPlan(
+                    known,
+                    (*evidence_slots, *spent_ordinary, *current),
+                    metadata_known=metadata_known,
+                    metadata_unknown=metadata_bound,
+                )
+                if candidate_plan.worst_read_calls() >= 5:
+                    ordinary_slots = spent_ordinary
     return CommentAllocationPlan(
         known,
-        (
-            *(parts["max_object_wire_bytes"],) * parts["new_objects"],
-            *(ordinary["max_object_wire_bytes"],) * ordinary["new_objects"],
-            *current,
-        ),
+        (*evidence_slots, *ordinary_slots, *current),
         metadata_known=metadata_known,
         metadata_unknown=metadata_bound,
     )
@@ -1091,6 +1972,43 @@ def install_capacity(
     guard.command_receipt_update_id = (
         None if receipt_update is None else receipt_update[0]
     )
+    exposure = isolation["qualification"]["exposure"]["surfaces"]
+    reserved_slots = (
+        exposure["evidence_parts"]["new_objects"]
+        + exposure["issue_comments"]["new_objects"]
+        + len(comment_bounds)
+    )
+    guard._spent_reserved_slots = max(0, reserved_slots - len(comment_plan.unknown))
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    if (
+        guard._spent_reserved_slots > 0
+        and not guard.complete_tail
+        and guard.old_check_head is not None
+        and authenticated is not None
+    ):
+        known_old_review_ids: set[int] = set()
+        old_review_heads: set[str] = {guard.old_check_head}
+        source_bytes = getattr(authenticated, "source_documents_bytes", b"")
+        if isinstance(source_bytes, (bytes, bytearray)) and source_bytes:
+            docs = json.loads(source_bytes)
+            if isinstance(docs, dict):
+                for source in docs.values():
+                    if not isinstance(source, dict):
+                        continue
+                    review_id = source.get("review_id")
+                    if type(review_id) is int and review_id > 0:
+                        known_old_review_ids.add(review_id)
+                    record = source.get("record")
+                    if isinstance(record, dict):
+                        tx = record.get("transaction")
+                        if isinstance(tx, dict) and isinstance(tx.get("head_sha"), str):
+                            old_review_heads.add(tx["head_sha"])
+        if guard.current_check_head is not None:
+            old_review_heads.discard(guard.current_check_head)
+        guard._known_old_review_ids = tuple(sorted(known_old_review_ids))
+        guard._old_review_heads = tuple(sorted(old_review_heads))
+        author_id = getattr(ledger, "_evidence_author_id", None)
+        guard._evidence_author_id = author_id if type(author_id) is int else None
     if not ledger._inventory_complete:
         raise ReviewInputError(
             "quarantine native capacity needs the complete comment census"
@@ -1193,9 +2111,21 @@ def install_capacity(
         else:
             raise ReviewInputError("quarantine check census is incomplete")
     guard.seed("checks", list(checks.values()))
+    from review_sensei.source_registry import require_module_seal
+
+    from . import capacity_transport_membership
+
+    require_module_seal(capacity_transport_membership)
+    capacity_transport_membership.register_install(transport, guard)
     transport._quarantine_capacity_guard = guard
     ledger._quarantine_capacity_cursor = True
     guard.comment_reader = CapacityCommentReader(ledger, identity, transport)
+    _INSTALLED_GUARDS[guard] = (
+        weakref.ref(ledger),
+        weakref.ref(transport),
+        guard.comment_plan,
+        _guard_state(guard),
+    )
     return guard
 
 
@@ -1214,7 +2144,7 @@ def install_retained_capacity(ledger, identity, authenticated, *, token):
     bounds = ledger._quarantine_native_comment_bounds
     if bounds is not None:
         future = len(bounds)
-    return install_capacity(
+    guard = install_capacity(
         ledger,
         identity,
         archive["target_isolation"],
@@ -1223,3 +2153,62 @@ def install_retained_capacity(ledger, identity, authenticated, *, token):
         future_bytes=future * MAX_PART_BYTES,
         comment_bounds=bounds,
     )
+
+    if guard is not None:
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
+
+        installed = _INSTALLED_GUARDS.get(guard)
+        caller = getattr(ledger, "caller", None) or getattr(
+            ledger, "_startup_caller", None
+        )
+        old_caller = (
+            None
+            if installed is None
+            else (
+                getattr(installed[0](), "caller", None)
+                or getattr(installed[0](), "_startup_caller", None)
+            )
+        )
+        if (
+            installed is None
+            or caller is None
+            or old_caller is not caller
+            or type(authenticated) is not AuthenticatedQuarantine
+            or authenticated not in _AUTHENTICATED
+            or authenticated.original_caller is not caller
+            or authenticated.original_identity != identity
+            or ledger._quarantine_authenticated is not authenticated
+            or not ledger._inventory_complete
+            or installed[3] != _guard_state(guard)
+        ):
+            raise ReviewInputError(
+                "quarantine installed capacity selected owner changed"
+            )
+        from .api_run_requests import ApiRunRequestTransport
+
+        if not isinstance(caller, ApiRunRequestTransport):
+            raise ReviewInputError(
+                "quarantine installed capacity caller is unsupported"
+            )
+        caller._require_ledger(ledger, identity)
+        from .quarantine_origin import require_authenticated_read_owner
+
+        require_authenticated_read_owner(authenticated, ledger, caller, identity)
+        # The existing reader has independently authenticated this complete
+        # lineage. Transfer capacity custody only, never reset its consumed pool.
+        if canonical_bytes(authenticated.lineage) != authenticated.lineage_bytes:
+            raise ReviewInputError("quarantine installed capacity lineage changed")
+        _INSTALLED_GUARDS[guard] = (
+            weakref.ref(ledger),
+            installed[1],
+            installed[2],
+            installed[3],
+        )
+    return guard
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

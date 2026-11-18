@@ -6,10 +6,12 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
+from hot_original_entry import invoke_original
 from review_sensei_github.api_run_host import ApiRunReviewHooks
 from review_sensei_github.api_run_plan import owner_allocations, terminal_requests
 from review_sensei_github.approval import ReviewApprovalEligibility
 from review_sensei_github.native_union import native_union_frame_document
+from review_sensei_github.publication import approval_eligibility_from_body
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
 from review_sensei_github.session_ledger import (
     parse_session_comment,
@@ -18,7 +20,10 @@ from review_sensei_github.session_ledger import (
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 from test_quarantine_activation import registered_resource
 from test_quarantine_evidence import git
-from test_quarantine_published_tail_journey import NativePublishedTailJourneyFixture
+from test_quarantine_published_tail_journey import (
+    NativePublishedTailJourneyFixture,
+    PublishedTailJourneyFixture,
+)
 from test_review_run import EntryFixture
 
 from review_sensei.api_work import (
@@ -82,62 +87,55 @@ class TerminalAllocationProfileTests(unittest.TestCase):
     def test_current_publication_preserves_all_historical_holds_at_profile_boundaries(
         self,
     ):
+        def configure_profile(fixture, limit: int, message: str) -> None:
+            fixture.config_bytes = fixture.config_bytes.replace(
+                b"api_request_limit: 512",
+                f"api_request_limit: {limit}".encode(),
+            )
+            (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+            fixture.limit = limit
+            git(fixture.root, "add", ".reviewsensei.yml")
+            git(
+                fixture.root,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                message,
+            )
+            fixture.policy = fixture.policy_ref = git(fixture.root, "rev-parse", "HEAD")
+            fixture.creation_metadata = fixture.creator()
+
         for limit in (512, 513, 514, 548):
             with (
                 self.subTest(limit=limit),
                 tempfile.TemporaryDirectory() as directory,
                 patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
             ):
-                fixture = NativePublishedTailJourneyFixture(directory)
+                fixture = PublishedTailJourneyFixture(directory)
+                fixture.api_url = "https://api.github.com"
                 old, registration = fixture.original_origins()
                 old_document = copy.deepcopy(old.api_run_accounting)
                 # Change only the new run's synthetic trusted configuration;
                 # the fourteen historical holds and old frozen policy remain.
                 if limit != 512:
-                    fixture.config_bytes = fixture.config_bytes.replace(
-                        b"api_request_limit: 512",
-                        f"api_request_limit: {limit}".encode(),
+                    configure_profile(
+                        fixture, limit, "Offline terminal boundary configuration"
                     )
-                    (fixture.root / ".reviewsensei.yml").write_bytes(
-                        fixture.config_bytes
-                    )
-                    fixture.limit = limit
-                    git(fixture.root, "add", ".reviewsensei.yml")
-                    git(
-                        fixture.root,
-                        "-c",
-                        "user.name=Fixture",
-                        "-c",
-                        "user.email=fixture@example.invalid",
-                        "commit",
-                        "-m",
-                        "Offline terminal boundary configuration",
-                    )
-                    fixture.policy = fixture.policy_ref = git(
-                        fixture.root, "rev-parse", "HEAD"
-                    )
-                    fixture.creation_metadata = fixture.creator()
-                fixture.provider_comments = [
-                    {
-                        "path": "src/app.py",
-                        "line": 3,
-                        "side": "RIGHT",
-                        "body": "Current published assessment 0 requires independent human judgment.",
-                        "severity": "high",
-                        "blocking": False,
-                        "needs_human": True,
-                    }
-                ]
+                fixture.provider_comments = []
                 with registered_resource([registration]):
-                    self.assertEqual(fixture.invoke(), 0, fixture.error)
+                    result = fixture.invoke()
+                    self.assertEqual(result, 0, fixture.error)
                 self.assertEqual(old.api_run_accounting, old_document)
-                observed = native_union_frame_document(fixture.reviews[-1]["body"])
-                self.assertIsNotNone(observed)
-                view = ReviewApprovalEligibility.from_dict(
-                    observed["current"]
-                ).quarantine_assessments
+                eligibility = approval_eligibility_from_body(
+                    fixture.reviews[-1]["body"]
+                )
+                self.assertIsNotNone(eligibility)
+                view = eligibility.quarantine_assessments
                 self.assertEqual(len(view["pending"]), 14)
-                self.assertTrue(view["fresh_human_pending"])
+                self.assertFalse(view["fresh_human_pending"])
                 current = fixture.accounted.accounting
                 self.assertEqual(current.configuration.limit, limit)
                 record = parse_session_comment(
@@ -145,6 +143,44 @@ class TerminalAllocationProfileTests(unittest.TestCase):
                 )
                 self.assertEqual(record.transaction.phase, "publication_succeeded")
                 self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+
+        with (
+            self.subTest(limit=1152, populated=True),
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
+            old, registration = fixture.original_origins()
+            old_document = copy.deepcopy(old.api_run_accounting)
+            configure_profile(fixture, 1152, "Offline bounded profile")
+            fixture.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 3,
+                    "side": "RIGHT",
+                    "body": "Current published assessment 0 requires independent human judgment.",
+                    "severity": "high",
+                    "blocking": False,
+                    "needs_human": True,
+                }
+            ]
+            with registered_resource([registration]):
+                result, _ = invoke_original(fixture)
+                self.assertEqual(result, 0, fixture.error)
+            self.assertEqual(old.api_run_accounting, old_document)
+            observed = native_union_frame_document(fixture.reviews[-1]["body"])
+            self.assertIsNotNone(observed)
+            view = ReviewApprovalEligibility.from_dict(
+                observed["current"]
+            ).quarantine_assessments
+            self.assertEqual(len(view["pending"]), 14)
+            self.assertTrue(view["fresh_human_pending"])
+            current = fixture.accounted.accounting
+            self.assertEqual(current.configuration.limit, 1152)
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(record.transaction.phase, "publication_succeeded")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
 
     def test_frozen_v1_public_successor_preserves_receipts_unknowns_and_work(self):
         for limit in (513, 548, 1152):

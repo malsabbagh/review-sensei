@@ -41,6 +41,50 @@ from .native_union import NativeUnionReceipt, native_union_frame_document
 from .operation_host import OperationWriteUnconfirmed
 
 
+def _require_session_successor(before, after, *, extra_allowed: set[str], message: str):
+    if type(before) is not SessionRecord or type(after) is not SessionRecord:
+        raise ReviewInputError("native staging journal record type changed")
+    left, right = before.to_dict(), after.to_dict()
+    allowed = {
+        "generation",
+        "updated_at",
+        "record_sha256",
+        "api_run_accounting",
+        *extra_allowed,
+    }
+    if after.generation != before.generation + 1 or {
+        k: v for k, v in left.items() if k not in allowed
+    } != {k: v for k, v in right.items() if k not in allowed}:
+        raise ReviewInputError(message)
+
+
+def _require_staging_journal_successor(before, after, expected, staged):
+    """Validate data only; this predicate cannot issue or transfer a receipt."""
+    _require_session_successor(
+        before,
+        after,
+        extra_allowed={"publication_staging"},
+        message="native staging journal successor changed",
+    )
+    if (
+        before.publication_staging
+        != (None if expected is None else expected.to_document())
+        or after.publication_staging != staged.to_document()
+    ):
+        raise ReviewInputError("native staging journal successor changed")
+
+
+def _require_lifecycle_pending_successor(before, after):
+    _require_session_successor(
+        before,
+        after,
+        extra_allowed={"finding_lifecycle"},
+        message="native dispatch reconciliation request is ambiguous",
+    )
+    if after.finding_lifecycle == before.finding_lifecycle:
+        raise ReviewInputError("native dispatch reconciliation request is ambiguous")
+
+
 @dataclass
 class NativeGroupPublication:
     http: GitHubHttp
@@ -54,7 +98,8 @@ class NativeGroupPublication:
     authority_fence: Callable[[], bool]
     now: datetime | None = None
     manifest_store: NativeManifestStore | None = None
-    _physical_attempts: dict[str, tuple[Any, int]] = field(
+    reused_roots: tuple = ()
+    _physical_attempts: dict[str, tuple[Any, ...]] = field(
         default_factory=dict, init=False, repr=False
     )
     _frontier_record: SessionRecord | None = field(default=None, init=False, repr=False)
@@ -62,12 +107,58 @@ class NativeGroupPublication:
         default=None, init=False, repr=False
     )
 
-    def _remember_dispatch(self, claim: str) -> None:
+    def _attached_journal(self, dispatch_http: Any):
+        import sys
+
+        from review_sensei.source_registry import (
+            require_instance_source,
+            require_module_seal,
+        )
+
+        from . import command_finalization_plan, finding_lifecycle
+
+        require_module_seal(sys.modules[__name__])
+        require_module_seal(command_finalization_plan)
+        require_module_seal(finding_lifecycle)
+        if type(dispatch_http) is not finding_lifecycle._JournalTransport:
+            return None
+        command_finalization_plan.registered_journal_delegate(dispatch_http)
+        journal = dispatch_http.journal
+        require_instance_source(journal, methods=("checkpoint", "_document"))
+        caller = getattr(self.ledger, "caller", None)
+        if caller is None:
+            raise ReviewInputError("native staging journal input changed")
+        retained = caller._effect_record
+        if (
+            retained is None
+            or journal.ledger is not self.ledger
+            or journal.identity != self.identity
+            or journal._record is not retained
+            or caller._root != retained.record_sha256
+            or caller._checkpoint is not None
+            or journal.reviewer.http is not self.http
+        ):
+            raise ReviewInputError("native staging journal input changed")
+        return journal, retained
+
+    def _remember_dispatch(self, claim: str, *, dispatch_http: Any = None) -> None:
         from .caller_operation import caller_for_http
 
-        caller = caller_for_http(self.http)
+        target_http = self.http if dispatch_http is None else dispatch_http
+        caller = caller_for_http(target_http)
         if caller is not None:
-            self._physical_attempts[claim] = (caller, len(caller.observations))
+            attached = self._attached_journal(target_http)
+            journal_ctx = (
+                (attached[0], attached[1], len(attached[0].effects))
+                if attached is not None and getattr(attached[0], "_armed", False)
+                else None
+            )
+            self._physical_attempts[claim] = (
+                caller,
+                len(caller.observations),
+                target_http,
+                journal_ctx,
+            )
 
     def _settle_original_dispatch(self, claim: str) -> None:
         """Positive exact readback settles only this process's original effect.
@@ -80,18 +171,58 @@ class NativeGroupPublication:
         retained = self._physical_attempts.get(claim)
         if retained is None:
             return
-        caller, start = retained
-        if caller_for_http(self.http) is not caller:
+        caller, start, target_http, journal_ctx = retained
+        if caller_for_http(target_http) is not caller:
             raise ReviewInputError("native dispatch reconciliation owner changed")
         writes = [item for item in caller.observations[start:] if item.get("mutation")]
-        if len(writes) != 1:
-            raise ReviewInputError(
-                "native dispatch reconciliation request is ambiguous"
+        if journal_ctx is None:
+            if len(writes) != 1:
+                raise ReviewInputError(
+                    "native dispatch reconciliation request is ambiguous"
+                )
+            native_write = writes[0]
+        else:
+            journal, before_record, before_effects = journal_ctx
+            attached = self._attached_journal(target_http)
+            manifest = (
+                journal._record.finding_lifecycle.get("manifest")
+                if isinstance(journal._record.finding_lifecycle, dict)
+                else None
             )
-        if writes[0]["outcome"] in {"unknown", "expired"} or writes[0].get(
+            parts = (
+                manifest.get("parts")
+                if isinstance(manifest, dict)
+                and manifest.get("encoding") == "partitioned-json-v1"
+                else None
+            )
+            max_journal_writes = 1 + (len(parts) if isinstance(parts, list) else 0)
+            if (
+                attached is None
+                or attached[0] is not journal
+                or len(journal.effects) != before_effects + 1
+                or journal.effects[-1].get("method") != "POST"
+                or not str(journal.effects[-1].get("path", "")).endswith("/reviews")
+                or not (2 <= len(writes) <= max_journal_writes + 1)
+                or any(
+                    not (
+                        (
+                            item["outcome"] == "response"
+                            and not item.get("uncertain_effect")
+                        )
+                        or str(item["request_id"]) in caller._reconciled_mutations
+                    )
+                    for item in writes[:-1]
+                )
+            ):
+                raise ReviewInputError(
+                    "native dispatch reconciliation request is ambiguous"
+                )
+            _require_lifecycle_pending_successor(before_record, journal._record)
+            native_write = writes[-1]
+        if native_write["outcome"] in {"unknown", "expired"} or native_write.get(
             "uncertain_effect"
         ):
-            caller._reconciled_mutations.add(str(writes[0]["request_id"]))
+            caller._reconciled_mutations.add(str(native_write["request_id"]))
         self._physical_attempts.pop(claim)
 
     def fence(self) -> SessionRecord:
@@ -205,6 +336,23 @@ class NativeGroupPublication:
             != (self.plan.repository_id, self.plan.pull_request)
         ):
             raise ReviewInputError("native publication checkpoint plan changed")
+        # Retain the exact attached journal before this original staging CAS.
+        # The journal's later lifecycle CAS must not use the superseded root.
+        journal_handoff = None
+        if native:
+            attached = self._attached_journal(self.http)
+            if attached is not None:
+                journal, retained = attached
+                caller = getattr(self.ledger, "caller", None)
+                if caller is None:
+                    raise ReviewInputError("native staging journal custody changed")
+                journal_handoff = (
+                    journal,
+                    retained,
+                    canonical_bytes(retained.to_dict()),
+                    canonical_bytes(journal._document()),
+                    journal.operation_id,
+                )
         confirmed = checkpoint_publication_staging(
             self.ledger,
             self.identity,
@@ -226,10 +374,50 @@ class NativeGroupPublication:
                 self.identity,
                 staging=confirmed.to_document(),
             )
-            self._frontier_record = receipt.record
+            receipt_record = receipt.record
+            if journal_handoff is not None:
+                journal, retained, retained_bytes, document_bytes, operation_id = (
+                    journal_handoff
+                )
+                # No read or new authority: use only the already consumed
+                # original positive GET receipt, never a freshly guessed root.
+                import sys
+
+                from review_sensei.source_registry import (
+                    require_instance_source,
+                    require_module_seal,
+                )
+
+                from . import command_finalization_plan
+
+                require_module_seal(sys.modules[__name__])
+                require_module_seal(command_finalization_plan)
+                command_finalization_plan.registered_journal_delegate(self.http)
+                require_instance_source(journal, methods=("checkpoint", "_document"))
+                http_journal = getattr(self.http, "journal", None)
+                if (
+                    http_journal is None
+                    or http_journal is not journal
+                    or journal.ledger is not self.ledger
+                    or journal._record is not retained
+                    or journal.operation_id != operation_id
+                    or canonical_bytes(retained.to_dict()) != retained_bytes
+                    or canonical_bytes(journal._document()) != document_bytes
+                    or receipt_record is None
+                    or caller._effect_record is None
+                    or caller._effect_record is not receipt_record
+                    or caller._root != receipt_record.record_sha256
+                    or caller._checkpoint is not None
+                ):
+                    raise ReviewInputError("native staging journal custody changed")
+                _require_staging_journal_successor(
+                    retained, receipt_record, before, confirmed
+                )
+                journal._record = receipt_record
+            self._frontier_record = receipt_record
             self._claim_receipt = (
                 caller,
-                receipt.record.record_sha256,
+                receipt_record.record_sha256,
                 receipt.block,
                 receipt.comment_id,
                 receipt.body,
@@ -481,7 +669,10 @@ class NativeGroupPublication:
             )
         state, own_manifest_claim = self._publish_parts(claim_manifest=True)
         receipt = NativeUnionReceipt.from_staging(
-            self.plan, state, producer_id=self.producer_id
+            self.plan,
+            state,
+            producer_id=self.producer_id,
+            reused_roots=self.reused_roots,
         )
         known_manifest = None
         if not state.manifest_attempted:
@@ -490,7 +681,9 @@ class NativeGroupPublication:
         if own_manifest_claim:
             self.require_claim(state)
             assert state.manifest_token is not None
-            self._remember_dispatch(state.manifest_token)
+            self._remember_dispatch(
+                state.manifest_token, dispatch_http=store.port._http
+            )
             try:
                 known_manifest = store.create(receipt)
             except (GitHubHTTPTransientError, OperationWriteUnconfirmed):
@@ -614,3 +807,8 @@ class NativeGroupPublication:
         )
         state = self.checkpoint(state, confirmed)
         return state, evidence
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

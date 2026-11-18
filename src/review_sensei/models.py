@@ -2507,3 +2507,8 @@ def _json_compact(value: object) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

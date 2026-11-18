@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import io
 import json
 import subprocess
+import sys
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
@@ -92,6 +96,7 @@ class G04MergeFixture(EntryFixture):
         self.acquisitions = []
         self.before_acquisition = None
         self.broker_reads = []
+        self.broker_head_rejections = []
         self.review_payloads = []
         self.analysis_diffs = []
         self.provider_has_exact_diff = []
@@ -101,6 +106,28 @@ class G04MergeFixture(EntryFixture):
         path = urlsplit(request.full_url).path
         if urlsplit(request.full_url).hostname == "broker.github.test":
             self.broker_reads.append(request.get_method())
+            if path.endswith("/token"):
+                from review_sensei_github.run_authority import parse_authority
+
+                payload = json.loads(request.data)
+                authority = parse_authority(payload["session_attestation"])
+                # The real broker independently reads the current PR head before
+                # minting even the unscoped Actions token (token-broker.ts).
+                if (
+                    authority["head_sha"] != self.live_head
+                    and payload.get("release_only") is not True
+                ):
+                    self.trace.append((self.attempt, request.get_method(), path))
+                    self.broker_head_rejections.append(
+                        (authority["head_sha"], self.live_head)
+                    )
+                    raise HTTPError(
+                        request.full_url,
+                        403,
+                        "Forbidden",
+                        {},
+                        io.BytesIO(b'{"error":"broker_session_head_rejected"}'),
+                    )
         if path.endswith("/pulls/7/reviews") and request.get_method() == "POST":
             self.review_payloads.append(json.loads(request.data))
         response = super().external(request, timeout)
@@ -153,7 +180,8 @@ class G04MergeFixture(EntryFixture):
         from review_sensei.service import ReviewService
 
         original_run = ReviewService.run
-        original_preflight = ReviewPublisher._preflight_pr
+        original_preflight = inspect.unwrap(ReviewPublisher._preflight_pr)
+        previous_profile = sys.getprofile()
 
         def run(service, request, **kwargs):
             self.analysis_diffs.append(request.diff)
@@ -168,12 +196,21 @@ class G04MergeFixture(EntryFixture):
             with patch.object(service.provider, "complete", complete):
                 return original_run(service, request, **kwargs)
 
-        def preflight(publisher, *args, **kwargs):
-            result = original_preflight(publisher, *args, **kwargs)
-            self.preflight_results.append(
-                result.result.status if result.result else "eligible"
-            )
-            return result
+        def observe_preflight(frame, event, result):
+            # Observe the genuine source result without replacing the method
+            # whose identity is part of native publication admission. Python's
+            # exceptional return event has no result and must not be recorded.
+            if (
+                event == "return"
+                and frame.f_code is original_preflight.__code__
+                and frame.f_globals is original_preflight.__globals__
+                and result is not None
+            ):
+                self.preflight_results.append(
+                    result.result.status if result.result else "eligible"
+                )
+            if previous_profile is not None:
+                previous_profile(frame, event, result)
 
         def main(argv):
             argv = list(argv)
@@ -229,10 +266,13 @@ class G04MergeFixture(EntryFixture):
             ),
             patch.object(hosted_cli, "main", main),
             patch.object(ReviewService, "run", run),
-            patch.object(ReviewPublisher, "_preflight_pr", preflight),
             patch.object(review_run, "prepare_diff", prepare),
         ):
-            return self.invoke()
+            try:
+                sys.setprofile(observe_preflight)
+                return self.invoke()
+            finally:
+                sys.setprofile(previous_profile)
 
     def observation(self, *, case, code):
         from review_sensei_github.session_ledger import parse_session_comment

@@ -244,3 +244,40 @@ describe("independent Worker physical admission ceiling", () => {
     expect(control.receipt().dispatched).toBe(maximum);
   });
 });
+
+describe("v4 observation through production OIDC and HTTP extraction", () => {
+  it.each(["review", "command", "reply"] as const)("signs current %s facts using the same bounded exchange requests", async purpose => {
+    const counts: number[] = [];
+    for (const version of [3, 4] as const) {
+      resetOidcJwksCacheForTesting();
+      const fixture = await consumingBroker();
+      vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+        const response = await fixture.transport(input, init);
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.pathname === "/repos/acme/widgets/installation") return Response.json({ id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "write" } });
+        if (url.pathname === "/repos/acme/widgets") return Response.json({ id: 987654321, fork: false, full_name: "acme/widgets", owner: { id: 77, login: "acme" } });
+        return response;
+      });
+      const authority = { ...await request(purpose), version };
+      const result = await fixture.broker.exchange({ oidc_token: await fixture.oidcToken(), capability: "review_session", session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: authority });
+      counts.push(fixture.transportRequests.length);
+      if (version === 3) expect(result.session_attestation?.current_observation).toBeUndefined();
+      else {
+        const observation = result.session_attestation!.current_observation!;
+        expect(observation.repository.owner_id).toBe(77);
+        expect(observation.installation.repository_access).toBe(true);
+        expect(observation.actor.id).toBeGreaterThan(0);
+        expect(observation.actor.source_association).toBe(purpose === "review" ? null : "OWNER");
+        expect(await fixture.broker.verifySessionGrant(result.session_grant, result.session_attestation)).toEqual(result.session_attestation);
+      }
+    }
+    expect(counts[1]).toBe(counts[0]);
+  });
+  it("rejects v4 supplied observations and missing observation grants; leaves v3 closed", async () => {
+    const authority = { ...await request("review"), version: 4 };
+    expect(parseRunAuthority(authority).version).toBe(4);
+    expect(() => parseRunAuthority({ ...authority, current_observation: {} })).toThrow();
+    expect(() => parseRunAuthority({ ...authority, actor: null }, true)).toThrow();
+    expect(() => parseRunAuthority({ ...authority, version: 3, actor: null, current_observation: {} }, true)).toThrow();
+  });
+});

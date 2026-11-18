@@ -80,6 +80,17 @@ class V3JourneyFixture(PublishedTailJourneyFixture):
         "max_object_wire_bytes": 65536,
     }
 
+    def __init__(self, directory):
+        super().__init__(directory)
+        self.limit = 612
+        self.config_bytes = self.config_bytes.replace(
+            b"api_request_limit: 512", b"api_request_limit: 612"
+        )
+        (self.root / ".reviewsensei.yml").write_bytes(self.config_bytes)
+        git(self.root, "add", ".reviewsensei.yml")
+        git(self.root, "commit", "-m", "v3 limit 612")
+        self.policy = self.policy_ref = git(self.root, "rev-parse", "HEAD")
+
     def original_origins(self, **kwargs):
         old, registration = super().original_origins(**kwargs)
         self.same_head = getattr(type(self), "same_head", False)
@@ -387,7 +398,7 @@ class QuarantineV3JourneyTests(unittest.TestCase):
 
                 def observe(stage):
                     state = fixture.selected.caller.accounting
-                    self.assertEqual(state.configuration.limit, 512)
+                    self.assertEqual(state.configuration.limit, fixture.limit)
                     self.assertEqual(
                         len(fixture.accounted.observations), len(fixture.trace)
                     )
@@ -398,7 +409,7 @@ class QuarantineV3JourneyTests(unittest.TestCase):
                         + state.uncertain
                         + state.reserved_undispatched
                         + state.remaining,
-                        512,
+                        fixture.limit,
                     )
                     self.measurements.append(
                         {
@@ -495,7 +506,8 @@ class QuarantineV3JourneyTests(unittest.TestCase):
                             len(fixture.accounted.observations), len(fixture.trace)
                         )
                         self.assertEqual(
-                            fixture.selected.caller.accounting.configuration.limit, 512
+                            fixture.selected.caller.accounting.configuration.limit,
+                            fixture.limit,
                         )
                         observe("cold-decision")
                     self.assertEqual(

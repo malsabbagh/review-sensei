@@ -950,6 +950,9 @@ class _ArtifactGitHubHost:
                     if c.get("pull_request_review_id") == rid
                 ]
                 return self._resp(matched)
+            if "/reviews/" in path and not path.endswith("/comments"):
+                rid = int(path.rsplit("/", 1)[-1])
+                return self._resp(next((r for r in self.reviews if r["id"] == rid), {}))
             if path.endswith("/pulls/1/comments"):
                 return self._resp([])
             if "/pulls/comments/" in path:
@@ -1033,11 +1036,14 @@ class _ArtifactGitHubHost:
                                         "id": f"PRRC_{review_id}_{idx}",
                                         "databaseId": review_id * 100 + idx,
                                         "pull_request_review_id": review_id,
+                                        "pullRequestReview": {"databaseId": review_id},
+                                        "commit": {"oid": body["commit_id"]},
                                         "body": comment["body"],
                                         "edited_by_human": False,
                                         "author": {
                                             "login": self.app_slug,
                                             "__typename": "Bot",
+                                            "databaseId": 9001,
                                         },
                                     }
                                 ]
@@ -1460,6 +1466,7 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
 
         from review_sensei.convergence import ReviewConvergencePolicy
         from review_sensei.outcomes import RecoveryArtifact
+        from tests.test_review_transaction import CONFIGURATION
 
         host = _ArtifactGitHubHost(head_sha=HEAD_SHA)
         app, _pub, options = self._make_app(host, github_session_ledger=True)
@@ -1490,6 +1497,7 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
             base_branch="main",
             base_sha=BASE_SHA,
             result=res1,
+            configuration_context=CONFIGURATION,
             diff=self.DIFF_1,
             app_slug="reviewsensei[bot]",
             convergence_policy=policy,

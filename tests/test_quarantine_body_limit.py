@@ -1,13 +1,13 @@
 """Partial, no-wildcard c7 failure through the real review/quarantine entries."""
 
 import hashlib
-import itertools
 import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
+from quarantine_fixture_identity import BODY_LIMIT_RUNS
 from review_sensei_github.publication import (
     ReviewPublisher,
     approval_eligibility_from_body,
@@ -27,7 +27,7 @@ from test_quarantine_published_tail_isolation import contract_fixture
 
 from review_sensei.bounded_evidence import canonical_bytes
 
-_RUNS = itertools.count(7900)
+_RUNS = BODY_LIMIT_RUNS
 
 
 class BodyLimitJourneyFixture(JourneyFixture):

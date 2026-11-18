@@ -481,27 +481,14 @@ class InitialAssessmentTailTests(unittest.TestCase):
             f.next_run()
             f.live_head = f.requested_head = HEAD
             f.prepare_reply()
-            f.thread_rows = [
-                {
-                    "id": "native-thread-" + str(comment["id"]),
-                    "isResolved": True,
-                    "comments": {
-                        "nodes": [
-                            {
-                                "databaseId": comment["id"],
-                                "body": comment["body"],
-                                "path": comment["path"],
-                                "line": comment["line"],
-                                "author": {
-                                    "login": "reviewsensei",
-                                    "__typename": "Bot",
-                                },
-                            }
-                        ]
-                    },
-                }
-                for comment in f.inline
-            ]
+            # Preserve the actual producer's opaque target IDs, bodies and owner.
+            # Only native resolution state changes before this fresh invocation.
+            f.thread_rows = copy.deepcopy(f.threads)
+            for node in f.thread_rows:
+                node["isResolved"] = True
+                for comment in node["comments"]["nodes"]:
+                    # This field is absent from the real GraphQL query response.
+                    comment["author"].pop("databaseId", None)
             f.source["body"] = (
                 "@reviewsensei The caller contract is intentional; the added change is checked."
             )

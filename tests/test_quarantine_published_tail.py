@@ -48,6 +48,9 @@ class PublishedTailAssessmentTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = EntryFixture(directory)
+            # This contract reconstructs the pre-lifecycle published-tail
+            # wire format, not today's window-projected publication identity.
+            fixture.legacy_publication_fixture = True
             original_objects(fixture)
             fixture.provider_comments = [
                 {

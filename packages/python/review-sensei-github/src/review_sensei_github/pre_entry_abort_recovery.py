@@ -822,8 +822,9 @@ def _probe_owner_ceased(
     cancelled runs legitimately exit with `failure` or `cancelled`. Any
     recognized terminal conclusion (`_TERMINAL_JOB_CONCLUSIONS`) paired with
     `status == "completed"` across every paginated job in the target attempt
-    proves runner execution has ceased; incomplete, truncated, or unrecognized
-    job pages fail closed (`False`).
+    proves runner execution has ceased; empty, incomplete, truncated, or
+    unrecognized job pages fail closed (`False`). A retained caller necessarily
+    ran a job, so an empty listing cannot witness its owner's cessation.
     """
     http = getattr(ledger, "http", None)
     token = actions_token or getattr(ledger, "token", None)
@@ -842,10 +843,8 @@ def _probe_owner_ceased(
                 and repo.get("id") == identity.repository_id
                 and repo.get("full_name") == identity.repository
                 and run_payload.get("status") == "completed"
-                and (
-                    run_conclusion is None
-                    or run_conclusion in _TERMINAL_JOB_CONCLUSIONS
-                )
+                and isinstance(run_conclusion, str)
+                and run_conclusion in _TERMINAL_JOB_CONCLUSIONS
                 and isinstance(attempt, int)
                 and not isinstance(attempt, bool)
                 and attempt >= old.owner.run_attempt
@@ -867,39 +866,34 @@ def _probe_owner_ceased(
                     total_count = j_payload.get("total_count")
                     if not isinstance(page_jobs, list) or len(page_jobs) > _PAGE_SIZE:
                         return False
-                    if total_count is not None:
-                        if (
-                            type(total_count) is not int
-                            or total_count < 0
-                            or (
-                                expected_total is not None
-                                and total_count != expected_total
-                            )
-                        ):
-                            return False
-                        expected_total = total_count
+                    if (
+                        type(total_count) is not int
+                        or total_count <= 0
+                        or (
+                            expected_total is not None and total_count != expected_total
+                        )
+                    ):
+                        return False
+                    expected_total = total_count
                     for job in page_jobs:
                         if not isinstance(job, dict):
                             return False
                         jid = job.get("id")
-                        if type(jid) is int:
-                            if jid in seen_job_ids:
-                                return False
-                            seen_job_ids.add(jid)
+                        if type(jid) is not int or jid <= 0 or jid in seen_job_ids:
+                            return False
+                        seen_job_ids.add(jid)
                         all_jobs.append(job)
                     if len(page_jobs) < _PAGE_SIZE:
                         reached_end = True
                         break
                 if not reached_end:
                     return False
-                if expected_total is not None and expected_total != len(all_jobs):
+                if expected_total != len(all_jobs):
                     return False
                 return all(
                     j.get("status") == "completed"
-                    and (
-                        j.get("conclusion") is None
-                        or j.get("conclusion") in _TERMINAL_JOB_CONCLUSIONS
-                    )
+                    and isinstance(j.get("conclusion"), str)
+                    and j["conclusion"] in _TERMINAL_JOB_CONCLUSIONS
                     for j in all_jobs
                 )
         return False
@@ -1427,12 +1421,12 @@ def build_no_transaction_attempt_packet(
         repo_lower = resolved_identity.repository.casefold()
         if (
             resolved_identity.pull_request == SITEVAULT_142_PULL_REQUEST
-            and "sitevault" in repo_lower
+            and repo_lower == "malsabbagh/site-vault"
         ):
             resolved_case_id = SITEVAULT_142_CASE_ID
         elif (
             resolved_identity.pull_request == SITEVAULT_153_PULL_REQUEST
-            and "sitevault" in repo_lower
+            and repo_lower == "malsabbagh/site-vault"
         ):
             resolved_case_id = SITEVAULT_153_CASE_ID
         else:

@@ -511,7 +511,14 @@ class HumanInventoryStore:
         authentication. Its just-read bodies also feed the inventory decoder;
         no prior operation's content or incomplete listing is reused.
         """
-        from .api_run_requests import ApiRunSessionLedger
+        from .api_run_requests import ApiRunRequestTransport, ApiRunSessionLedger
+        from .current_command_execution import _ACTIVE as _CURRENT_COMMAND_ACTIVE
+        from .publication_recovery import _publication_transport
+        from .quarantine_action import has_grouped_historical_lease
+        from .quarantine_origin import (
+            has_paged_v2_disposition_snapshot,
+            rebind_same_lineage_owner,
+        )
 
         if (
             not isinstance(self.ledger, ApiRunSessionLedger)
@@ -523,8 +530,51 @@ class HumanInventoryStore:
             self.context.pull_request,
             self.context.repository_id,
         )
-        loaded = self.ledger.load(identity)
         caller = self.ledger.caller
+        loaded = None
+        authenticated = getattr(self.ledger, "_quarantine_authenticated", None)
+        guard = getattr(
+            _publication_transport(self.http), "_quarantine_capacity_guard", None
+        )
+        if (
+            getattr(self.ledger, "_inventory_complete", False) is True
+            and type(caller) is ApiRunRequestTransport
+            and caller._checkpoint is None
+            and caller._effect_record is not None
+            and caller._effect_record.record_sha256 == caller._root
+            and authenticated is not None
+            and caller._effect_record.quarantine_lineage is not None
+            and canonical_bytes(caller._effect_record.quarantine_lineage)
+            == authenticated.lineage_bytes
+            and (
+                (guard is None and len(self.ledger._cached_comments()) >= 98)
+                or (
+                    (
+                        caller in _CURRENT_COMMAND_ACTIVE
+                        or has_grouped_historical_lease(self.ledger, identity)
+                        or authenticated.record_sha256
+                        == caller._effect_record.record_sha256
+                    )
+                    and type(caller.accounting.configuration.limit) is int
+                    and caller.accounting.configuration.limit >= 1152
+                    and has_paged_v2_disposition_snapshot(caller._effect_record)
+                )
+            )
+        ):
+            try:
+                rebind_same_lineage_owner(
+                    authenticated,
+                    self.ledger,
+                    caller,
+                    identity,
+                    caller._effect_record,
+                )
+            except ReviewInputError:
+                pass
+            else:
+                loaded = SessionLoadResult(status="ok", record=caller._effect_record)
+        if loaded is None:
+            loaded = self.ledger.load(identity)
         caller._require_ledger(self.ledger, identity)
         if (
             loaded.status != "ok"

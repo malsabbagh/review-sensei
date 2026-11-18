@@ -1483,7 +1483,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
         self,
     ) -> None:
         taskalong_id = SessionIdentity(
-            repository="org/taskalong",
+            repository="malsabbagh/taskalong",
             pull_request=TASKALONG_41_PULL_REQUEST,
             repository_id=4100,
         )
@@ -1550,7 +1550,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
 
             state = RetentionState()
             state.reviews = []
-            # Re-bind state opener to serve org/taskalong PR #41 issue comments:
+            # Re-bind state opener to serve malsabbagh/taskalong PR #41 issue comments:
             orig_opener = state.http.opener
 
             def _rebind_comment(obj: Any) -> Any:
@@ -1560,7 +1560,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                         "https://api.github.test/repos/owner/repo/issues/1"
                     ):
                         out["issue_url"] = (
-                            "https://api.github.test/repos/org/taskalong/issues/41"
+                            "https://api.github.test/repos/malsabbagh/taskalong/issues/41"
                         )
                     if isinstance(out.get("base"), dict) and isinstance(
                         out["base"].get("repo"), dict
@@ -1570,7 +1570,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                             "repo": {
                                 **out["base"]["repo"],
                                 "id": 4100,
-                                "full_name": "org/taskalong",
+                                "full_name": "malsabbagh/taskalong",
                             },
                         }
                     if isinstance(out.get("head"), dict) and isinstance(
@@ -1580,7 +1580,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                             **out["head"],
                             "repo": {
                                 **out["head"]["repo"],
-                                "full_name": "org/taskalong",
+                                "full_name": "malsabbagh/taskalong",
                             },
                         }
                     return out
@@ -1591,7 +1591,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             def taskalong_opener(request: Any, timeout: float | None = None) -> Any:
                 rewritten_url = (
                     request.full_url.replace(
-                        "/repos/org/taskalong/", "/repos/owner/repo/"
+                        "/repos/malsabbagh/taskalong/", "/repos/owner/repo/"
                     )
                     .replace("/issues/41/", "/issues/1/")
                     .replace("/pulls/41", "/pulls/1")
@@ -1691,6 +1691,68 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                 cessation_conclusion="failure",
                 cessation_completed_at="2026-10-20T09:15:00Z",
             )
+
+            # A lookalike/foreign repository must not inherit this historical incident label.
+            for foreign_repository in ("other/taskalong", "malsabbagh/taskalong-copy"):
+                with self.subTest(foreign_repository=foreign_repository):
+                    foreign_packet = build_publication_overflow_attempt_packet(
+                        identity=SessionIdentity(
+                            repository=foreign_repository,
+                            pull_request=taskalong_id.pull_request,
+                            repository_id=taskalong_id.repository_id,
+                        ),
+                        record=SessionRecord._construct(
+                            **{
+                                **{
+                                    key: value
+                                    for key, value in vars(rec_41).items()
+                                    if key != "record_sha256"
+                                    and not key.startswith("_")
+                                },
+                                "repository": foreign_repository,
+                                "transaction": replace(
+                                    rec_41.transaction,
+                                    repository=foreign_repository,
+                                    transaction_id=ReviewTransaction.derive_id(
+                                        repository=foreign_repository,
+                                        **{
+                                            key: getattr(rec_41.transaction, key)
+                                            for key in (
+                                                "pull_request",
+                                                "base_sha",
+                                                "head_sha",
+                                                "policy_digest",
+                                                "configuration_digest",
+                                                "evidence_digest",
+                                                "reservation_id",
+                                            )
+                                        },
+                                    ),
+                                ),
+                            }
+                        ),
+                        result=result_41,
+                        policy=POLICY,
+                        current_base_sha=BASE,
+                        current_head_sha="f" * 40,
+                        live_reviews=[],
+                        app_slug=APP,
+                        owner_ceased=True,
+                        diff=FULL_DIFF,
+                        narrative_archive=None,
+                        executor_sha=TASKALONG_41_BE1_EXECUTOR,
+                        caller_blob=TASKALONG_41_CALLER_BLOB,
+                        installed_core_version="0.8.11",
+                        installed_hosted_version="0.3.12",
+                        cessation_job_id=41009,
+                        cessation_conclusion="failure",
+                        cessation_completed_at="2026-10-20T09:15:00Z",
+                    )
+                    self.assertNotEqual(foreign_packet.case_id, TASKALONG_41_CASE_ID)
+                    self.assertTrue(
+                        foreign_packet.case_id.startswith(foreign_repository + "#")
+                    )
+                    self.assertFalse(foreign_packet.authority)
             self.assertIsInstance(pkt_41, PublicationOverflowAttemptPacket)
             self.assertEqual(pkt_41.case_id, TASKALONG_41_CASE_ID)
             self.assertFalse(pkt_41.authority)
@@ -1883,7 +1945,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
         )
 
         # 2. SiteVault #142 & #153 (G29):
-        sv_142_id = SessionIdentity("org/sitevault", 142, repository_id=1420)
+        sv_142_id = SessionIdentity("malsabbagh/site-vault", 142, repository_id=1420)
         sv_142_acc = ApiRunAccounting.from_document(
             {
                 **_make_accounting(run_id=14201).to_document(),
@@ -1891,7 +1953,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             }
         )
         sv_142_rec = SessionRecord._construct(
-            repository="org/sitevault",
+            repository="malsabbagh/site-vault",
             pull_request=142,
             repository_id=1420,
             completed_initial_reviews=0,
@@ -1913,7 +1975,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             provider_entry_started=False,
         )
 
-        sv_153_id = SessionIdentity("org/sitevault", 153, repository_id=1420)
+        sv_153_id = SessionIdentity("malsabbagh/site-vault", 153, repository_id=1420)
         sv_153_acc = ApiRunAccounting.from_document(
             {
                 **_make_accounting(run_id=15301, uncertain=1).to_document(),
@@ -1921,7 +1983,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             }
         )
         sv_153_rec = SessionRecord._construct(
-            repository="org/sitevault",
+            repository="malsabbagh/site-vault",
             pull_request=153,
             repository_id=1420,
             completed_initial_reviews=0,

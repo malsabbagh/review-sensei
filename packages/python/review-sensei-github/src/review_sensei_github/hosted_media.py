@@ -6,6 +6,7 @@ publication all spend the caller's original budget and physical transport.
 
 from __future__ import annotations
 
+import time
 from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
@@ -56,7 +57,11 @@ class _MediaTransport(GitHubHttp):
     """
 
     def __init__(self, http: GitHubHttp, *, read_token: str, app_slug: str) -> None:
-        super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        super().__init__(
+            api_url=http.api_url,
+            timeout=getattr(http, "timeout", 30),
+            evidence_monotonic=getattr(http, "evidence_monotonic", time.monotonic),
+        )
         self.transport = http
         self.read_token = read_token
         self.app_path = "/users/" + quote(app_slug, safe="")

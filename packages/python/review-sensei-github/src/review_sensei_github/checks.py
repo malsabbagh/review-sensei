@@ -352,13 +352,7 @@ class ReviewCheckPublisher:
             repository=repository,
             head_sha=head_sha,
             app_slug=app_slug,
-            status="in_progress",
-            title="ReviewSensei review in progress",
-            summary=(
-                "A new ReviewSensei review is running for this head; any "
-                "earlier conclusion on this head does not stand for it."
-            ),
-            conclusion=None,
+            **self._state_fields(),
         )
 
     def complete(
@@ -390,11 +384,31 @@ class ReviewCheckPublisher:
                 "and delayed effects remain unsettled. Controlled restart does "
                 "not certify those obligations or authorize approval.",
             )
+        return self._write(
+            token=token,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            **self._state_fields(outcome),
+        )
+
+    @staticmethod
+    def _state_fields(outcome: CheckOutcome | None = None) -> dict[str, Any]:
+        """The actual pending/completed producer, shared by pure sizing only."""
+        if outcome is None:
+            return {
+                "status": "in_progress",
+                "title": "ReviewSensei review in progress",
+                "summary": (
+                    "A new ReviewSensei review is running for this head; any "
+                    "earlier conclusion on this head does not stand for it."
+                ),
+                "conclusion": None,
+            }
+        if outcome.conclusion not in COMPLETED_CONCLUSIONS:
+            raise GitHubPublicationError("check conclusion is invalid")
         validate_bounded_text(
-            outcome.title,
-            MAX_CHECK_TITLE_CHARS,
-            label="check title",
-            allow_empty=False,
+            outcome.title, MAX_CHECK_TITLE_CHARS, label="check title", allow_empty=False
         )
         validate_bounded_text(
             outcome.summary,
@@ -402,16 +416,12 @@ class ReviewCheckPublisher:
             label="check summary",
             allow_empty=False,
         )
-        return self._write(
-            token=token,
-            repository=repository,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            status="completed",
-            title=outcome.title,
-            summary=outcome.summary,
-            conclusion=outcome.conclusion,
-        )
+        return {
+            "status": "completed",
+            "title": outcome.title,
+            "summary": outcome.summary,
+            "conclusion": outcome.conclusion,
+        }
 
     def cancel(
         self,
@@ -444,6 +454,48 @@ class ReviewCheckPublisher:
             ),
             conclusion="cancelled",
         )
+
+    def plan_completion(self, *, token, repository, head_sha, app_slug, outcome):
+        """Observe the selected check and return exact sizing data, never a write."""
+        if type(self) is not ReviewCheckPublisher:
+            raise GitHubPublicationError("check capacity source is unsupported")
+        existing = self._find_own_run(
+            token=token, repository=repository, head_sha=head_sha, app_slug=app_slug
+        )
+        body = self._mutation_body(
+            repository=repository,
+            head_sha=head_sha,
+            status="completed",
+            title=outcome.title,
+            summary=outcome.summary,
+            conclusion=outcome.conclusion,
+            create=existing is None,
+        )
+        return (
+            "POST" if existing is None else "PATCH",
+            self._repository_path(
+                repository,
+                "/check-runs" if existing is None else f"/check-runs/{existing}",
+            ),
+            body,
+        )
+
+    def _mutation_body(
+        self, *, repository, head_sha, status, title, summary, conclusion, create
+    ):
+        body: dict[str, object] = {
+            "status": status,
+            "output": {"title": title, "summary": summary},
+        }
+        if create:
+            body.update(
+                name=REVIEW_CHECK_NAME,
+                head_sha=head_sha,
+                external_id=self._external_id(repository, head_sha),
+            )
+        if conclusion is not None:
+            body["conclusion"] = conclusion
+        return body
 
     def _write(
         self,
@@ -583,7 +635,7 @@ class ReviewCheckPublisher:
             if not isinstance(slug, str) or slug.casefold() not in expected_slugs:
                 continue
             check_run_id = run.get("id")
-            if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
+            if type(check_run_id) is int and 1 <= check_run_id <= 2**63 - 1:
                 from .controlled_restart import owns_target
 
                 if owns_target(
@@ -591,6 +643,8 @@ class ReviewCheckPublisher:
                     self._repository_path(repository, f"/check-runs/{check_run_id}"),
                 ):
                     return check_run_id
+            else:
+                raise CheckOperationError(check_failure("lookup", status=status))
         return None
 
     def _create(
@@ -604,27 +658,37 @@ class ReviewCheckPublisher:
         summary: str,
         conclusion: str | None,
     ) -> CheckPublicationResult:
-        body: dict[str, object] = {
-            "name": REVIEW_CHECK_NAME,
-            "head_sha": head_sha,
-            "status": status,
-            "external_id": self._external_id(repository, head_sha),
-            "output": {"title": title, "summary": summary},
-        }
-        if conclusion is not None:
-            body["conclusion"] = conclusion
-        path = self._repository_path(repository, "/check-runs")
-        with native_check_call(
-            self.http,
-            "create",
-            "POST",
-            path,
+        body = self._mutation_body(
             repository=repository,
             head_sha=head_sha,
-            body=body,
-            context=getattr(self, "_accounting_context", None),
-        ) as capture:
-            status_code, payload = self._request("POST", path, token, body)
+            status=status,
+            title=title,
+            summary=summary,
+            conclusion=conclusion,
+            create=True,
+        )
+        path = self._repository_path(repository, "/check-runs")
+        from .ordinary_native_recovery import ReconciledCheck, consume_check
+
+        try:
+            with native_check_call(
+                self.http,
+                "create",
+                "POST",
+                path,
+                repository=repository,
+                head_sha=head_sha,
+                body=body,
+                context=getattr(self, "_accounting_context", None),
+            ) as capture:
+                status_code, payload = self._request("POST", path, token, body)
+        except ReconciledCheck as recovered:
+            return CheckPublicationResult(
+                status="created",
+                check_run_id=consume_check(
+                    recovered, self, method="POST", path=path, body=body
+                ),
+            )
         if status_code == 403:
             return CheckPublicationResult(
                 status="check_permission_denied",
@@ -633,7 +697,7 @@ class ReviewCheckPublisher:
             )
         if status_code == 201 and isinstance(payload, Mapping):
             check_run_id = payload.get("id")
-            if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
+            if type(check_run_id) is int and 1 <= check_run_id <= 2**63 - 1:
                 return CheckPublicationResult(
                     status="created", check_run_id=check_run_id
                 )
@@ -653,24 +717,37 @@ class ReviewCheckPublisher:
         summary: str,
         conclusion: str | None,
     ) -> CheckPublicationResult:
-        body: dict[str, object] = {
-            "status": status,
-            "output": {"title": title, "summary": summary},
-        }
-        if conclusion is not None:
-            body["conclusion"] = conclusion
-        path = self._repository_path(repository, f"/check-runs/{check_run_id}")
-        with native_check_call(
-            self.http,
-            "update",
-            "PATCH",
-            path,
+        body = self._mutation_body(
             repository=repository,
             head_sha=head_sha,
-            body=body,
-            context=getattr(self, "_accounting_context", None),
-        ) as capture:
-            status_code, payload = self._request("PATCH", path, token, body)
+            status=status,
+            title=title,
+            summary=summary,
+            conclusion=conclusion,
+            create=False,
+        )
+        path = self._repository_path(repository, f"/check-runs/{check_run_id}")
+        from .ordinary_native_recovery import ReconciledCheck, consume_check
+
+        try:
+            with native_check_call(
+                self.http,
+                "update",
+                "PATCH",
+                path,
+                repository=repository,
+                head_sha=head_sha,
+                body=body,
+                context=getattr(self, "_accounting_context", None),
+            ) as capture:
+                status_code, payload = self._request("PATCH", path, token, body)
+        except ReconciledCheck as recovered:
+            return CheckPublicationResult(
+                status="updated",
+                check_run_id=consume_check(
+                    recovered, self, method="PATCH", path=path, body=body
+                ),
+            )
         if status_code == 403:
             return CheckPublicationResult(
                 status="check_permission_denied",
@@ -679,7 +756,11 @@ class ReviewCheckPublisher:
             )
         if status_code == 200 and isinstance(payload, Mapping):
             updated_id = payload.get("id")
-            if isinstance(updated_id, int) and not isinstance(updated_id, bool):
+            if (
+                type(updated_id) is int
+                and 1 <= updated_id <= 2**63 - 1
+                and updated_id == check_run_id
+            ):
                 return CheckPublicationResult(status="updated", check_run_id=updated_id)
         raise CheckOperationError(
             capture.bind(check_failure("update", status=status_code))
@@ -721,3 +802,8 @@ __all__ = [
     "review_check_outcome",
     "review_check_outcome_for_publication_failure",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

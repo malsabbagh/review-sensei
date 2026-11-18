@@ -2055,3 +2055,8 @@ def _stamp(value: object) -> int:
     if not 0 <= number <= _STAMP_MAX:
         raise ValueError("invalid timestamp")
     return number
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

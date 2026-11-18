@@ -308,11 +308,21 @@ def count_fixture_skips(remaining, scopes, skipped_events) -> tuple[int, bool]:
 
 
 def partition(
-    identities: list[str], workers: int, costs: dict[str, float] | None = None
+    identities: list[str],
+    workers: int,
+    costs: dict[str, float] | None = None,
+    *,
+    limit: int = 16,
+    splittable: frozenset[str] = frozenset(),
 ) -> list[list[str]]:
-    """Deterministic, order-independent class assignment to nonempty workers."""
-    if workers < 1 or workers > 16:
-        raise ValueError("workers must be between 1 and 16")
+    """Deterministic, order-independent class assignment to nonempty workers.
+
+    A class in ``splittable`` (no class or module fixtures) may be split by
+    method when it alone exceeds half the average worker load; otherwise one
+    such class would bound the runtime of every sharded plan.
+    """
+    if workers < 1 or workers > limit:
+        raise ValueError(f"workers must be between 1 and {limit}")
     if not identities or len(set(identities)) != len(identities):
         raise ValueError("discovery must produce distinct nonempty test IDs")
     if costs is not None and not isinstance(costs, dict):
@@ -338,13 +348,42 @@ def partition(
 
     # Keep class fixtures and any class-local state together. Splitting methods
     # repeats expensive setup and amplifies Windows filesystem contention.
-    for _name, members in sorted(
-        classes.items(), key=lambda item: (-cost(*item), item[0])
-    ):
+    units: list[tuple[float, str, list[str]]] = []
+    average = sum(cost(*item) for item in classes.items()) / len(groups)
+    for name, members in classes.items():
+        weight = cost(name, members)
+        if name in splittable and len(members) > 1 and weight > average / 2:
+            units.extend(
+                (weight / len(members), member, [member]) for member in members
+            )
+        else:
+            units.append((weight, name, members))
+    for weight, _name, members in sorted(units, key=lambda unit: (-unit[0], unit[1])):
         index = min(range(len(groups)), key=lambda index: (loads[index], index))
         groups[index].extend(members)
-        loads[index] += cost(_name, members)
+        loads[index] += weight
     return [sorted(group) for group in groups]
+
+
+def fixture_free_classes(suite: unittest.TestSuite) -> frozenset[str]:
+    """Classes whose methods share no unittest class or module fixture."""
+    names: dict[str, bool] = {}
+    for case in test_cases(suite):
+        cls = type(case)
+        name = case.id().rpartition(".")[0]
+        module = sys.modules.get(cls.__module__)
+        eligible = (
+            name == f"{cls.__module__}.{cls.__qualname__}"
+            and getattr(cls.setUpClass, "__func__", None)
+            is unittest.TestCase.setUpClass.__func__
+            and getattr(cls.tearDownClass, "__func__", None)
+            is unittest.TestCase.tearDownClass.__func__
+            and isinstance(module, ModuleType)
+            and not hasattr(module, "setUpModule")
+            and not hasattr(module, "tearDownModule")
+        )
+        names[name] = names.get(name, True) and eligible
+    return frozenset(name for name, eligible in names.items() if eligible)
 
 
 def execution_plan(suite, loader, identities, groups, controller_modules):
@@ -465,6 +504,39 @@ def execution_plan(suite, loader, identities, groups, controller_modules):
 
 def inventory_digest(identities):
     return hashlib.sha256("\n".join(sorted(identities)).encode()).hexdigest()
+
+
+MAX_SHARDS = 16
+
+
+def parse_shard(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", value)
+    if match is None:
+        raise argparse.ArgumentTypeError("shard must be INDEX/COUNT")
+    index, count = int(match[1]), int(match[2])
+    if index > count or count > MAX_SHARDS:
+        raise argparse.ArgumentTypeError(
+            f"shard index must be within 1..COUNT and COUNT at most {MAX_SHARDS}"
+        )
+    return index, count
+
+
+def plan_digest(mode, controller_ids, workers) -> str:
+    document = {
+        "mode": mode,
+        "controller": list(controller_ids),
+        "workers": [[bucket, list(members)] for bucket, members in workers],
+    }
+    return hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def shard_buckets(workers, index: int, count: int):
+    """Select one runner's buckets from the complete plan every shard computes."""
+    return [
+        (bucket, members) for bucket, members in workers if bucket % count == index - 1
+    ]
 
 
 def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
@@ -617,6 +689,12 @@ def _main(coverage_owners) -> int:
         action="store_true",
         help="Combine isolated worker branch coverage",
     )
+    parser.add_argument(
+        "--shard",
+        type=parse_shard,
+        help="Run INDEX/COUNT of the complete plan on this runner; "
+        "scripts/verify_test_shards.py proves the shards cover the inventory",
+    )
     parser.add_argument("--worker-report", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-manifest", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -654,27 +732,55 @@ def _main(coverage_owners) -> int:
         if args.costs and not isinstance(costs, dict):
             raise ValueError("class costs must be a JSON object of positive seconds")
         all_identities = test_ids(suite, allow_custom=loader.hook_seen)
-        groups = partition(all_identities, args.workers, costs)
+        shard_index, shard_count = args.shard or (1, 1)
+        groups = partition(
+            all_identities,
+            args.workers * shard_count,
+            costs,
+            limit=16 * shard_count,
+            splittable=fixture_free_classes(suite)
+            if args.shard is not None
+            else frozenset(),
+        )
         plan = execution_plan(
             suite, loader, all_identities, groups, args.controller_module
         )
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1
-    fallback = plan["mode"] == "original-root"
-    controller_suite = plan["controller"]
-    controller_ids = plan["controller_ids"]
-    bucket_ids = [bucket for bucket, _members in plan["workers"]]
-    groups = [members for _bucket, members in plan["workers"]]
-    if plan["mode"] == "workers" and fallback_coverage is not None:
+    owned = shard_buckets(plan["workers"], shard_index, shard_count)
+    fallback = plan["mode"] == "original-root" and bool(owned)
+    controller_suite = plan["controller"] if shard_index == 1 else None
+    controller_ids = plan["controller_ids"] if shard_index == 1 else []
+    if not owned and controller_suite is None:
+        if plan["mode"] != "original-root":
+            print(
+                f"Shard {shard_index}/{shard_count} owns no tests in "
+                f"{plan['mode']} mode; use fewer shards",
+                file=sys.stderr,
+            )
+            return 1
+        # Drift revokes splitting, not coverage: shard 1 runs the original root.
+        print(
+            f"Shard {shard_index}/{shard_count} owns no tests: shard 1 runs the "
+            f"original root because {plan['reason']}",
+            file=sys.stderr,
+            flush=True,
+        )
+    bucket_ids = [bucket for bucket, _members in owned]
+    groups = [members for _bucket, members in owned]
+    if fallback_coverage is not None and controller_suite is None and not fallback:
         fallback_coverage.stop()
     phase_label = (
         f"controller phase {len(controller_ids)} tests; "
         if controller_suite is not None
         else ""
     )
+    shard_label = (
+        f" (shard {shard_index}/{shard_count})" if args.shard is not None else ""
+    )
     print(
-        f"Discovered {len(all_identities)} tests; {phase_label}running {len(groups)} disjoint workers",
+        f"Discovered {len(all_identities)} tests; {phase_label}running {len(groups)} disjoint workers{shard_label}",
         flush=True,
     )
     # Use manifests rather than argv test lists: Windows has a 32 KiB command
@@ -875,6 +981,8 @@ def _main(coverage_owners) -> int:
                 paths.insert(0, Path(scratch) / ".coverage.controller")
             if not execution_complete or not all(path.is_file() for path in paths):
                 coverage_error = "Missing worker coverage or incomplete execution"
+            elif not paths:
+                print("This shard ran no tests; it has no coverage data", flush=True)
             else:
                 try:
                     coverage = Coverage()
@@ -891,27 +999,37 @@ def _main(coverage_owners) -> int:
             coverage_ok = coverage_error is None
         complete = execution_complete and coverage_ok is not False
         if args.report:
+            document = {
+                "inventory_sha256": inventory_digest(all_identities),
+                "mode": plan["mode"],
+                "fallback_reason": plan["reason"],
+                "requested_workers": args.workers,
+                "effective_worker_count": len(workers),
+                "controller": controller,
+                "discovered": len(all_identities),
+                "complete": complete,
+                "execution_complete": execution_complete,
+                "coverage_ok": coverage_ok,
+                "coverage_error": coverage_error,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "workers": workers,
+            }
+            if args.shard is not None:
+                document["shard"] = {
+                    "index": shard_index,
+                    "count": shard_count,
+                    "plan_sha256": plan_digest(
+                        plan["mode"], plan["controller_ids"], plan["workers"]
+                    ),
+                    "plan_buckets": [bucket for bucket, _members in plan["workers"]],
+                    "plan_controller_assigned": len(plan["controller_ids"]),
+                    "buckets": bucket_ids,
+                    "assigned": len(controller_ids)
+                    + sum(len(members) for members in groups),
+                }
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(
-                json.dumps(
-                    {
-                        "inventory_sha256": inventory_digest(all_identities),
-                        "mode": plan["mode"],
-                        "fallback_reason": plan["reason"],
-                        "requested_workers": args.workers,
-                        "effective_worker_count": len(workers),
-                        "controller": controller,
-                        "discovered": len(all_identities),
-                        "complete": complete,
-                        "execution_complete": execution_complete,
-                        "coverage_ok": coverage_ok,
-                        "coverage_error": coverage_error,
-                        "elapsed_seconds": round(time.monotonic() - started, 3),
-                        "workers": workers,
-                    },
-                    indent=2,
-                )
-                + "\n",
+                json.dumps(document, indent=2) + "\n",
                 encoding="utf-8",
             )
     return (

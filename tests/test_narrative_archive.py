@@ -391,6 +391,12 @@ class NarrativeArchiveTests(unittest.TestCase):
             self.assertEqual(len(new_reviews), 1)
             self.assertEqual(new_reviews[0]["state"], "COMMENTED")
             body = new_reviews[0]["body"]
+            eligibility = approval_eligibility_from_body(body)
+            self.assertFalse(eligibility.facts.has_blocking_findings)
+            self.assertTrue(eligibility.facts.has_human_adjudication_findings)
+            self.assertEqual(len(eligibility.human_review.pending), 5)
+            self.assertEqual(fixture.check_runs[-1]["conclusion"], "action_required")
+            self.assertNotIn("APPROVED", [review["state"] for review in new_reviews])
             self.assertIn("Excerpt; the complete original provider narrative", body)
             self.assertLessEqual(len(body.encode()), MAX_PUBLISHED_REVIEW_BODY_BYTES)
             state = fixture.accounted.accounting

@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import socket
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -37,7 +39,6 @@ from fake_github_http import json_response
 from review_sensei_github.api_run_host import review_startup_plan
 from review_sensei_github.api_run_plan import owner_allocations
 from review_sensei_github.conversation import ReplyResult, reply_marker
-from review_sensei_github.errors import GitHubPublicationTransientError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.operation_comments import (
     GitHubIssueCommentOperationPort,
@@ -332,14 +333,30 @@ class PendingReassessmentG30Tests(unittest.TestCase):
         # durably recorded in an eligibility `COMMENT` review:
         state_fin = _attach_finding_index(State())
         fin_provider = Provider(response_for(state_fin.eligibility))
-        with patch.object(
-            ReviewApprovalFinalizer,
-            "finalize",
-            side_effect=GitHubPublicationTransientError(
-                "transient check/approval loss"
-            ),
-        ):
+        original = inspect.unwrap(ReviewApprovalFinalizer.finalize)
+        code, globals_ = original.__code__, original.__globals__
+        faults = []
+
+        def interrupt_durable_finalizer(current, method, path, body):
+            if method != "GET" or path != "/repos/owner/repo/pulls/1":
+                return
+            frame = sys._getframe(1)
+            while frame is not None:
+                if frame.f_code is code and frame.f_globals is globals_:
+                    self.assertEqual(current.events(), ["COMMENT"])
+                    self.assertTrue(current.replies)
+                    faults.append((method, path))
+                    raise TimeoutError("interrupted durable reassessment finalizer")
+                frame = frame.f_back
+
+        state_fin.hook = interrupt_durable_finalizer
+        try:
             interrupted, fin_broker = _app_reply(state_fin, fin_provider)
+        finally:
+            state_fin.hook = None
+        self.assertTrue(faults, "original durable finalizer fault was not reached")
+        self.assertIs(original.__code__, code)
+        self.assertIs(original.__globals__, globals_)
 
         self.assertEqual(interrupted.status, "replied")
         self.assertEqual(interrupted.approval_status, "approval_withheld")
@@ -1832,6 +1849,48 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             source_actor="maintainer-user",
             pending_receipt=receipt_408,
         )
+
+        # A lookalike/foreign repository must not inherit this historical incident label.
+        for foreign_repository in (
+            "other/review-sensei",
+            "malsabbagh/review-sensei-copy",
+        ):
+            with self.subTest(foreign_repository=foreign_repository):
+                foreign_packet = build_pending_reassessment_attempt_packet(
+                    identity=SessionIdentity(
+                        repository=foreign_repository,
+                        pull_request=id_408.pull_request,
+                        repository_id=id_408.repository_id,
+                    ),
+                    original_eligibility=orig_elig,
+                    latest_eligibility=orig_elig,
+                    bound_source_comment_id=40810,
+                    bound_source_updated_at="2026-10-15T14:22:00Z",
+                    bound_source_body_sha256=source_sha,
+                    bound_source_kind="issue",
+                    bound_base_sha=BASE,
+                    bound_head_sha=HEAD,
+                    current_base_sha=BASE,
+                    current_head_sha=HEAD,
+                    pr_merged=True,
+                    record=SessionRecord._construct(
+                        **{
+                            **{
+                                key: value
+                                for key, value in vars(rec_408).items()
+                                if key != "record_sha256" and not key.startswith("_")
+                            },
+                            "repository": foreign_repository,
+                        }
+                    ),
+                    source_actor="maintainer-user",
+                    pending_receipt=receipt_408,
+                )
+                self.assertNotEqual(foreign_packet.case_id, REVIEWSENSEI_408_CASE_ID)
+                self.assertTrue(
+                    foreign_packet.case_id.startswith(foreign_repository + "#")
+                )
+                self.assertFalse(foreign_packet.authority)
         self.assertIsInstance(pkt_408, PendingReassessmentAttemptPacket)
         self.assertEqual(pkt_408.case_id, REVIEWSENSEI_408_CASE_ID)
         self.assertFalse(pkt_408.authority)
