@@ -41,12 +41,14 @@ from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from . import controlled_restart
+from .errors import GitHubHTTPError
 from .publication import (
     APPROVAL_MARKER_PREFIX,
+    FINDING_MARKER_PREFIX,
+    FINDING_MARKER_PREFIX_V2,
     MAX_PAGINATION_PAGES,
     REVIEW_MARKER_PREFIX,
     finding_publication_scope,
-    review_identity_marker,
 )
 from .session_ledger import parse_session_comment
 
@@ -157,9 +159,23 @@ class NoTransactionAbortQualification:
             raise ReviewInputError(
                 "missing transaction cannot imply no-operation outside qualified pre-entry abort"
             )
-        if self.qualifies_rollover and self.missing_predicates:
+        if self.qualifies_rollover and (
+            self.state_code != "qualified_pre_entry_abort"
+            or self.primary_route != "pre_entry_abort_rollover"
+            or self.missing_predicates
+            or any(
+                proof is not True
+                for proof in (
+                    self.owner_ceased,
+                    self.provider_entry_proven_absent,
+                    self.reservation_release_confirmed,
+                    self.dispatch_clean,
+                    self.late_effects_absent,
+                )
+            )
+        ):
             raise ReviewInputError(
-                "qualified pre-entry abort rollover cannot carry missing predicates"
+                "qualified pre-entry abort rollover requires all explicit witnesses"
             )
         if (
             self.conservative_nonstartup_caller_liability < 0
@@ -364,12 +380,20 @@ def _validate_analysis_abort_receipt(
         else:
             if abort_tx.phase != "analysis":
                 failures.append("analysis_phase_abort_transaction")
+            if (abort_tx.repository, abort_tx.pull_request) != (
+                record.repository,
+                record.pull_request,
+            ):
+                failures.append("matching_abort_transaction_scope")
     if record.transaction is not None:
         failures.append("null_session_transaction_after_abort_cleanup")
     if record.reservation_id is not None or record.reserved_slot is not None:
         failures.append("confirmed_reservation_release")
     if not failures and (
-        record.generation < 2 or record.record_sha256 in {source_root, cleanup_root}
+        abort_tx is None
+        or record.generation < 2
+        or abort_tx.generation >= record.generation
+        or record.record_sha256 in {source_root, cleanup_root}
     ):
         failures.append("verified_cleanup_root_lineage")
     return (len(failures) == 0), abort_tx, tuple(failures)
@@ -402,12 +426,15 @@ def verify_reenroll_forbidden(record: SessionRecord) -> bool:
 def qualify_no_transaction_abort(
     record: SessionRecord,
     *,
-    owner_ceased: bool = True,
+    owner_ceased: bool = False,
     provider_entry_started: bool | None = None,
     unreconciled_mutation_present: bool = False,
-    late_native_effects_present: bool = False,
+    late_native_effects_present: bool | None = None,
 ) -> NoTransactionAbortQualification:
-    """Evaluate exact G29 pre-entry `no-transaction` predicates on `record`."""
+    """Evaluate G29 from explicit witnesses, without performing any reads.
+
+    An omitted owner/effect witness does not prove cessation or absence.
+    """
     if not isinstance(record, SessionRecord):
         raise ReviewInputError("qualification requires a valid SessionRecord")
     if record.api_run_accounting is None:
@@ -416,6 +443,13 @@ def qualify_no_transaction_abort(
         )
     old = ApiRunAccounting.from_document(record.api_run_accounting)
     nonstartup_liab, total_liab = _conservative_bounds(old)
+    owner_ceased = owner_ceased is True
+    late_effects_absent = late_native_effects_present is False
+    late_effects_hold = (
+        "zero_late_native_effects"
+        if late_native_effects_present is True
+        else "complete_late_native_effects_readback"
+    )
 
     # Non-`no-transaction` boundaries (e.g., settled review or action, or
     # unclosed publication transaction) delegate to the G03 state classifier.
@@ -435,7 +469,7 @@ def qualify_no_transaction_abort(
                 record.reservation_id is None and record.reserved_slot is None
             ),
             dispatch_clean=(old.uncertain == 0 and not unreconciled_mutation_present),
-            late_effects_absent=not late_native_effects_present,
+            late_effects_absent=late_effects_absent,
             conservative_nonstartup_caller_liability=nonstartup_liab,
             conservative_total_caller_liability=total_liab,
             conservative_provider_call_hold=1,
@@ -472,7 +506,7 @@ def qualify_no_transaction_abort(
                 provider_entry_proven_absent=False,
                 reservation_release_confirmed=release_confirmed,
                 dispatch_clean=dispatch_clean,
-                late_effects_absent=not late_native_effects_present,
+                late_effects_absent=late_effects_absent,
                 conservative_nonstartup_caller_liability=nonstartup_liab,
                 conservative_total_caller_liability=total_liab,
                 conservative_provider_call_hold=1,
@@ -493,7 +527,7 @@ def qualify_no_transaction_abort(
                 provider_entry_proven_absent=True,
                 reservation_release_confirmed=True,
                 dispatch_clean=False,
-                late_effects_absent=not late_native_effects_present,
+                late_effects_absent=late_effects_absent,
                 conservative_nonstartup_caller_liability=nonstartup_liab,
                 conservative_total_caller_liability=total_liab,
                 conservative_provider_call_hold=0,
@@ -505,7 +539,7 @@ def qualify_no_transaction_abort(
                     "retain conservative caller liability and recover via controlled restart."
                 ),
             )
-        if late_native_effects_present:
+        if not late_effects_absent:
             return NoTransactionAbortQualification(
                 state_code="pre_entry_abort_late_effects",
                 qualifies_rollover=False,
@@ -518,12 +552,27 @@ def qualify_no_transaction_abort(
                 conservative_nonstartup_caller_liability=nonstartup_liab,
                 conservative_total_caller_liability=total_liab,
                 conservative_provider_call_hold=1,
-                missing_predicates=("zero_late_native_effects",),
-                primary_route="controlled_serialized_restart",
+                missing_predicates=(late_effects_hold,)
+                + (() if owner_ceased else ("predecessor_owner_cessation",)),
+                primary_route=(
+                    "controlled_serialized_restart"
+                    if owner_ceased
+                    else "wait_for_owner_cessation_then_recover"
+                ),
                 fallback_routes=(),
                 operator_action=(
-                    "Late native review or thread effects exist on the aborted "
-                    "scope; refuse rollover and isolate via controlled serialized restart."
+                    (
+                        "Late native review or thread effects exist on the aborted scope."
+                        if late_native_effects_present is True
+                        else "Native review or thread evidence is incomplete; "
+                        "absence of late effects is unproven."
+                    )
+                    + " Retain the rollover hold."
+                    + (
+                        ""
+                        if owner_ceased
+                        else " Prove owner cessation before recovery."
+                    )
                 ),
             )
         if not owner_ceased:
@@ -586,7 +635,7 @@ def qualify_no_transaction_abort(
             provider_entry_proven_absent=(provider_entry_started is False),
             reservation_release_confirmed=False,
             dispatch_clean=dispatch_clean,
-            late_effects_absent=not late_native_effects_present,
+            late_effects_absent=late_effects_absent,
             conservative_nonstartup_caller_liability=nonstartup_liab,
             conservative_total_caller_liability=total_liab,
             conservative_provider_call_hold=0 if provider_entry_started is False else 1,
@@ -620,7 +669,7 @@ def qualify_no_transaction_abort(
             provider_entry_proven_absent=False,
             reservation_release_confirmed=True,
             dispatch_clean=dispatch_clean,
-            late_effects_absent=not late_native_effects_present,
+            late_effects_absent=late_effects_absent,
             conservative_nonstartup_caller_liability=nonstartup_liab,
             conservative_total_caller_liability=total_liab,
             conservative_provider_call_hold=1,
@@ -654,7 +703,7 @@ def qualify_no_transaction_abort(
             provider_entry_proven_absent=(provider_entry_started is False),
             reservation_release_confirmed=True,
             dispatch_clean=False,
-            late_effects_absent=not late_native_effects_present,
+            late_effects_absent=late_effects_absent,
             conservative_nonstartup_caller_liability=nonstartup_liab,
             conservative_total_caller_liability=total_liab,
             conservative_provider_call_hold=0 if provider_entry_started is False else 1,
@@ -676,8 +725,8 @@ def qualify_no_transaction_abort(
         "authenticated_analysis_abort_receipt",
         "proven_provider_non_entry",
     ]
-    if late_native_effects_present:
-        missing_unconf.append("zero_late_native_effects")
+    if not late_effects_absent:
+        missing_unconf.append(late_effects_hold)
     if not owner_ceased:
         missing_unconf.append("predecessor_owner_cessation")
     return NoTransactionAbortQualification(
@@ -688,7 +737,7 @@ def qualify_no_transaction_abort(
         provider_entry_proven_absent=False,
         reservation_release_confirmed=True,
         dispatch_clean=True,
-        late_effects_absent=not late_native_effects_present,
+        late_effects_absent=late_effects_absent,
         conservative_nonstartup_caller_liability=nonstartup_liab,
         conservative_total_caller_liability=total_liab,
         conservative_provider_call_hold=1,
@@ -847,7 +896,7 @@ def _probe_owner_ceased(
                 and run_conclusion in _TERMINAL_JOB_CONCLUSIONS
                 and isinstance(attempt, int)
                 and not isinstance(attempt, bool)
-                and attempt >= old.owner.run_attempt
+                and attempt == old.owner.run_attempt
             ):
                 all_jobs: list[dict[str, Any]] = []
                 seen_job_ids: set[int] = set()
@@ -908,29 +957,188 @@ def _probe_owner_ceased(
     return False
 
 
+_REVIEW_SCOPE = r" repo=([1-9][0-9]*) pr=([1-9][0-9]*) head=([a-f0-9]{40})"
+_REVIEW_FRAME = re.compile(
+    re.escape(REVIEW_MARKER_PREFIX)
+    + _REVIEW_SCOPE
+    + r" result=[a-f0-9]{64} coverage=(?:full|incremental|fallback-full)"
+    + r"(?: continuation=[a-f0-9]{64})? -->"
+)
+_APPROVAL_FRAME = re.compile(
+    re.escape(APPROVAL_MARKER_PREFIX) + _REVIEW_SCOPE + r" base=[a-f0-9]{40} -->"
+)
+_NATIVE_LOGIN = re.compile(r"[A-Za-z0-9_-]+(?:\[bot\])?", re.IGNORECASE)
+_NOT_REQUESTED = object()
+_LATE_THREADS_QUERY = (
+    "query LateAbortEffects($owner: String!, $name: String!, "
+    "$number: Int!, $first: Int!, $after: String) { "
+    "repository(owner: $owner, name: $name) { databaseId pullRequest(number: $number) { "
+    "number reviewThreads(first: $first, after: $after) { "
+    "totalCount pageInfo { hasNextPage endCursor } "
+    "nodes { id isResolved comments(first: 1) { nodes { id body commit { oid } "
+    "originalCommit { oid } "
+    "author { login __typename ... on Bot { databaseId } } "
+    "} } } } } } }"
+)
+
+
+def _native_login(value: object) -> str | None:
+    if isinstance(value, str) and _NATIVE_LOGIN.fullmatch(value):
+        return value.casefold().removesuffix("[bot]")
+    return None
+
+
+def _native_effect_author(
+    author: object,
+    *,
+    app_slug: str | None,
+    app_user_id: int | None,
+    graphql: bool = False,
+) -> bool | None:
+    """Return owned, definitively foreign, or unreadable attribution."""
+    if not isinstance(author, dict):
+        return None
+    if type(app_user_id) is not int or app_user_id <= 0:
+        app_user_id = None
+    login = _native_login(author.get("login"))
+    actor_type = author.get("__typename" if graphql else "type")
+    author_id = author.get("databaseId" if graphql else "id")
+    if login is None or (
+        author_id is not None and (type(author_id) is not int or author_id <= 0)
+    ):
+        return None
+    if actor_type in ("User", "Organization", "Mannequin"):
+        # The authenticated actor type, not its mutable body or login, excludes
+        # human rows. Conflicting numeric identity is not a human witness.
+        return None if app_user_id is not None and author_id == app_user_id else False
+    if actor_type != "Bot" or author_id is None or app_user_id is None:
+        return None
+    is_owned = author_id == app_user_id
+    expected_login = _native_login(app_slug)
+    if app_slug is not None and (
+        expected_login is None or is_owned != (login == expected_login)
+    ):
+        return None
+    return is_owned
+
+
+def classify_abort_review_effect(
+    review: object,
+    *,
+    identity: SessionIdentity,
+    head_sha: str | None,
+    app_slug: str | None,
+    app_user_id: int | None,
+) -> bool | None:
+    """Classify an exact native review; malformed or contradictory evidence holds."""
+    if not isinstance(review, dict):
+        return None
+    review_id = review.get("id")
+    if type(review_id) is not int or review_id <= 0:
+        return None
+    owned = _native_effect_author(
+        review.get("user"), app_slug=app_slug, app_user_id=app_user_id
+    )
+    if owned is False:
+        return False
+
+    commit_id = review.get("commit_id")
+    if not isinstance(commit_id, str) or _HEX40.fullmatch(commit_id) is None:
+        return None
+    body = review.get("body")
+    frame = None
+    if isinstance(body, str) and (
+        body.count(REVIEW_MARKER_PREFIX) + body.count(APPROVAL_MARKER_PREFIX) == 1
+    ):
+        frame = _REVIEW_FRAME.search(body) or _APPROVAL_FRAME.search(body)
+    if frame is not None:
+        repo_id, pr, marker_head = frame.groups()
+        if (repo_id, pr, marker_head) != (
+            str(identity.repository_id),
+            str(identity.pull_request),
+            commit_id,
+        ):
+            return None
+    if head_sha is not None and commit_id != head_sha:
+        # Native reviews target their immutable commit. An unreadable body
+        # on a different commit cannot hide a review of the aborted head.
+        return False
+    return True if owned is True and frame is not None else None
+
+
+def classify_abort_inline_effect(
+    *,
+    author: object,
+    native_head: object,
+    body: object,
+    identity: SessionIdentity,
+    head_sha: str | None,
+    app_slug: str | None,
+    app_user_id: int | None,
+    current_head: object = _NOT_REQUESTED,
+    graphql: bool = False,
+) -> bool | None:
+    """Classify a native inline comment; native_head is the original commit."""
+    owned = _native_effect_author(
+        author, app_slug=app_slug, app_user_id=app_user_id, graphql=graphql
+    )
+    if owned is False:
+        return False
+    if (
+        owned is not True
+        or not isinstance(native_head, str)
+        or _HEX40.fullmatch(native_head) is None
+        or (
+            current_head is not _NOT_REQUESTED
+            and (
+                not isinstance(current_head, str)
+                or _HEX40.fullmatch(current_head) is None
+            )
+        )
+        or not isinstance(body, str)
+        or body.count(FINDING_MARKER_PREFIX) + body.count(FINDING_MARKER_PREFIX_V2) != 1
+    ):
+        return None
+    try:
+        scope = finding_publication_scope(body)
+    except ValueError:
+        # The existing scope parser converts numeric marker fields.
+        return None
+    if scope is None or scope[:2] != (identity.repository_id, identity.pull_request):
+        return None
+    if head_sha is None or scope[2] == head_sha:
+        return True
+    # A finding root can be edited for a new head without changing its
+    # original native commit. Neither that commit alone nor a damaged marker
+    # proves the root is unrelated to the abort.
+    return False if head_sha not in (native_head, current_head) else None
+
+
 def _detect_late_native_effects(
     ledger: Any,
     identity: SessionIdentity,
     record: SessionRecord,
     old: ApiRunAccounting,
     *,
+    app_slug: str | None = None,
+    app_user_id: int | None = None,
     max_wall_seconds: float = _MAX_LATE_EFFECTS_WALL_SECONDS,
-) -> bool:
-    """Detect whether ReviewSensei reviews or threads exist for an aborted scope.
+) -> bool | None:
+    """Read bounded native evidence: present, proven absent, or unproven.
 
-    Paginates both REST `/pulls/{pr}/reviews` and GraphQL `reviewThreads` up to
-    `MAX_PAGINATION_PAGES` under a bounded wall-clock budget. Any unavailable,
-    malformed, timed-out, or truncated pagination fails closed (`True`, treating
-    late native effects as potentially present) so rollover is never granted on
-    incomplete evidence.
+    Row uncertainty accumulates so an independently attributable effect later
+    in a readable listing is still observed. An incomplete listing never
+    proves absence, and an unreadable page is not retried.
     """
     abort_head: str | None = None
-    if isinstance(old.analysis_abort, Mapping):
-        raw_tx = old.analysis_abort.get("transaction")
-        if isinstance(raw_tx, Mapping):
-            raw_head = raw_tx.get("head_sha")
-            if isinstance(raw_head, str):
-                abort_head = raw_head
+    if old.analysis_abort is not None:
+        valid, transaction, _failures = _validate_analysis_abort_receipt(record, old)
+        if not valid or transaction is None:
+            return None
+        abort_head = transaction.head_sha
+    elif record.transaction is not None or old.terminal_transaction is not None:
+        # There is no unambiguous aborted scope to inspect.
+        return None
 
     http = getattr(ledger, "http", None)
     token = getattr(ledger, "token", None)
@@ -940,82 +1148,77 @@ def _detect_late_native_effects(
         or not token.strip()
         or identity.repository_id is None
     ):
-        return False
+        return None
+    if app_slug is None:
+        app_slug = getattr(ledger, "app_slug", None)
+    if app_user_id is None:
+        app_user_id = getattr(ledger, "_evidence_author_id", None)
+    if _native_login(app_slug) is None and (
+        type(app_user_id) is not int or app_user_id <= 0
+    ):
+        return None
 
     deadline = time.monotonic() + max(0.1, float(max_wall_seconds))
-    expected_prefix = (
-        review_identity_marker(
-            repository_id=identity.repository_id,
-            pull_request=identity.pull_request,
-            head_sha=abort_head,
-        )
-        if abort_head is not None
-        else f"{REVIEW_MARKER_PREFIX} repo={identity.repository_id} pr={identity.pull_request} "
-    )
-    approval_prefix = (
-        f"{APPROVAL_MARKER_PREFIX} repo={identity.repository_id} "
-        f"pr={identity.pull_request} "
-    )
 
-    reviews_complete = False
+    def request(method: str, path: str, **kwargs: Any):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, None
+        try:
+            result = http.request(
+                method, path, token=token, timeout_seconds=remaining, **kwargs
+            )
+        except GitHubHTTPError:
+            return None, None
+        return result if time.monotonic() < deadline else (None, None)
+
+    incomplete = False
+    seen_reviews: set[int] = set()
     for page in range(1, MAX_PAGINATION_PAGES + 1):
-        if time.monotonic() > deadline:
-            return True
         reviews_path = http.repository_path(
             identity.repository,
             f"/pulls/{identity.pull_request}/reviews?per_page={_PAGE_SIZE}&page={page}",
         )
-        r_status, reviews = http.request("GET", reviews_path, token=token)
-        if (
-            r_status != 200
-            or not isinstance(reviews, list)
-            or len(reviews) > _PAGE_SIZE
-        ):
-            return True
-        for item in reviews:
-            if not isinstance(item, dict):
-                continue
-            body = item.get("body")
-            if not isinstance(body, str):
-                continue
-            if expected_prefix in body:
-                if abort_head is not None or (
-                    record.transaction is None and old.terminal_transaction is None
-                ):
-                    return True
+        status, reviews = request("GET", reviews_path)
+        if status != 200 or not isinstance(reviews, list) or len(reviews) > _PAGE_SIZE:
+            return None
+        for review in reviews:
+            review_id = review.get("id") if isinstance(review, dict) else None
             if (
-                approval_prefix in body
-                and record.transaction is None
-                and old.terminal_transaction is None
+                type(review_id) is not int
+                or review_id <= 0
+                or review_id in seen_reviews
             ):
-                if abort_head is None or f"head={abort_head}" in body:
-                    return True
+                incomplete = True
+                continue
+            seen_reviews.add(review_id)
+            effect = classify_abort_review_effect(
+                review,
+                identity=identity,
+                head_sha=abort_head,
+                app_slug=app_slug,
+                app_user_id=app_user_id,
+            )
+            if effect is True:
+                return True
+            incomplete |= effect is None
         if len(reviews) < _PAGE_SIZE:
-            reviews_complete = True
             break
-    if not reviews_complete:
-        return True
+    else:
+        return None
 
     owner, _, name = identity.repository.partition("/")
     after_cursor: str | None = None
     seen_cursors: set[str] = set()
-    threads_complete = False
+    seen_threads: set[str] = set()
+    seen_roots: set[str] = set()
+    expected_total: int | None = None
     for _page in range(MAX_PAGINATION_PAGES):
-        if time.monotonic() > deadline:
-            return True
-        gql_status, gql_payload = http.request(
+        status, payload = request(
             "POST",
             "/graphql",
             body={
-                "query": (
-                    "query LateAbortEffects($owner: String!, $name: String!, "
-                    "$number: Int!, $first: Int!, $after: String) { "
-                    "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
-                    "reviewThreads(first: $first, after: $after) { "
-                    "pageInfo { hasNextPage endCursor } "
-                    "nodes { id isResolved comments(first: 1) { nodes { body } } } "
-                    "} } } }"
-                ),
+                "query": _LATE_THREADS_QUERY,
                 "variables": {
                     "owner": owner,
                     "name": name,
@@ -1024,68 +1227,108 @@ def _detect_late_native_effects(
                     "after": after_cursor,
                 },
             },
-            token=token,
         )
         if (
-            gql_status != 200
-            or not isinstance(gql_payload, dict)
-            or gql_payload.get("errors")
+            status != 200
+            or not isinstance(payload, dict)
+            or ("errors" in payload and payload["errors"] != [])
         ):
-            return True
-        data = gql_payload.get("data")
-        repo_node = data.get("repository") if isinstance(data, dict) else None
-        pr_node = repo_node.get("pullRequest") if isinstance(repo_node, dict) else None
-        thread_conn = (
-            pr_node.get("reviewThreads") if isinstance(pr_node, dict) else None
-        )
-        if not isinstance(thread_conn, dict):
-            return True
-        threads = thread_conn.get("nodes")
-        page_info = thread_conn.get("pageInfo")
-        if not isinstance(threads, list) or not isinstance(page_info, dict):
-            return True
-        has_next = page_info.get("hasNextPage")
-        end_cursor = page_info.get("endCursor")
-        if type(has_next) is not bool:
-            return True
+            return None
+        data = payload.get("data")
+        repo = data.get("repository") if isinstance(data, dict) else None
+        repo_id = repo.get("databaseId") if isinstance(repo, dict) else None
+        pr = repo.get("pullRequest") if isinstance(repo, dict) else None
+        number = pr.get("number") if isinstance(pr, dict) else None
+        connection = pr.get("reviewThreads") if isinstance(pr, dict) else None
+        if (
+            type(repo_id) is not int
+            or repo_id != identity.repository_id
+            or type(number) is not int
+            or number != identity.pull_request
+            or not isinstance(connection, dict)
+        ):
+            return None
+        threads = connection.get("nodes")
+        if not isinstance(threads, list) or len(threads) > _PAGE_SIZE:
+            return None
         for thread in threads:
-            if not isinstance(thread, dict):
+            thread_id = thread.get("id") if isinstance(thread, dict) else None
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id.strip()
+                or thread_id in seen_threads
+            ):
+                incomplete = True
                 continue
-            nodes = thread.get("comments", {}).get("nodes")
-            if not isinstance(nodes, list) or not nodes:
+            seen_threads.add(thread_id)
+            comments = thread.get("comments")
+            roots = comments.get("nodes") if isinstance(comments, dict) else None
+            if (
+                type(thread.get("isResolved")) is not bool
+                or not isinstance(roots, list)
+                or len(roots) != 1
+                or not isinstance(roots[0], dict)
+            ):
+                incomplete = True
                 continue
-            first_body = nodes[0].get("body") if isinstance(nodes[0], dict) else None
-            if not isinstance(first_body, str):
+            root = roots[0]
+            root_id = root.get("id")
+            if (
+                not isinstance(root_id, str)
+                or not root_id.strip()
+                or root_id in seen_roots
+            ):
+                incomplete = True
                 continue
-            f_scope = finding_publication_scope(first_body)
-            if f_scope is not None:
-                repo_id, pr, head, _base, _blocking, _human = f_scope
-                if (repo_id, pr) == (
-                    identity.repository_id,
-                    identity.pull_request,
-                ):
-                    if abort_head is not None and head == abort_head:
-                        return True
-                    if (
-                        abort_head is None
-                        and record.transaction is None
-                        and old.terminal_transaction is None
-                    ):
-                        return True
-        if not has_next:
-            threads_complete = True
-            break
+            seen_roots.add(root_id)
+            original = root.get("originalCommit")
+            current = root.get("commit")
+            effect = classify_abort_inline_effect(
+                author=root.get("author"),
+                native_head=original.get("oid") if isinstance(original, dict) else None,
+                current_head=current.get("oid") if isinstance(current, dict) else None,
+                body=root.get("body"),
+                identity=identity,
+                head_sha=abort_head,
+                app_slug=app_slug,
+                app_user_id=app_user_id,
+                graphql=True,
+            )
+            if effect is True:
+                return True
+            incomplete |= effect is None
+
+        total = connection.get("totalCount")
+        page_info = connection.get("pageInfo")
         if (
-            not isinstance(end_cursor, str)
-            or not end_cursor
-            or end_cursor in seen_cursors
+            type(total) is not int
+            or total < len(seen_threads)
+            or (expected_total is not None and total != expected_total)
+            or not isinstance(page_info, dict)
+            or type(page_info.get("hasNextPage")) is not bool
+            or "endCursor" not in page_info
         ):
-            return True
+            return None
+        expected_total = total
+        end_cursor = page_info["endCursor"]
+        if (
+            end_cursor is not None
+            and (
+                not isinstance(end_cursor, str)
+                or not end_cursor.strip()
+                or end_cursor in seen_cursors
+            )
+        ) or bool(threads) != (end_cursor is not None):
+            return None
+        if not page_info["hasNextPage"]:
+            if incomplete or total != len(seen_threads) or time.monotonic() >= deadline:
+                return None
+            return False
+        if end_cursor is None or total <= len(seen_threads):
+            return None
         seen_cursors.add(end_cursor)
         after_cursor = end_cursor
-    if not threads_complete:
-        return True
-    return False
+    return None
 
 
 def _author_matches_configured_bot(author: Any, ledger: Any) -> bool:
@@ -1104,7 +1347,7 @@ def _author_matches_configured_bot(author: Any, ledger: Any) -> bool:
     expected_author_id = getattr(ledger, "_evidence_author_id", None)
     if type(expected_author_id) is int and expected_author_id > 0:
         author_id = author.get("id")
-        if author_id != expected_author_id:
+        if type(author_id) is not int or author_id != expected_author_id:
             return False
     return True
 
@@ -1324,10 +1567,10 @@ def build_no_transaction_attempt_packet(
     *,
     identity: SessionIdentity | None = None,
     case_id: str | None = None,
-    owner_ceased: bool = True,
+    owner_ceased: bool = False,
     provider_entry_started: bool | None = None,
     unreconciled_mutation_present: bool = False,
-    late_native_effects_present: bool = False,
+    late_native_effects_present: bool | None = None,
     session_comment_ref: Mapping[str, Any] | None = None,
     executor_sha: str = "unknown",
     installed_core_version: str = "unknown",
@@ -1530,7 +1773,7 @@ def _load_live_no_transaction_context(
     ledger: Any,
     identity: SessionIdentity,
     actions_token: str | None = None,
-) -> tuple[SessionRecord, dict[str, Any], bool, bool]:
+) -> tuple[SessionRecord, dict[str, Any], bool, bool | None]:
     http = getattr(ledger, "http", None)
     token = getattr(ledger, "token", None)
     if http is None or not isinstance(token, str) or not token.strip():
@@ -1593,7 +1836,20 @@ def _load_live_no_transaction_context(
         raise ReviewInputError("session comment is not API-accounted")
     old = ApiRunAccounting.from_document(matched_record.api_run_accounting)
     ceased = _probe_owner_ceased(ledger, identity, old, actions_token)
-    late_effects = _detect_late_native_effects(ledger, identity, matched_record, old)
+    app_slug = getattr(ledger, "app_slug", None)
+    app_user_id = getattr(ledger, "_evidence_author_id", None)
+    if _native_login(app_slug) is not None and app_user_id is None:
+        # Only a root already matched to the independently configured App
+        # can supply its numeric GitHub identity for the native census.
+        app_user_id = matched_comment["user"].get("id")
+    late_effects = _detect_late_native_effects(
+        ledger,
+        identity,
+        matched_record,
+        old,
+        app_slug=app_slug,
+        app_user_id=app_user_id,
+    )
     return matched_record, comment_ref, ceased, late_effects
 
 
@@ -1674,6 +1930,8 @@ __all__ = [
     "NoTransactionRecoveryDescriptor",
     "build_no_transaction_attempt_packet",
     "build_no_transaction_recovery_descriptor",
+    "classify_abort_inline_effect",
+    "classify_abort_review_effect",
     "inspect_live_no_transaction_attempt_packet",
     "inspect_live_no_transaction_predecessor",
     "qualify_no_transaction_abort",

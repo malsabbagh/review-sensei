@@ -1772,7 +1772,9 @@ class _WindowGitHubHost:
                 matching = [
                     r for r in self.check_runs if r.get("head_sha") == self.head_sha
                 ]
-                return self._resp({"check_runs": matching})
+                return self._resp(
+                    {"check_runs": matching, "total_count": len(matching)}
+                )
             if "/rules/branches/" in path:
                 return self._resp([])
             if path.endswith("/protection"):
@@ -1841,6 +1843,9 @@ class _WindowGitHubHost:
                     "id": run_id,
                     "name": body["name"],
                     "head_sha": body["head_sha"],
+                    # The Checks API echoes the creation request's external ID
+                    # and retains it when a PATCH only changes status/output.
+                    "external_id": body.get("external_id"),
                     "status": body.get("status"),
                     "conclusion": body.get("conclusion"),
                     "output": body.get("output", {}),

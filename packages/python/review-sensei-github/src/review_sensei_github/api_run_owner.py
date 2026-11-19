@@ -65,6 +65,15 @@ def _writer_name(name: object, job: str) -> bool:
     return isinstance(name, str) and (name == job or name.endswith(" / " + job))
 
 
+def _terminal_job(row: dict[str, Any]) -> bool:
+    conclusion = row.get("conclusion")
+    return (
+        row.get("status") == "completed"
+        and isinstance(conclusion, str)
+        and conclusion in _TERMINAL_JOB_CONCLUSIONS
+    )
+
+
 class ApiRunActionsEvidence(ActionsReservationEvidence):
     """Read identity/cessation from authenticated GitHub, never status JSON.
 
@@ -147,7 +156,12 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         return owner
 
     def ceased_run_owner(
-        self, identity: SessionIdentity, run_id: int, predecessor: ApiExecutionOwner
+        self,
+        identity: SessionIdentity,
+        run_id: int,
+        predecessor: ApiExecutionOwner,
+        *,
+        complete_terminal_inventory: bool = False,
     ) -> tuple[object, ...]:
         if type(run_id) is not int or run_id < 1 or str(run_id) == self.command_run_id:
             raise ReviewInputError("previous Actions run identity conflicts")
@@ -166,11 +180,17 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             or run.get("status") != "completed"
             or type(run.get("run_attempt")) is not int
             or run["run_attempt"] != predecessor.run_attempt
+            or complete_terminal_inventory
+            and not _terminal_job(run)
         ):
             raise ReviewInputError(
                 "previous Actions run has not ceased or its identity conflicts"
             )
-        return run_id, *previous.ceased_owner(identity, predecessor)
+        return run_id, *previous.ceased_owner(
+            identity,
+            predecessor,
+            complete_terminal_inventory=complete_terminal_inventory,
+        )
 
     def qualified_publication_cessation(
         self,
@@ -331,7 +351,11 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         }
 
     def ceased_owner(
-        self, identity: SessionIdentity, predecessor: ApiExecutionOwner
+        self,
+        identity: SessionIdentity,
+        predecessor: ApiExecutionOwner,
+        *,
+        complete_terminal_inventory: bool = False,
     ) -> tuple[int, str, str]:
         if predecessor.job != self.job:
             raise ReviewInputError("API predecessor job is unsupported")
@@ -344,20 +368,23 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         # `conclusion == "skipped"`. Any writer job with `status != "completed"`
         # (for example `queued`, `in_progress`, `waiting`, `pending`, or
         # `requested`) or without a terminal conclusion has not ceased.
-        incomplete_writers = [
+        incomplete_jobs = [
             j
             for j in jobs
-            if any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
-            and (
-                j.get("status") != "completed"
-                or not isinstance(j.get("conclusion"), str)
-                or j["conclusion"] not in _TERMINAL_JOB_CONCLUSIONS
+            if (
+                complete_terminal_inventory
+                or any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
             )
+            and not _terminal_job(j)
         ]
-        if incomplete_writers:
+        if incomplete_jobs:
+            if complete_terminal_inventory:
+                raise ReviewInputError(
+                    "pre-entry abort predecessor job inventory has not ceased"
+                )
             details = ", ".join(
                 f"{j.get('name', '<unnamed>')}={j.get('status', '<unknown>')}/{j.get('conclusion')}"
-                for j in incomplete_writers
+                for j in incomplete_jobs
             )
             raise ReviewInputError(
                 f"API predecessor has not ceased (incomplete writer jobs: {details})"

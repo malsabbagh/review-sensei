@@ -93,6 +93,18 @@ invariant:
      `no_transaction_active_reservation`, `no_transaction_unknown_dispatch`, or
      `no_transaction_unconfirmed_predecessor`, carrying full predecessor
      non-startup caller liability into `controlled-restart-registry-v1`.
+   - Treat readback as three distinct observations: an attributable late effect,
+     complete evidence excluding a late effect, or incomplete/uninterpretable
+     evidence. Only complete negative evidence qualifies. Incomplete evidence
+     records `complete_late_native_effects_readback` rather than an absent
+     effect or an assertion that it landed. Offline qualification needs explicit
+     cessation and absence witnesses and does not confer ordinary authority.
+   - Ordinary admission checks the unchanged authenticated abort and its
+     terminal Actions owner, then performs its own metered REST review and inline
+     census before archive or activation. An older same-head object can be
+     excluded only by authenticating the settled ancestor's exact retained
+     identity and body commitment. Unavailable ancestry or an unfunded complete
+     census holds rather than borrowing from the existing confirmation tail.
 
 3. **Pending reassessment attribution, `PendingReassessmentAttemptPacket`, and `OfflineContinuationQualification` (`pending_reassessment_recovery.py` — G30):**
    - Bind pending-work identity, pending reason, immutable accepted-result

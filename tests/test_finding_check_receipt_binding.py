@@ -17,13 +17,19 @@ BODY = {
 
 
 def native():
-    return {
+    value = {
         "id": 1234,
         "name": "ReviewSensei",
         "head_sha": fixture.HEAD,
         "app": {"id": 999, "slug": "reviewsensei"},
         **copy.deepcopy(BODY),
     }
+    value["output"].update(
+        text=None,
+        annotations_count=0,
+        annotations_url=f"https://api.github.test{PATH}/annotations",
+    )
+    return value
 
 
 class CheckReceiptBindingTests(unittest.TestCase):
@@ -128,3 +134,11 @@ class CheckReceiptBindingTests(unittest.TestCase):
                 self.assertEqual(len(http.calls), 1)
                 self.assertEqual(http.calls[0][0], "GET")
                 self.assertEqual(cold.effects[0]["status"], "pending")
+
+    def test_pending_update_without_a_precondition_does_not_read_or_settle(self):
+        retained = fixture.document([fixture.effect(BODY, path=PATH, method="PATCH")])
+        journal = fixture.journal(retained=retained)
+        http = fixture.FakeHTTP((200, native()))
+        self.assertIsNone(journal._readback(http, journal.effects[0], token="fixture"))
+        self.assertEqual(journal.effects[0]["status"], "pending")
+        self.assertEqual(http.calls, [])

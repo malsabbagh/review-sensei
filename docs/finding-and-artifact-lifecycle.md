@@ -269,6 +269,18 @@ reconciles exact owned native readback instead of repeating inference or blindly
 reposting. A changed, duplicate, foreign or missing native object remains a hold.
 Failure after a known success does not turn that success into an absent effect.
 
+Lost check creation requires one complete, counted GitHub check-runs page with
+`filter=all`, not the default latest-only response. An exact App-owned stable
+identity must be unique before its status, conclusion and emitted output are
+compared. The ordinary source-bound tail prices that same one GET. A selected
+drift lease that does not qualify this request holds the lost creation, without
+falling back to latest-only evidence or replaying the write. The readback can
+ignore documented empty output metadata without using the annotation URL. A
+check update retains its exact target, App, head and prior creation external
+ID when the same journal recorded it; an older independent update precondition
+does not establish that external ID. Physical losses remain charged even when
+the logical check effect is confirmed.
+
 A known multi-effect batch is admitted as a whole before its first mutation.
 Its pending prefixes and final receipt state must fit cumulative retention,
 effect slots and the original funding domains. This capacity preview is not
