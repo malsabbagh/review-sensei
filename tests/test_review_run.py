@@ -506,7 +506,7 @@ class EntryFixture(LifecycleFixture):
                 # admission or publication. Current-route tests never use it.
                 with patch.object(
                     review_run.ReviewRun,
-                    "finding_inventory_migration_required",
+                    "_record_requires_finding_inventory_migration",
                     return_value=False,
                 ):
                     return original_execute(selected, *args, **kwargs)
@@ -582,6 +582,17 @@ class EntryFixture(LifecycleFixture):
                     forbid_replacement_phase_budget(),
                     redirect_stdout(io.StringIO()),
                     redirect_stderr(errors),
+                    *(
+                        [
+                            patch.object(
+                                review_run.ReviewRun,
+                                "_record_requires_finding_inventory_migration",
+                                return_value=False,
+                            )
+                        ]
+                        if fixture.legacy_publication_fixture
+                        else []
+                    ),
                 ):
                     stack.enter_context(scope)
                 result = package_cli.main(

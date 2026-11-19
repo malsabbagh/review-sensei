@@ -77,6 +77,205 @@ _REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 physical_opener = urlopen
 
 
+class _PreRolloverMigrationHold(ReviewInputError):
+    """Internal pre-rollover hold emitted as a structured migration handoff."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _write_migration_hold_outcome(publication_output: Path, *, reason: str) -> int:
+    migration_outcome: dict[str, object] = {
+        "status": "handoff",
+        "publication_status": "handoff",
+        "accounting_terminal": False,
+        "terminal_reason": reason,
+        "review_id": None,
+        "diagnostic": "durable_finding_inventory_recovery_required",
+    }
+    lifecycle_diagnostics.publication(migration_outcome)
+    publication_output.write_text(json.dumps(migration_outcome, indent=2) + "\n")
+    return 1
+
+
+def _expected_transaction_digests(
+    args: argparse.Namespace,
+    *,
+    configuration_path: Path | None,
+) -> tuple[str, str]:
+    """Compute exact (policy_digest, configuration_digest) matching review_sensei.cli."""
+    from review_sensei.cli import (
+        _CANONICAL_BACKEND_ADAPTERS,
+        _adapter_for_provider,
+        _cli_option_set,
+        _configured_resource_budget,
+        _explicit_cli_value,
+        _provider_settings_from_args,
+        _review_environ,
+        _transaction_provider_identity,
+    )
+    from review_sensei.configuration import resolve_inference
+    from review_sensei.convergence import resolve_review_convergence_policy
+    from review_sensei.models import (
+        build_transaction_configuration_context,
+        transaction_stage_identity,
+    )
+    from review_sensei.outcomes import ResourceBudget
+    from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
+    from review_sensei.providers.profiles import get_provider_profile
+    from review_sensei.service import DEFAULT_STAGES, review_work_policy_digest
+    from review_sensei.stages import (
+        category_catalog_for_configured_stages,
+        load_stages_from_dir,
+    )
+    from review_sensei.validation import DEFAULT_REVIEW_LIMITS
+
+    work_configuration = load_configuration(configuration_path)
+    categories_dir = getattr(args, "categories_dir", None)
+    stages_dir = getattr(args, "stages_dir", None)
+    if categories_dir and not stages_dir:
+        raise ReviewInputError("--categories-dir requires --stages-dir")
+    stages = None
+    if stages_dir:
+        stages = load_stages_from_dir(
+            stages_dir,
+            category_catalog=category_catalog_for_configured_stages(categories_dir),
+        )
+    policy = resolve_review_convergence_policy(
+        mode=getattr(args, "review_mode", None),
+        quality=work_configuration.review.quality,
+    )
+    resolved_args = copy.copy(args)
+    explicit = getattr(resolved_args, "_explicit_cli_options", None)
+    if explicit is None:
+        explicit = {
+            f"--{flag}"
+            for flag, attr in (
+                ("provider", "provider"),
+                ("model", "model"),
+                ("base-url", "base_url"),
+                ("api-key-env", "api_key_env"),
+                ("timeout-seconds", "timeout_seconds"),
+            )
+            if getattr(resolved_args, attr, None) is not None
+        }
+        resolved_args._explicit_cli_options = explicit
+    for attr, default in (
+        ("provider", None),
+        ("model", None),
+        ("base_url", None),
+        ("api_key_env", None),
+        ("timeout_seconds", None),
+        ("allow_custom_endpoint", False),
+        ("fixture_response", None),
+    ):
+        if not hasattr(resolved_args, attr):
+            setattr(resolved_args, attr, default)
+    argv_stub: list[str] = []
+    cli_provider = _explicit_cli_value(resolved_args, argv_stub, "provider")
+    cli_model = _explicit_cli_value(resolved_args, argv_stub, "model")
+    cli_base_url = _explicit_cli_value(resolved_args, argv_stub, "base-url")
+    cli_api_key_env = _explicit_cli_value(resolved_args, argv_stub, "api-key-env")
+    for option, value in (
+        ("--provider", cli_provider),
+        ("--model", cli_model),
+        ("--base-url", cli_base_url),
+        ("--api-key-env", cli_api_key_env),
+    ):
+        if isinstance(value, str) and not value.strip():
+            raise ReviewInputError(f"{option} requires a non-empty value")
+    if getattr(resolved_args, "profile", None):
+        profile = get_provider_profile(str(resolved_args.profile))
+        adapter = _adapter_for_provider(getattr(resolved_args, "provider", None))
+        if adapter is not None and adapter != profile.provider:
+            raise ReviewInputError(
+                f"--provider {resolved_args.provider} does not match profile "
+                f"'{profile.name}' (requires {profile.provider})"
+            )
+        resolved_args.provider = profile.provider
+        if not _cli_option_set(argv_stub, "--model", explicit=explicit):
+            resolved_args.model = profile.model
+        provider_settings = _provider_settings_from_args(
+            resolved_args,
+            api_key=None,
+            fixture_response=getattr(resolved_args, "fixture_response", None),
+            argv=argv_stub,
+        )
+    else:
+        resolved = resolve_inference(
+            work_configuration,
+            cli_provider=cli_provider if isinstance(cli_provider, str) else None,
+            cli_model=cli_model if isinstance(cli_model, str) else None,
+            environ=_review_environ(),
+        )
+        resolved_args.provider = _CANONICAL_BACKEND_ADAPTERS[resolved.backend]
+        resolved_args.model = (
+            cli_model if isinstance(cli_model, str) else resolved.model
+        )
+        resolved_args.base_url = (
+            cli_base_url if isinstance(cli_base_url, str) else None
+        ) or resolved.base_url
+        resolved_args.allow_custom_endpoint = bool(
+            getattr(resolved_args, "allow_custom_endpoint", False)
+        ) or (resolved.authorizes_custom_endpoint(resolved_args.base_url))
+        resolved_args.api_key_env = (
+            cli_api_key_env if isinstance(cli_api_key_env, str) else None
+        ) or resolved.credential_env
+        cli_timeout = _explicit_cli_value(resolved_args, argv_stub, "timeout-seconds")
+        resolved_args.timeout_seconds = (
+            cli_timeout
+            if isinstance(cli_timeout, (int, float))
+            else resolved.timeout_seconds
+        )
+        provider_settings = _provider_settings_from_args(
+            resolved_args,
+            api_key=None,
+            fixture_response=getattr(resolved_args, "fixture_response", None),
+            argv=argv_stub,
+            openrouter_policy=(
+                OpenRouterRoutingPolicy(resolved.upstream_provider)
+                if resolved.backend == "openrouter"
+                and resolved.upstream_provider is not None
+                else None
+            ),
+        )
+    transaction_provider_identity, transaction_model = _transaction_provider_identity(
+        provider_settings
+    )
+    work_budgets = work_configuration.advanced.review_work
+    resource_budget = _configured_resource_budget(
+        ResourceBudget.for_limits(DEFAULT_REVIEW_LIMITS), work_configuration
+    )
+    work_policy_digest = review_work_policy_digest(
+        work_budgets,
+        resource_budget,
+        None,
+        decision=work_configuration.decision,
+    )
+    orchestrate = (
+        bool(getattr(resolved_args, "orchestrate_large_changes", False))
+        or work_budgets.mode == "unified"
+    )
+    effective_stages = stages if stages is not None else DEFAULT_STAGES
+    stage_identity, category_policy = transaction_stage_identity(effective_stages)
+    transaction_configuration_context = build_transaction_configuration_context(
+        provider=transaction_provider_identity,
+        model=transaction_model,
+        stages=stage_identity,
+        category_policy=category_policy,
+        publication_mode=policy.mode,
+        orchestration_enabled=orchestrate,
+        work_policy_digest=work_policy_digest,
+    )
+    return (
+        policy.digest(),
+        ReviewTransaction.compute_configuration_digest(
+            transaction_configuration_context
+        ),
+    )
+
+
 class RolloverService(Protocol):
     """Internal one-bootstrap dependency; no CLI or document conveys this service.
 
@@ -453,14 +652,8 @@ class ReviewRun:
             tuple(analyze_diff(diff, allow_incomplete=True).changed_paths),
         )
 
-    def finding_inventory_migration_required(self) -> bool:
-        # Reuse the exact authenticated enrollment root, not a new census or
-        # diagnostic file. Missing retained inventory is not an empty inventory.
-        record = self.caller._effect_record
-        if record is None or record.record_sha256 != self.caller._root:
-            raise ReviewInputError(
-                "authenticated finding inventory admission is unavailable"
-            )
+    @staticmethod
+    def _record_requires_finding_inventory_migration(record: SessionRecord) -> bool:
         return record.finding_lifecycle is None and (
             record.completed_initial_reviews > 0
             or record.completed_verification_rounds > 0
@@ -469,23 +662,23 @@ class ReviewRun:
             or record.publication_staging is not None
         )
 
+    def finding_inventory_migration_required(self) -> bool:
+        # Reuse the exact authenticated enrollment root, not a new census or
+        # diagnostic file. Missing retained inventory is not an empty inventory.
+        record = self.caller._effect_record
+        if record is None or record.record_sha256 != self.caller._root:
+            raise ReviewInputError(
+                "authenticated finding inventory admission is unavailable"
+            )
+        return self._record_requires_finding_inventory_migration(record)
+
     def execute(self, argv: list[str], *, publication_output: Path) -> int:
         lifecycle_diagnostics.phase("analysis")
         retained = self.retained_analysis(argv)
         if retained is None and self.finding_inventory_migration_required():
-            migration_outcome = {
-                "status": "handoff",
-                "publication_status": "handoff",
-                "accounting_terminal": False,
-                "terminal_reason": "finding_inventory_migration_required",
-                "review_id": None,
-                "diagnostic": "durable_finding_inventory_recovery_required",
-            }
-            lifecycle_diagnostics.publication(migration_outcome)
-            publication_output.write_text(
-                json.dumps(migration_outcome, indent=2) + "\n"
+            return _write_migration_hold_outcome(
+                publication_output, reason="finding_inventory_migration_required"
             )
-            return 1
         if retained is None and self.plan.runner_kind == "local":
             # Provider discovery is caller API work; inference remains governed
             # by the independent provider budget. Never send a GitHub credential.
@@ -1454,6 +1647,34 @@ def bootstrap(
                     )
                 else:
                     if rollover_service is None:
+                        if purpose == "review" and restart_registration is None:
+                            if ReviewRun._record_requires_finding_inventory_migration(
+                                previous_root
+                            ):
+                                raise _PreRolloverMigrationHold(
+                                    "finding_inventory_migration_required"
+                                )
+                            if previous_root.finding_lifecycle is not None:
+                                binding = cast(
+                                    Mapping[str, Any],
+                                    cast(
+                                        Mapping[str, Any],
+                                        previous_root.finding_lifecycle,
+                                    )["manifest"],
+                                )["binding"]
+                                expected_policy, expected_configuration = (
+                                    _expected_transaction_digests(
+                                        args, configuration_path=configuration_path
+                                    )
+                                )
+                                if (
+                                    binding["policy_digest"] != expected_policy
+                                    or binding["configuration_digest"]
+                                    != expected_configuration
+                                ):
+                                    raise _PreRolloverMigrationHold(
+                                        "finding_inventory_policy_drift"
+                                    )
                         caller.rollover_and_activate(
                             native,
                             identity,
@@ -1678,18 +1899,23 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
             raise ReviewInputError(
                 "controlled restart diff cannot use retained history storage"
             )
-        selected = bootstrap(
-            args,
-            run_directory=options.run_directory,
-            policy_commit=options.policy_commit,
-            quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
-            restart_id=getattr(options, "restart_id", None),
-            recovery_context_dir=options.recovery_context_dir,
-            recovery_context_key_file=options.recovery_context_key_file,
-            recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
-            enable_current_trust_enrollment=options.enable_current_trust_enrollment,
-            input_directory=Path(working_directory),
-        )
+        try:
+            selected = bootstrap(
+                args,
+                run_directory=options.run_directory,
+                policy_commit=options.policy_commit,
+                quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
+                restart_id=getattr(options, "restart_id", None),
+                recovery_context_dir=options.recovery_context_dir,
+                recovery_context_key_file=options.recovery_context_key_file,
+                recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
+                enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+                input_directory=Path(working_directory),
+            )
+        except _PreRolloverMigrationHold as error:
+            return _write_migration_hold_outcome(
+                options.publication_outcome, reason=error.reason
+            )
         core = [*core]
         if not _has_option(core, "--base-sha"):
             core.extend(["--base-sha", selected.base_sha])
