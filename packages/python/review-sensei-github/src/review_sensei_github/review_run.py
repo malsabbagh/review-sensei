@@ -72,6 +72,18 @@ from .session_ledger import GitHubIssueCommentSessionLedger
 
 _SHA = re.compile(r"[a-f0-9]{40}\Z")
 _REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
+_CONFIRMED_WITHHELD_CLOSE_DIAGNOSTICS = frozenset(
+    {
+        "required_fixes_open",
+        "human_adjudication_open",
+        "qualification_unverified",
+        "app_authored",
+        "baseline_capacity_exceeded",
+        "review_threads_incomplete",
+        "historical_assessment_unverified",
+        "quarantine_assessment_unverified",
+    }
+)
 
 # Injectable only as the physical external service seam; never selected by JSON.
 physical_opener = urlopen
@@ -739,8 +751,7 @@ class ReviewRun:
             and (
                 check_rejection is not None
                 or (
-                    publication.diagnostic
-                    in {"required_fixes_open", "human_adjudication_open"}
+                    publication.diagnostic in _CONFIRMED_WITHHELD_CLOSE_DIAGNOSTICS
                     and finalization_confirmed(publication)
                 )
                 or publication.diagnostic
