@@ -3109,11 +3109,21 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     expected_generation=current.generation,
                 )
             else:
-                ledger.abort(
-                    identity,
-                    reservation_id=held_reservation,
-                    expected_generation=current.generation,
-                )
+                can_mark_direct_abort = hasattr(
+                    ledger, "_direct_final_abort"
+                ) or hasattr(ledger, "__dict__")
+                previous_direct_abort = getattr(ledger, "_direct_final_abort", False)
+                if can_mark_direct_abort:
+                    setattr(ledger, "_direct_final_abort", True)
+                try:
+                    ledger.abort(
+                        identity,
+                        reservation_id=held_reservation,
+                        expected_generation=current.generation,
+                    )
+                finally:
+                    if can_mark_direct_abort:
+                        setattr(ledger, "_direct_final_abort", previous_direct_abort)
 
         def cleanup_analysis_error(
             analysis_error: BaseException, charge_failed_attempt: bool

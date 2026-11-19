@@ -542,6 +542,15 @@ class GitHubIssueCommentSessionLedger:
         self._quarantine_complete_read = False
         self._quarantine_authenticated: Any | None = None
         self._quarantine_decision_permit: Any | None = None
+        self._last_selected_row: tuple[int, str, dict[str, Any]] | None = None
+        self._direct_final_abort = False
+        self._prospective_abort_finalizer: (
+            Callable[
+                [SessionRecord, SessionRecord, int, datetime | None],
+                tuple[SessionRecord, str],
+            ]
+            | None
+        ) = None
         if session_grant is not None:
             self._bound_tail_grants.add(
                 hashlib.sha256(session_grant.encode()).hexdigest()
@@ -553,6 +562,26 @@ class GitHubIssueCommentSessionLedger:
                 "partition authority requires exact configured Bot numeric ownership"
             )
         return f"github-bot:{self._evidence_author_id}"
+
+    def selected_native_comment(
+        self, record: SessionRecord
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Return the freshly selected `(comment_id, raw_row)` inside active CAS."""
+        if not self._mutation_active or self._last_selected_row is None:
+            return None
+        comment_id, digest, row = self._last_selected_row
+        if digest != record.record_sha256:
+            return None
+        if (
+            isinstance(comment_id, bool)
+            or not isinstance(comment_id, int)
+            or comment_id < 1
+            or not isinstance(row, dict)
+            or row.get("id") != comment_id
+            or not isinstance(row.get("body"), str)
+        ):
+            return None
+        return comment_id, copy.deepcopy(row)
 
     def _history_load(
         self,
@@ -2004,6 +2033,7 @@ class GitHubIssueCommentSessionLedger:
     def _discover(
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> tuple[int | None, SessionRecord | None]:
+        self._last_selected_row = None
         self._observed_consumed_grants = set()
         # Quarantine rediscovery still reads a full comment list. Leave
         # `_inventory_complete` with the census that already set it until that
@@ -2041,6 +2071,7 @@ class GitHubIssueCommentSessionLedger:
         if restart is not None:
             items = restart.select(self, identity, items)
         found: list[tuple[int, SessionRecord]] = []
+        found_rows: dict[int, dict[str, Any]] = {}
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -2112,6 +2143,7 @@ class GitHubIssueCommentSessionLedger:
                     "quarantine lineage requires authenticated provenance",
                 )
             found.append((comment_id, record))
+            found_rows[comment_id] = item
             author_id = author.get("id") if isinstance(author, dict) else None
             if (
                 self._tail_authorizing
@@ -2199,6 +2231,13 @@ class GitHubIssueCommentSessionLedger:
                 if reuse_listed:
                     self._reuse_listed_parts = prior_reuse
                     self._quarantine_complete_read = prior_complete_read
+        raw_row = found_rows.get(found[0][0])
+        if isinstance(raw_row, dict):
+            self._last_selected_row = (
+                found[0][0],
+                record.record_sha256,
+                copy.deepcopy(raw_row),
+            )
         return found[0]
 
     def load(
@@ -2208,10 +2247,15 @@ class GitHubIssueCommentSessionLedger:
         try:
             _comment_id, record = self._discover(identity, now=now)
         except SessionLoadError as exc:
+            self._last_selected_row = None
             return SessionLoadResult(status=exc.reason.value, detail=str(exc))
         if record is None:
+            self._last_selected_row = None
             return SessionLoadResult(status="missing")
-        return load_session_status(record, now=now)
+        result = load_session_status(record, now=now)
+        if result.status not in {"ok", "migrated"}:
+            self._last_selected_row = None
+        return result
 
     def initialize(
         self,
@@ -2369,20 +2413,33 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError("session generation conflict before activation")
         if not self._is_own_release(record, updated):
             self._verify_live_head(identity)
+        finalizer = self._prospective_abort_finalizer
+        self._prospective_abort_finalizer = None
+        patch_body: str | None = None
+        if finalizer is not None:
+            self._mutation_active = True
+            try:
+                updated, patch_body = finalizer(record, updated, comment_id, now)
+                _validate_queue_retention(record, updated)
+                _history_legacy_write_guard(self, updated)
+            finally:
+                self._mutation_active = False
         repository_id = self._require_identity(identity)
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{comment_id}"
         )
+        if patch_body is None:
+            patch_body = self._render_comment(
+                repository_id=repository_id,
+                pull_request=identity.pull_request,
+                record=updated,
+            )
+        else:
+            self._require_readable_candidate(patch_body, updated)
         status, payload = self._request(
             "PATCH",
             path,
-            body={
-                "body": self._render_comment(
-                    repository_id=repository_id,
-                    pull_request=identity.pull_request,
-                    record=updated,
-                )
-            },
+            body={"body": patch_body},
         )
         if status != 200 or not isinstance(payload, dict):
             if status in {409, 422, 429} or status >= 500:
