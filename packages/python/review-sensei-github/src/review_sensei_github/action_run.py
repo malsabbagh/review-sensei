@@ -471,6 +471,10 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         run.ledger.business_guard = authority.fence
         source = authority.document["source"]
         actor = authority.document["actor"]
+        if not isinstance(args.comment_body, str) or hashlib.sha256(
+            args.comment_body.encode()
+        ).hexdigest() != source.get("body_sha256"):
+            raise ReviewInputError("authenticated source body conflicts with command")
         from .historical_assessment_action import parse_historical_command
         from .quarantine_action import parse_quarantine_command
 
@@ -488,6 +492,18 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         )
         if command is None:
             raise ReviewInputError("authenticated source is not a supported command")
+        semantic_target = getattr(run.caller, "_accepted_semantic_target", None)
+        if (
+            type(semantic_target) is tuple
+            and len(semantic_target) >= 4
+            and semantic_target[3] is not None
+            and (
+                semantic_target[0] != "command" or command.action != semantic_target[3]
+            )
+        ):
+            raise ReviewInputError(
+                "authenticated command action conflicts with admitted semantic target"
+            )
         key = hashlib.sha256(
             canonical_bytes(
                 {
@@ -730,12 +746,20 @@ def run_action(
         )
     if getattr(args, "session_ledger", None) is not None:
         raise ReviewInputError("current Actions routes require their native run ledger")
+    command_action: str | None = None
     if purpose == "command":
         from .historical_assessment_action import parse_historical_command
         from .quarantine_action import parse_quarantine_command
 
-        parse_historical_command(args.comment_body)
-        parse_quarantine_command(args.comment_body)
+        historical_command = parse_historical_command(args.comment_body)
+        quarantine_command = parse_quarantine_command(args.comment_body)
+        classified_command = (
+            historical_command
+            or quarantine_command
+            or parse_maintainer_command(args.comment_body, actor="classification-only")
+        )
+        if classified_command is not None:
+            command_action = classified_command.action
     source = event_source(args, purpose=purpose)
     args.provider = getattr(args, "provider", None)
     args.model = getattr(args, "model", None)
@@ -752,6 +776,7 @@ def run_action(
             source=source,
             rollover_service=rollover_service,
             enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+            command_action=command_action,
         )
     same_run_gate = (
         unstarted_recovery

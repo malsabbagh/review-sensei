@@ -20,6 +20,30 @@ KEY = "accepted_semantic_history"
 VERSION = "accepted-semantic-history-v1"
 LIMIT = 2
 
+_STATE_ADVANCING_COMMAND_ACTIONS = frozenset(
+    {
+        "dismiss",
+        "defer",
+        "accept-risk",
+        "accept-coverage-uncertainty",
+        "approve-media",
+        "continue",
+        "reenroll",
+    }
+)
+
+
+def _target_allows_disposition_entry(caller: Any) -> bool:
+    target = getattr(caller, "_accepted_semantic_target", None)
+    return (
+        type(target) is tuple
+        and len(target) >= 4
+        and type(target[0]) is str
+        and target[0] == "command"
+        and type(target[3]) is str
+        and target[3] in _STATE_ADVANCING_COMMAND_ACTIONS
+    )
+
 
 def _digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
@@ -486,6 +510,7 @@ def _prepare_action(run):
         if (
             previous["streak"] >= LIMIT
             and not pending
+            and not _target_allows_disposition_entry(run.caller)
             and not semantic_advancement(previous["records"][-1]["snapshot"], snapshot)
         ):
             _hold("finite_no_progress_stop")
@@ -631,6 +656,8 @@ def guard_carried_successor(caller, ledger, identity, record, history):
     ):
         return  # No semantic claim; the ordinary route handles missing history.
     validate_history(history, identity)
+    if _target_allows_disposition_entry(caller):
+        return
     if history["streak"] < LIMIT:
         return
     selected, snapshot = capture_selected(ledger, identity)
