@@ -2410,6 +2410,49 @@ def _request_matches(observed, expected):
     )
 
 
+def _check_request_matches(observed, expected, *, recovering=False):
+    """Match the sent check projection, not GitHub's larger output envelope."""
+    if not isinstance(observed, dict):
+        return False
+    # An acknowledged rescan update can reuse a completed check object. A
+    # later observation retaining its previous outcome cannot alone prove
+    # that an uncertain in-progress write was this operation's exact effect.
+    if (
+        recovering
+        and expected.get("status") == "in_progress"
+        and expected.get("conclusion") is None
+        and observed.get("conclusion") is not None
+    ):
+        return False
+    if _request_matches(observed, expected):
+        return True
+    output, sent = observed.get("output"), expected.get("output")
+    # The current check producer sends only title and summary. GitHub adds
+    # nullable text and annotation metadata. Do not ignore another rendered
+    # field, annotations, extra output keys or differences in sent fields.
+    if (
+        not isinstance(sent, dict)
+        or set(sent) != {"title", "summary"}
+        or not all(isinstance(item, str) for item in sent.values())
+        or not isinstance(output, dict)
+        or not set(output)
+        <= {"title", "summary", "text", "annotations_count", "annotations_url"}
+        or output.get("text") is not None
+    ):
+        return False
+    count = output.get("annotations_count", 0)
+    url = output.get("annotations_url")
+    if (
+        type(count) is not int
+        or count != 0
+        or ("annotations_url" in output and (not isinstance(url, str) or not url))
+    ):
+        return False
+    return _request_matches(
+        {**observed, "output": {key: output.get(key) for key in sent}}, expected
+    )
+
+
 def _validate(document: object) -> dict[str, Any]:
     fields = {
         "schema_version",
@@ -5144,14 +5187,40 @@ class FindingLifecycleJournal:
             raise ReviewInputError("finding lifecycle observed check identity changed")
         return dict(observed[1])
 
-    def _check_update_matches(self, effect, payload):
+    def _check_update_matches(self, effect, payload, *, recovered=False):
         precondition = effect.get("check_update_precondition")
-        return (
+        if not (
             isinstance(precondition, dict)
             and self._check_commitment(payload) == precondition
             and payload.get("errors") in (None, [])
-            and _request_matches(payload, effect["request"])
-        )
+            and _check_request_matches(payload, effect["request"], recovering=recovered)
+        ):
+            return False
+        source_app_id = getattr(self.ledger, "authenticated_app_id", None)
+        if (
+            recovered
+            and source_app_id is not None
+            and precondition["app_id"] != source_app_id
+        ):
+            return False
+        # If this journal created the same check, keep its request's external
+        # identity bound even on an exact-target update. Independent legacy
+        # update preconditions do not contain this optional provenance.
+        for prior in self.effects:
+            if prior is effect:
+                break
+            if (
+                prior["method"] == "POST"
+                and prior["path"] + f"/{precondition['check_run_id']}" == effect["path"]
+                and prior["status"] == "confirmed"
+                and isinstance(prior["response"][1], dict)
+                and prior["response"][1].get("id") == precondition["check_run_id"]
+                and prior["response"][1].get("app_id") == precondition["app_id"]
+                and "external_id" in prior["request"]
+                and payload.get("external_id") != prior["request"]["external_id"]
+            ):
+                return False
+        return True
 
     def _body_receipts(self, review_id):
         return [
@@ -5596,6 +5665,14 @@ class FindingLifecycleJournal:
     def _readback(self, http, effect, *, token):
         path, request = effect["path"], effect["request"]
         response = effect["response"]
+        expected_slug = (self.app_slug or "").removesuffix("[bot]")
+        if (
+            "/check-runs/" in path
+            and effect["method"] == "PATCH"
+            and response is None
+            and "check_update_precondition" not in effect
+        ):
+            return None
         if effect["method"] == "PUT":
             selected = re.fullmatch(
                 re.escape(
@@ -5622,27 +5699,85 @@ class FindingLifecycleJournal:
             and effect["method"] == "POST"
             and response is None
         ):
+            external_id = request.get("external_id")
+            if (
+                path != f"/repos/{self.identity.repository}/check-runs"
+                or request.get("name") != "ReviewSensei"
+                or request.get("head_sha") != self.head_sha
+                or not isinstance(external_id, str)
+                or not external_id
+            ):
+                return None
             status, payload = http.request(
                 "GET",
                 path.rsplit("/check-runs", 1)[0]
                 + "/commits/"
-                + str(request.get("head_sha"))
-                + "/check-runs?check_name=ReviewSensei&per_page=100",
+                + self.head_sha
+                + "/check-runs?check_name=ReviewSensei&per_page=100&filter=all",
                 token=token,
             )
             runs = payload.get("check_runs") if isinstance(payload, dict) else None
             if (
                 status == 200
                 and isinstance(runs, list)
-                and payload.get("total_count", len(runs)) == len(runs)
+                and type(payload.get("total_count")) is int
+                and payload["total_count"] == len(runs)
                 and len(runs) < 100
             ):
-                candidates = [
-                    run
-                    for run in runs
-                    if isinstance(run, dict)
-                    and all(run.get(k) == v for k, v in request.items())
-                ]
+                # The default latest filter can hide an older run with this
+                # stable identity. Count all owned matches before inspecting
+                # their mutable output, and never page beyond this bounded GET.
+                candidates = []
+                seen: set[int] = set()
+                source_app_id = getattr(self.ledger, "authenticated_app_id", None)
+                for run in runs:
+                    if not isinstance(run, dict):
+                        return None
+                    run_id, name, head = (
+                        run.get("id"),
+                        run.get("name"),
+                        run.get("head_sha"),
+                    )
+                    if (
+                        type(run_id) is not int
+                        or run_id <= 0
+                        or run_id in seen
+                        or not isinstance(name, str)
+                        or not name
+                        or not isinstance(head, str)
+                        or _HEX40_RE.fullmatch(head) is None
+                    ):
+                        return None
+                    seen.add(run_id)
+                    if name != request["name"] or head != request["head_sha"]:
+                        continue
+                    app = run.get("app")
+                    if (
+                        not isinstance(app, dict)
+                        or type(app.get("id")) is not int
+                        or app["id"] <= 0
+                        or not isinstance(app.get("slug"), str)
+                        or not app["slug"]
+                    ):
+                        return None
+                    if source_app_id is not None and (app["id"] == source_app_id) != (
+                        app["slug"] == expected_slug
+                    ):
+                        return None
+                    if app["slug"] != expected_slug:
+                        continue
+                    observed_external_id = run.get("external_id")
+                    if (
+                        not isinstance(observed_external_id, str)
+                        or not observed_external_id
+                    ):
+                        return None
+                    if observed_external_id == external_id:
+                        candidates.append(run)
+                if len(candidates) == 1 and not _check_request_matches(
+                    candidates[0], request, recovering=True
+                ):
+                    return None
         elif path.endswith("/reviews") and effect["method"] == "POST":
             status, values = http.request(
                 "GET", path + "?per_page=100&page=1", token=token
@@ -5674,7 +5809,9 @@ class FindingLifecycleJournal:
             status, value = http.request("GET", object_path, token=token)
             if status == 200 and isinstance(value, dict):
                 expected_request = request
+                matches = _request_matches
                 if "/check-runs" in path:
+                    matches = _check_request_matches
                     # A later confirmed update in this same ordered intent log
                     # legitimately supersedes the earlier pending projection.
                     for later in self.effects[self.effects.index(effect) + 1 :]:
@@ -5689,7 +5826,7 @@ class FindingLifecycleJournal:
                                 item["status"] == "pending" for item in self.effects
                             )
                             == 1
-                            and self._check_update_matches(later, value)
+                            and self._check_update_matches(later, value, recovered=True)
                         ):
                             # A response-lost final update may supersede this
                             # earlier confirmed creation. The same fresh GET
@@ -5697,14 +5834,12 @@ class FindingLifecycleJournal:
                             # not infer success from a generic failure state.
                             expected_request = {**expected_request, **later["request"]}
                             confirmed_check_successor = later
-                candidates = (
-                    [value] if _request_matches(value, expected_request) else []
-                )
+                candidates = [value] if matches(value, expected_request) else []
         if candidates is None or len(candidates) != 1:
             return None
         value = candidates[0]
         if "check_update_precondition" in effect and not self._check_update_matches(
-            effect, value
+            effect, value, recovered=response is None
         ):
             return None
         if effect["method"] == "PUT":
@@ -5725,16 +5860,22 @@ class FindingLifecycleJournal:
         # ownership is independently selected by the ledger's evidence resolver.
         producer = self.ledger.evidence_producer()
         if "/check-runs" in path:
-            expected_slug = (
-                self.app_slug[:-5]
-                if self.app_slug and self.app_slug.endswith("[bot]")
-                else self.app_slug
-            )
-            if not isinstance(user, dict) or user.get("slug") != expected_slug:
+            commitment = self._check_commitment(value)
+            if (
+                commitment is None
+                or "user" in value
+                or value["app"]["slug"] != expected_slug
+                or value.get("errors") not in (None, [])
+                or (
+                    effect["method"] == "PATCH"
+                    and path
+                    != f"/repos/{self.identity.repository}/check-runs/{commitment['check_run_id']}"
+                )
+            ):
                 return None
             if response is not None and isinstance(response[1], dict):
                 old_app_id = response[1].get("app_id")
-                if old_app_id is not None and user.get("id") != old_app_id:
+                if old_app_id is not None and commitment["app_id"] != old_app_id:
                     return None
         elif producer.startswith("github-bot:"):
             if (
@@ -5757,7 +5898,7 @@ class FindingLifecycleJournal:
         if (
             "user" in value
             and expected_producer is not None
-            and user.get("id") != expected_producer
+            and (not isinstance(user, dict) or user.get("id") != expected_producer)
         ):
             return None
         if value.get("edited_by_human") is True:

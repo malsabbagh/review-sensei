@@ -21,6 +21,20 @@ UPDATE = {
 }
 
 
+def native_check(*, check_id=501, **projection):
+    return {
+        **projection,
+        "id": check_id,
+        "app": {"id": 999, "slug": "reviewsensei"},
+        "output": {
+            **projection["output"],
+            "text": None,
+            "annotations_count": 0,
+            "annotations_url": f"https://api.github.test{PATH}/{check_id}/annotations",
+        },
+    }
+
+
 def fixture():
     created = effect(
         CREATE,
@@ -44,13 +58,7 @@ def fixture():
         "app_slug": "reviewsensei",
     }
     value = journal(retained=document((created, updated)))
-    native = {
-        **copy.deepcopy(CREATE),
-        **copy.deepcopy(UPDATE),
-        "id": 501,
-        "app": {"id": 999, "slug": "reviewsensei"},
-    }
-    return value, native
+    return value, native_check(**{**CREATE, **UPDATE})
 
 
 class PendingCheckSuccessorReadbackTests(unittest.TestCase):
@@ -117,6 +125,163 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
                 )
                 self.assertEqual(value.effects, before)
                 self.assertEqual(len(http.calls), 1)
+
+    def test_changed_check_output_is_not_readback_metadata(self):
+        for field, changed in (
+            ("summary", "Different summary"),
+            ("title", "Different title"),
+            ("text", "Unexpected rendered content"),
+            ("annotations_count", 1),
+            ("annotations_count", False),
+            ("annotations_url", None),
+            ("unknown", "Unsupported field"),
+        ):
+            with self.subTest(field=field, changed=changed):
+                value, native = fixture()
+                before = copy.deepcopy(value.effects)
+                native["output"][field] = changed
+                self.assertIsNone(
+                    value._readback(
+                        FakeHTTP((200, native)), value.effects[0], token="synthetic"
+                    )
+                )
+                self.assertEqual(value.effects, before)
+
+        value, native = fixture()
+        del native["output"]["summary"]
+        self.assertIsNone(
+            value._readback(
+                FakeHTTP((200, native)), value.effects[0], token="synthetic"
+            )
+        )
+        self.assertEqual(value.effects[1]["status"], "pending")
+
+    def test_pending_check_creation_needs_one_scoped_candidate_in_the_bounded_list(
+        self,
+    ):
+        for fault in (
+            None,
+            "duplicate",
+            "duplicate_changed_output",
+            "repeated_native_id",
+            "unknown_external_id",
+            "unknown_candidate_name",
+            "unknown_candidate_head",
+            "conflicting_app_identity",
+            "confirmed_other_identity",
+            "truncated",
+            "malformed_count",
+            "missing_count",
+            "inconsistent_conclusion",
+            "foreign_app",
+            "foreign_numeric_app_identity",
+            "missing_app_identity",
+            "foreign_head",
+        ):
+            with self.subTest(fault=fault):
+                value = journal(retained=document((effect(CREATE, path=PATH),)))
+                value.ledger.authenticated_app_id = 999
+                native = native_check(**CREATE)
+                runs = [native]
+                count = 1
+                if fault in {
+                    "duplicate",
+                    "duplicate_changed_output",
+                    "repeated_native_id",
+                    "unknown_external_id",
+                    "unknown_candidate_name",
+                    "unknown_candidate_head",
+                    "conflicting_app_identity",
+                    "confirmed_other_identity",
+                }:
+                    runs.append(native_check(check_id=502, **CREATE))
+                    if fault == "duplicate_changed_output":
+                        runs[1]["output"]["summary"] = "Different retained output"
+                    elif fault == "repeated_native_id":
+                        runs[1].update(id=native["id"], external_id="another-result")
+                    elif fault == "unknown_external_id":
+                        del runs[1]["external_id"]
+                    elif fault == "unknown_candidate_name":
+                        del runs[1]["name"]
+                    elif fault == "unknown_candidate_head":
+                        del runs[1]["head_sha"]
+                    elif fault == "conflicting_app_identity":
+                        runs[1]["app"]["id"] += 1
+                    elif fault == "confirmed_other_identity":
+                        runs[1]["external_id"] = "another-result"
+                    count = 2
+                elif fault == "truncated":
+                    count = 2
+                elif fault == "malformed_count":
+                    count = True
+                elif fault == "inconsistent_conclusion":
+                    native["conclusion"] = "success"
+                elif fault == "foreign_app":
+                    native["app"]["slug"] = "foreign"
+                elif fault == "foreign_numeric_app_identity":
+                    native["app"]["id"] = 1_000
+                elif fault == "missing_app_identity":
+                    del native["app"]["id"]
+                elif fault == "foreign_head":
+                    native["head_sha"] = "f" * 40
+                page = {"check_runs": runs}
+                if fault != "missing_count":
+                    page["total_count"] = count
+                http = FakeHTTP((200, page))
+                result = value._readback(http, value.effects[0], token="synthetic")
+                self.assertEqual(
+                    result,
+                    (200, native)
+                    if fault in {None, "confirmed_other_identity"}
+                    else None,
+                )
+                self.assertEqual(value.effects[0]["status"], "pending")
+                self.assertEqual(
+                    [(method, path) for method, path, _ in http.calls],
+                    [
+                        (
+                            "GET",
+                            f"/repos/owner/repo/commits/{HEAD}/check-runs?check_name=ReviewSensei&per_page=100&filter=all",
+                        )
+                    ],
+                )
+
+    def test_in_progress_update_cannot_recover_with_a_stale_conclusion(self):
+        precondition = fixture()[0].effects[1]["check_update_precondition"]
+        request = {"status": "in_progress", "output": CREATE["output"]}
+        pending = effect(request, path=PATH + "/501", method="PATCH")
+        pending["check_update_precondition"] = precondition
+        for returned in (None, "success"):
+            with self.subTest(returned=returned):
+                value = journal(retained=document((pending,)))
+                native = native_check(**{**CREATE, "conclusion": returned})
+                self.assertTrue(value._check_update_matches(value.effects[0], native))
+                http = FakeHTTP((200, native))
+                result = value._readback(http, value.effects[0], token="synthetic")
+                self.assertEqual(result, (200, native) if returned is None else None)
+                self.assertEqual(value.effects[0]["status"], "pending")
+                self.assertEqual(len(http.calls), 1)
+
+    def test_cold_targeted_update_preserves_prior_creation_external_id(self):
+        value, native = fixture()
+        native["external_id"] = "foreign-run"
+        before = copy.deepcopy(value.effects)
+        http = FakeHTTP((200, native))
+        self.assertIsNone(value._readback(http, value.effects[1], token="synthetic"))
+        self.assertEqual(value.effects, before)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_pending_update_does_not_conflict_with_authenticated_app(self):
+        for selected in (0, 1):
+            value, native = fixture()
+            value.ledger.authenticated_app_id = 1_000
+            before = copy.deepcopy(value.effects)
+            http = FakeHTTP((200, native))
+            self.assertIsNone(
+                value._readback(http, value.effects[selected], token="synthetic")
+            )
+            self.assertEqual(value.effects, before)
+            self.assertEqual(len(http.calls), 1)
 
     def test_missing_or_foreign_precondition_and_other_unknown_work_remain_held(self):
         for fault in (

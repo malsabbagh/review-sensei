@@ -358,7 +358,12 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                 return json_response(copy.deepcopy(item), 200)
             if check:
                 if method == "GET":
-                    return json_response({"check_runs": copy.deepcopy(self.check_runs)})
+                    return json_response(
+                        {
+                            "check_runs": copy.deepcopy(self.check_runs),
+                            "total_count": len(self.check_runs),
+                        }
+                    )
                 if method == "POST":
                     item = {
                         "id": 500 + len(self.check_runs),

@@ -182,6 +182,8 @@ class CarriedHumanProgressTests(unittest.TestCase):
                     "refuse_broker",
                     "previous_active",
                     "previous_incomplete",
+                    "previous_conclusion",
+                    "previous_auxiliary_running",
                     "rollover_fault",
                     "change_root",
                     "archive_bad",

@@ -8,11 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from review_sensei_github import ordinary_native_recovery as recovery
 
 from tests import test_ordinary_native_recovery_cold as cold
 from tests import test_ordinary_native_recovery_custody as custody
+from tests.test_ordinary_publication_lost_native import expose_check_output_metadata
 
 
 class SimulatedProcessCrash(BaseException):
@@ -26,6 +28,20 @@ class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             fixture = custody.OrdinaryNativeRecoveryCustodyTests().fixture(str(source))
+            if fault is None:
+                stored_loss = fixture.external
+
+                def check_metadata_before_loss(request, timeout):
+                    try:
+                        return stored_loss(request, timeout)
+                    except TimeoutError:
+                        if request.get_method() == "POST" and urlsplit(
+                            request.full_url
+                        ).path.endswith("/check-runs"):
+                            expose_check_output_metadata(fixture.check_runs[0])
+                        raise
+
+                fixture.external = check_metadata_before_loss
             key = root / "private.key"
             key.write_bytes(b"synthetic-only-recovery-key-32byt")
             key.chmod(0o600)
@@ -387,8 +403,6 @@ def observe(frame,event,result):
                 self.assertIsNone(after.terminal_transaction)
 
     def test_receipt_checkpoint_crash_never_settles_before_durable_return(self):
-        from urllib.parse import urlsplit
-
         from review_sensei_github.session_ledger import parse_session_comment
 
         from review_sensei.api_work import ApiRunAccounting
