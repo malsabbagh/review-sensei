@@ -818,7 +818,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
             f.past_jobs[f.run_id] = f.owner_job
             f.SOURCE_ID = 402
             f.select_command(
-                f"@reviewsensei override {finding_ref} second try",
+                f"@reviewsensei override {finding_ref} acceptable risk",
                 new_run=True,
             )
             self.assertNotEqual(f.invoke_command(), 0)

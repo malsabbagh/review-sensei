@@ -36,7 +36,7 @@ from .api_run_requests import ApiRunRequestTransport
 from .application import GitHubApplication, GitHubWriteOptions
 from .comment_intent import verify_live_comment_source
 from .conversation import ConversationPublisher
-from .errors import GitHubMergeGroupUnsupportedError
+from .errors import GitHubBrokerClientError, GitHubMergeGroupUnsupportedError
 from .event_routing_contract import (
     MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
     RECONCILIATION_OWNERS,
@@ -488,6 +488,81 @@ def _parse_action_command(
     return historical, quarantine, command
 
 
+def _is_source_mutation_fence_error(error: BaseException) -> bool:
+    if isinstance(error, GitHubBrokerClientError):
+        return str(error) == "Current action source changed"
+    if isinstance(error, ReviewInputError):
+        return str(error).startswith("source comment revision changed before execution")
+    return False
+
+
+def cancel_unstarted_after_source_mutation(
+    run: ReviewRun,
+    *,
+    intent: Mapping[str, Any],
+    fence_error: Exception,
+) -> int:
+    """Opt-in G32 same-run unstarted cancellation on pre-effect source mutation."""
+    if not _is_source_mutation_fence_error(fence_error):
+        raise fence_error
+    from .trust_effects import verification_profile
+
+    if verification_profile(run.caller) is not None:
+        raise ReviewInputError(
+            "unstarted source-mutation cancellation is unsupported with trust verification profile"
+        )
+    caller = run.caller
+    action = caller.accounting.action
+    if (
+        caller._action_effect_boundary is not None
+        or caller._action_unresolved()
+        or caller.accounting.uncertain > 0
+        or action is None
+        or action["phase"] != "pending"
+        or action["execution_started"]
+    ):
+        raise fence_error
+    loaded = run.ledger.load(run.identity)
+    if (
+        loaded.status != "ok"
+        or loaded.record is None
+        or loaded.record.record_sha256 != caller._root
+    ):
+        raise ReviewInputError("unstarted cancellation root changed")
+    if not isinstance(run.actions_token, str) or not run.actions_token.strip():
+        raise ReviewInputError(
+            "same-run unstarted recovery requires authenticated actions_token"
+        )
+    dispatch_evidence = NoBusinessDispatchEvidence.from_stranded_caller(
+        caller,
+        identity=run.identity,
+        record=loaded.record,
+        provider_dispatches=0,
+    )
+    actions_evidence = ApiRunActionsEvidence(
+        run.http,
+        token=run.actions_token,
+        command_run_id=str(caller.run.run_id),
+        job=caller.job,
+    )
+    from .unstarted_action_recovery import authenticate_unstarted_cancellation
+
+    witness = authenticate_unstarted_cancellation(
+        caller=caller,
+        ledger=run.ledger,
+        identity=run.identity,
+        record=loaded.record,
+        actions_evidence=actions_evidence,
+        no_business_dispatch_evidence=dispatch_evidence,
+        require_positive_dispatch_proof=True,
+        expected_intent=intent,
+        mode="same_run",
+    )
+    caller.cancel_unstarted_action(run.ledger, run.identity, witness)
+    print("Unstarted action canceled after source change")
+    return 0
+
+
 def execute_command(run: ReviewRun, args: Any) -> int:
     from review_sensei.source_registry import require_module_seal
 
@@ -496,6 +571,16 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     require_module_seal(historical_terminal_fence)
     with historical_terminal_fence.execution_scope():
         assert run.identity.repository_id is not None
+        cancel_on_mutation = bool(
+            getattr(args, "cancel_unstarted_on_source_mutation", False)
+        )
+        if cancel_on_mutation:
+            from .trust_effects import verification_profile
+
+            if verification_profile(run.caller) is not None:
+                raise ReviewInputError(
+                    "unstarted source-mutation cancellation is unsupported with trust verification profile"
+                )
         authority = VerifiedRunAction(run)
         if not isinstance(run.ledger, ActionRunLedger):
             raise ReviewInputError("command requires its current action ledger")
@@ -586,42 +671,51 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 actor=actor["login"],
             )
         quarantine_refusal = None
-        if quarantine is not None:
-            from .quarantine_action import (
-                QuarantineTargetRefusal,
-                issue_decision_fence,
-                prepare_quarantine_target,
-            )
-
-            try:
-                quarantine_target = prepare_quarantine_target(
-                    run, authority, quarantine, app, permission
-                )
-                run.ledger.business_guard = issue_decision_fence(run, authority)
-            except QuarantineTargetRefusal as error:
-                quarantine_refusal = str(error)
         historical_refusal = None
-        if historical is not None:
-            from .historical_assessment_action import (
-                HistoricalTargetRefusal,
-                prepare_historical_target,
-            )
-
-            try:
-                historical_target = prepare_historical_target(
-                    run, authority, historical, app, permission
+        try:
+            if quarantine is not None:
+                from .quarantine_action import (
+                    QuarantineTargetRefusal,
+                    issue_decision_fence,
+                    prepare_quarantine_target,
                 )
-            except HistoricalTargetRefusal as error:
-                # This process has not entered a decision mutation. A definite
-                # selector/role refusal can finish as a charged explicit no-op;
-                # transport/budget uncertainty and stale authority still escape.
-                historical_refusal = str(error)
-        fenced_comment = authority.fence()
-        verify_live_comment_source(
-            bound_source=source,
-            live_comment=fenced_comment,
-            phase="unstarted_intent",
-        )
+
+                try:
+                    quarantine_target = prepare_quarantine_target(
+                        run, authority, quarantine, app, permission
+                    )
+                    run.ledger.business_guard = issue_decision_fence(run, authority)
+                except QuarantineTargetRefusal as error:
+                    quarantine_refusal = str(error)
+            if historical is not None:
+                from .historical_assessment_action import (
+                    HistoricalTargetRefusal,
+                    prepare_historical_target,
+                )
+
+                try:
+                    historical_target = prepare_historical_target(
+                        run, authority, historical, app, permission
+                    )
+                except HistoricalTargetRefusal as error:
+                    # This process has not entered a decision mutation. A definite
+                    # selector/role refusal can finish as a charged explicit no-op;
+                    # transport/budget uncertainty and stale authority still escape.
+                    historical_refusal = str(error)
+            fenced_comment = authority.fence()
+            verify_live_comment_source(
+                bound_source=source,
+                live_comment=fenced_comment,
+                phase="unstarted_intent",
+            )
+        except (GitHubBrokerClientError, ReviewInputError) as fence_error:
+            if not cancel_on_mutation:
+                raise
+            return cancel_unstarted_after_source_mutation(
+                run,
+                intent=intent,
+                fence_error=fence_error,
+            )
         boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
         explicit_mode = getattr(args, "review_mode", None)
         if (
@@ -743,6 +837,7 @@ def run_action(
     *,
     purpose: str,
     verify_before_intent: bool = False,
+    cancel_unstarted_on_source_mutation: bool = False,
     event_delivery: Mapping[str, Any] | None = None,
     has_pending_receipt: bool = False,
     unstarted_recovery: UnstartedCallerRecoveryGate | None = None,
@@ -763,8 +858,21 @@ def run_action(
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--cancel-unstarted-on-source-mutation",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
+    cancel_on_mutation = bool(
+        cancel_unstarted_on_source_mutation
+        or options.cancel_unstarted_on_source_mutation
+    )
+    if cancel_on_mutation and options.enable_current_trust_enrollment:
+        raise ReviewInputError(
+            "unstarted source-mutation cancellation is unsupported with current trust enrollment"
+        )
     arguments = (
         options.arguments[1:] if options.arguments[:1] == ["--"] else options.arguments
     )
@@ -788,8 +896,9 @@ def run_action(
         _, _, classified_command = _parse_action_command(
             args.comment_body, actor="classification-only"
         )
-        if classified_command is not None:
-            command_action = classified_command.action
+        if classified_command is None:
+            raise ReviewInputError("authenticated source is not a supported command")
+        command_action = classified_command.action
     source = event_source(args, purpose=purpose)
     args.provider = getattr(args, "provider", None)
     args.model = getattr(args, "model", None)
@@ -797,6 +906,8 @@ def run_action(
     if not args.head_sha:
         args.head_sha = None
     args.rescan = args.review_remaining = False
+    if cancel_on_mutation:
+        args.cancel_unstarted_on_source_mutation = True
     with _cross_run_unstarted_rollover_guard(unstarted_recovery) as rollover_service:
         run = bootstrap(
             args,
@@ -851,6 +962,8 @@ def run_action(
         return execute_command(run, args)
     from .action_reply import execute_reply
 
+    if cancel_on_mutation:
+        return execute_reply(run, args, cancel_unstarted_on_source_mutation=True)
     return execute_reply(run, args)
 
 
