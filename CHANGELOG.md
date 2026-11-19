@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.22 - 2026-11-19
+
 - Add a purpose-bound durable finding lifecycle, cold reply/command consumers,
   exact native receipt reconciliation and complete-tail capacity guards. Retain
   hidden obligations, uncertainty and original funding across restarts.
@@ -18,6 +20,10 @@
 - These are source changes, not deployment, historical settlement or completion
   of every lifecycle gap. Missing original evidence and decision-gated authority
   contracts remain explicit holds.
+
+## review-sensei-github 0.3.28 - 2026-11-19
+
+- Pin `review-sensei==0.8.22`.
 
 ## 0.8.21 - 2026-11-12
 
