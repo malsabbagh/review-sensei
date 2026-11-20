@@ -106,25 +106,22 @@ def _dispatch_profile_entries(entries, frame, event: str, value) -> None:
 def _make_profile_dispatcher(thread: int, previous):
     watches: dict = {}
     get_entries = watches.get
-    if previous is None:
+    if not callable(previous):
 
         def dispatch(frame, event: str, value) -> None:
-            entries = get_entries(frame.f_code)
-            if entries is not None:
-                _dispatch_profile_entries(entries, frame, event, value)
-
-    elif callable(previous):
-
-        def dispatch(frame, event: str, value) -> None:
-            previous(frame, event, value)
-            entries = get_entries(frame.f_code)
+            if event != "call" and event != "return":
+                return
+            entries = get_entries(id(frame.f_code))
             if entries is not None:
                 _dispatch_profile_entries(entries, frame, event, value)
 
     else:
 
         def dispatch(frame, event: str, value) -> None:
-            entries = get_entries(frame.f_code)
+            previous(frame, event, value)
+            if event != "call" and event != "return":
+                return
+            entries = get_entries(id(frame.f_code))
             if entries is not None:
                 _dispatch_profile_entries(entries, frame, event, value)
 
@@ -275,20 +272,24 @@ def watch_code(
             yields,
             {},
         )
-        watches.setdefault(code, []).append(watch)
+        # The suspended context owns a strong reference to code throughout.
+        # Its identity is exact and constant-time; hashing arbitrary code
+        # objects in the profiler hot path can traverse their constants.
+        key = id(code)
+        watches.setdefault(key, []).append(watch)
         try:
             if installed:
                 sys.setprofile(dispatcher)
             yield
         finally:
-            entries = watches.get(code)
+            entries = watches.get(key)
             if entries is not None:
                 for index, item in enumerate(entries):
                     if item is watch:
                         del entries[index]
                         break
                 if not entries:
-                    watches.pop(code, None)
+                    watches.pop(key, None)
             if not watches:
                 sys.setprofile(dispatcher._watch_previous)  # type: ignore[attr-defined]
         return

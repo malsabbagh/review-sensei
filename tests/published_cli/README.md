@@ -141,10 +141,24 @@ increment `subtest_failures`. Skipped subtests likewise use their parent's faili
 and `execution_complete` is false. These failures still produce an ordinary
 failed receipt and nonzero process exit; the qualification driver validates
 row totals and exit status without requiring an integer `tests_run`.
-The same two `spawn` workers start expensive contracts first. Only dispatch order
-changes: every declared method is still required within the same 300 seconds.
+The same two `spawn` workers start expensive contracts first. Python 3.11 starts
+override metadata immediately: observing original Python frames without
+`sys.monitoring` makes those journeys substantially more expensive than on newer
+interpreters. The fallback observer matches the exact live code object and
+forwards all events to an existing callable profile hook, but examines only
+Python call/return events for its own watches.
+
+Every declared method is still required within the same 300 seconds. A stale or
+duplicate scheduling priority fails before any submission.
 `dispatch_order` records actual submissions; confirmed contracts, method IDs and
-rows stay in canonical inventory order.
+rows stay in canonical inventory order. Independently flushed `lifecycle stage=`
+stderr records show worker entry and return/error, the parent's wait and validated
+acceptance, pool shutdown, and the receipt write against one monotonic clock.
+A pool constructor or context-entry error emits `pool-start-failed`; a stall
+during that phase leaves only `pool-start`.
+A worker's terminal marker does not attest parent acceptance, and no marker
+substitutes for the validated `results.json`. A timeout can retain only a prefix
+of the canonical unittest summaries even when later contracts have finished.
 The loader validates every declared resolved path before executing any file,
 rejecting a contract file or directory symlink that escapes its declared location.
 The qualification ref supplies trusted test code; these path checks do not

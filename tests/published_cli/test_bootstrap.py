@@ -846,17 +846,154 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
 
     def test_expensive_first_dispatch_preserves_the_declared_inventory(self):
         module = self.lifecycle_module()
-        order = module.submission_order(module.CONTRACTS)
-        self.assertCountEqual(order, module.CONTRACTS)
-        self.assertEqual(len(order), len(set(order)))
+        for version, first_pair in (
+            (
+                (3, 11),
+                ("test_override_metadata_contract", "test_rich_feedback_contract"),
+            ),
+            (
+                (3, 14),
+                (
+                    "test_rich_feedback_contract",
+                    "test_default_human_inventory_contract",
+                ),
+            ),
+        ):
+            with (
+                self.subTest(version=version),
+                patch.object(module.sys, "version_info", version),
+            ):
+                order = module.submission_order(module.CONTRACTS)
+                self.assertCountEqual(order, module.CONTRACTS)
+                self.assertEqual(len(order), len(set(order)))
+                self.assertEqual(order[:2], first_pair)
+                self.assertEqual(
+                    module.submission_order(("new", order[1], "newer")),
+                    (order[1], "new", "newer"),
+                )
+
+    def test_stale_or_duplicate_priorities_refuse_before_filtering_subsets(self):
+        module = self.lifecycle_module()
+        subset = (module.CONTRACTS[0],)
+        for version, config in (
+            ((3, 11), "_PY311_LONG_CONTRACTS"),
+            ((3, 14), "_LONG_CONTRACTS"),
+        ):
+            declared = getattr(module, config)
+            for bad in ("test_renamed_contract", declared[0]):
+                with (
+                    self.subTest(version=version, bad=bad),
+                    patch.object(module.sys, "version_info", version),
+                    patch.object(module, config, (*declared, bad)),
+                    self.assertRaisesRegex(
+                        ValueError, "invalid lifecycle contract priorities"
+                    ),
+                ):
+                    module.submission_order(subset)
+
+    def test_pool_startup_failure_is_distinct_from_a_stall_or_shutdown(self):
+        module = self.lifecycle_module()
+        for boundary in ("constructor", "enter"):
+            with self.subTest(boundary=boundary):
+                error = RuntimeError("private startup detail")
+                stderr = io.StringIO()
+                with (
+                    patch.object(sys, "stderr", stderr),
+                    patch.object(
+                        module.concurrent.futures, "ProcessPoolExecutor"
+                    ) as executor,
+                ):
+                    target = (
+                        executor
+                        if boundary == "constructor"
+                        else executor.return_value.__enter__
+                    )
+                    target.side_effect = error
+                    with (
+                        self.assertRaises(RuntimeError) as caught,
+                        module.worker_pool(module.time.monotonic()),
+                    ):
+                        self.fail("pool opened despite startup failure")
+                self.assertIs(caught.exception, error)
+                self.assertEqual(
+                    [line.split()[1] for line in stderr.getvalue().splitlines()],
+                    ["stage=pool-start", "stage=pool-start-failed"],
+                )
+                self.assertNotIn(str(error), stderr.getvalue())
+                executor.return_value.__exit__.assert_not_called()
+
+    def test_pool_shutdown_is_bracketed_even_after_a_worker_error(self):
+        module = self.lifecycle_module()
+        stages = []
+        with (
+            patch.object(
+                module,
+                "progress",
+                side_effect=lambda stage, _origin: stages.append(stage),
+            ),
+            patch.object(module.concurrent.futures, "ProcessPoolExecutor") as executor,
+        ):
+            executor.return_value.__exit__.side_effect = lambda *args: stages.append(
+                "shutdown"
+            )
+            with (
+                self.assertRaisesRegex(RuntimeError, "worker error"),
+                module.worker_pool(0),
+            ):
+                stages.append("body")
+                raise RuntimeError("worker error")
         self.assertEqual(
-            order[:2],
-            ("test_rich_feedback_contract", "test_default_human_inventory_contract"),
+            stages,
+            ["pool-start", "body", "pool-exit-begin", "shutdown", "pool-exit-end"],
         )
+        self.assertEqual(executor.call_args.kwargs["max_workers"], 2)
         self.assertEqual(
-            module.submission_order(("new", order[1], "newer")),
-            (order[1], "new", "newer"),
+            executor.call_args.kwargs["mp_context"].get_start_method(), "spawn"
         )
+
+    def test_worker_progress_is_flushed_sanitized_and_not_a_receipt(self):
+        module = self.lifecycle_module()
+        name = module.CONTRACTS[0]
+
+        class Output(io.StringIO):
+            def flush(self):
+                self.flushed.append(self.getvalue())
+
+        for successful in (True, False, None):
+            with self.subTest(successful=successful):
+                output = Output()
+                output.flushed = []
+                record = {"tests_run": 1, "successful": successful}
+                with (
+                    patch.object(sys, "stderr", output),
+                    patch.object(
+                        module.time, "monotonic", side_effect=[12.0, 12.0, 13.0]
+                    ),
+                    patch.object(module, "assert_installed"),
+                    patch.object(module, "load_contracts"),
+                    patch.object(module, "execute_suite", return_value=record) as run,
+                ):
+                    if successful is None:
+                        run.side_effect = RuntimeError("private exception detail")
+                        with self.assertRaises(RuntimeError):
+                            module.run_contract("tests", name, "1", "2", 10.0)
+                        terminal = f"worker-error elapsed_ms=3000 contract={name}"
+                    else:
+                        self.assertIs(
+                            module.run_contract("tests", name, "1", "2", 10.0), record
+                        )
+                        status = "worker-pass" if successful else "worker-fail"
+                        terminal = f"{status} elapsed_ms=3000 contract={name} tests=1"
+                entry = (
+                    f"lifecycle stage=worker-enter elapsed_ms=2000 contract={name}\n"
+                )
+                self.assertEqual(
+                    output.flushed,
+                    [
+                        entry,
+                        entry + "lifecycle stage=" + terminal + " duration_ms=1000\n",
+                    ],
+                )
 
     def test_worker_success_requires_every_assigned_test_and_result_once(self):
         from copy import deepcopy
@@ -1120,7 +1257,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             ) as version,
                             patch.object(sys, "argv", argv),
                             patch.object(sys, "path", list(sys.path)),
-                            patch.object(sys, "stderr", io.StringIO()),
+                            patch.object(sys, "stderr", io.StringIO()) as stderr,
                             patch.object(
                                 module.concurrent.futures, "ProcessPoolExecutor"
                             ) as pool,
@@ -1164,6 +1301,33 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                                 pool.assert_not_called()
                         receipt = json.loads((report / "results.json").read_text())
                         self.assertIs(validate_receipt(receipt, "0.8.1"), receipt)
+                        marks = [
+                            line
+                            for line in stderr.getvalue().splitlines()
+                            if line.startswith("lifecycle ")
+                        ]
+                        stages = [line.split()[1] for line in marks]
+                        self.assertEqual(
+                            stages[-2:],
+                            ["stage=receipt-write-begin", "stage=receipt-write-end"],
+                        )
+                        self.assertFalse(any("private " in line for line in marks))
+                        if worker_error:
+                            expected_stages = ["stage=pool-start"]
+                            if confirmed:
+                                expected_stages.extend(
+                                    ["stage=parent-wait", "stage=parent-accepted"]
+                                )
+                            expected_stages.extend(
+                                [
+                                    "stage=parent-wait",
+                                    "stage=pool-exit-begin",
+                                    "stage=pool-exit-end",
+                                ]
+                            )
+                            self.assertEqual(stages[:-2], expected_stages)
+                            self.assertIn(f"contract={names[confirmed]}", marks[-5])
+                            self.assertNotIn("stage=worker-pass", stages)
                         if worker_error:
                             self.assertIsNone(receipt["tests_run"])
                         else:
@@ -1181,6 +1345,10 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             else fault,
                         )
                         if fault == "pool-enter-error":
+                            self.assertEqual(
+                                stages[:-2],
+                                ["stage=pool-start", "stage=pool-start-failed"],
+                            )
                             self.assertFalse(receipt["workers_started"])
                             self.assertEqual(receipt["submitted_contracts"], [])
                             self.assertEqual(
