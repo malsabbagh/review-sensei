@@ -103,7 +103,7 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 ),
                 (
                     "original_source_observation.py",
-                    "340c52e403310393bc9794c7812b7255aff9b0f7f24722d50a0161dbb2bdd6f8",
+                    "208dd9b33a02ebac011f74249ea2205edb0f82a31993fc9b53c6c25db6025f19",
                 ),
                 (
                     "fake_github_http.py",
