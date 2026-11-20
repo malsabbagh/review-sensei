@@ -2675,6 +2675,7 @@ def _validate_accepted_history_metadata(value, binding, *, depth=0):
                 and (
                     item["purpose"] != "command"
                     or item["disposition_entry"] is not True
+                    or item["made_progress"] is not False
                 )
             )
         ):

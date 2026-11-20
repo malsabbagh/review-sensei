@@ -457,6 +457,37 @@ def _options(run: ReviewRun) -> GitHubWriteOptions:
     )
 
 
+def _parse_action_command(
+    comment_body: Any,
+    *,
+    actor: str,
+    head_sha: str | None = None,
+    command_id: str | None = None,
+) -> tuple[Any, Any, Any]:
+    """Syntax-only action command parser shared between preflight and execution.
+
+    ``actor`` is recorded as command metadata only; actor role and association
+    authorization live strictly inside ``VerifiedRunAction`` and
+    ``GitHubApplication``.
+    """
+    from .historical_assessment_action import parse_historical_command
+    from .quarantine_action import parse_quarantine_command
+
+    historical = parse_historical_command(comment_body)
+    quarantine = parse_quarantine_command(comment_body)
+    command = (
+        historical
+        or quarantine
+        or parse_maintainer_command(
+            comment_body,
+            actor=actor,
+            head_sha=head_sha,
+            command_id=command_id,
+        )
+    )
+    return historical, quarantine, command
+
+
 def execute_command(run: ReviewRun, args: Any) -> int:
     from review_sensei.source_registry import require_module_seal
 
@@ -472,7 +503,8 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         source = authority.document["source"]
         actor = authority.document["actor"]
         # VerifiedRunAction enforces closed SOURCE_KEYS (with 64-hex body_sha256)
-        # for every command grant in run_authority.parse_authority.
+        # for every command grant in run_authority.parse_authority; also fail closed
+        # with ReviewInputError if a caller passes a malformed source without it.
         try:
             body_sha256 = (
                 hashlib.sha256(args.comment_body.encode("utf-8")).hexdigest()
@@ -481,22 +513,18 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             )
         except UnicodeEncodeError:
             body_sha256 = None
-        if body_sha256 != source["body_sha256"]:
+        expected_digest = source.get("body_sha256")
+        if (
+            not isinstance(expected_digest, str)
+            or body_sha256 is None
+            or body_sha256 != expected_digest
+        ):
             raise ReviewInputError("authenticated source body conflicts with command")
-        from .historical_assessment_action import parse_historical_command
-        from .quarantine_action import parse_quarantine_command
-
-        historical = parse_historical_command(args.comment_body)
-        quarantine = parse_quarantine_command(args.comment_body)
-        command = (
-            historical
-            or quarantine
-            or parse_maintainer_command(
-                args.comment_body,
-                actor=actor["login"],
-                head_sha=run.head_sha,
-                command_id=str(source["id"]),
-            )
+        historical, quarantine, command = _parse_action_command(
+            args.comment_body,
+            actor=actor["login"],
+            head_sha=run.head_sha,
+            command_id=str(source["id"]),
         )
         if command is None:
             raise ReviewInputError("authenticated source is not a supported command")
@@ -757,17 +785,8 @@ def run_action(
     command_action: str | None = None
     classified_command: Any = None
     if purpose == "command":
-        from .historical_assessment_action import parse_historical_command
-        from .quarantine_action import parse_quarantine_command
-
-        historical_command = parse_historical_command(args.comment_body)
-        quarantine_command = parse_quarantine_command(args.comment_body)
-        # Syntax-only classification; role/permission gates run in execute_command
-        # and apply_maintainer_command against the authenticated actor.
-        classified_command = (
-            historical_command
-            or quarantine_command
-            or parse_maintainer_command(args.comment_body, actor="classification-only")
+        _, _, classified_command = _parse_action_command(
+            args.comment_body, actor="classification-only"
         )
         if classified_command is not None:
             command_action = classified_command.action

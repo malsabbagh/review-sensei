@@ -21,6 +21,207 @@
     "expires_at",
     "record_sha256"
   ],
+  "$defs": {
+    "accepted_semantic_history_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_key",
+        "purpose",
+        "source",
+        "snapshot",
+        "made_progress",
+        "target_base_sha",
+        "target_head_sha"
+      ],
+      "properties": {
+        "operation_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "purpose": {
+          "enum": [
+            "command",
+            "reply"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "updated_at",
+            "body_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "issue_comment",
+                "review_comment"
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "updated_at": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "body_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inventory_sha256",
+            "unresolved_sha256",
+            "enumerated_sha256",
+            "reviewed_sha256",
+            "uncertain_sha256",
+            "pending_sha256",
+            "receipts_sha256",
+            "base_sha",
+            "head_sha",
+            "unresolved_count",
+            "reviewed_count",
+            "uncertain_count",
+            "pending_count",
+            "review_complete",
+            "enumeration_complete",
+            "fully_reviewed",
+            "unknown_trust_effect"
+          ],
+          "properties": {
+            "inventory_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "unresolved_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "enumerated_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "reviewed_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "uncertain_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "pending_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "receipts_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "base_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "unresolved_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "reviewed_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "uncertain_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "pending_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "review_complete": {
+              "type": "boolean"
+            },
+            "enumeration_complete": {
+              "type": "boolean"
+            },
+            "fully_reviewed": {
+              "type": "boolean"
+            },
+            "unknown_trust_effect": {
+              "type": "boolean"
+            }
+          }
+        },
+        "made_progress": {
+          "type": "boolean"
+        },
+        "target_base_sha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_head_sha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disposition_entry": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "disposition_entry"
+            ]
+          },
+          "then": {
+            "properties": {
+              "purpose": {
+                "const": "command"
+              },
+              "made_progress": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
   "properties": {
     "historical_assessments": {
       "$ref": "https://reviewsensei.dev/schemas/v1/historical-assessment-hold.schema.json"
@@ -1308,200 +1509,7 @@
                   "minItems": 1,
                   "maxItems": 2,
                   "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "operation_key",
-                      "purpose",
-                      "source",
-                      "snapshot",
-                      "made_progress",
-                      "target_base_sha",
-                      "target_head_sha"
-                    ],
-                    "properties": {
-                      "operation_key": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 256
-                      },
-                      "purpose": {
-                        "enum": [
-                          "command",
-                          "reply"
-                        ]
-                      },
-                      "source": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": [
-                          "kind",
-                          "id",
-                          "updated_at",
-                          "body_sha256"
-                        ],
-                        "properties": {
-                          "kind": {
-                            "enum": [
-                              "issue_comment",
-                              "review_comment"
-                            ]
-                          },
-                          "id": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 9007199254740991
-                          },
-                          "updated_at": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          },
-                          "body_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          }
-                        }
-                      },
-                      "snapshot": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": [
-                          "inventory_sha256",
-                          "unresolved_sha256",
-                          "enumerated_sha256",
-                          "reviewed_sha256",
-                          "uncertain_sha256",
-                          "pending_sha256",
-                          "receipts_sha256",
-                          "base_sha",
-                          "head_sha",
-                          "unresolved_count",
-                          "reviewed_count",
-                          "uncertain_count",
-                          "pending_count",
-                          "review_complete",
-                          "enumeration_complete",
-                          "fully_reviewed",
-                          "unknown_trust_effect"
-                        ],
-                        "properties": {
-                          "inventory_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "unresolved_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "enumerated_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "reviewed_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "uncertain_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "pending_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "receipts_sha256": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{64}$"
-                          },
-                          "base_sha": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{40}$"
-                          },
-                          "head_sha": {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{40}$"
-                          },
-                          "unresolved_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": 100000
-                          },
-                          "reviewed_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": 100000
-                          },
-                          "uncertain_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": 100000
-                          },
-                          "pending_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": 100000
-                          },
-                          "review_complete": {
-                            "type": "boolean"
-                          },
-                          "enumeration_complete": {
-                            "type": "boolean"
-                          },
-                          "fully_reviewed": {
-                            "type": "boolean"
-                          },
-                          "unknown_trust_effect": {
-                            "type": "boolean"
-                          }
-                        }
-                      },
-                      "made_progress": {
-                        "type": "boolean"
-                      },
-                      "target_base_sha": {
-                        "anyOf": [
-                          {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{40}$"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "target_head_sha": {
-                        "anyOf": [
-                          {
-                            "type": "string",
-                            "pattern": "^[a-f0-9]{40}$"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "disposition_entry": {
-                        "type": "boolean",
-                        "const": true
-                      }
-                    },
-                    "allOf": [
-                      {
-                        "if": {
-                          "required": [
-                            "disposition_entry"
-                          ]
-                        },
-                        "then": {
-                          "properties": {
-                            "purpose": {
-                              "const": "command"
-                            }
-                          }
-                        }
-                      }
-                    ]
+                    "$ref": "#/$defs/accepted_semantic_history_record"
                   }
                 }
               }
@@ -1560,200 +1568,7 @@
                           "minItems": 1,
                           "maxItems": 2,
                           "items": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": [
-                              "operation_key",
-                              "purpose",
-                              "source",
-                              "snapshot",
-                              "made_progress",
-                              "target_base_sha",
-                              "target_head_sha"
-                            ],
-                            "properties": {
-                              "operation_key": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256
-                              },
-                              "purpose": {
-                                "enum": [
-                                  "command",
-                                  "reply"
-                                ]
-                              },
-                              "source": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": [
-                                  "kind",
-                                  "id",
-                                  "updated_at",
-                                  "body_sha256"
-                                ],
-                                "properties": {
-                                  "kind": {
-                                    "enum": [
-                                      "issue_comment",
-                                      "review_comment"
-                                    ]
-                                  },
-                                  "id": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "maximum": 9007199254740991
-                                  },
-                                  "updated_at": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "maxLength": 128
-                                  },
-                                  "body_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  }
-                                }
-                              },
-                              "snapshot": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": [
-                                  "inventory_sha256",
-                                  "unresolved_sha256",
-                                  "enumerated_sha256",
-                                  "reviewed_sha256",
-                                  "uncertain_sha256",
-                                  "pending_sha256",
-                                  "receipts_sha256",
-                                  "base_sha",
-                                  "head_sha",
-                                  "unresolved_count",
-                                  "reviewed_count",
-                                  "uncertain_count",
-                                  "pending_count",
-                                  "review_complete",
-                                  "enumeration_complete",
-                                  "fully_reviewed",
-                                  "unknown_trust_effect"
-                                ],
-                                "properties": {
-                                  "inventory_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "unresolved_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "enumerated_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "reviewed_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "uncertain_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "pending_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "receipts_sha256": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{64}$"
-                                  },
-                                  "base_sha": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{40}$"
-                                  },
-                                  "head_sha": {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{40}$"
-                                  },
-                                  "unresolved_count": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 100000
-                                  },
-                                  "reviewed_count": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 100000
-                                  },
-                                  "uncertain_count": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 100000
-                                  },
-                                  "pending_count": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 100000
-                                  },
-                                  "review_complete": {
-                                    "type": "boolean"
-                                  },
-                                  "enumeration_complete": {
-                                    "type": "boolean"
-                                  },
-                                  "fully_reviewed": {
-                                    "type": "boolean"
-                                  },
-                                  "unknown_trust_effect": {
-                                    "type": "boolean"
-                                  }
-                                }
-                              },
-                              "made_progress": {
-                                "type": "boolean"
-                              },
-                              "target_base_sha": {
-                                "anyOf": [
-                                  {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{40}$"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "target_head_sha": {
-                                "anyOf": [
-                                  {
-                                    "type": "string",
-                                    "pattern": "^[a-f0-9]{40}$"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "disposition_entry": {
-                                "type": "boolean",
-                                "const": true
-                              }
-                            },
-                            "allOf": [
-                              {
-                                "if": {
-                                  "required": [
-                                    "disposition_entry"
-                                  ]
-                                },
-                                "then": {
-                                  "properties": {
-                                    "purpose": {
-                                      "const": "command"
-                                    }
-                                  }
-                                }
-                              }
-                            ]
+                            "$ref": "#/$defs/accepted_semantic_history_record"
                           }
                         }
                       }

@@ -313,7 +313,9 @@ def validate_history(value, identity):
         ):
             _hold("invalid_record")
         if "disposition_entry" in item and (
-            item["purpose"] != "command" or item["disposition_entry"] is not True
+            item["purpose"] != "command"
+            or item["disposition_entry"] is not True
+            or item["made_progress"] is not False
         ):
             _hold("invalid_record")
         source = item["source"]
@@ -392,7 +394,7 @@ def append_history(
         "target_base_sha": target_base_sha,
         "target_head_sha": intent.get("head_sha"),
     }
-    if disposition_entry and intent["purpose"] == "command":
+    if disposition_entry and intent["purpose"] == "command" and not progress:
         entry["disposition_entry"] = True
     records.append(entry)
     value = {
