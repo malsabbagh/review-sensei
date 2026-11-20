@@ -363,28 +363,29 @@ class SemanticHistoryRecoveryCommandsTests(unittest.TestCase):
                     self.assertEqual(current.record_sha256, before_root)
 
             # Prose reply is also still stopped on streak == LIMIT.
-            reply_fx = RecoveryEntryFixture(tempfile.mkdtemp(dir=directory))
-            # Seed the same streak on RecoveryEntryFixture directly.
-            assert reply_fx.invoke(human=True) == 0, reply_fx.error
-            for n in range(LIMIT):
-                reply_fx.SOURCE_ID = 41 + n
-                reply_fx.select_command("@reviewsensei review status", new_run=True)
-                assert reply_fx.invoke_command() == 0, reply_fx.error
-            reply_root = parse_session_comment(
-                reply_fx.comment["body"], identity=IDENTITY
-            ).record_sha256
-            reply_calls = reply_fx.provider_calls
-            self.assertEqual(reply_fx.invoke_reply("@reviewsensei explain this"), 1)
-            self.assertIn(
-                "accepted_semantic_history_finite_no_progress_stop", reply_fx.error
-            )
-            self.assertEqual(
-                parse_session_comment(
+            with tempfile.TemporaryDirectory(dir=directory) as reply_dir:
+                reply_fx = RecoveryEntryFixture(reply_dir)
+                # Seed the same streak on RecoveryEntryFixture directly.
+                assert reply_fx.invoke(human=True) == 0, reply_fx.error
+                for n in range(LIMIT):
+                    reply_fx.SOURCE_ID = 41 + n
+                    reply_fx.select_command("@reviewsensei review status", new_run=True)
+                    assert reply_fx.invoke_command() == 0, reply_fx.error
+                reply_root = parse_session_comment(
                     reply_fx.comment["body"], identity=IDENTITY
-                ).record_sha256,
-                reply_root,
-            )
-            self.assertEqual(reply_fx.provider_calls, reply_calls)
+                ).record_sha256
+                reply_calls = reply_fx.provider_calls
+                self.assertEqual(reply_fx.invoke_reply("@reviewsensei explain this"), 1)
+                self.assertIn(
+                    "accepted_semantic_history_finite_no_progress_stop", reply_fx.error
+                )
+                self.assertEqual(
+                    parse_session_comment(
+                        reply_fx.comment["body"], identity=IDENTITY
+                    ).record_sha256,
+                    reply_root,
+                )
+                self.assertEqual(reply_fx.provider_calls, reply_calls)
             self.assertEqual(f.provider_calls, before_calls)
 
     def test_accept_risk_and_override_reset_streak_and_allow_subsequent_verify(self):

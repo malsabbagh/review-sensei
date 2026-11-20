@@ -184,7 +184,8 @@ def historical_snapshot(snapshot, ledger, record):
         )
 
         hold = normalize_hold(historical_assessments)
-        assert hold is not None
+        if hold is None:
+            _hold("historical_assessments_invalid")
         hold_pending = sorted(a["instance"] for a in pending_assessments(hold))
         snapshot = {
             **snapshot,
