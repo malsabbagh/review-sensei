@@ -9,7 +9,9 @@ import io
 import json
 import multiprocessing
 import sys
+import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 CONTRACTS = (
@@ -51,9 +53,55 @@ _LONG_CONTRACTS = (
 
 
 def submission_order(contracts):
-    return tuple(name for name in _LONG_CONTRACTS if name in contracts) + tuple(
-        name for name in contracts if name not in _LONG_CONTRACTS
+    priority = _LONG_CONTRACTS
+    if sys.version_info[:2] == (3, 11):
+        # This interpreter lacks per-code sys.monitoring. The observed
+        # override journeys are its longest group; starting them third
+        # leaves a late serial tail even while the other worker is idle.
+        priority = (
+            "test_override_metadata_contract",
+            "test_rich_feedback_contract",
+            "test_default_human_inventory_contract",
+            "test_provider_deadline_contract",
+            "test_hosted_history_readers_contract",
+            "test_default_publication_recovery_contract",
+            "test_initial_assessment_tail_contract",
+        )
+    return tuple(name for name in priority if name in contracts) + tuple(
+        name for name in contracts if name not in priority
     )
+
+
+def progress(stage, origin, *, contract=None, count=None, since=None):
+    """Flush a bounded diagnostic record, never test evidence or fixture data."""
+    now = time.monotonic()
+    fields = [f"stage={stage}", f"elapsed_ms={int((now - origin) * 1000)}"]
+    if contract is not None:
+        fields.append(f"contract={contract}")
+    if count is not None:
+        fields.append(f"tests={count}")
+    if since is not None:
+        fields.append(f"duration_ms={int((now - since) * 1000)}")
+    sys.stderr.write("lifecycle " + " ".join(fields) + "\n")
+    sys.stderr.flush()
+
+
+@contextmanager
+def worker_pool(origin):
+    progress("pool-start", origin)
+    entered = False
+    try:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=2, mp_context=multiprocessing.get_context("spawn")
+        ) as pool:
+            entered = True
+            try:
+                yield pool
+            finally:
+                progress("pool-exit-begin", origin)
+    finally:
+        if entered:
+            progress("pool-exit-end", origin)
 
 
 def load_contracts(tests, selected=None):
@@ -204,9 +252,23 @@ def execute_suite(suite):
     }
 
 
-def run_contract(tests, name, version, github_version):
-    assert_installed(tests, version, github_version)
-    return execute_suite(load_contracts(Path(tests), (name,)))
+def run_contract(tests, name, version, github_version, origin):
+    started = time.monotonic()
+    progress("worker-enter", origin, contract=name)
+    try:
+        assert_installed(tests, version, github_version)
+        record = execute_suite(load_contracts(Path(tests), (name,)))
+    except BaseException:
+        progress("worker-error", origin, contract=name, since=started)
+        raise
+    progress(
+        "worker-pass" if record["successful"] else "worker-fail",
+        origin,
+        contract=name,
+        count=record["tests_run"],
+        since=started,
+    )
+    return record
 
 
 def validate_execution(record, expected):
@@ -245,6 +307,7 @@ def main():
     parser.add_argument("--expected-github-version", required=True)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
+    origin = time.monotonic()
     args.report.mkdir(parents=True, exist_ok=False)
     tests = Path(__file__).resolve().parents[1]
     assert_installed(tests, args.expected_version, args.expected_github_version)
@@ -286,9 +349,7 @@ def main():
                 # Processes isolate module globals and installed imports. Keep
                 # the complete inventory and the outer 300-second deadline.
                 stage = "worker-pool"
-                with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=2, mp_context=multiprocessing.get_context("spawn")
-                ) as pool:
+                with worker_pool(origin) as pool:
                     workers_started = True
                     futures = {}
                     for name in submission_order(CONTRACTS):
@@ -300,6 +361,7 @@ def main():
                             name,
                             args.expected_version,
                             args.expected_github_version,
+                            origin,
                         )
                         submitted_contracts.append(name)
                     successful = True
@@ -307,10 +369,19 @@ def main():
                         future = futures[name]
                         stage = "worker-result"
                         worker_contract = name
+                        waiting = time.monotonic()
+                        progress("parent-wait", origin, contract=name)
                         record = future.result()
                         expected = by_contract[name]
                         successful = validate_execution(record, expected) and successful
                         confirmed_contracts.append(name)
+                        progress(
+                            "parent-accepted",
+                            origin,
+                            contract=name,
+                            count=record["tests_run"],
+                            since=waiting,
+                        )
                         rows.extend(record["rows"])
                         executed.extend(record["executed_ids"])
                         sys.stderr.write(record["log"])
@@ -369,9 +440,11 @@ def main():
         "load_error": load_error,
         "boundary": "installed wheels / synthetic broker and provider only",
     }
+    progress("receipt-write-begin", origin, count=len(executed))
     (args.report / "results.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
+    progress("receipt-write-end", origin, count=len(executed))
     return 0 if successful and not failed and rows else 1
 
 

@@ -89,3 +89,12 @@ not a complete 126-test receipt. The qualifier changes no wheel or runtime budge
 Use the same recovery rule above: one authorized, corrected-harness run for the
 existing immutable pair; require all four exact-wheel lanes and preserve both the
 original publication evidence and the independent npm qualification status.
+
+The corrected pagination harness on [run 44692762789, attempt 2](https://github.com/malsabbagh/review-sensei/actions/runs/44692762789/attempts/2)
+passed publication and three installed lanes. macOS / Python 3.11 again timed
+out at 300 seconds with 17 canonical summaries (529 methods) but no lifecycle
+receipt. That prefix does not identify a stuck worker. Complete local timings
+for the same wheels showed that the override-metadata group was much more
+expensive on Python 3.11 and dispatched third; that interpreter's test-only
+frame observer was inspecting irrelevant profiler events. Scheduling and
+observer fixes must still be requalified remotely against the unchanged pair.
