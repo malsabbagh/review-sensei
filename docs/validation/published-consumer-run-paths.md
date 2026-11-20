@@ -2,7 +2,7 @@
 
 The default six-suite harness selects the current installed `review-run` and
 `reply-run` entry points. `operations` runs the original 39 scenario identities
-and 15 additional current-entry/refusal cases. Product code must load from the
+plus 15 current-entry/refusal cases and four unanchored/dense-history controls (58 total). Product code must load from the
 isolated exact wheels; only test fixture modules load from the qualification
 checkout. No `src` directory enters the import path.
 
@@ -29,7 +29,8 @@ directly to a mocked publisher.
 | `readback-matching-{complete,partial}` | Create a genuine accepted current root, then authenticate a fresh run against the same head and proven stopped predecessor. Retained completion must close the new owner without another provider call or approval. |
 | `readback-mismatch-{complete,partial}` | Corrupt the genuine root's integrity digest. The current native ledger refuses before new inference or native review writes. |
 | `readback-{403,wrong-type,timeout}-{complete,partial}` | Inject denial, malformed listing or transport timeout at actual root discovery. Require the requested fault to be observed and no inference. |
-| `readback-second-page-{matching,mismatch,absent}-{complete,partial}` | Place current retained evidence, corrupt evidence or no evidence after a full page of unrelated PR-associated comments. Require page two to be reached; actual current-root completion/refusal replaces the old mocked continuation count. With no root, actual enrollment, publication and terminal completion must succeed. |
+| `readback-second-page-{matching,mismatch,absent}-{complete,partial}` | Place current retained evidence, corrupt evidence or no evidence after a full page of unrelated PR-associated comments. Require page two to be reached; actual current-root completion/refusal replaces the old mocked continuation count. With no root and staggered historical update dates, require an unfiltered second page before enrollment, a real incremental refresh, publication and terminal completion. |
+| `readback-second-page-absent-{undated,tied}-{complete,partial}` | Preserve the original no-timestamp, unfiltered history; separately exercise 100 valid rows updated in the same second. Both must read page two before enrollment. A tied cursor must really reach page two on a `since` query. The frozen 512 caller must conserve its accounting and refuse the unfunded whole publication without posting a native review or check. Neither case qualifies dense-history publication. |
 | `readback-second-page-{403,malformed,timeout}-{complete,partial}` | Reach page two and its exact injected failure; refuse before inference or native publication. |
 | `readback-scan-limit-{complete,partial}` | An endless complete page must stop within the unchanged ten-request startup discovery envelope; no provider call or native approval. |
 | `readback-oversized-page-{complete,partial}` | Return more rows than requested at discovery; malformed evidence must not authorize provider/publication work. |
@@ -79,3 +80,12 @@ checks; join its corrected-harness source and receipts to the original signed
 source, tag objects, successful publisher attempts and verified PyPI provenance.
 Neither a local fixture pass nor this harness correction proves historical PR32
 recovery, live provider quality, Worker activation or release cutover completion.
+
+For the `0.8.22` / `0.3.28` pair, [run 44623795304](https://github.com/malsabbagh/review-sensei/actions/runs/44623795304)
+remains the original failed evidence. The two sparse-history operation assertions
+failed on all four lanes. The 3.14 lifecycle receipts contained all 567 methods;
+the 3.11 runs retained output from 17 of 22 contracts before the suite deadline,
+not a complete 126-test receipt. The qualifier changes no wheel or runtime budget.
+Use the same recovery rule above: one authorized, corrected-harness run for the
+existing immutable pair; require all four exact-wheel lanes and preserve both the
+original publication evidence and the independent npm qualification status.

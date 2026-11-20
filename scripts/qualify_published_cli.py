@@ -223,6 +223,65 @@ def validate_receipt(data, version):
     return data
 
 
+def summarize_suite(name, code, result, version, github_version):
+    """Keep the process outcome even when the child cannot produce a receipt."""
+    entry = {"name": name, "exit": code, "total": None, "pass": None, "fail": None}
+    if not result.is_file():
+        entry["receipt_error"] = (
+            "suite timed out before writing results.json"
+            if code == "TIMEOUT"
+            else "suite did not write results.json"
+        )
+        return entry
+    try:
+        data = validate_receipt(json.loads(result.read_text(encoding="utf-8")), version)
+        if name == "lifecycle":
+            if data.get("github_version") != github_version:
+                raise ValueError("wrong hosted version in lifecycle receipt")
+            if code == 0:
+                validate_completed_lifecycle(data)
+    except (OSError, UnicodeError, ValueError) as error:
+        entry["receipt_error"] = (
+            str(error)
+            if type(error) is ValueError
+            else "unreadable qualification receipt"
+        )
+        return entry
+    return {**entry, **{key: data[key] for key in ("total", "pass", "fail")}}
+
+
+def validate_completed_lifecycle(data):
+    # The child independently discovers and verifies each declared contract.
+    # Never turn a partial worker inventory into success based on row totals.
+    ids = data.get("expected_inventory")
+    contracts = data.get("expected_contracts")
+    submitted = data.get("submitted_contracts")
+    if (
+        data.get("execution_complete") is not True
+        or not isinstance(ids, list)
+        or not ids
+        or not all(isinstance(identity, str) and identity for identity in ids)
+        or len(set(ids)) != len(ids)
+        or data.get("executed_ids") != ids
+        or [row.get("id") for row in data["rows"]] != ids
+        or any(
+            type(data.get(key)) is not int or data[key] != len(ids)
+            for key in ("tests_run", "known_tests_run", "total")
+        )
+        or not isinstance(contracts, list)
+        or not contracts
+        or not all(isinstance(name, str) and name for name in contracts)
+        or len(set(contracts)) != len(contracts)
+        or data.get("confirmed_contracts") != contracts
+        or not isinstance(submitted, list)
+        or not all(isinstance(name, str) for name in submitted)
+        or sorted(submitted) != sorted(contracts)
+        or data.get("unsubmitted_contracts") != []
+        or data.get("unconfirmed_contracts") != []
+    ):
+        raise ValueError("lifecycle receipt does not confirm its exact inventory")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, type=exact_version)
@@ -291,7 +350,9 @@ def main():
             "support_sha256": {name: digests[name] for name in fixtures[2:]},
         }
         environment = root / "environment"
-        venv.EnvBuilder(with_pip=True).create(environment)
+        # Match `python -m venv`: on POSIX keep relocatable interpreter
+        # launchers bound to their base runtime. Copies can lose libpython.
+        venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt").create(environment)
         python = environment / (
             "Scripts/python.exe" if os.name == "nt" else "bin/python"
         )
@@ -395,24 +456,27 @@ def main():
                 )
             (root / (name + ".stdout.txt")).write_bytes(stdout)
             (root / (name + ".stderr.txt")).write_bytes(stderr)
-            result = destination / "results.json"
-            data = validate_receipt(
-                json.loads(result.read_text()) if result.exists() else {}, args.version
-            )
             report["suites"].append(
-                {
-                    "name": name,
-                    "exit": code,
-                    "total": data.get("total", 0),
-                    "pass": data.get("pass", 0),
-                    "fail": data.get("fail", 0),
-                }
+                summarize_suite(
+                    name,
+                    code,
+                    destination / "results.json",
+                    args.version,
+                    args.github_version,
+                )
             )
-        passed = all(
+        receipt_errors = [
+            s["name"] + ": " + s["receipt_error"]
+            for s in report["suites"]
+            if "receipt_error" in s
+        ]
+        passed = not receipt_errors and all(
             x["exit"] == 0 and x["total"] > 0 and x["fail"] == 0
             for x in report["suites"]
         )
-        report["status"] = "PASS" if passed else "FAIL"
+        report["status"] = "ERROR" if receipt_errors else "PASS" if passed else "FAIL"
+        if receipt_errors:
+            report["error"] = "; ".join(receipt_errors)
         exit_code = 0 if passed else 1
     except Exception as error:
         report["status"] = "ERROR"

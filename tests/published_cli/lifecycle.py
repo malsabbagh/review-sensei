@@ -38,6 +38,24 @@ CONTRACTS = (
 )
 
 
+# The heaviest installed contracts otherwise start at the end of the queue.
+# This only controls dispatch, never discovery order, membership or receipts.
+_LONG_CONTRACTS = (
+    "test_rich_feedback_contract",
+    "test_default_human_inventory_contract",
+    "test_override_metadata_contract",
+    "test_default_publication_recovery_contract",
+    "test_provider_deadline_contract",
+    "test_initial_assessment_tail_contract",
+)
+
+
+def submission_order(contracts):
+    return tuple(name for name in _LONG_CONTRACTS if name in contracts) + tuple(
+        name for name in contracts if name not in _LONG_CONTRACTS
+    )
+
+
 def load_contracts(tests, selected=None):
     """Load exact files for this one-shot process, replacing cached names.
 
@@ -272,22 +290,21 @@ def main():
                     max_workers=2, mp_context=multiprocessing.get_context("spawn")
                 ) as pool:
                     workers_started = True
-                    futures = []
-                    for name in CONTRACTS:
+                    futures = {}
+                    for name in submission_order(CONTRACTS):
                         stage = "worker-submit"
                         worker_contract = name
-                        futures.append(
-                            pool.submit(
-                                run_contract,
-                                str(tests),
-                                name,
-                                args.expected_version,
-                                args.expected_github_version,
-                            )
+                        futures[name] = pool.submit(
+                            run_contract,
+                            str(tests),
+                            name,
+                            args.expected_version,
+                            args.expected_github_version,
                         )
                         submitted_contracts.append(name)
                     successful = True
-                    for name, future in zip(CONTRACTS, futures):
+                    for name in CONTRACTS:
+                        future = futures[name]
                         stage = "worker-result"
                         worker_contract = name
                         record = future.result()
@@ -330,7 +347,11 @@ def main():
         "executed_ids": executed,
         "expected_inventory": inventory,
         "expected_contracts": list(CONTRACTS),
-        "submitted_contracts": submitted_contracts,
+        # Keep the receipt in canonical inventory order regardless of dispatch.
+        "submitted_contracts": [
+            name for name in CONTRACTS if name in submitted_contracts
+        ],
+        "dispatch_order": submitted_contracts,
         "unsubmitted_contracts": [
             name for name in CONTRACTS if name not in submitted_contracts
         ],
