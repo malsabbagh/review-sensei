@@ -37,6 +37,7 @@ from review_sensei.baseline import (
 from review_sensei.cli import _parser as engine_parser
 from review_sensei.cli import main as engine_main
 from review_sensei.configuration import MAX_CONFIG_BYTES, load_configuration
+from review_sensei.disposition import MAINTAINER_ACTIONS
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.models import ReviewResult, ReviewTransaction
@@ -957,7 +958,9 @@ def bootstrap(
             "original actor-role observation requires opted v4 enrollment"
         )
     if command_action is not None and (
-        purpose != "command" or type(command_action) is not str or not command_action
+        purpose != "command"
+        or type(command_action) is not str
+        or command_action not in MAINTAINER_ACTIONS
     ):
         raise ReviewInputError("command action semantic target is invalid")
     lifecycle_diagnostics.phase("bootstrap")

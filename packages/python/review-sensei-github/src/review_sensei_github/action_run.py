@@ -471,9 +471,17 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         run.ledger.business_guard = authority.fence
         source = authority.document["source"]
         actor = authority.document["actor"]
-        if not isinstance(args.comment_body, str) or hashlib.sha256(
-            args.comment_body.encode()
-        ).hexdigest() != source.get("body_sha256"):
+        # VerifiedRunAction enforces closed SOURCE_KEYS (with 64-hex body_sha256)
+        # for every command grant in run_authority.parse_authority.
+        try:
+            body_sha256 = (
+                hashlib.sha256(args.comment_body.encode("utf-8")).hexdigest()
+                if isinstance(args.comment_body, str)
+                else None
+            )
+        except UnicodeEncodeError:
+            body_sha256 = None
+        if body_sha256 != source["body_sha256"]:
             raise ReviewInputError("authenticated source body conflicts with command")
         from .historical_assessment_action import parse_historical_command
         from .quarantine_action import parse_quarantine_command
@@ -493,12 +501,12 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         if command is None:
             raise ReviewInputError("authenticated source is not a supported command")
         semantic_target = getattr(run.caller, "_accepted_semantic_target", None)
-        if (
-            type(semantic_target) is tuple
-            and len(semantic_target) >= 4
-            and semantic_target[3] is not None
-            and (
-                semantic_target[0] != "command" or command.action != semantic_target[3]
+        if type(semantic_target) is tuple and (
+            (len(semantic_target) >= 1 and semantic_target[0] != "command")
+            or (
+                len(semantic_target) >= 4
+                and semantic_target[3] is not None
+                and command.action != semantic_target[3]
             )
         ):
             raise ReviewInputError(
@@ -747,12 +755,15 @@ def run_action(
     if getattr(args, "session_ledger", None) is not None:
         raise ReviewInputError("current Actions routes require their native run ledger")
     command_action: str | None = None
+    classified_command: Any = None
     if purpose == "command":
         from .historical_assessment_action import parse_historical_command
         from .quarantine_action import parse_quarantine_command
 
         historical_command = parse_historical_command(args.comment_body)
         quarantine_command = parse_quarantine_command(args.comment_body)
+        # Syntax-only classification; role/permission gates run in execute_command
+        # and apply_maintainer_command against the authenticated actor.
         classified_command = (
             historical_command
             or quarantine_command
@@ -812,27 +823,10 @@ def run_action(
     # Supplied convergence records remain model inputs, never its replacement.
     from .accepted_semantic_history import prepare_action
 
-    semantic_command = (
-        parse_maintainer_command(
-            args.comment_body,
-            actor="classification-only",
-            head_sha=run.head_sha,
-            command_id=str(source["id"]),
-        )
-        if purpose == "command"
-        else None
-    )
     prepare_action(
         run,
         allow_unqualified=purpose == "reply"
-        or (
-            purpose == "command"
-            and (
-                parse_historical_command(args.comment_body) is not None
-                or parse_quarantine_command(args.comment_body) is not None
-            )
-        )
-        or (semantic_command is not None),
+        or (purpose == "command" and classified_command is not None),
     )
     if purpose == "command":
         return execute_command(run, args)

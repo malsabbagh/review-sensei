@@ -1480,8 +1480,28 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "disposition_entry": {
+                        "type": "boolean",
+                        "const": true
                       }
-                    }
+                    },
+                    "allOf": [
+                      {
+                        "if": {
+                          "required": [
+                            "disposition_entry"
+                          ]
+                        },
+                        "then": {
+                          "properties": {
+                            "purpose": {
+                              "const": "command"
+                            }
+                          }
+                        }
+                      }
+                    ]
                   }
                 }
               }
@@ -1712,8 +1732,28 @@
                                     "type": "null"
                                   }
                                 ]
+                              },
+                              "disposition_entry": {
+                                "type": "boolean",
+                                "const": true
                               }
-                            }
+                            },
+                            "allOf": [
+                              {
+                                "if": {
+                                  "required": [
+                                    "disposition_entry"
+                                  ]
+                                },
+                                "then": {
+                                  "properties": {
+                                    "purpose": {
+                                      "const": "command"
+                                    }
+                                  }
+                                }
+                              }
+                            ]
                           }
                         }
                       }
