@@ -36,6 +36,7 @@ from qualify_published_cli import (
     require_installed_distribution,
     require_wheel_digest,
     selected_suites,
+    summarize_suite,
     validate_receipt,
     wheel_for,
 )
@@ -431,6 +432,67 @@ class BootstrapContracts(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 validate_receipt({**valid, **changed}, "0.6.20")
 
+    def test_suite_errors_keep_the_exit_and_never_invent_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.json"
+            for code, message in (("TIMEOUT", "timed out"), (1, "did not write")):
+                with self.subTest(code=code):
+                    entry = summarize_suite("lifecycle", code, path, "1", "2")
+                    self.assertEqual(
+                        (entry["name"], entry["exit"]), ("lifecycle", code)
+                    )
+                    self.assertIn(message, entry["receipt_error"])
+                    self.assertEqual(
+                        [entry[k] for k in ("total", "pass", "fail")], [None] * 3
+                    )
+            path.write_text("{")
+            self.assertIn(
+                "unreadable",
+                summarize_suite("qualify", 0, path, "1", "2")["receipt_error"],
+            )
+
+    def test_successful_lifecycle_exit_requires_exact_inventories_and_versions(self):
+        valid = {
+            "version": "1",
+            "github_version": "2",
+            "pass": 2,
+            "fail": 0,
+            "total": 2,
+            "rows": [{"id": i, "status": "PASS"} for i in ("A.test", "B.test")],
+            "expected_inventory": ["A.test", "B.test"],
+            "executed_ids": ["A.test", "B.test"],
+            "expected_contracts": ["A", "B"],
+            "submitted_contracts": ["A", "B"],
+            "confirmed_contracts": ["A", "B"],
+            "unsubmitted_contracts": [],
+            "unconfirmed_contracts": [],
+            "known_tests_run": 2,
+            "tests_run": 2,
+            "execution_complete": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.json"
+            path.write_text(json.dumps(valid))
+            self.assertEqual(summarize_suite("lifecycle", 0, path, "1", "2")["pass"], 2)
+            for altered in (
+                {"version": "3"},
+                {"github_version": "3"},
+                {"execution_complete": False},
+                {"tests_run": None},
+                {"known_tests_run": 1},
+                {"expected_inventory": ["A.test"] * 2},
+                {"executed_ids": ["A.test"] * 2},
+                {"confirmed_contracts": ["B", "A"]},
+                {"submitted_contracts": ["A", "A"]},
+                {"unconfirmed_contracts": ["B"]},
+                {"rows": [{"id": "A.test", "status": "PASS"}] * 2},
+            ):
+                with self.subTest(altered=altered):
+                    path.write_text(json.dumps({**valid, **altered}))
+                    self.assertIn(
+                        "receipt_error", summarize_suite("lifecycle", 0, path, "1", "2")
+                    )
+
     def run_gate(self, pages, manifest=None, hosted=None, core_source=None):
         run = {
             "repository": {"full_name": "owner/repo"},
@@ -781,6 +843,20 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_expensive_first_dispatch_preserves_the_declared_inventory(self):
+        module = self.lifecycle_module()
+        order = module.submission_order(module.CONTRACTS)
+        self.assertCountEqual(order, module.CONTRACTS)
+        self.assertEqual(len(order), len(set(order)))
+        self.assertEqual(
+            order[:2],
+            ("test_rich_feedback_contract", "test_default_human_inventory_contract"),
+        )
+        self.assertEqual(
+            module.submission_order(("new", order[1], "newer")),
+            (order[1], "new", "newer"),
+        )
 
     def test_worker_success_requires_every_assigned_test_and_result_once(self):
         from copy import deepcopy

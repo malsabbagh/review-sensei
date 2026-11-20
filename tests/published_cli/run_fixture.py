@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -232,6 +233,8 @@ class ReviewFixture(EntryFixture):
         self.mode = mode
         self.hit = []
         self.requests = []
+        self.comment_revisions = {}
+        self.revision_clock = datetime(2025, 1, 1, tzinfo=timezone.utc)
         if partial:
             self.config_bytes += b"advanced:\n  resources:\n    max_provider_calls: 1\n  review_work:\n    mode: unified\n    batch_diff_bytes: 300\n"
             commit_policy(self)
@@ -242,6 +245,43 @@ class ReviewFixture(EntryFixture):
             (self.root / "review.patch").write_text(
                 diff, encoding="utf-8", newline="\n"
             )
+
+    def dated_history_page(self, page, size, since):
+        # One stable 100-comment history, independent of pagination requests.
+        # Native issue comments have server timestamps. The GitHub list endpoint
+        # filters on updated_at *before* pagination when a `since` is supplied.
+        # Model writes as new revisions so a changed owned row is never hidden.
+        def stamp(instant):
+            return instant.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        dense = self.mode == "second-page-absent-tied"
+        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        rows = [
+            {
+                "id": 3000 + i,
+                "body": "unrelated synthetic history",
+                "user": {"id": 42, "type": "User", "login": "other"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                "updated_at": stamp(
+                    self.revision_clock if dense else start + timedelta(minutes=i)
+                ),
+            }
+            for i in range(100)
+        ]
+        for row in ([self.comment] if self.comment else []) + list(
+            self.extra_comments.values()
+        ):
+            previous = self.comment_revisions.get(row["id"])
+            if previous is None or previous[0] != row["body"]:
+                if not dense:
+                    self.revision_clock += timedelta(seconds=1)
+                previous = (row["body"], stamp(self.revision_clock))
+                self.comment_revisions[row["id"]] = previous
+            rows.append({**row, "updated_at": previous[1]})
+        if since is not None:
+            rows = [row for row in rows if row["updated_at"] > since]
+        rows.sort(key=lambda row: row["id"])  # GitHub's default issue-comment order.
+        return copy.deepcopy(rows[(page - 1) * size : page * size])
 
     def external(self, request, timeout):
         target = urlsplit(request.full_url)
@@ -262,6 +302,12 @@ class ReviewFixture(EntryFixture):
                 int(query.get("page", ["1"])[0]),
                 int(query.get("per_page", ["100"])[0]),
             )
+            if mode in {"second-page-absent", "second-page-absent-tied"}:
+                self.hit.append("listing-page-" + str(page))
+                self.trace.append((self.attempt, method, path))
+                return json_response(
+                    self.dated_history_page(page, size, query.get("since", [None])[0])
+                )
             if mode in {"scan-limit", "oversized-page"}:
                 self.hit.append("listing-page-" + str(page))
                 self.trace.append((self.attempt, method, path))

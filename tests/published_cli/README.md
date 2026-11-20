@@ -29,7 +29,10 @@ The installer tries the requested public PyPI wheel at most six times (45 second
 per attempt, five 15-second pauses), then fails explicitly. Dependency installation
 has a separate 180-second bound. Pip configuration, caches and provider credentials
 are excluded. Suites each have a 300-second process ceiling and smaller individual
-case ceilings. The full lane has a 25-minute Actions ceiling.
+case ceilings. The full lane has a 25-minute Actions ceiling. A missing/corrupt
+receipt preserves the suite name and process exit (`TIMEOUT` on deadline), uses
+null rather than invented counts, and cannot satisfy qualification. Other
+selected suites still run and report independently.
 
 `qualify.py` drives the installed console process with deterministic fixture
 responses. `transports.py` drives real loopback HTTP and POSIX SIGINT with fake
@@ -39,6 +42,17 @@ through synthetic external HTTP, including partial-result withholding and
 explicit refusal of retired Actions phases. It does not replace a publication
 continuation. `operation_state.py` retains its unchanged low-level operation
 port/state components; these are not current public-entry qualification.
+
+The page-two absent-root review cases exercise one stable 100-comment history,
+then the real installed incremental refresh against the [GitHub issue-comment
+`since` contract](https://docs.github.com/en/rest/issues/comments#list-issue-comments).
+With staggered update times, complete review must publish its approval and success
+check; partial review must withhold approval and require action. The undated
+control retains the old unfiltered fixture. A second control gives every row the
+same valid server timestamp so even a `since` query returns a full first page.
+In both dense cases the frozen 512-call original budget can refuse the whole
+publication: these checks require that refusal without native review/check
+effects, not successful publication or a universal 100-comment capacity claim.
 See the [complete old-to-current oracle mapping](../../docs/validation/published-consumer-run-paths.md).
 `seam_boundaries.py` supplements console tests with installed
 model/budget constructor boundaries; those are not evidence of live inference.
@@ -127,7 +141,10 @@ increment `subtest_failures`. Skipped subtests likewise use their parent's faili
 and `execution_complete` is false. These failures still produce an ordinary
 failed receipt and nonzero process exit; the qualification driver validates
 row totals and exit status without requiring an integer `tests_run`.
-Workers explicitly use `spawn` so their import checks run in fresh interpreters.
+The same two `spawn` workers start expensive contracts first. Only dispatch order
+changes: every declared method is still required within the same 300 seconds.
+`dispatch_order` records actual submissions; confirmed contracts, method IDs and
+rows stay in canonical inventory order.
 The loader validates every declared resolved path before executing any file,
 rejecting a contract file or directory symlink that escapes its declared location.
 The qualification ref supplies trusted test code; these path checks do not

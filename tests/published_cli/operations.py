@@ -48,6 +48,8 @@ def main():
             ("second-page-mismatch", False),
             ("second-page-matching", True),
             ("second-page-absent", True),
+            ("second-page-absent-undated", False),
+            ("second-page-absent-tied", False),
             ("second-page-403", False),
             ("second-page-malformed", False),
             ("scan-limit", False),
@@ -251,6 +253,62 @@ def main():
             checks["read_later_page"] = any(
                 x["query"].get("page") == ["2"] for x in d["requests"]
             )
+        if c["listing"] in {
+            "second-page-absent",
+            "second-page-absent-undated",
+            "second-page-absent-tied",
+        }:
+            listings = [
+                request
+                for request in d["requests"]
+                if request["path"].endswith("/issues/7/comments")
+            ]
+            creation = next(
+                (
+                    i
+                    for i, request in enumerate(listings)
+                    if request["method"] == "POST"
+                ),
+                None,
+            )
+            checks["initial_unfiltered_second_page_before_create"] = (
+                creation is not None
+                and any(
+                    request["method"] == "GET"
+                    and request["query"].get("page") == ["2"]
+                    and "since" not in request["query"]
+                    for request in listings[:creation]
+                )
+            )
+            updates = [
+                r["query"]
+                for r in listings
+                if r["method"] == "GET" and r["query"].get("since")
+            ]
+            checks["frozen_caller_conserved"] = (
+                d["caller_limit"] == 512 and d["conserved"]
+            )
+            if c["listing"] == "second-page-absent":
+                checks["real_incremental_refresh"] = bool(updates)
+            else:
+                # Undated history reproduces the original unfiltered workload. Real
+                # updates can tie at server timestamp precision, so even valid
+                # incremental refreshes can repeatedly require a second page.
+                if c["listing"] == "second-page-absent-tied":
+                    checks["incremental_refresh_still_needs_second_page"] = any(
+                        query.get("page") == ["2"] for query in updates
+                    )
+                else:
+                    checks["undated_history_cannot_supply_a_cursor"] = not updates
+                checks["unfunded_full_history_stops_before_native_effects"] = (
+                    "caller run cannot fund the complete operation" in d["stderr"]
+                    and d["exit"] != 0
+                    and not d["completed"]
+                    and d["provider_calls"] == 1
+                    and not d["reviews"]
+                    and not d["check_conclusions"]
+                    and (d["outcome"] or {}).get("accounting_terminal") is False
+                )
         if c["listing"] == "scan-limit":
             checks["bounded_scan"] = (
                 sum(
