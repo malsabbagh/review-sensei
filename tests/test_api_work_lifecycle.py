@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 import test_api_work_public_review as fixture_module
 import test_review_transaction as tx
 from fake_github_http import json_response
-from original_source_observation import watch_code
+from original_source_observation import watch_fresh_calls
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
 from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN, ApiRunReviewHooks
 from review_sensei_github.api_run_plan import (
@@ -47,7 +47,7 @@ def forbid_replacement_phase_budget():
     def refuse(frame):
         raise AssertionError("no replacement phase budget")
 
-    with watch_code(EvidenceReadBudget.__init__.__code__, entered=refuse):
+    with watch_fresh_calls(EvidenceReadBudget.__init__.__code__, entered=refuse):
         yield
 
 

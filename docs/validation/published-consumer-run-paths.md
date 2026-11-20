@@ -98,3 +98,16 @@ for the same wheels showed that the override-metadata group was much more
 expensive on Python 3.11 and dispatched third; that interpreter's test-only
 frame observer was inspecting irrelevant profiler events. Scheduling and
 observer fixes must still be requalified remotely against the unchanged pair.
+
+[Run 44771708199](https://github.com/malsabbagh/review-sensei/actions/runs/44771708199)
+again passed publication and three installed lanes. The macOS / Python 3.11
+trace shows the override contract passed in 208.9 seconds, other contracts still
+running at cutoff, and no pool-exit or receipt-write marker. This was work
+against the 300-second ceiling, not an established stuck override or receipt.
+Provider deadline took about 43 seconds on both hosted macOS interpreters,
+versus under eight seconds on hosted Linux 3.11. Its nine synthetic
+numeric-loopback listeners previously called the stdlib's reverse name lookup
+during bind. The fixture keeps the real TCP listener and cold CLI requests
+without the unused lookup. An injected resolver delay reproduces that source of
+overhead locally; it does not prove which resolver delay occurred on a hosted
+runner. The same pair still requires all four real hosted receipts.

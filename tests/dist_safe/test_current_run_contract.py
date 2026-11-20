@@ -185,7 +185,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "original_source_observation.py",
-            "208dd9b33a02ebac011f74249ea2205edb0f82a31993fc9b53c6c25db6025f19",
+            "e14b7b6e502256cb9d37c3fe49c9d02a354535e97af2dfa7be1472d9fd369166",
         ),
         (
             "packaging_guard.py",
@@ -201,11 +201,11 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "test_action_run.py",
-            "d704283ef492fe3daefaa3eb4797fdfa95dfbfba03c1d1d57c850307177109c7",
+            "1265f76a196e710ba4ff0b90d5fafdf97339a7d198354a0261880e54c2d7a46b",
         ),
         (
             "test_api_work_lifecycle.py",
-            "cbae76b34264b7c224e6c437e7b6f2a5017bab21d30f7f7d573228b6b267b269",
+            "17cc582b9b3396cdaccac34c118f57d34b581168fa10a405acbe42ef0da5f3b9",
         ),
         (
             "test_api_work_persistence.py",
