@@ -1,9 +1,11 @@
 """Observer matching, fallback caching, generator lifecycle, and profiler restoration."""
 
 import dis
+import gc
 import sys
 import threading
 import unittest
+import weakref
 from contextlib import contextmanager
 from types import FunctionType
 from unittest.mock import patch
@@ -376,6 +378,30 @@ class OriginalSourceObservationTests(unittest.TestCase):
             sys.setprofile(previous)
         self.assertEqual(prior_events, baseline)
         self.assertEqual(seen, ["call", "return"])
+
+    def test_profile_watch_retains_unowned_code_and_releases_its_identity(self):
+        seen = []
+        with (
+            patch.object(observation, "_monitoring", None),
+            watch_code(_target.__code__, entered=lambda frame: seen.append("outer")),
+        ):
+            dispatcher = sys.getprofile()
+            # Don't execute this code: a coverage profiler may legitimately
+            # retain executed code independently of the source observer.
+            code = compile("pass", "<observer-lifetime>", "exec")
+            reference = weakref.ref(code)
+            key = id(code)
+            with watch_code(code, entered=lambda frame: self.fail("never executed")):
+                del code
+                gc.collect()
+                self.assertIsNotNone(reference())
+                self.assertIn(key, dispatcher._watch_watches)
+            gc.collect()
+            self.assertIsNone(reference())
+            self.assertNotIn(key, dispatcher._watch_watches)
+            self.assertIs(sys.getprofile(), dispatcher)
+            _target(1)
+        self.assertEqual(seen, ["outer"])
 
     def test_profile_fallback_caches_code_instruction_offsets(self):
         def fresh_target(x):

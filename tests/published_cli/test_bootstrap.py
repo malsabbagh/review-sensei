@@ -872,6 +872,56 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                     (order[1], "new", "newer"),
                 )
 
+    def test_stale_or_duplicate_priorities_refuse_before_filtering_subsets(self):
+        module = self.lifecycle_module()
+        subset = (module.CONTRACTS[0],)
+        for version, config in (
+            ((3, 11), "_PY311_LONG_CONTRACTS"),
+            ((3, 14), "_LONG_CONTRACTS"),
+        ):
+            declared = getattr(module, config)
+            for bad in ("test_renamed_contract", declared[0]):
+                with (
+                    self.subTest(version=version, bad=bad),
+                    patch.object(module.sys, "version_info", version),
+                    patch.object(module, config, (*declared, bad)),
+                    self.assertRaisesRegex(
+                        ValueError, "invalid lifecycle contract priorities"
+                    ),
+                ):
+                    module.submission_order(subset)
+
+    def test_pool_startup_failure_is_distinct_from_a_stall_or_shutdown(self):
+        module = self.lifecycle_module()
+        for boundary in ("constructor", "enter"):
+            with self.subTest(boundary=boundary):
+                error = RuntimeError("private startup detail")
+                stderr = io.StringIO()
+                with (
+                    patch.object(sys, "stderr", stderr),
+                    patch.object(
+                        module.concurrent.futures, "ProcessPoolExecutor"
+                    ) as executor,
+                ):
+                    target = (
+                        executor
+                        if boundary == "constructor"
+                        else executor.return_value.__enter__
+                    )
+                    target.side_effect = error
+                    with (
+                        self.assertRaises(RuntimeError) as caught,
+                        module.worker_pool(module.time.monotonic()),
+                    ):
+                        self.fail("pool opened despite startup failure")
+                self.assertIs(caught.exception, error)
+                self.assertEqual(
+                    [line.split()[1] for line in stderr.getvalue().splitlines()],
+                    ["stage=pool-start", "stage=pool-start-failed"],
+                )
+                self.assertNotIn(str(error), stderr.getvalue())
+                executor.return_value.__exit__.assert_not_called()
+
     def test_pool_shutdown_is_bracketed_even_after_a_worker_error(self):
         module = self.lifecycle_module()
         stages = []
@@ -1295,6 +1345,10 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             else fault,
                         )
                         if fault == "pool-enter-error":
+                            self.assertEqual(
+                                stages[:-2],
+                                ["stage=pool-start", "stage=pool-start-failed"],
+                            )
                             self.assertFalse(receipt["workers_started"])
                             self.assertEqual(receipt["submitted_contracts"], [])
                             self.assertEqual(

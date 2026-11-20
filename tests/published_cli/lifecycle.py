@@ -51,24 +51,30 @@ _LONG_CONTRACTS = (
     "test_initial_assessment_tail_contract",
 )
 
+# Python 3.11 lacks per-code sys.monitoring. The override journeys are its
+# longest group, so starting them third can leave a late serial tail.
+_PY311_LONG_CONTRACTS = (
+    "test_override_metadata_contract",
+    "test_rich_feedback_contract",
+    "test_default_human_inventory_contract",
+    "test_provider_deadline_contract",
+    "test_hosted_history_readers_contract",
+    "test_default_publication_recovery_contract",
+    "test_initial_assessment_tail_contract",
+)
+
 
 def submission_order(contracts):
-    priority = _LONG_CONTRACTS
-    if sys.version_info[:2] == (3, 11):
-        # This interpreter lacks per-code sys.monitoring. The observed
-        # override journeys are its longest group; starting them third
-        # leaves a late serial tail even while the other worker is idle.
-        priority = (
-            "test_override_metadata_contract",
-            "test_rich_feedback_contract",
-            "test_default_human_inventory_contract",
-            "test_provider_deadline_contract",
-            "test_hosted_history_readers_contract",
-            "test_default_publication_recovery_contract",
-            "test_initial_assessment_tail_contract",
-        )
+    priority = (
+        _PY311_LONG_CONTRACTS if sys.version_info[:2] == (3, 11) else _LONG_CONTRACTS
+    )
+    ranked = set(priority)
+    # Check the declaration, not the caller's subset: a legitimate subset
+    # need not include every priority, but a stale name must not vanish.
+    if len(ranked) != len(priority) or not ranked.issubset(CONTRACTS):
+        raise ValueError("invalid lifecycle contract priorities")
     return tuple(name for name in priority if name in contracts) + tuple(
-        name for name in contracts if name not in priority
+        name for name in contracts if name not in ranked
     )
 
 
@@ -100,8 +106,7 @@ def worker_pool(origin):
             finally:
                 progress("pool-exit-begin", origin)
     finally:
-        if entered:
-            progress("pool-exit-end", origin)
+        progress("pool-exit-end" if entered else "pool-start-failed", origin)
 
 
 def load_contracts(tests, selected=None):
@@ -348,11 +353,12 @@ def main():
                     )
                 # Processes isolate module globals and installed imports. Keep
                 # the complete inventory and the outer 300-second deadline.
+                queue = submission_order(CONTRACTS)
                 stage = "worker-pool"
                 with worker_pool(origin) as pool:
                     workers_started = True
                     futures = {}
-                    for name in submission_order(CONTRACTS):
+                    for name in queue:
                         stage = "worker-submit"
                         worker_contract = name
                         futures[name] = pool.submit(
