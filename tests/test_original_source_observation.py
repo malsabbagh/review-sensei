@@ -6,12 +6,12 @@ import sys
 import threading
 import unittest
 import weakref
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from types import FunctionType
 from unittest.mock import patch
 
 import original_source_observation as observation
-from original_source_observation import observe_original, watch_code
+from original_source_observation import observe_original, watch_code, watch_fresh_calls
 
 
 def _target(value):
@@ -418,6 +418,109 @@ class OriginalSourceObservationTests(unittest.TestCase):
                 with watch_code(fresh_target.__code__, entered=lambda frame: None):
                     self.assertEqual(fresh_target(1), 2)
         self.assertEqual(disassemble.call_count, 1)
+
+    def test_fresh_calls_observe_only_exact_normal_entries_and_returns(self):
+        seen = []
+
+        def target(fail=False):
+            if fail:
+                raise KeyError("target failed")
+            return 7
+
+        pattern = target.__code__
+        clone = FunctionType(pattern.replace(), target.__globals__)
+        wrong_globals = FunctionType(pattern, {"KeyError": KeyError})
+        previous_trace, previous_profile = sys.gettrace(), sys.getprofile()
+        with watch_fresh_calls(
+            pattern,
+            namespace=target.__globals__,
+            entered=lambda frame: seen.append(("entered", frame.f_locals["fail"])),
+            returned=lambda frame, value: seen.append(("returned", value)),
+        ):
+            if (
+                sys.version_info[:2] == (3, 11)
+                and previous_trace is previous_profile is None
+            ):
+                self.assertIsNone(sys.getprofile())
+                self.assertIsNotNone(sys.gettrace())
+            self.assertEqual(clone(False), 7)
+            self.assertEqual(wrong_globals(False), 7)
+            self.assertEqual(target(), 7)
+            with self.assertRaises(KeyError):
+                target(True)
+        self.assertEqual(seen, [("entered", False), ("returned", 7), ("entered", True)])
+        self.assertIs(sys.gettrace(), previous_trace)
+        self.assertIs(sys.getprofile(), previous_profile)
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "3.11 scoped trace only")
+    def test_fresh_trace_matches_nested_calls_not_a_late_registered_return(self):
+        if sys.gettrace() is not None or sys.getprofile() is not None:
+            self.skipTest("requires a clean thread")
+        seen = []
+        with ExitStack() as scopes:
+
+            def target(scoped=True):
+                if scoped:
+                    scopes.enter_context(
+                        watch_fresh_calls(
+                            target.__code__,
+                            returned=lambda frame, value: seen.append(("late", value)),
+                        )
+                    )
+                    return target(False) + 1
+                return 10
+
+            with watch_fresh_calls(
+                target.__code__,
+                returned=lambda frame, value: seen.append(("initial", value)),
+            ):
+                dispatcher = sys.gettrace()
+                self.assertEqual(target(), 11)
+                self.assertEqual(seen, [("initial", 10), ("late", 10), ("initial", 11)])
+            self.assertIs(sys.gettrace(), dispatcher)
+            self.assertEqual(target(False), 10)
+            self.assertEqual(seen[-1], ("late", 10))
+        self.assertIsNone(sys.gettrace())
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "3.11 scoped trace only")
+    def test_fresh_watch_keeps_an_existing_trace_and_observer_receives_returns(self):
+        previous = sys.gettrace()
+        seen = []
+        observed = []
+
+        def existing(frame, event, value):
+            if frame.f_code is _target.__code__:
+                seen.append(event)
+            return existing
+
+        try:
+            sys.settrace(existing)
+            with watch_fresh_calls(
+                _target.__code__, returned=lambda frame, value: observed.append(value)
+            ):
+                self.assertIs(sys.gettrace(), existing)
+                self.assertEqual(_target(4), 5)
+            self.assertIs(sys.gettrace(), existing)
+        finally:
+            sys.settrace(previous)
+        self.assertEqual(seen, ["call", "line", "return"])
+        self.assertEqual(observed, [5])
+
+    def test_fresh_source_callback_fault_is_raised_and_hooks_are_restored(self):
+        trace, profile = sys.gettrace(), sys.getprofile()
+        for boundary in ("entered", "returned"):
+
+            def fault(*_):
+                raise AssertionError("fixture fault from original frame")
+
+            with (
+                self.subTest(boundary=boundary),
+                watch_fresh_calls(_target.__code__, **{boundary: fault}),
+                self.assertRaisesRegex(AssertionError, "original frame"),
+            ):
+                _target(1)
+            self.assertIs(sys.gettrace(), trace)
+            self.assertIs(sys.getprofile(), profile)
 
     def test_monitoring_tool_is_released_after_the_last_watch(self):
         if observation._monitoring is None:

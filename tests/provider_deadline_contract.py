@@ -15,6 +15,7 @@ import unittest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 
 import review_sensei
 from review_sensei import ReviewService
@@ -78,6 +79,15 @@ class Provider:
         if isinstance(value, BaseException):
             raise value
         return ProviderResponse(text=value, provider=self.name, model=self.model)
+
+
+class _NumericLoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The fixture publishes a numeric loopback URL. HTTPServer.server_bind
+        # would reverse-resolve that same address for an unused server name.
+        # Keep the real TCP bind, ephemeral port and normal server activation.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class ProviderDeadlineContractTests(unittest.TestCase):
@@ -416,7 +426,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server = _NumericLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

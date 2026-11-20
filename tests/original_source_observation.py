@@ -307,6 +307,111 @@ def watch_code(
                 _tool[0] = None
 
 
+class _FreshCallWatch:
+    def __init__(self, namespace, entered, returned, returns):
+        self.namespace = namespace
+        self.entered = entered
+        self.returned = returned
+        self.returns = returns
+        self.active = True
+
+
+def _fresh_call_dispatcher():
+    # Most fixture scopes watch one or two original functions. Compare their
+    # code identities directly on unrelated calls; only matching calls need
+    # callbacks or local trace events.
+    by_id = {}
+    first = second = None
+    other = False
+
+    def refresh():
+        nonlocal first, second, other
+        entries = iter(by_id.values())
+        first = next(entries, (None, ()))[0]
+        second = next(entries, (None, ()))[0]
+        other = len(by_id) > 2
+
+    def dispatch(frame, event, value):
+        code = frame.f_code
+        if code is not first and code is not second and not other:
+            return None
+        entry = by_id.get(id(code))
+        if entry is None:
+            return None
+        returners = []
+        for watch in tuple(entry[1]):
+            if watch.namespace is not None and frame.f_globals is not watch.namespace:
+                continue
+            if watch.entered is not None:
+                watch.entered(frame)
+            if watch.returned is not None:
+                returners.append(watch)
+        if not returners:
+            return None
+        frame.f_trace_lines = False
+        frame.f_trace_opcodes = False
+
+        def leave(frame, event, value):
+            if event == "return":
+                frame.f_trace = None
+                for watch in returners:
+                    if watch.active and frame.f_lasti in watch.returns:
+                        watch.returned(frame, value)
+                return None
+            return leave
+
+        return leave
+
+    dispatch._fresh_observer = (by_id, refresh)  # type: ignore[attr-defined]
+    return dispatch
+
+
+@contextmanager
+def watch_fresh_calls(code, *, namespace=None, entered=None, returned=None):
+    """Observe ordinary calls that begin inside this fixture's scope.
+
+    A clean Python 3.11 thread can observe new calls without globally profiling
+    C calls or unrelated returns. This opt-in does not observe a frame that was
+    already running when registered. Existing instrumentation, suspended code,
+    and other Python versions use the normal observer.
+    """
+    previous = sys.gettrace()
+    owned = getattr(previous, "_fresh_observer", None)
+    if (
+        sys.version_info[:2] != (3, 11)
+        or code.co_flags
+        & (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR)
+        or (owned is None and (previous is not None or sys.getprofile() is not None))
+    ):
+        with watch_code(code, namespace=namespace, entered=entered, returned=returned):
+            yield
+        return
+    dispatcher = previous if owned is not None else _fresh_call_dispatcher()
+    by_id, refresh = dispatcher._fresh_observer
+    watch = _FreshCallWatch(
+        namespace,
+        entered,
+        returned,
+        _code_events(code)[2] if returned is not None else (),
+    )
+    key = id(code)
+    entry = by_id.setdefault(key, (code, []))
+    entry[1].append(watch)
+    refresh()
+    try:
+        if owned is None:
+            sys.settrace(dispatcher)
+        yield
+    finally:
+        watch.active = False
+        entry[1].remove(watch)
+        if not entry[1]:
+            del by_id[key]
+        refresh()
+        if not by_id and sys.gettrace() is dispatcher:
+            sys.settrace(None)
+
+
 @contextmanager
 def observe_original(
     function, *, entered=None, returned=None, yielded=None, resumed=None

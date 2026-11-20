@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 import test_review_run as review_run_fixtures
 from fake_github_http import json_response
-from original_source_observation import watch_code
+from original_source_observation import watch_fresh_calls
 from review_sensei_github import action_run, review_run
 from review_sensei_github import cli as package_cli
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
@@ -356,7 +356,7 @@ class CommandEntryFixture(EntryFixture):
                     if after_bootstrap is not None:
                         after_bootstrap(arg)
 
-            with watch_code(
+            with watch_fresh_calls(
                 original_code, namespace=original_globals, returned=selected
             ):
                 yield

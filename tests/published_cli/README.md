@@ -146,7 +146,10 @@ override metadata immediately: observing original Python frames without
 `sys.monitoring` makes those journeys substantially more expensive than on newer
 interpreters. The fallback observer matches the exact live code object and
 forwards all events to an existing callable profile hook, but examines only
-Python call/return events for its own watches.
+Python call/return events for its own watches. Two fixture scopes that start
+before invoking a known ordinary Python function can use a plain-call trace on
+an otherwise uninstrumented Python 3.11 thread. Only exact original code
+identities receive callbacks; no installed code is wrapped or replaced.
 
 Every declared method is still required within the same 300 seconds. A stale or
 duplicate scheduling priority fails before any submission.
