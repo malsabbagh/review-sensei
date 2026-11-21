@@ -98,10 +98,8 @@ class OrdinaryColdStructuralDriftTests(unittest.TestCase):
             before = result["initial"]["obligations"][0]
             self.assertEqual(len(result["state"]["obligations"]), 1)
             current = result["state"]["obligations"][0]
-            criterion = dict(before["criterion"])
-            if paths:
-                criterion.update(blocking=True, needs_human=True)
-            self.assertEqual(current["criterion"], criterion)
+            # Preserve original severity separately from the ADR 0134 ambiguity hold.
+            self.assertEqual(current["criterion"], before["criterion"])
             self.assertIsNone(current["resolution_proof_sha256"])
             self.assertNotEqual(current["thread_binding"]["slot_state"], "released")
             self.assertEqual(current["thread_binding"]["thread_id"], f.threads[0]["id"])
