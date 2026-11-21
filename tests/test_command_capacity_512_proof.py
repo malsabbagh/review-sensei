@@ -7,10 +7,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from review_sensei_github import (
     current_quarantine_finalization,
+    publication_recovery,
     quarantine_action,
 )
 from review_sensei_github.api_run_host import review_startup_plan
@@ -24,6 +27,7 @@ from review_sensei_github.api_run_plan import (
     owner_allocations,
 )
 from review_sensei_github.application import GitHubApplication
+from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import (
     COMMAND_FINALIZATION_RESERVE,
     parse_finding_index,
@@ -33,7 +37,12 @@ from review_sensei_github.session_ledger import parse_session_comment
 from review_sensei.api_work import DEFAULT_API_REQUEST_LIMIT, ApiRunAccounting
 from review_sensei.errors import EvidenceBudgetExhausted
 from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
-from review_sensei.session import read_session_dispositions
+from review_sensei.session import (
+    SessionIdentity,
+    SessionLoadResult,
+    read_session_dispositions,
+)
+from tests.fake_github_http import json_response
 from tests.test_action_run import HEAD, CommandEntryFixture
 from tests.test_api_work_persistence import IDENTITY
 
@@ -462,6 +471,7 @@ class CommandCapacity512ProofTests(unittest.TestCase):
                     fixture.select_command(cmd, new_run=True)
 
                     orig_external = fixture.external
+                    session_comment_id = fixture.comment["id"]
                     seen_faults = {
                         "graphql": 0,
                         "patch": 0,
@@ -490,7 +500,8 @@ class CommandCapacity512ProofTests(unittest.TestCase):
                             mode in {"patch", "combined"}
                             and quotes
                             and method == "PATCH"
-                            and path == "/repos/owner/repo/issues/comments/1000000"
+                            and path
+                            == f"/repos/owner/repo/issues/comments/{session_comment_id}"
                             and seen_faults["patch"] == 0
                         ):
                             seen_faults["patch"] += 1
@@ -684,6 +695,183 @@ class CommandCapacity512ProofTests(unittest.TestCase):
         self.assertTrue(callable(current_quarantine_finalization.prepare))
         # Also confirm EvidenceReadBudget default refusal preserves EvidenceBudgetExhausted
         self.assertTrue(issubclass(EvidenceBudgetExhausted, Exception))
+
+    def test_store_rejects_forged_action_ledger_and_fetches_live_identity(
+        self,
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def opener(request, timeout=None):
+            del timeout
+            path = urlsplit(request.full_url).path
+            calls.append((request.get_method(), path))
+            if path == "/users/reviewsensei%5Bbot%5D":
+                return json_response(
+                    {"id": 9001, "login": "reviewsensei[bot]", "type": "Bot"}
+                )
+            if path == "/repos/owner/repo/pulls/7":
+                return json_response(
+                    {
+                        "state": "open",
+                        "base": {
+                            "sha": "1" * 40,
+                            "repo": {"id": 123, "full_name": "owner/repo"},
+                        },
+                        "head": {"sha": HEAD},
+                    }
+                )
+            raise AssertionError(f"unexpected request {request.get_method()} {path}")
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        forged = SimpleNamespace(
+            _evidence_author_id=9001,
+            _evidence_author_slug="reviewsensei[bot]",
+            authenticated_app_id=999,
+            app_slug="reviewsensei[bot]",
+            token="tok",
+            http=http,
+            _quarantine_required=False,
+            _inventory_complete=True,
+        )
+        store = publication_recovery._store(
+            http,
+            token="tok",
+            identity=IDENTITY,
+            app_slug="reviewsensei[bot]",
+            base_sha="1" * 40,
+            head_sha=HEAD,
+            verified_action_ledger=forged,
+        )
+        self.assertIsNotNone(store)
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/users/reviewsensei%5Bbot%5D"),
+                ("GET", "/repos/owner/repo/pulls/7"),
+            ],
+        )
+
+    def test_distinct_bot_user_id_from_app_id_reuses_sealed_action_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CommandEntryFixture(directory, limit=512)
+            # Match real GitHub where the Bot user's numeric id differs from App id (999).
+            orig_external = fixture.external
+
+            def distinct_bot_open(request, timeout):
+                resp = orig_external(request, timeout)
+                path = urlsplit(request.full_url).path
+                if path == "/users/reviewsensei%5Bbot%5D":
+                    data = json.loads(resp.read(524288))
+                    data["id"] = 424242
+                    return json_response(data, resp.status)
+                if path == "/graphql":
+                    data = json.loads(resp.read(524288))
+
+                    def rewrite(obj):
+                        if isinstance(obj, dict):
+                            author = obj.get("author")
+                            if (
+                                isinstance(author, dict)
+                                and author.get("login") == "reviewsensei[bot]"
+                                and "databaseId" in author
+                            ):
+                                author["databaseId"] = 424242
+                            for val in obj.values():
+                                rewrite(val)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                rewrite(item)
+
+                    rewrite(data)
+                    return json_response(data, resp.status)
+                if "/repos/owner/repo/" in path and (
+                    "comments" in path or "reviews" in path
+                ):
+                    data = json.loads(resp.read(524288))
+                    if isinstance(data, list):
+                        for row in data:
+                            if (
+                                isinstance(row, dict)
+                                and isinstance(row.get("user"), dict)
+                                and row["user"].get("type") == "Bot"
+                            ):
+                                row["user"]["id"] = 424242
+                    elif (
+                        isinstance(data, dict)
+                        and isinstance(data.get("user"), dict)
+                        and data["user"].get("type") == "Bot"
+                    ):
+                        data["user"]["id"] = 424242
+                    return json_response(data, resp.status)
+                return resp
+
+            fixture.external = distinct_bot_open
+            fixture.provider_comments = _make_blocking_comments(4)
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            index = parse_finding_index(
+                fixture.reviews[-1]["body"],
+                repository_id=123,
+                pull_request=7,
+                head_sha=HEAD,
+            )
+            cmd = (
+                "@reviewsensei override "
+                + " ".join("RS-" + e.instance[:6].upper() for e in index.entries)
+                + " acceptable risk"
+            )
+            fixture.trace.clear()
+            rc, quotes, _ = _run_command_with_breakdown(fixture, cmd)
+            self.assertEqual(rc, 0, fixture.error)
+            self.assertTrue(quotes)
+            self.assertEqual(
+                [item for item in fixture.trace if "/users/" in item[2]],
+                [],
+            )
+
+    def test_mismatched_effect_record_identity_is_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CommandEntryFixture(directory, limit=512)
+            fixture.provider_comments = _make_blocking_comments(1)
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            index = parse_finding_index(
+                fixture.reviews[-1]["body"],
+                repository_id=123,
+                pull_request=7,
+                head_sha=HEAD,
+            )
+            cmd = (
+                f"@reviewsensei override RS-{index.entries[0].instance[:6].upper()} "
+                "acceptable risk"
+            )
+            fixture.SOURCE_ID += 1
+            fixture.select_command(cmd, new_run=True)
+            self.assertEqual(fixture.invoke_command(), 0, fixture.error)
+            ledger = fixture.selected.ledger
+            other_identity = SessionIdentity(
+                repository=IDENTITY.repository,
+                pull_request=999,
+                repository_id=IDENTITY.repository_id,
+            )
+            loaded_identities: list[SessionIdentity] = []
+
+            def track_load(ident: SessionIdentity) -> SessionLoadResult:
+                loaded_identities.append(ident)
+                return SessionLoadResult(status="missing", record=None)
+
+            # Querying with a different pull_request identity must not reuse
+            # caller._effect_record for transaction selection or priming.
+            with patch.object(ledger, "load", track_load):
+                retained = ledger.load_retained_checkpoint_result(other_identity)
+            self.assertIsNone(retained)
+            self.assertEqual(loaded_identities, [other_identity])
+            # Also verify caller._require_ledger rejects wrong repository_id directly.
+            wrong_repo_identity = SessionIdentity(
+                repository="owner/other", pull_request=7, repository_id=456
+            )
+            with self.assertRaises(Exception):
+                ledger.caller._require_ledger(ledger, wrong_repo_identity)
 
 
 if __name__ == "__main__":

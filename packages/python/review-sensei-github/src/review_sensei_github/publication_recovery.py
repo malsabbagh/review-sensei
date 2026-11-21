@@ -719,6 +719,76 @@ def _event_key(identity: SessionIdentity, transaction: ReviewTransaction) -> str
     return f"{scope}\t{event}"
 
 
+def _verified_plain_action_identity(
+    verified_action_ledger: Any,
+    *,
+    http: GitHubHttp,
+    token: str,
+    identity: SessionIdentity,
+    app_slug: str,
+    base_sha: str,
+    head_sha: str,
+) -> tuple[int | None, bool]:
+    if verified_action_ledger is None:
+        return None, False
+    from review_sensei.source_registry import require_module_seal
+
+    from . import run_authority
+    from .api_run_requests import ApiRunSessionLedger
+    from .review_run import ActionRunLedger
+    from .run_authority import VerifiedRunAction
+
+    require_module_seal(run_authority)
+    if (
+        type(verified_action_ledger) is not ActionRunLedger
+        or not isinstance(verified_action_ledger, ApiRunSessionLedger)
+        or verified_action_ledger.token != token
+        or _publication_transport(http)
+        is not _publication_transport(verified_action_ledger.http)
+        or verified_action_ledger._quarantine_required
+        or not verified_action_ledger._inventory_complete
+        or verified_action_ledger.caller._checkpoint is not None
+        or verified_action_ledger.caller._effect_record is None
+        or verified_action_ledger.caller._effect_record.record_sha256
+        != verified_action_ledger.caller._root
+        or verified_action_ledger.caller._effect_record.identity() != identity
+    ):
+        return None, False
+    verified_action_ledger.caller._require_ledger(verified_action_ledger, identity)
+    guard = getattr(verified_action_ledger, "business_guard", None)
+    owner = getattr(guard, "__self__", None)
+    if (
+        getattr(guard, "__func__", None) is not VerifiedRunAction.fence
+        or type(owner) is not VerifiedRunAction
+        or owner.run.ledger is not verified_action_ledger
+        or owner.run.caller is not verified_action_ledger.caller
+        or owner.owner != verified_action_ledger.caller.accounting.owner
+        or owner.token != token
+        or owner.document.get("repository_id") != identity.repository_id
+        or owner.document.get("repository") != identity.repository
+        or owner.document.get("pull_request") != identity.pull_request
+        or owner.document.get("head_sha") != head_sha
+    ):
+        return None, False
+    verified_user_id: int | None = None
+    if (
+        type(verified_action_ledger._evidence_author_id) is int
+        and verified_action_ledger._evidence_author_id > 0
+        and verified_action_ledger._evidence_author_slug == app_slug.casefold()
+        and isinstance(verified_action_ledger.app_slug, str)
+        and verified_action_ledger.app_slug.casefold() == app_slug.casefold()
+    ):
+        verified_user_id = verified_action_ledger._evidence_author_id
+    verified_pr = owner._fenced_pull_identity == (
+        identity.repository_id,
+        identity.repository,
+        identity.pull_request,
+        base_sha,
+        head_sha,
+    )
+    return verified_user_id, verified_pr
+
+
 def _store(
     http: GitHubHttp,
     *,
@@ -731,8 +801,7 @@ def _store(
     transaction: ReviewTransaction | None = None,
     source_app_id: int | None = None,
     compact_write: bool = False,
-    verified_app_user_id: int | None = None,
-    verified_pull_request: bool = False,
+    verified_action_ledger: Any = None,
 ) -> ResultPartStore:
     if (
         not isinstance(app_slug, str)
@@ -742,9 +811,18 @@ def _store(
         is None
     ):
         raise ReviewInputError("retention requires the configured Bot login")
+    verified_user_id, verified_pr = _verified_plain_action_identity(
+        verified_action_ledger,
+        http=http,
+        token=token,
+        identity=identity,
+        app_slug=app_slug,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
     user_id: int | None
-    if type(verified_app_user_id) is int and verified_app_user_id > 0:
-        user_id = verified_app_user_id
+    if verified_user_id is not None:
+        user_id = verified_user_id
     else:
         status, user = http.request(
             "GET", "/users/" + quote(app_slug, safe=""), token=token
@@ -760,7 +838,7 @@ def _store(
             or user_id <= 0
         ):
             raise ReviewInputError("retention Bot identity is unavailable")
-    if not verified_pull_request:
+    if not verified_pr:
         status, pr = http.request(
             "GET",
             http.repository_path(

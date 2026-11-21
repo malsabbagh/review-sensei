@@ -3841,6 +3841,8 @@ class FindingLifecycleJournal:
         """Whole-command admission; detached previews never become authority."""
         from .command_finalization_plan import CommandFinalizationPlan
 
+        self.last_capacity_breakdown = None
+
         if type(plan) is not CommandFinalizationPlan:
             raise ReviewInputError("command finalization capacity plan is unissued")
         from review_sensei.source_registry import require_instance_source

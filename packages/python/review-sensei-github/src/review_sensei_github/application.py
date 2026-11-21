@@ -3743,7 +3743,9 @@ class GitHubApplication:
                 and getattr(caller, "_checkpoint", None) is None
                 and effect_record is not None
                 and effect_record.record_sha256 == getattr(caller, "_root", None)
+                and effect_record.identity() == identity
             ):
+                caller._require_ledger(ledger, identity)
                 reusable_loaded = SessionLoadResult(status="ok", record=effect_record)
             lifecycle_record, lifecycle_document = restore_finding_lifecycle(
                 self.reviewer, ledger, identity, loaded=reusable_loaded
@@ -4942,6 +4944,7 @@ class GitHubApplication:
 
         from .finding_lifecycle import FindingLifecycleJournal
 
+        self.last_command_capacity_breakdown = None
         preview_result = capacity_preview.get("result")
         if not isinstance(preview_result, MaintainerCommandResult):
             raise ReviewInputError("command capacity preview result is unavailable")

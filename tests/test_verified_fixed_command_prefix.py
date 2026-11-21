@@ -300,7 +300,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
             prior = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
             self.assertEqual(fixture.limit, 512)
             fixture.config_bytes = fixture.config_bytes.replace(
-                b"api_request_limit: 512", b"api_request_limit: 457"
+                b"api_request_limit: 512", b"api_request_limit: 408"
             )
             (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
             subprocess.run(
@@ -322,7 +322,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
             fixture.policy = fixture.policy_ref = subprocess.check_output(
                 ["git", "-C", str(fixture.root), "rev-parse", "HEAD"], text=True
             ).strip()
-            fixture.limit = 457
+            fixture.limit = 408
             before = copy.deepcopy(
                 (fixture.reviews, fixture.check_runs, fixture.threads)
             )
@@ -349,7 +349,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 self.assertEqual(fixture.invoke_command(), 0, fixture.error)
             finally:
                 sys.settrace(previous)
-            self.assertEqual(refused, [(85, 84)])
+            self.assertEqual(refused, [(65, 64)])
             self.assertEqual(
                 (fixture.reviews, fixture.check_runs, fixture.threads), before
             )

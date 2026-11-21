@@ -247,6 +247,7 @@ class VerifiedRunAction:
             raise GitHubBrokerClientError("Current action grant binding conflicts")
         self.run, self.document = run, document
         self.owner = run.caller.accounting.owner
+        self._fenced_pull_identity: tuple[int, str, int, str, str] | None = None
 
     @property
     def token(self) -> str:
@@ -295,6 +296,7 @@ class VerifiedRunAction:
         self, *, validate_pull: Callable[[Mapping[str, Any]], None] | None = None
     ) -> Mapping[str, Any]:
         """Fresh source/head read; return the authenticated source observation."""
+        self._fenced_pull_identity = None
         run, document = self.run, self.document
         if run.caller.accounting.owner != self.owner:
             raise GitHubBrokerClientError("Current action owner changed")
@@ -343,6 +345,25 @@ class VerifiedRunAction:
                 # Add stricter consumer facts to this same fresh observation;
                 # a callback cannot weaken the action's source/head checks.
                 validate_pull(pull)
+            base = pull.get("base")
+            repo = base.get("repo") if isinstance(base, dict) else None
+            base_sha = base.get("sha") if isinstance(base, dict) else None
+            if (
+                isinstance(base, dict)
+                and isinstance(base_sha, str)
+                and re.fullmatch(r"[a-f0-9]{40}", base_sha) is not None
+                and isinstance(repo, dict)
+                and type(repo.get("id")) is int
+                and repo.get("id") == document["repository_id"]
+                and repo.get("full_name") == document["repository"]
+            ):
+                self._fenced_pull_identity = (
+                    document["repository_id"],
+                    document["repository"],
+                    document["pull_request"],
+                    base_sha,
+                    document["head_sha"],
+                )
         return cast(Mapping[str, Any], current)
 
 

@@ -505,6 +505,7 @@ class GitHubIssueCommentSessionLedger:
         self._history_associations: dict[object, Any] = {}
         self._history_reading = False
         self._evidence_author_id: int | None = None
+        self._evidence_author_slug: str | None = None
         self._mutation_active = False
         self._tail_authorizing = False
         self._tail_preparing = False
@@ -2159,6 +2160,9 @@ class GitHubIssueCommentSessionLedger:
                 ):
                     raise ReviewInputError("activation root Bot numeric owner changed")
                 self._evidence_author_id = author_id
+                self._evidence_author_slug = (
+                    self.app_slug.casefold() if self.app_slug is not None else None
+                )
                 self._part_owner(item, identity)
             if (
                 not isinstance(author_id, bool)
@@ -2166,6 +2170,9 @@ class GitHubIssueCommentSessionLedger:
                 and author_id > 0
             ):
                 self._evidence_author_id = author_id
+                self._evidence_author_slug = (
+                    self.app_slug.casefold() if self.app_slug is not None else None
+                )
         from .quarantine_selection import select_quarantine
 
         try:
@@ -3436,6 +3443,11 @@ class GitHubIssueCommentSessionLedger:
                 and self.caller.accounting.configuration.limit >= 1152
                 and has_paged_v2_disposition_snapshot(self.caller._effect_record)
             )
+        effective_identity = (
+            identity
+            if identity.repository_id is not None
+            else replace(identity, repository_id=self._expected_repository_id)
+        )
         from .review_run import ActionRunLedger
 
         plain_action_reuse = (
@@ -3446,12 +3458,16 @@ class GitHubIssueCommentSessionLedger:
             and self.caller._checkpoint is None
             and self.caller._effect_record is not None
             and self.caller._effect_record.record_sha256 == self.caller._root
+            and self.caller._effect_record.identity() == effective_identity
         )
+        if plain_action_reuse:
+            assert isinstance(self, ApiRunSessionLedger)
+            self.caller._require_ledger(self, effective_identity)
         target_tx = transaction if isinstance(transaction, ReviewTransaction) else None
         if target_tx is None and (paged_v2_reuse or plain_action_reuse):
             assert isinstance(self, ApiRunSessionLedger)
             assert self.caller._effect_record is not None
-            self.caller._require_ledger(self, identity)
+            self.caller._require_ledger(self, effective_identity)
             target_tx = self.caller._effect_record.transaction
         if target_tx is None:
             loaded = self.load(identity)
@@ -3461,44 +3477,16 @@ class GitHubIssueCommentSessionLedger:
             return None
         if head_sha is not None and target_tx.head_sha != head_sha:
             return None
-        effective_identity = (
-            identity
-            if identity.repository_id is not None
-            else replace(identity, repository_id=self._expected_repository_id)
-        )
         from .publication_recovery import publication_http
 
         primed_comments = None
-        verified_app_user_id: int | None = None
-        verified_pull_request = False
         if plain_action_reuse:
             assert isinstance(self, ApiRunSessionLedger)
-            cached = self._cached_comments()
-            if len(cached) < 100:
-                primed_comments = list(cached)
-            if (
-                type(self._evidence_author_id) is int
-                and self._evidence_author_id > 0
-                and self._evidence_author_id == self.authenticated_app_id
-            ):
-                guard = getattr(self, "business_guard", None)
-                owner = getattr(guard, "__self__", None)
-                run = getattr(owner, "run", None)
-                doc = getattr(owner, "document", None)
-                if (
-                    run is not None
-                    and getattr(run, "ledger", None) is self
-                    and getattr(run, "caller", None) is self.caller
-                    and getattr(run, "base_sha", None) == target_tx.base_sha
-                    and getattr(run, "head_sha", None) == target_tx.head_sha
-                    and isinstance(doc, Mapping)
-                    and doc.get("head_sha") == target_tx.head_sha
-                    and doc.get("repository_id") == effective_identity.repository_id
-                    and doc.get("repository") == effective_identity.repository
-                    and doc.get("pull_request") == effective_identity.pull_request
-                ):
-                    verified_app_user_id = self._evidence_author_id
-                    verified_pull_request = True
+            assert self.caller._effect_record is not None
+            if target_tx == self.caller._effect_record.transaction:
+                cached = self._cached_comments()
+                if len(cached) < 100:
+                    primed_comments = list(cached)
         elif (
             isinstance(self, ApiRunSessionLedger)
             and self._quarantine_required
@@ -3549,8 +3537,7 @@ class GitHubIssueCommentSessionLedger:
             transaction=target_tx,
             source_app_id=self.authenticated_app_id,
             primed_comments=primed_comments,
-            verified_app_user_id=verified_app_user_id,
-            verified_pull_request=verified_pull_request,
+            verified_action_ledger=self if plain_action_reuse else None,
         )
         available = store.read_available(
             event_key=_event_key(effective_identity, target_tx)
