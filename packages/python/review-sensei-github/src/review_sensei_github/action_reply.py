@@ -29,11 +29,13 @@ from review_sensei.stages import (
 
 from .action_completion import require_reply_completion
 from .action_representability import require_action_settlement_representable
-from .action_run import application
+from .action_run import application, cancel_unstarted_after_source_mutation
 from .api_run_budget import CallerRunBudget
 from .api_run_host import policy_bytes
 from .application import GitHubWriteOptions
+from .comment_intent import verify_live_comment_source
 from .conversation import ReplyResult
+from .errors import GitHubBrokerClientError
 from .operation_comments import GitHubIssueCommentOperationPort, ResultPartStore
 from .operation_host import GitHubCommentOperationStore
 from .review_run import ActionRunLedger, ReviewRun
@@ -187,7 +189,23 @@ def _outcome(result: ReplyResult, run: ReviewRun | None = None) -> dict[str, obj
     raise ReviewInputError("reply effect remains pending: " + result.status)
 
 
-def execute_reply(run: ReviewRun, args: Any) -> int:
+def execute_reply(
+    run: ReviewRun,
+    args: Any,
+    *,
+    cancel_unstarted_on_source_mutation: bool = False,
+) -> int:
+    cancel_on_mutation = bool(
+        cancel_unstarted_on_source_mutation
+        or getattr(args, "cancel_unstarted_on_source_mutation", False)
+    )
+    if cancel_on_mutation:
+        from .trust_effects import verification_profile
+
+        if verification_profile(run.caller) is not None:
+            raise ReviewInputError(
+                "unstarted source-mutation cancellation is unsupported with trust verification profile"
+            )
     authority = VerifiedRunAction(run)
     if (
         not isinstance(run.ledger, ActionRunLedger)
@@ -228,6 +246,20 @@ def execute_reply(run: ReviewRun, args: Any) -> int:
         head_sha=run.head_sha,
         operation_key=key,
     )
+    if cancel_on_mutation:
+        try:
+            fenced_comment = authority.fence()
+            verify_live_comment_source(
+                bound_source=source,
+                live_comment=fenced_comment,
+                phase="unstarted_intent",
+            )
+        except (GitHubBrokerClientError, ReviewInputError) as fence_error:
+            return cancel_unstarted_after_source_mutation(
+                run,
+                intent=intent,
+                fence_error=fence_error,
+            )
     boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
     if not run.plan.policy.writes or not run.plan.policy.mentions:
         result = ReplyResult(status="disabled")
