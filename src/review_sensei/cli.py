@@ -4148,6 +4148,16 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         hosted_hooks, "validate_before_checkpoint", None
                     )
                     if callable(validate_before):
+                        caller = getattr(ledger, "caller", None)
+                        obs_before = (
+                            len(caller.observations)
+                            if caller is not None and hasattr(caller, "observations")
+                            else None
+                        )
+                        if caller is not None and hasattr(
+                            caller, "_pre_checkpoint_validation_failed"
+                        ):
+                            caller._pre_checkpoint_validation_failed = False
                         try:
                             validate_before(
                                 ledger=ledger,
@@ -4164,7 +4174,21 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                                 changed_paths=changed_paths,
                             )
                         except BaseException:
-                            pre_checkpoint_validation_failed = True
+                            if (
+                                caller is not None
+                                and obs_before is not None
+                                and len(caller.observations) == obs_before
+                                and not getattr(
+                                    caller, "_external_business_write_attempted", False
+                                )
+                                and not getattr(
+                                    caller, "_provider_effect_unresolved", False
+                                )
+                            ):
+                                caller._pre_checkpoint_validation_failed = True
+                                pre_checkpoint_validation_failed = True
+                            elif caller is None:
+                                pre_checkpoint_validation_failed = True
                             raise
                     result = checkpoint_review_analysis(
                         ledger,

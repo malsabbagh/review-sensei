@@ -398,6 +398,7 @@ class ApiRunRequestTransport:
         self._action_result_proof: ActionResultProof | None = None
         self._action_result_fingerprint: str | None = None
         self._external_business_write_attempted = False
+        self._pre_checkpoint_validation_failed = False
         self._control_witness_write_active = False
 
     @contextmanager
@@ -2687,7 +2688,11 @@ class ApiRunRequestTransport:
             )
             if (
                 self._terminal_reason == "analysis-abort"
-                and not self._operation_entry_started
+                and not (
+                    self._pre_checkpoint_validation_failed
+                    and not self._provider_effect_unresolved
+                    and not self._external_business_write_attempted
+                )
                 and record.transaction is not None
                 and record.transaction.phase == "analysis"
                 and record.reservation_id == record.transaction.reservation_id

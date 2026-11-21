@@ -5092,7 +5092,9 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
                         before.transaction is None
                         and before.failed_attempts > 0
                         and isinstance(before.failed_attempts_head_sha, str)
-                        and re.fullmatch(r"[a-f0-9]{40}", before.failed_attempts_head_sha)
+                        and re.fullmatch(
+                            r"[a-f0-9]{40}", before.failed_attempts_head_sha
+                        )
                         is not None
                     )
                 )

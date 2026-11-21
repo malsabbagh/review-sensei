@@ -34,7 +34,9 @@ HEAD_2 = "d" * 40
 HEAD_3 = "e" * 40
 
 
-def _witnesses_from_extra(extra_comments: dict[int, dict[str, object]]) -> list[tuple[int, dict[str, object], PreExternalWriteSettlementWitness]]:
+def _witnesses_from_extra(
+    extra_comments: dict[int, dict[str, object]],
+) -> list[tuple[int, dict[str, object], PreExternalWriteSettlementWitness]]:
     found: list[tuple[int, dict[str, object], PreExternalWriteSettlementWitness]] = []
     for cid, row in sorted(extra_comments.items()):
         parsed = parse_settlement_witness_comment(row.get("body"))
@@ -164,7 +166,9 @@ class PublicationFailureRecoveryFixture(CommandEntryFixture):
 
 
 class PublicationFailureRecoveryTests(unittest.TestCase):
-    def _blocking_and_advisory_round1(self, directory: str, *, limit: int = 512) -> PublicationFailureRecoveryFixture:
+    def _blocking_and_advisory_round1(
+        self, directory: str, *, limit: int = 512
+    ) -> PublicationFailureRecoveryFixture:
         f = PublicationFailureRecoveryFixture(directory, limit=limit)
         f.provider_comments = [
             {
@@ -204,7 +208,9 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
 
         def fail_before_external_write(publisher_self, **kwargs):
             _ = publisher_self, kwargs
-            raise GitHubPublicationError("synthetic pure publication crash before write")
+            raise GitHubPublicationError(
+                "synthetic pure publication crash before write"
+            )
 
         with patch.object(ReviewPublisher, "publish", fail_before_external_write):
             self.assertEqual(f.invoke(), 1)
@@ -237,10 +243,7 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
         self.assertEqual(f.extra_comments, saved_extra)
         self.assertEqual(f.reviews, saved_reviews)
         self.assertFalse(
-            any(
-                m in {"POST", "PATCH"} and "/issues" in path
-                for _, m, path in f.trace
-            )
+            any(m in {"POST", "PATCH"} and "/issues" in path for _, m, path in f.trace)
         )
 
     def _assert_next_command_held(
@@ -254,10 +257,7 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
         self.assertEqual(f.comment, saved_comment)
         self.assertEqual(f.extra_comments, saved_extra)
         self.assertFalse(
-            any(
-                m in {"POST", "PATCH"} and "/issues" in path
-                for _, m, path in f.trace
-            )
+            any(m in {"POST", "PATCH"} and "/issues" in path for _, m, path in f.trace)
         )
 
     def test_475_end_to_end_advisory_promoted_to_blocking_succeeds(self):
@@ -315,7 +315,9 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
 
             def failing_validate(hook_self, **kwargs):
                 _ = hook_self, kwargs
-                raise ReviewInputError("synthetic pure pre-checkpoint validation refusal")
+                raise ReviewInputError(
+                    "synthetic pure pre-checkpoint validation refusal"
+                )
 
             with patch.object(
                 ReviewRunHooks, "validate_before_checkpoint", failing_validate
@@ -369,7 +371,9 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
 
             def failing_validate(hook_self, **kwargs):
                 _ = hook_self, kwargs
-                raise ReviewInputError("synthetic round-1 pre-checkpoint validation refusal")
+                raise ReviewInputError(
+                    "synthetic round-1 pre-checkpoint validation refusal"
+                )
 
             with patch.object(
                 ReviewRunHooks, "validate_before_checkpoint", failing_validate
@@ -571,7 +575,9 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                     token="synthetic",
                     body={"name": "ReviewSensei", "head_sha": HEAD_2},
                 )
-                raise GitHubPublicationError("synthetic failure after external write started")
+                raise GitHubPublicationError(
+                    "synthetic failure after external write started"
+                )
 
             with patch.object(ReviewPublisher, "publish", start_write_then_fail):
                 self.assertEqual(f.invoke(), 1)

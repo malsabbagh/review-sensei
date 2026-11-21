@@ -93,8 +93,7 @@ def _hold(reason: str, *, record: SessionRecord | None = None) -> ReviewInputErr
         else "no-transaction"
     )
     return ReviewInputError(
-        f"previous caller publication failure cannot roll over (phase={phase}): "
-        + reason
+        f"previous caller run is not terminal (phase={phase}): " + reason
     )
 
 
@@ -176,7 +175,10 @@ class PreExternalWriteSettlementWitness:
         if self.boundary not in SETTLEMENT_BOUNDARIES:
             raise ReviewInputError("settlement witness boundary is invalid")
         if self.boundary == "pre_checkpoint_validation":
-            if self.settled_phase != "no-transaction" or self.transaction_id is not None:
+            if (
+                self.settled_phase != "no-transaction"
+                or self.transaction_id is not None
+            ):
                 raise ReviewInputError(
                     "pre-checkpoint settlement witness cannot carry a transaction"
                 )
@@ -198,7 +200,9 @@ class PreExternalWriteSettlementWitness:
             self.content_sha256
         ):
             raise ReviewInputError("settlement witness content_sha256 is invalid")
-        expected_digest = hashlib.sha256(canonical_bytes(self._unsigned_dict())).hexdigest()
+        expected_digest = hashlib.sha256(
+            canonical_bytes(self._unsigned_dict())
+        ).hexdigest()
         if self.content_sha256 != expected_digest:
             raise ReviewInputError("settlement witness digest mismatch")
         object.__setattr__(
@@ -345,7 +349,9 @@ def parse_settlement_witness_comment(
         content_sha256=parsed["content_sha256"],
     )
     if body != render_settlement_witness_comment(witness):
-        raise ReviewInputError("settlement witness body does not match canonical rendering")
+        raise ReviewInputError(
+            "settlement witness body does not match canonical rendering"
+        )
     return witness
 
 
@@ -399,7 +405,9 @@ def emit_pre_external_write_settlement(
         or settled_record.reserved_slot is not None
         or settled_record.publication_staging is not None
     ):
-        raise ReviewInputError("settled session record does not match active caller root")
+        raise ReviewInputError(
+            "settled session record does not match active caller root"
+        )
     if boundary == "pre_checkpoint_validation":
         if settled_record.transaction is not None or transaction_id is not None:
             raise ReviewInputError(
@@ -420,7 +428,8 @@ def emit_pre_external_write_settlement(
             )
         if (
             settled_record.finding_lifecycle is not None
-            and settled_record.finding_lifecycle.get("operation_id") == tx.transaction_id
+            and settled_record.finding_lifecycle.get("operation_id")
+            == tx.transaction_id
         ):
             raise ReviewInputError(
                 "cannot emit pre-write settlement when finding lifecycle recorded transaction effects"
@@ -524,7 +533,9 @@ def find_authenticated_settlement_witness(
                 timeout_seconds=remaining,
             )
         except GitHubHTTPError:
-            raise _hold("settlement witness scan is unavailable", record=record) from None
+            raise _hold(
+                "settlement witness scan is unavailable", record=record
+            ) from None
         if status != 200 or not isinstance(rows, list) or len(rows) > _PAGE_SIZE:
             raise _hold("settlement witness scan is incomplete", record=record)
         if http.evidence_monotonic() >= deadline:
@@ -553,7 +564,10 @@ def find_authenticated_settlement_witness(
                         "tampered or corrupt bot settlement witness: " + str(exc),
                         record=record,
                     ) from exc
-                if parsed is not None and parsed.settled_root_sha256 == record.record_sha256:
+                if (
+                    parsed is not None
+                    and parsed.settled_root_sha256 == record.record_sha256
+                ):
                     matches.append(parsed)
         if len(rows) < _PAGE_SIZE:
             if http.evidence_monotonic() >= deadline:
@@ -579,9 +593,7 @@ def find_authenticated_settlement_witness(
         raise _hold("ambiguous pre-external-write settlement witnesses", record=record)
     witness = matches[0]
     expected_phase = (
-        record.transaction.phase
-        if record.transaction is not None
-        else "no-transaction"
+        record.transaction.phase if record.transaction is not None else "no-transaction"
     )
     expected_boundary = (
         "post_checkpoint_pre_write"
@@ -660,9 +672,7 @@ class _EarlierSettledEffects:
         return _positive_id(cid) and cid in self.check_runs
 
 
-_NO_EARLIER_EFFECTS = _EarlierSettledEffects(
-    frozenset(), frozenset(), frozenset()
-)
+_NO_EARLIER_EFFECTS = _EarlierSettledEffects(frozenset(), frozenset(), frozenset())
 
 
 def _earlier_settled_effects(
@@ -702,7 +712,11 @@ def _earlier_settled_effects(
         prior_caller = ApiRunAccounting.from_document(prior.api_run_accounting)
         tx = prior.transaction
         if (
-            tx is None
+            prior.identity() != identity
+            or prior.record_sha256 != archive.get("root_sha256")
+            or prior_caller.identity.run_id != archive.get("run_id")
+            or prior_caller.identity.repository_id != identity.repository_id
+            or tx is None
             or tx.phase != "publication_succeeded"
             or prior_caller.terminal_transaction != tx.transaction_id
             or prior.reservation_id is not None
@@ -745,7 +759,9 @@ def _earlier_settled_effects(
         eff_path = effect["path"]
         response_pair = effect.get("response")
         status, response = (
-            response_pair if isinstance(response_pair, (list, tuple)) and len(response_pair) == 2 else (None, None)
+            response_pair
+            if isinstance(response_pair, (list, tuple)) and len(response_pair) == 2
+            else (None, None)
         )
         request = effect["request"]
         if method == "POST" and eff_path == reviews_path:
@@ -786,7 +802,12 @@ def _earlier_settled_effects(
             ):
                 rid = int(suffix)
                 old_row = reviews[rid]
-                reviews[rid] = (rid, old_row[1], body["$body_sha256"], body["utf8_bytes"])
+                reviews[rid] = (
+                    rid,
+                    old_row[1],
+                    body["$body_sha256"],
+                    body["utf8_bytes"],
+                )
         elif method == "POST" and eff_path == check_post_path:
             if (
                 status in {200, 201}
@@ -938,6 +959,8 @@ def require_publication_failure_admission(
                     )
                 seen.add(row["id"])
                 effect = classifier(row)
+                # Classifiers return False for unrelated human/foreign/different-head rows
+                # and None exclusively for unreadable or contradictory Bot-owned rows.
                 if effect is None:
                     raise _hold("native effect scope is unconfirmed", record=record)
                 if effect is True:
@@ -1071,7 +1094,9 @@ def require_publication_failure_admission(
                         "native check-run census reached its deadline", record=record
                     )
                 return
-        raise _hold("native check-run census reached its pagination bound", record=record)
+        raise _hold(
+            "native check-run census reached its pagination bound", record=record
+        )
 
     inspect_pr_surface("reviews", classify_review)
     inspect_pr_surface("comments", classify_inline, inline=True)

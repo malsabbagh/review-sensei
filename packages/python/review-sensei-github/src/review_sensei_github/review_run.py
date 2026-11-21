@@ -475,80 +475,102 @@ class ReviewRunHooks(ApiRunReviewHooks):
             raise ReviewInputError(
                 "pre-checkpoint validation does not own the admitted process"
             )
-        from review_sensei.bounded_evidence import read_inline_evidence
-        from review_sensei.finding_drift import (
-            DriftEvaluationResult,
-            project_drift_review_result,
-        )
-        from review_sensei.finding_lifecycle import decode_lifecycle_state
+        caller = self.ledger.caller
+        before_observations = len(caller.observations)
+        caller._pre_checkpoint_validation_failed = False
+        try:
+            from review_sensei.bounded_evidence import read_inline_evidence
+            from review_sensei.finding_drift import (
+                DriftEvaluationResult,
+                project_drift_review_result,
+            )
+            from review_sensei.finding_lifecycle import decode_lifecycle_state
 
-        from .finding_lifecycle import _unpack_journal, _validate
-        from .finding_lifecycle_dictionary import is_dictionary
-        from .publication import ReviewPublisher, _reject_conflicting_instances
-        from .quarantine_namespace import inherited_namespace_is_historical
+            from .finding_lifecycle import _unpack_journal, _validate
+            from .finding_lifecycle_dictionary import is_dictionary
+            from .publication import ReviewPublisher, _reject_conflicting_instances
+            from .quarantine_namespace import inherited_namespace_is_historical
 
-        _reject_conflicting_instances(result.comments)
-        publisher = ReviewPublisher(http=self.ledger.http)
-        prepared = publisher.prepare(
-            result=result,
-            diff=diff,
-            head_sha=self.head_sha,
-            convergence_policy=policy,
-            baseline=baseline,
-            current_key=current_key,
-            changed_paths=changed_paths,
-        )
-        publisher._validate_locations(prepared.result, diff)
-        effect_record = self.ledger.caller._effect_record
-        if effect_record is None or self.identity.repository_id is None:
-            return
-        repo_key = (self.identity.repository_id, self.identity.pull_request)
-        if effect_record.finding_lifecycle is not None:
-            manifest = effect_record.finding_lifecycle.get("manifest")
-            if not isinstance(manifest, dict) or manifest.get("encoding") != "inline-json-v1":
+            _reject_conflicting_instances(result.comments)
+            publisher = ReviewPublisher(http=self.ledger.http)
+            prepared = publisher.prepare(
+                result=result,
+                diff=diff,
+                head_sha=self.head_sha,
+                convergence_policy=policy,
+                baseline=baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+            )
+            publisher._validate_locations(prepared.result, diff)
+            effect_record = caller._effect_record
+            if effect_record is None or self.identity.repository_id is None:
+                raise ReviewInputError(
+                    "pre-checkpoint validation requires an admitted session record"
+                )
+            repo_key = (self.identity.repository_id, self.identity.pull_request)
+            if effect_record.finding_lifecycle is not None:
+                manifest = effect_record.finding_lifecycle.get("manifest")
+                if (
+                    not isinstance(manifest, dict)
+                    or manifest.get("encoding") != "inline-json-v1"
+                ):
+                    return
+                binding = manifest.get("binding")
+                if not isinstance(binding, dict):
+                    raise ReviewInputError(
+                        "finding lifecycle inline manifest binding is invalid"
+                    )
+                envelope = read_inline_evidence(manifest, expected_binding=binding)
+                if (
+                    not isinstance(envelope, dict)
+                    or envelope.get("schema_version") != "finding-lifecycle-evidence-v2"
+                ):
+                    return
+                packed = envelope.get("lifecycle")
+                if is_dictionary(packed):
+                    return
+                document = _validate(_unpack_journal(packed))
+                restored = decode_lifecycle_state(document["lifecycle"])
+                if inherited_namespace_is_historical(
+                    self.ledger, effect_record, restored.state, document
+                ):
+                    return
+                if not isinstance(restored.state, DriftEvaluationResult):
+                    return
+                publisher._drift_states[repo_key] = restored.state
+            elif ReviewRun._record_requires_finding_inventory_migration(effect_record):
                 return
-            envelope = read_inline_evidence(manifest, expected_binding=manifest["binding"])
+            planned, _ = publisher._plan_drift_round(
+                repository_id=self.identity.repository_id,
+                pull_request=self.identity.pull_request,
+                head_sha=self.head_sha,
+                base_sha=self.base_sha,
+                result=prepared.result,
+                diff=diff,
+                baseline=baseline,
+                convergence_policy=policy,
+                authorized_dispositions=(),
+                max_active_findings=prepared.result.limits.max_comments,
+                confirmed_fixes=(),
+                human_overrides=(),
+                coverage_acceptance=None,
+                authorized_rescan=None,
+                enable_drift_tracking=True,
+                drift_descriptors=(),
+                host_outdated_threads=frozenset(),
+                host_resolved_threads=frozenset(),
+            )
+            if planned is not None:
+                project_drift_review_result(prepared.result, planned)
+        except BaseException:
             if (
-                not isinstance(envelope, dict)
-                or envelope.get("schema_version") != "finding-lifecycle-evidence-v2"
+                len(caller.observations) == before_observations
+                and not caller._external_business_write_attempted
+                and not caller._provider_effect_unresolved
             ):
-                return
-            packed = envelope.get("lifecycle")
-            if is_dictionary(packed):
-                return
-            document = _validate(_unpack_journal(packed))
-            restored = decode_lifecycle_state(document["lifecycle"])
-            if inherited_namespace_is_historical(
-                self.ledger, effect_record, restored.state, document
-            ):
-                return
-            if not isinstance(restored.state, DriftEvaluationResult):
-                return
-            publisher._drift_states[repo_key] = restored.state
-        elif ReviewRun._record_requires_finding_inventory_migration(effect_record):
-            return
-        planned, _ = publisher._plan_drift_round(
-            repository_id=self.identity.repository_id,
-            pull_request=self.identity.pull_request,
-            head_sha=self.head_sha,
-            base_sha=self.base_sha,
-            result=prepared.result,
-            diff=diff,
-            baseline=baseline,
-            convergence_policy=policy,
-            authorized_dispositions=(),
-            max_active_findings=prepared.result.limits.max_comments,
-            confirmed_fixes=(),
-            human_overrides=(),
-            coverage_acceptance=None,
-            authorized_rescan=self.rescan_request,
-            enable_drift_tracking=True,
-            drift_descriptors=(),
-            host_outdated_threads=frozenset(),
-            host_resolved_threads=frozenset(),
-        )
-        if planned is not None:
-            project_drift_review_result(prepared.result, planned)
+                caller._pre_checkpoint_validation_failed = True
+            raise
 
     def record_pre_external_write_settlement(
         self,
@@ -564,6 +586,10 @@ class ReviewRunHooks(ApiRunReviewHooks):
         if ledger is not self.ledger or identity != self.identity:
             raise ReviewInputError(
                 "settlement witness emission does not own the admitted process"
+            )
+        if not ledger.caller._pre_checkpoint_validation_failed:
+            raise ReviewInputError(
+                "pre-checkpoint settlement witness requires pure validation failure"
             )
         from .publication_failure_recovery import emit_pre_external_write_settlement
 

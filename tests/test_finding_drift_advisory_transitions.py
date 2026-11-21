@@ -74,7 +74,9 @@ def _result(
     )
 
 
-def _bound(obligation_id: str, *, thread_id: str = "PRRT_thread_1") -> NativeThreadBinding:
+def _bound(
+    obligation_id: str, *, thread_id: str = "PRRT_thread_1"
+) -> NativeThreadBinding:
     _ = obligation_id
     return NativeThreadBinding(
         thread_id=thread_id,
@@ -197,7 +199,9 @@ class FindingDriftAdvisoryTransitionTests(unittest.TestCase):
         )
         prior_ob = r1.inventory.obligations[0]
         r1_inv = DriftInventory(
-            obligations=(replace(prior_ob, thread_binding=_bound(prior_ob.obligation_id)),)
+            obligations=(
+                replace(prior_ob, thread_binding=_bound(prior_ob.obligation_id)),
+            )
         )
         r2 = evaluate_drift_round(
             _result(),
@@ -321,7 +325,9 @@ class FindingDriftAdvisoryTransitionTests(unittest.TestCase):
         )
         prior_ob = r1.inventory.obligations[0]
         r1_inv = DriftInventory(
-            obligations=(replace(prior_ob, thread_binding=_bound(prior_ob.obligation_id)),)
+            obligations=(
+                replace(prior_ob, thread_binding=_bound(prior_ob.obligation_id)),
+            )
         )
         r2 = evaluate_drift_round(
             _result(),
