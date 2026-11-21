@@ -1,10 +1,10 @@
 # ADR 0142: Prospective pre-entry abort close witness
 
-- Status: Proposed
+- Status: Accepted (direct pre-entry abort writer and admission wired; charged-failure tail remains out of scope)
 - Date: 2026-11-18
-- Decision owner and approver: repository maintainer; not yet approved
-- Related work: G29 and [PR #468](https://github.com/malsabbagh/review-sensei/pull/468)
-- Implementation: unconnected source candidate; no rollout or writer qualification
+- Decision owner and approver: repository maintainer
+- Related work: G29, [PR #468](https://github.com/malsabbagh/review-sensei/pull/468), and [PR #469](https://github.com/malsabbagh/review-sensei/pull/469)
+- Implementation: live direct-abort writer & admission wiring in `session_ledger.py`, `api_run_requests.py`, `pre_entry_abort_admission.py`, and `cli.py` (`charge_failed_attempt=False` only)
 
 ## Context
 
@@ -52,11 +52,25 @@ inventory has room to archive it or that its full scan/readback fits.
 
 ## Scope and consequences
 
-The prototype prepares detached bytes and describes one observed effect. It has
-no HTTP client, caller registration, CLI switch or ordinary rollover consumer.
+Direct pre-entry abort finality wiring (`charge_failed_attempt=False` on a plain
+hosted first-attempt cleanup root with zero prior uncertainty) prepares and
+dispatches the single canonical `abort-close-v1` PATCH in
+`ApiRunRequestTransport.close_analysis_abort` and enforces a sticky
+post-abort finality lock so no subsequent mutation or `reconcile_checkpoint`
+can follow on that caller. Ordinary pre-entry abort admission
+(`pre_entry_abort_admission.py`) accepts `old.uncertain == 1` only via
+`observe_exact_abort_close` on the freshly fetched exact native comment row
+inside the active native CAS mutation, followed by all existing abort-receipt,
+negative native reviews/comments census, Actions cessation, and archive-capacity
+checks, archiving the predecessor root unchanged (retaining `uncertain == 1`
+and `abort-close-v1` without refunding or converting it to completed).
+
 It cannot mint a writer identity, refund the original charge, clear any other
-uncertainty, settle cleanup, transfer obligations, or authorize a successor.
-Default writers and old schema readers are unchanged. No new capacity,
+uncertainty, settle cleanup, or authorize a successor on its own. Legacy
+opaque `c-0-...` roots, `uncertain > 1`, non-plain roots, and the
+charged-failure tail (`record_session_failed_attempt` /
+`charge_failed_attempt=True`) remain unchanged and explicitly out of scope for
+prospective witness emission and `uncertain > 0` admission. No new capacity,
 deployment, version/channel or permissions are proposed.
 
 The candidate binding is prepared **before** dispatch; it becomes durable
@@ -93,17 +107,23 @@ custody and cold admission are explicitly not established by these tests.
 
 ## Rollout, rollback and follow-up
 
-1. Review this no-authority candidate and keep readers/writers unchanged. It
-   can be removed without migration; no production code emits its marker.
-2. Qualify only a source-owned final direct abort. Bind one exact request and
-   its unchanged deadline at the actual native PATCH boundary. In cold
-   subprocess fixtures, kill immediately before and after storage and exercise
-   an exact, fresh, already-funded readback with every existing fence.
-3. Before any ordinary admission consumer, prove finality, original authority,
-   cessation, complete negative late-effect inventory, full archive/write
-   capacity and retention of the pending receipt. A failed or unaffordable
-   proof must stop before archive. Do not convert unknown response to completed.
-4. For the charged-failure path, first design and test custody of the later
-   reservation/commit, or a qualified equivalent that ends at the proven
+1. Source-qualified candidate (`PR #469`) established canonical encoding and
+   observer checks without changing readers or writers.
+2. Direct-abort writer qualification (wired): qualify only a source-owned final
+   direct abort (`charge_failed_attempt=False` on a plain hosted first-attempt
+   root with zero prior uncertainty), binding one exact `abort-close-v1`
+   request and deadline at the actual native PATCH boundary, enforcing sticky
+   post-abort finality on the caller, and never replaying or reconciling a lost
+   close response.
+3. Direct-abort admission qualification (wired): require `observe_exact_abort_close`
+   on the freshly fetched native row inside active CAS alongside finality,
+   original authority, Actions cessation, complete negative late-effect
+   inventory, archive/write capacity, and unchanged retention of the `uncertain == 1`
+   pending receipt (`caller-run-root-v1`). Failed or unaffordable proofs hold
+   before archive, provider execution, or native writes; unknown responses are
+   never converted to completed.
+4. Out of scope (future work): for the charged-failure path
+   (`record_session_failed_attempt`), first design and test custody of the
+   later reservation/commit, or a qualified equivalent that ends at the proven
    closure and keeps failed-attempt charges. Cleanup needs its own prospective
    proof. Neither step retrofits evidence for historical runs.

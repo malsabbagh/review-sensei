@@ -494,12 +494,13 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
                 "REVIEWSENSEI_PROVIDER": "openrouter",
                 "REVIEWSENSEI_MODEL": "anthropic/claude-3.5-sonnet",
             }
-            self.assertEqual(fx.invoke(), 1, fx.error)
+            self.assertEqual(fx.invoke(), 0, fx.error)
             # OpenRouter without qualification evidence still recovers Attempt 1's review
-            # with 0 extra provider calls, publishes COMMENTED, and withholds unverified
-            # approval (fail-closed qualification gate).
+            # with 0 extra provider calls, publishes COMMENTED, closes accounting as
+            # confirmed withheld-approval (#471), and withholds unverified approval.
             self.assertEqual(fx.provider_calls, 1)
             self.assertEqual([r["state"] for r in fx.reviews], ["COMMENTED"])
+            self.assertIn('"accounting_terminal":true', fx.error)
             self.assertIn('"diagnostic":"qualification_unverified"', fx.error)
             self.assertIn('"publication_status":"published"', fx.error)
 

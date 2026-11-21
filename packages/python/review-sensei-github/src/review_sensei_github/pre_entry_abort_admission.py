@@ -219,8 +219,33 @@ def require_pre_entry_abort_admission(
         classify_abort_inline_effect,
         classify_abort_review_effect,
     )
+    from .prospective_abort_close import AbortCloseTarget, observe_exact_abort_close
 
-    if old.uncertain != 0:
+    if old.uncertain == 1:
+        if not ledger._mutation_active or ledger.app_slug is None:
+            raise _hold("predecessor caller dispatch remains uncertain")
+        selected = ledger.selected_native_comment(record)
+        if selected is None:
+            raise _hold("predecessor caller dispatch remains uncertain")
+        comment_id, raw_row = selected
+        try:
+            producer_id = int(ledger.evidence_producer().removeprefix("github-bot:"))
+            target = AbortCloseTarget(
+                identity=identity,
+                api_url=ledger.http.api_url,
+                comment_id=comment_id,
+                app_login=ledger.app_slug,
+                producer_id=producer_id,
+            )
+            echo = observe_exact_abort_close(target, selected=record, row=raw_row)
+        except (ReviewInputError, ValueError):
+            raise _hold("predecessor caller dispatch remains uncertain") from None
+        if (
+            echo.root_sha256 != record.record_sha256
+            or echo.run_id != old.identity.run_id
+        ):
+            raise _hold("predecessor caller dispatch remains uncertain")
+    elif old.uncertain != 0:
         raise _hold("predecessor caller dispatch remains uncertain")
     valid, aborted, _ = _validate_analysis_abort_receipt(record, old)
     if (

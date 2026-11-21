@@ -11,12 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, cast
 from urllib.error import HTTPError
@@ -25,6 +26,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from weakref import WeakKeyDictionary
 
 from review_sensei.api_work import (
+    ACCOUNTING_VERSION,
     LEGACY_ACCOUNTING_VERSION,
     ApiExecutionOwner,
     ApiRunAccounting,
@@ -309,6 +311,13 @@ class _ThreadResolutionCapture:
     invalid: bool = False
 
 
+def _require_not_final_abort_dispatched(caller: Any) -> None:
+    if getattr(caller, "_final_abort_dispatched", False):
+        raise ReviewInputError(
+            "prospective final abort close has sealed caller mutations"
+        )
+
+
 class ApiRunRequestTransport:
     """One source-controlled startup slot, then one confirmed owned block.
 
@@ -363,6 +372,8 @@ class ApiRunRequestTransport:
         self._operation_entry_started = False
         self._provider_effect_unresolved = False
         self._abort_close_attempted = False
+        self._final_abort_dispatched = False
+        self._prospective_abort_close: tuple[Any, int, str] | None = None
         self._reconciled_mutations: set[str] = set()
         self._effect_record: SessionRecord | None = None
         self._thread_resolution_capture: _ThreadResolutionCapture | None = None
@@ -861,7 +872,39 @@ class ApiRunRequestTransport:
         ):
             raise ReviewInputError("caller request deadline is invalid")
         trust_verification = before_trust_request(self, request)
-        deadline = int((self._clock() + timeout) * 1000)
+        bound_abort_close = self._prospective_abort_close
+        if bound_abort_close is not None:
+            self._prospective_abort_close = None
+            prepared_abort_close, expected_sequence, expected_full_url = (
+                bound_abort_close
+            )
+            raw_request_body = request.data
+            if (
+                self._state is None
+                or request.get_method() != "PATCH"
+                or request.full_url != expected_full_url
+                or not isinstance(raw_request_body, (bytes, bytearray))
+                or bytes(raw_request_body)
+                != json.dumps(
+                    {"body": prepared_abort_close.body}, separators=(",", ":")
+                ).encode("utf-8")
+                or self._sequence + 1 != expected_sequence
+                or self._block != "hosted-terminal"
+            ):
+                raise ReviewInputError("prospective abort close dispatch mismatch")
+            now_ms = int(self._clock() * 1000)
+            max_deadline_ms = int((self._clock() + timeout) * 1000)
+            deadline = prepared_abort_close.pending.deadline_unix_ms
+            if deadline < now_ms:
+                raise EvidenceBudgetExhausted(
+                    "caller response exceeded its original request deadline"
+                )
+            if deadline > max_deadline_ms:
+                raise ReviewInputError(
+                    "prospective abort close deadline exceeds timeout"
+                )
+        else:
+            deadline = int((self._clock() + timeout) * 1000)
         request_deadline = self._monotonic() + timeout
         from review_sensei.source_registry import require_module_seal
 
@@ -893,6 +936,10 @@ class ApiRunRequestTransport:
             request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
             and not read_only_census
         )
+        if self._final_abort_dispatched and bound_abort_close is None and is_mutation:
+            raise ReviewInputError(
+                "prospective final abort close has sealed caller mutations"
+            )
         pending: PendingApiRequest | None = None
         if self._state is None:
             if self.startup_dispatches >= len(self._slot.requests):
@@ -943,8 +990,12 @@ class ApiRunRequestTransport:
             # root. Preserve one exact request/deadline receipt per dispatch,
             # using its owner generation and physical sequence without repeating
             # that outer scope in every receipt. Existing IDs remain untouched.
-            request_id = f"c-{self._state.owner.generation:x}-{self._sequence:x}"
-            pending = PendingApiRequest(request_id, deadline)
+            if bound_abort_close is not None:
+                pending = bound_abort_close[0].pending
+                request_id = pending.request_id
+            else:
+                request_id = f"c-{self._state.owner.generation:x}-{self._sequence:x}"
+                pending = PendingApiRequest(request_id, deadline)
             assert self._block is not None
             if self.usable <= 0:
                 raise EvidenceBudgetExhausted("caller request allocation is exhausted")
@@ -1826,9 +1877,66 @@ class ApiRunRequestTransport:
             self._reconciled_mutations.add(self._activation_write_request_id)
         return result
 
+    def _require_not_final_abort_dispatched(self) -> None:
+        _require_not_final_abort_dispatched(self)
+
+    def _is_prospective_direct_abort(
+        self,
+        ledger: GitHubIssueCommentSessionLedger,
+        identity: SessionIdentity,
+        confirmed: SessionRecord,
+    ) -> bool:
+        if not getattr(ledger, "_direct_final_abort", False):
+            return False
+        if (
+            self.job != "hosted"
+            or self.attempt != 1
+            or self.accounting.owner != ApiExecutionOwner(1, "hosted", 0)
+            or self.accounting.version != ACCOUNTING_VERSION
+            or self.accounting.uncertain != 0
+            or self.accounting.action is not None
+            or self.accounting.terminal_transaction is not None
+        ):
+            return False
+        block = next(
+            (b for b in self.accounting.blocks if b.block_id == "hosted-terminal"),
+            None,
+        )
+        if block is None or block.issued_by != self.accounting.owner:
+            return False
+        if (
+            confirmed.identity() != identity
+            or identity.repository_id is None
+            or confirmed.transaction is not None
+            or confirmed.reservation_id is not None
+            or confirmed.reserved_slot is not None
+            or confirmed.quarantine_lineage is not None
+            or confirmed.trust_enrollment is not None
+            or confirmed.historical_assessments is not None
+            or confirmed.api_run_accounting is None
+            or ApiRunAccounting.from_document(confirmed.api_run_accounting).uncertain
+            != 0
+        ):
+            return False
+        author_id = getattr(ledger, "_evidence_author_id", None)
+        return (
+            getattr(ledger, "_controlled_restart", None) is None
+            and isinstance(ledger.app_slug, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,98}\[bot\]", ledger.app_slug)
+            is not None
+            and re.fullmatch(
+                r"https://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?(?:/api/v3)?",
+                ledger.http.api_url,
+            )
+            is not None
+            and type(author_id) is int
+            and author_id > 0
+        )
+
     def close_analysis_abort(self, ledger, identity, confirmed):
         from dataclasses import replace
 
+        _require_not_final_abort_dispatched(self)
         source = self._abort_source
         if source is None or self._abort_close_attempted:
             return confirmed
@@ -1863,7 +1971,96 @@ class ApiRunRequestTransport:
             self._state = replace(self.accounting, analysis_abort=source)
             return record.evolve(generation=record.generation + 1)
 
-        return ledger.replace(identity, close)
+        if not self._is_prospective_direct_abort(ledger, identity, confirmed):
+            return ledger.replace(identity, close)
+
+        from .prospective_abort_close import AbortCloseTarget, prepare_abort_close
+
+        def finalize_prospective(
+            record: SessionRecord,
+            updated: SessionRecord,
+            comment_id: int,
+            now: datetime | None,
+        ) -> tuple[SessionRecord, str]:
+            if (
+                record.record_sha256 != source["cleanup_root"]
+                or record.reservation_id is not None
+                or record.transaction is not None
+            ):
+                raise ReviewInputError("analysis abort cleanup root changed")
+            selected = ledger.selected_native_comment(record)
+            if selected is None or selected[0] != comment_id:
+                raise ReviewInputError(
+                    "prospective abort close selected native row is unavailable"
+                )
+            _, cleanup_row = selected
+            if ledger.app_slug is None:
+                raise ReviewInputError(
+                    "prospective abort close app slug is unavailable"
+                )
+            producer_id = int(ledger.evidence_producer().removeprefix("github-bot:"))
+            target = AbortCloseTarget(
+                identity=identity,
+                api_url=ledger.http.api_url,
+                comment_id=comment_id,
+                app_login=ledger.app_slug,
+                producer_id=producer_id,
+            )
+            timeout_bound = float(ledger.http.timeout)
+            if ledger.evidence_budget is not None:
+                timeout_bound = min(
+                    timeout_bound, ledger.evidence_budget._remaining_seconds()
+                )
+            safety_margin = (
+                min(0.05, timeout_bound / 4.0) if timeout_bound > 0.004 else 0.0
+            )
+            deadline = int(
+                (self._clock() + max(0.001, timeout_bound - safety_margin)) * 1000
+            )
+            sequence = self._sequence + 1
+            effective_now = now if now is not None else datetime.now(UTC)
+            prepared = prepare_abort_close(
+                target,
+                cleanup=record,
+                cleanup_row=cleanup_row,
+                accounting=self.accounting,
+                sequence=sequence,
+                deadline=deadline,
+                now=effective_now,
+            )
+            if (
+                getattr(ledger, "_observed_consumed_grants", None)
+                or getattr(ledger, "_accepted_consumed_grant", None) is not None
+                or getattr(ledger, "_controlled_restart", None) is not None
+            ):
+                raise ReviewInputError(
+                    "prospective abort close requires an unadorned native comment"
+                )
+            repository_id = ledger._require_identity(identity)
+            rendered = ledger._render_comment(
+                repository_id=repository_id,
+                pull_request=identity.pull_request,
+                record=prepared.record,
+            )
+            if rendered != prepared.body:
+                raise ReviewInputError(
+                    "prospective abort close rendered body diverges from canonical witness"
+                )
+            self._checkpoint = prepared.record
+            self._final_abort_dispatched = True
+            self._prospective_abort_close = (
+                prepared,
+                sequence,
+                target.api_url + target.patch_path,
+            )
+            return prepared.record, prepared.body
+
+        ledger._prospective_abort_finalizer = finalize_prospective
+        try:
+            return self.replace_checkpoint(ledger, identity, close)
+        finally:
+            ledger._prospective_abort_finalizer = None
+            self._prospective_abort_close = None
 
     def _action_unresolved(self) -> bool:
         return (
@@ -1883,6 +2080,7 @@ class ApiRunRequestTransport:
     def _action_checkpoint(self, ledger, identity, mutate):
         from .errors import GitHubPublicationTransientError
 
+        _require_not_final_abort_dispatched(self)
         try:
             return self.replace_checkpoint(ledger, identity, mutate)
         except GitHubPublicationTransientError:
@@ -1922,6 +2120,7 @@ class ApiRunRequestTransport:
         """
         from review_sensei.bounded_evidence import canonical_bytes
 
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if self._action_unresolved():
             raise ReviewInputError("caller action admission has unresolved work")
@@ -2009,6 +2208,7 @@ class ApiRunRequestTransport:
         """Durably mark entry before executing the selected command or reply."""
         from review_sensei.bounded_evidence import canonical_bytes
 
+        _require_not_final_abort_dispatched(self)
         action = self.accounting.action
         if (
             action is None
@@ -2062,6 +2262,7 @@ class ApiRunRequestTransport:
 
         from .api_run_history import action_result_binding, decode_action_result_carrier
 
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         action = self.accounting.action
         if (
@@ -2149,6 +2350,7 @@ class ApiRunRequestTransport:
 
         from .api_run_history import read_action_result
 
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if (
             not isinstance(proof, ActionResultProof)
@@ -2215,6 +2417,7 @@ class ApiRunRequestTransport:
             settle_unstarted_accounting,
         )
 
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         verified = require_witness_issued(witness)
         if (
@@ -2322,6 +2525,7 @@ class ApiRunRequestTransport:
         """
         from dataclasses import replace
 
+        _require_not_final_abort_dispatched(self)
         if (
             self._terminal_reason not in {"publication-completion", "already-published"}
             or self._checkpoint is not None
@@ -2368,6 +2572,7 @@ class ApiRunRequestTransport:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if self._checkpoint is not None:
             raise ReviewInputError("caller checkpoint has unresolved publication")
@@ -2536,6 +2741,7 @@ class ApiRunRequestTransport:
     def reconcile_checkpoint(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
     ) -> SessionRecord:
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if (
             self._checkpoint is None
@@ -3465,6 +3671,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         reserved_tail_calls=0,
         _guarded_authorize=None,
     ):
+        _require_not_final_abort_dispatched(self.caller)
         self.preflight_finding_lifecycle_retention(
             identity,
             added_parts=parts,
@@ -3555,6 +3762,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             _PLAIN_FINDING_ACTIVE.pop(self, None)
 
     def stage_disposition_snapshot_batch(self, identity, **kwargs):
+        _require_not_final_abort_dispatched(self.caller)
         if self._part_staging_identity is not None:
             raise ReviewInputError("immutable part staging cannot nest")
         self._part_staging_identity = identity
@@ -3597,6 +3805,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         item_count: int,
         max_manifest_bytes: int,
     ) -> dict[str, object]:
+        _require_not_final_abort_dispatched(self.caller)
         if self._part_staging_identity is not None:
             raise ReviewInputError("immutable part staging cannot nest")
         snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)

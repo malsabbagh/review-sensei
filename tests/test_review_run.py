@@ -3560,12 +3560,27 @@ os._exit(92)
                 # effect from the closure alone.
                 lost_response = fault in {"cleanup-stored", "closure-stored"}
                 if closes:
-                    self.assertEqual(
-                        ApiRunAccounting.from_document(
-                            record.api_run_accounting
-                        ).uncertain,
-                        int(lost_response),
-                    )
+                    stored = ApiRunAccounting.from_document(record.api_run_accounting)
+                    if isinstance(error, KeyboardInterrupt):
+                        # Direct final pre-entry abort emits the prospective
+                        # ADR 0142 witness before dispatch so the durable root
+                        # carries `uncertain == 1` even when HTTP 200 clears it
+                        # in memory (`old.uncertain == 0`).
+                        self.assertEqual(old.uncertain, int(lost_response))
+                        self.assertEqual(stored.uncertain, 1)
+                        terminal_block = next(
+                            block
+                            for block in stored.blocks
+                            if block.block_id == "hosted-terminal"
+                        )
+                        self.assertEqual(len(terminal_block.pending), 1)
+                        self.assertTrue(
+                            terminal_block.pending[0].request_id.startswith(
+                                "abort-close-v1-"
+                            )
+                        )
+                    else:
+                        self.assertEqual(stored.uncertain, int(lost_response))
                 original_comment = f.comment.copy()
                 provider_calls = f.provider_calls
                 f.before_entry = f.before_provider = None
