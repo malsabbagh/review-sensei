@@ -578,6 +578,7 @@ class ReviewRun:
             "publication_failed",
         }:
             return None
+        from review_sensei.cli import _env_flag, _explicit_cli_value
         from review_sensei.convergence import resolve_review_convergence_policy
         from review_sensei.diff import analyze_diff
         from review_sensei.validation import read_bounded_utf8
@@ -632,6 +633,16 @@ class ReviewRun:
             or bool(os.environ.get("REVIEWSENSEI_PROVIDER", "").strip())
             or bool(os.environ.get("REVIEWSENSEI_MODEL", "").strip())
         )
+        raw_cli_provider = _explicit_cli_value(args, argv, "provider")
+        raw_cli_model = _explicit_cli_value(args, argv, "model")
+        cli_provider = raw_cli_provider if isinstance(raw_cli_provider, str) else None
+        cli_model = raw_cli_model if isinstance(raw_cli_model, str) else None
+        symbol_context_enabled = bool(
+            getattr(args, "enable_symbol_context", False)
+        ) or _env_flag("REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT")
+        symbol_allowed_paths = tuple(
+            getattr(args, "symbol_context_allowed_path", ()) or ()
+        )
         contexts = reconstruct_publication_contexts(
             source_root=Path.cwd(),
             diff=diff,
@@ -640,6 +651,35 @@ class ReviewRun:
             base_sha=self.base_sha,
             head_sha=self.head_sha,
             policy=policy,
+            cli_provider=cli_provider,
+            cli_model=cli_model,
+            environ=os.environ,
+            evidence_policy=getattr(args, "evidence_policy", "legacy"),
+            snapshot_sha256=getattr(args, "snapshot_sha256", None),
+            enable_symbol_context=symbol_context_enabled,
+            symbol_context_allowed_paths=symbol_allowed_paths or None,
+            symbol_context_max_files=(
+                args.symbol_context_max_files
+                if _has_option(argv, "--symbol-context-max-files")
+                else None
+            ),
+            symbol_context_max_bytes=(
+                args.symbol_context_max_bytes
+                if _has_option(argv, "--symbol-context-max-bytes")
+                else None
+            ),
+            symbol_context_max_depth=(
+                args.symbol_context_max_depth
+                if _has_option(argv, "--symbol-context-max-depth")
+                else None
+            ),
+            stages_dir=getattr(args, "stages_dir", None),
+            categories_dir=getattr(args, "categories_dir", None),
+            # review_sensei.cli only loads custom stages when --stages-dir is explicit.
+            use_customization_directories=False,
+            orchestrate_large_changes=bool(
+                getattr(args, "orchestrate_large_changes", False)
+            ),
             recovery_store=self.recovery_context_store,
             policy_commit=accounting.configuration.commit,
             base_ref=self.base_branch,
