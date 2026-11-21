@@ -397,6 +397,55 @@ class ApiRunRequestTransport:
         self._action_effect_boundary: ActionEffectBoundary | None = None
         self._action_result_proof: ActionResultProof | None = None
         self._action_result_fingerprint: str | None = None
+        self._external_business_write_attempted = False
+        self._pre_checkpoint_validation_failed = False
+        self._control_witness_write_active = False
+
+    @contextmanager
+    def control_witness_write(self) -> Iterator[None]:
+        """Mark one bounded pre-external-write settlement witness POST."""
+        if self._control_witness_write_active:
+            raise ReviewInputError("settlement witness write cannot nest")
+        self._control_witness_write_active = True
+        try:
+            yield
+        finally:
+            self._control_witness_write_active = False
+
+    def _is_internal_operation_comment_or_query(
+        self, request: Request, path: str
+    ) -> bool:
+        """Return True only for internal operation/result comments or GraphQL queries."""
+        method = request.get_method()
+        raw_data = request.data
+        if not isinstance(raw_data, (bytes, bytearray)):
+            return False
+        try:
+            payload = json.loads(raw_data)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if path == "/graphql" and method == "POST":
+            query = payload.get("query")
+            if isinstance(query, str) and not re.search(r"\bmutation\b", query):
+                if re.match(r"^(?:\s|#[^\n]*\n)*(?:query\b|\{)", query):
+                    return True
+            return False
+        if (
+            self._logical_phase in {"provider", "completion"}
+            and self._active_operation is not None
+            and self._active_operation.key.startswith(("create:", "update:"))
+            and (
+                (method == "POST" and "/issues/" in path and path.endswith("/comments"))
+                or (method == "PATCH" and "/issues/comments/" in path)
+            )
+        ):
+            body = payload.get("body")
+            return isinstance(body, str) and body.lstrip().startswith(
+                ("<!-- review-sensei-operation -->", "<!-- review-sensei-result -->")
+            )
+        return False
 
     def label_phase(self, phase: str) -> None:
         if phase not in {
@@ -1000,6 +1049,16 @@ class ApiRunRequestTransport:
             if self.usable <= 0:
                 raise EvidenceBudgetExhausted("caller request allocation is exhausted")
             self._state = self._state.dispatch(self._block, pending)
+            if (
+                is_mutation
+                and not trust_verification
+                and (path.startswith("/repos/") or path == "/graphql")
+                and self._checkpoint_operation is None
+                and self._staged_part_operation is None
+                and not self._control_witness_write_active
+                and not self._is_internal_operation_comment_or_query(request, path)
+            ):
+                self._external_business_write_attempted = True
         observation = {
             "phase": phase,
             "lifecycle_phase": self._logical_phase,
@@ -1674,6 +1733,25 @@ class ApiRunRequestTransport:
                 )
             else:
                 cessation()
+            pre_write_settlement_candidate = (
+                completion is None
+                and old.action is None
+                and old.analysis_abort is None
+                and old.terminal_transaction is None
+                and record.reservation_id is None
+                and record.reserved_slot is None
+                and (
+                    (
+                        record.transaction is None
+                        and record.failed_attempts > 0
+                        and isinstance(record.failed_attempts_head_sha, str)
+                    )
+                    or (
+                        record.transaction is not None
+                        and record.transaction.phase == "publication_failed"
+                    )
+                )
+            )
             if (
                 record.reservation_id is not None
                 or record.reserved_slot is not None
@@ -1681,6 +1759,7 @@ class ApiRunRequestTransport:
                 or (
                     old.action is None
                     and old.analysis_abort is None
+                    and not pre_write_settlement_candidate
                     and (
                         record.transaction is None
                         or record.transaction.phase
@@ -1779,6 +1858,12 @@ class ApiRunRequestTransport:
                 from .pre_entry_abort_admission import require_pre_entry_abort_admission
 
                 require_pre_entry_abort_admission(ledger, identity, record, old)
+            elif pre_write_settlement_candidate:
+                from .publication_failure_recovery import (
+                    require_publication_failure_admission,
+                )
+
+                require_publication_failure_admission(ledger, identity, record, old)
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
@@ -1816,13 +1901,16 @@ class ApiRunRequestTransport:
                 and (o["outcome"] == "unknown" or o.get("uncertain_effect"))
             )
             state = candidate_state(reference)
-            updated = (
-                record.rollover_historical_api_accounting(
+            if completion is not None:
+                updated = record.rollover_historical_api_accounting(
                     state.to_document(), assessments=completion.assessments
                 )
-                if completion is not None
-                else record.rollover_api_accounting(state.to_document())
-            )
+            elif pre_write_settlement_candidate:
+                updated = record.rollover_pre_write_settled_api_accounting(
+                    state.to_document()
+                )
+            else:
+                updated = record.rollover_api_accounting(state.to_document())
             if carried_reference != updated.finding_lifecycle:
                 updated = updated.evolve(
                     now=datetime.fromisoformat(
@@ -2600,6 +2688,11 @@ class ApiRunRequestTransport:
             )
             if (
                 self._terminal_reason == "analysis-abort"
+                and not (
+                    self._pre_checkpoint_validation_failed
+                    and not self._provider_effect_unresolved
+                    and not self._external_business_write_attempted
+                )
                 and record.transaction is not None
                 and record.transaction.phase == "analysis"
                 and record.reservation_id == record.transaction.reservation_id

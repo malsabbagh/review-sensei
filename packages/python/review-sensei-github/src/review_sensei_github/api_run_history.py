@@ -337,6 +337,30 @@ def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
         transaction = ReviewTransaction.from_dict(
             cast(Mapping[str, object], state.analysis_abort["transaction"])
         )
+    if (
+        transaction is None
+        and state.action is None
+        and state.analysis_abort is None
+        and state.terminal_transaction is None
+        and record.reservation_id is None
+        and record.reserved_slot is None
+        and record.failed_attempts > 0
+        and isinstance(record.failed_attempts_head_sha, str)
+        and re.fullmatch(r"[a-f0-9]{40}", record.failed_attempts_head_sha) is not None
+    ):
+        return {
+            "repository": record.repository,
+            "repository_id": record.repository_id,
+            "pull_request": record.pull_request,
+            "base_sha": state.configuration.commit,
+            "head_sha": record.failed_attempts_head_sha,
+            "policy_digest": record.record_sha256,
+            "configuration_digest": state.configuration.digest,
+            "generation": record.generation,
+            "producer": producer,
+            "purpose": "evidence",
+            "schema_version": "1.0",
+        }
     if transaction is None:
         raise ReviewInputError("previous run has no terminal review transaction")
     return {

@@ -158,11 +158,9 @@ class OrdinaryColdLocationDriftTests(unittest.TestCase):
             obligations = result["state"]["obligations"]
             self.assertEqual(len(obligations), 1, result["state"])
             current = obligations[0]
-            expected_criterion = dict(initial["criterion"])
-            if getattr(self, "copy_case", False):
-                # Ambiguity conservatively strengthens gates, never identity.
-                expected_criterion.update(blocking=True, needs_human=True)
-            self.assertEqual(current["criterion"], expected_criterion)
+            # Preserve the original severity verbatim; ambiguity holds approval
+            # via lifecycle_state ("ambiguous-multi-target") per ADR 0134.
+            self.assertEqual(current["criterion"], initial["criterion"])
             self.assertIsNone(current["resolution_proof_sha256"])
             self.assertEqual(current["thread_binding"]["thread_id"], f.threads[0]["id"])
             self.assertEqual(
