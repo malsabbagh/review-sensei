@@ -84,6 +84,7 @@ _CONFIRMED_WITHHELD_CLOSE_DIAGNOSTICS = frozenset(
         "quarantine_assessment_unverified",
     }
 )
+_NON_ZERO_CLOSED_DIAGNOSTICS = frozenset({"baseline_capacity_exceeded"})
 
 # Injectable only as the physical external service seam; never selected by JSON.
 physical_opener = urlopen
@@ -790,7 +791,14 @@ class ReviewRun:
         lifecycle_diagnostics.publication(outcome)
         lifecycle_diagnostics.phase("outcome_write")
         publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
-        return 0 if published and accounting_terminal and check_rejection is None else 1
+        return (
+            0
+            if published
+            and accounting_terminal
+            and check_rejection is None
+            and publication.diagnostic not in _NON_ZERO_CLOSED_DIAGNOSTICS
+            else 1
+        )
 
 
 def _get(http: GitHubHttp, path: str, token: str) -> dict[str, Any]:

@@ -248,7 +248,8 @@ class WithheldApprovalTerminalCloseTests(unittest.TestCase):
                     _capture_publications() as captured,
                 ):
                     code = fixture.invoke()
-                self.assertEqual(code, 0, fixture.error)
+                expected_code = 1 if diagnostic == "baseline_capacity_exceeded" else 0
+                self.assertEqual(code, expected_code, fixture.error)
                 self.assertEqual(len(captured), 1)
                 publication = captured[0]
                 self.assertTrue(finalization_confirmed(publication))
