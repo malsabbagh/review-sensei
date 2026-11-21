@@ -3,12 +3,50 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import sys
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.presentation import render_command_receipt
+from review_sensei.source_registry import require_module_seal
 
 from .errors import GitHubHTTPTransientError, GitHubPublicationTransientError
+
+_PLAIN_SINGLE_PAGE_RECEIPT_LEASES: WeakKeyDictionary[Any, tuple[Any, Any, str, Any]] = (
+    WeakKeyDictionary()
+)
+
+
+def _bind_plain_single_page_receipt(
+    ledger: Any, caller: Any, identity: Any, *, operation_id: str
+) -> None:
+    """Bind one single-page receipt window exclusively from sealed command preflight."""
+    from . import finding_lifecycle
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(finding_lifecycle)
+    expected_code = inspect.unwrap(
+        finding_lifecycle.FindingLifecycleJournal.preflight_command_finalization
+    ).__code__
+    frame = inspect.currentframe()
+    caller_frame = frame.f_back if frame is not None else None
+    if (
+        caller_frame is None
+        or caller_frame.f_code is not expected_code
+        or caller_frame.f_globals is not vars(finding_lifecycle)
+        or getattr(caller_frame.f_locals.get("self"), "ledger", None) is not ledger
+    ):
+        raise ReviewInputError(
+            "plain single-page receipt lease requires command preflight"
+        )
+    _PLAIN_SINGLE_PAGE_RECEIPT_LEASES[ledger] = (
+        caller,
+        identity,
+        operation_id,
+        caller.accounting.owner,
+    )
 
 
 def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) -> None:
@@ -33,14 +71,36 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
         )
         app_id = run.ledger._evidence_author_id
         from .publication_recovery import _publication_transport
+        from .trust_effects import verification_profile
 
         guard = getattr(
             _publication_transport(run.http), "_quarantine_capacity_guard", None
+        )
+        plain_lease = (
+            _PLAIN_SINGLE_PAGE_RECEIPT_LEASES.pop(run.ledger, None)
+            if bounded_receipt is None and guard is None
+            else None
+        )
+        plain_single_page = bool(
+            plain_lease is not None
+            and plain_lease[0] is run.caller
+            and plain_lease[1] == run.identity
+            and plain_lease[3] == run.caller.accounting.owner
+            and verification_profile(run.caller) is None
+            and not getattr(run.ledger, "_quarantine_required", False)
         )
 
         def matching(live_readback: bool = False):
             if bounded_receipt is not None:
                 values = bounded_receipt.read(path=path, token=token)
+            elif plain_single_page:
+                status, values = run.http.request(
+                    "GET", f"{path}?per_page=100&page=1", token=token
+                )
+                if status != 200 or not isinstance(values, list) or len(values) >= 100:
+                    raise ReviewInputError(
+                        "command receipt single-page frontier changed"
+                    )
             elif (
                 guard is None
                 and getattr(run.ledger, "_quarantine_required", False)
@@ -110,7 +170,6 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
             else path
         )
         from .api_run_plan import COMMAND_RECEIPT_CONFIRMATION_REQUESTS
-        from .trust_effects import verification_profile
 
         profile = verification_profile(run.caller)
         verification = int(profile is not None)
@@ -126,9 +185,13 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
         # This local allocation preserves confirmation, but is not whole-route
         # admission. The source effect gate still refuses an unpriced business route.
         write_tail = 1 + (
-            COMMAND_RECEIPT_CONFIRMATION_REQUESTS
-            if bounded_receipt is None
-            else bounded_receipt.confirmation_requests()
+            3
+            if (bounded_receipt is None and plain_single_page)
+            else (
+                COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+                if bounded_receipt is None
+                else bounded_receipt.confirmation_requests()
+            )
         )
         capacity = write_tail + verification
         run.caller.budget_view.preflight(capacity)

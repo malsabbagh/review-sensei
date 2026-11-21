@@ -3788,10 +3788,28 @@ class GitHubApplication:
             raise GitHubPublicationError("maintainer commands require a session ledger")
         lifecycle_record = lifecycle_document = None
         if isinstance(self.reviewer, ReviewPublisher):
-            from .finding_lifecycle import restore_finding_lifecycle
+            from review_sensei.session import SessionLoadResult
 
+            from .finding_lifecycle import restore_finding_lifecycle
+            from .review_run import ActionRunLedger
+
+            reusable_loaded = None
+            caller = getattr(ledger, "caller", None)
+            effect_record = getattr(caller, "_effect_record", None)
+            if (
+                type(ledger) is ActionRunLedger
+                and not getattr(ledger, "_quarantine_required", False)
+                and getattr(ledger, "_inventory_complete", False)
+                and caller is not None
+                and getattr(caller, "_checkpoint", None) is None
+                and effect_record is not None
+                and effect_record.record_sha256 == getattr(caller, "_root", None)
+                and effect_record.identity() == identity
+            ):
+                caller._require_ledger(ledger, identity)
+                reusable_loaded = SessionLoadResult(status="ok", record=effect_record)
             lifecycle_record, lifecycle_document = restore_finding_lifecycle(
-                self.reviewer, ledger, identity
+                self.reviewer, ledger, identity, loaded=reusable_loaded
             )
         if (
             typed_inventory is None
@@ -3960,7 +3978,20 @@ class GitHubApplication:
                 loader = getattr(ledger, "load_retained_checkpoint_result", None)
                 if callable(loader):
                     try:
-                        loaded_checkpoint = loader(identity, head_sha=head_sha)
+                        from .review_run import ActionRunLedger
+
+                        if (
+                            lifecycle_record is not None
+                            and type(ledger) is ActionRunLedger
+                            and not getattr(ledger, "_quarantine_required", False)
+                        ):
+                            loaded_checkpoint = loader(
+                                identity,
+                                transaction=lifecycle_record.transaction,
+                                head_sha=head_sha,
+                            )
+                        else:
+                            loaded_checkpoint = loader(identity, head_sha=head_sha)
                         if isinstance(loaded_checkpoint, ReviewResult):
                             coverage_source = loaded_checkpoint
                     except Exception:
@@ -4978,6 +5009,7 @@ class GitHubApplication:
 
         from .finding_lifecycle import FindingLifecycleJournal
 
+        self.last_command_capacity_breakdown = None
         preview_result = capacity_preview.get("result")
         if not isinstance(preview_result, MaintainerCommandResult):
             raise ReviewInputError("command capacity preview result is unavailable")
@@ -5081,6 +5113,9 @@ class GitHubApplication:
                     http=finalizer.http,
                     budget=evidence_budget,
                 )
+                self.last_command_capacity_breakdown = getattr(
+                    journal, "last_capacity_breakdown", None
+                )
                 from .current_quarantine_finalization import require_execution_grant
 
                 require_execution_grant(plan)
@@ -5088,8 +5123,13 @@ class GitHubApplication:
             # No dispositions, review-body update, cleanup, check or approval
             # has been attempted. Existing action audit/terminal obligations
             # remain on their original caller allocation.
+            breakdown = getattr(error, "reserved_cost_breakdown", None)
+            if breakdown is None and "journal" in locals():
+                breakdown = getattr(journal, "last_capacity_breakdown", None)
+            self.last_command_capacity_breakdown = breakdown
             reason = " ".join(str(error).split())
-            reason = reason.encode("utf-8")[:512].decode("utf-8", errors="ignore")
+            max_bytes = 1024 if breakdown is not None else 512
+            reason = reason.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
             return MaintainerCommandResult(
                 action=command.action,
                 applied=False,

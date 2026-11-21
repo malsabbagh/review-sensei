@@ -217,7 +217,7 @@ class VerifiedFixedReplyPrefixTests(unittest.TestCase):
             return original(budget, calls)
 
         with tempfile.TemporaryDirectory() as directory:
-            fixture = self.fixture(directory, limit=501)
+            fixture = self.fixture(directory, limit=482)
             before = (
                 copy.deepcopy(fixture.reviews),
                 copy.deepcopy(fixture.check_runs),
@@ -225,12 +225,12 @@ class VerifiedFixedReplyPrefixTests(unittest.TestCase):
             )
             with patch.object(CallerRunBudget, "preflight", capture):
                 self.assertEqual(fixture.invoke_reply(), 1)
-            self.assertEqual(observed, [(104, 103)], fixture.error)
+            self.assertEqual(observed, [(94, 93)], fixture.error)
             self.assertEqual(fixture.reply_posts, 0)
             self.assertEqual(
                 (fixture.reviews, fixture.check_runs, fixture.thread_rows), before
             )
-            self.assertEqual(fixture.limit, 501)
+            self.assertEqual(fixture.limit, 482)
 
     def test_lost_first_cleanup_response_retains_unknown_and_stops_suffix(self):
         with tempfile.TemporaryDirectory() as directory:

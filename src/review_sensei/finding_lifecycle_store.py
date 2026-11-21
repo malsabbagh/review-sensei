@@ -14,7 +14,7 @@ import re
 import sys
 from dataclasses import dataclass
 from types import CellType, CodeType, FrameType, FunctionType, ModuleType
-from typing import Any, Mapping, cast
+from typing import Any, Mapping, Sequence, cast
 from weakref import WeakKeyDictionary
 
 from .bounded_evidence import (
@@ -1063,9 +1063,12 @@ def _refine_checkpoint_pricing(
     capacity, prices = _consume_checkpoint_pricing(proof, ledger, record, counts)
     for checkpoint, price in zip(checkpoints, prices):
         # ApiRun's inline path does not use the selected-parts capability.
-        # Its existing conservative price is deliberately unchanged.
+        # Its existing conservative price is deliberately unchanged unless
+        # qualified CAS pricing explicitly marks an inline checkpoint.
         if checkpoint.get("source_pricing", True) and (
-            checkpoint["parts"] or checkpoint.get("inline_source_plain", False)
+            checkpoint["parts"]
+            or checkpoint.get("inline_source_plain", False)
+            or checkpoint.get("inline_source_cas", False)
         ):
             checkpoint["conditional_calls"] = price
     return capacity
@@ -1159,6 +1162,237 @@ def _inline_checkpoint_read_free(record):
         ):
             return False
     return True
+
+
+def _inline_cas_pricing_eligible(record: Any) -> bool:
+    """True when plain CAS root replacement itself performs zero evidence reads."""
+    if (
+        getattr(record, "assessment_queue", None) is not None
+        or getattr(record, "historical_assessments", None) is not None
+        or getattr(record, "quarantine_lineage", None) is not None
+    ):
+        return False
+    history = getattr(record, "convergence_history", None)
+    baseline = history.get("baseline") if isinstance(history, Mapping) else None
+    if (
+        isinstance(baseline, Mapping)
+        and baseline.get("encoding") == "partitioned-json-v1"
+    ):
+        return False
+    snapshot_raw = getattr(record, "disposition_snapshot", None)
+    if snapshot_raw is not None:
+        from .disposition_snapshot import normalize_snapshot
+
+        snapshot = normalize_snapshot(snapshot_raw)
+        if (
+            snapshot is None
+            or snapshot["schema_version"] != "1.0"
+            or snapshot["state_manifest"]["encoding"] != INLINE_ENCODING
+        ):
+            return False
+    return True
+
+
+def _plain_non_trust_cas_eligible(ledger: Any, record: Any) -> bool:
+    """True when a plain non-trust ActionRunLedger CAS checkpoint needs no part reads."""
+    if getattr(ledger, "_quarantine_required", False):
+        return False
+    api_module = sys.modules.get("review_sensei_github.api_run_requests")
+    run_module = sys.modules.get("review_sensei_github.review_run")
+    if api_module is None or run_module is None:
+        return False
+    from .source_registry import (
+        require_instance_source,
+        require_module_seal,
+        require_original_class_export,
+    )
+
+    require_module_seal(api_module)
+    action_cls = require_original_class_export(
+        module=run_module, name="ActionRunLedger"
+    )
+    verify_profile = getattr(api_module, "_original_trust_verification_profile", None)
+    if not callable(verify_profile) or type(ledger) is not action_cls:
+        return False
+    require_instance_source(ledger, methods=("replace",))
+    caller = getattr(ledger, "caller", None)
+    if caller is None:
+        return False
+    if _qualified_checkpoint_pricer(ledger) is None:
+        return False
+    if verify_profile(caller) is not None:
+        return False
+    return _inline_cas_pricing_eligible(record)
+
+
+def _caller_allocation_summary(
+    ledger: Any,
+    remaining: int,
+    *,
+    caller_allocation: Mapping[str, int] | None = None,
+) -> dict[str, int | None]:
+    if isinstance(caller_allocation, Mapping):
+        limit = caller_allocation.get("limit")
+        startup = caller_allocation.get("startup")
+        first_work = caller_allocation.get("first_work")
+        terminal = caller_allocation.get("terminal")
+        successor = caller_allocation.get("successor")
+    else:
+        limit = startup = first_work = terminal = successor = None
+        caller = getattr(ledger, "caller", None)
+        accounting = getattr(caller, "accounting", None)
+        if accounting is not None:
+            config = getattr(accounting, "configuration", None)
+            startup_plan = getattr(accounting, "startup", None)
+            blocks = getattr(accounting, "blocks", ())
+            if config is not None and startup_plan is not None:
+                limit = config.limit
+                startup = startup_plan.liability
+                rem_after_startup = limit - startup
+                successor = rem_after_startup // 2
+                first_total = rem_after_startup - successor
+                terminal_block = next(
+                    (
+                        b
+                        for b in blocks
+                        if getattr(b, "block_id", "").endswith("-terminal")
+                    ),
+                    None,
+                )
+                if terminal_block is not None and not getattr(
+                    terminal_block, "pending", ()
+                ):
+                    terminal = terminal_block.undispatched
+                    first_work = first_total - terminal
+    spent_before_preflight = (
+        first_work - remaining
+        if type(first_work) is int and type(remaining) is int
+        else None
+    )
+    return {
+        "limit": limit,
+        "startup": startup,
+        "first_work": first_work,
+        "terminal": terminal,
+        "successor": successor,
+        "spent_before_preflight": spent_before_preflight,
+        "remaining": remaining,
+    }
+
+
+def _build_reserved_cost_breakdown(
+    ledger: Any,
+    *,
+    budget: Any,
+    checkpoints: Sequence[Mapping[str, Any]],
+    has_projected_root: bool,
+    calls: int,
+    reserved_tail_calls: int,
+    tail_breakdown: Mapping[str, Any] | None = None,
+    caller_allocation: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    remaining = budget.ordinary_remaining()
+    slots = _caller_allocation_summary(
+        ledger, remaining, caller_allocation=caller_allocation
+    )
+    disposition_calls = (
+        int(checkpoints[0]["conditional_calls"])
+        if has_projected_root and checkpoints
+        else 0
+    )
+    lc_cps = list(checkpoints[1:] if has_projected_root else checkpoints)
+    per_checkpoint = [int(cp["conditional_calls"]) for cp in lc_cps]
+    lifecycle_breakdown = {
+        "count": len(lc_cps),
+        "per_checkpoint": per_checkpoint,
+        "total": sum(per_checkpoint),
+    }
+    if isinstance(tail_breakdown, Mapping):
+        native_tail = dict(tail_breakdown.get("native_tail_calls") or {})
+        receipt_calls = int(tail_breakdown.get("receipt_calls", 0))
+    else:
+        native_tail = {"total": reserved_tail_calls}
+        receipt_calls = 0
+    return {
+        **slots,
+        "disposition_checkpoint_calls": disposition_calls,
+        "lifecycle_checkpoint_calls": lifecycle_breakdown,
+        "native_tail_calls": native_tail,
+        "receipt_calls": receipt_calls,
+        "conditional_calls": calls,
+        "reserved_tail_calls": reserved_tail_calls,
+        "total_required": calls + reserved_tail_calls,
+    }
+
+
+def _format_reserved_cost_breakdown(breakdown: Mapping[str, Any]) -> str:
+    lc = breakdown["lifecycle_checkpoint_calls"]
+    nt = breakdown["native_tail_calls"]
+    reads = nt.get("reads", {})
+    reads_total = sum(reads.values()) if isinstance(reads, Mapping) else int(reads or 0)
+    parts = []
+    if breakdown.get("limit") is not None:
+        parts.append(
+            f"limit={breakdown['limit']} startup={breakdown['startup']} "
+            f"first_work={breakdown['first_work']} terminal={breakdown['terminal']} "
+            f"successor={breakdown['successor']} "
+            f"spent_before_preflight={breakdown['spent_before_preflight']}"
+        )
+    parts.append(
+        f"remaining={breakdown['remaining']} "
+        f"total_required={breakdown['total_required']} "
+        f"disposition_checkpoint_calls={breakdown['disposition_checkpoint_calls']} "
+        f"lifecycle_checkpoint_calls={lc['total']}"
+        f"(count={lc['count']},per={lc['per_checkpoint']}) "
+        f"native_tail_calls={nt.get('total', 0)}("
+        f"reads={reads_total},"
+        f"capability_mints={nt.get('capability_mints', 0)},"
+        f"review_update={nt.get('review_update', 0)},"
+        f"cleanup_threads={nt.get('cleanup_threads', 0)},"
+        f"check_run={nt.get('check_run', 0)},"
+        f"approval={nt.get('approval', 0)}) "
+        f"receipt_calls={breakdown['receipt_calls']}"
+    )
+    return " ".join(parts)
+
+
+def _preflight_with_breakdown(
+    budget: Any,
+    *,
+    ledger: Any,
+    checkpoints: Sequence[Mapping[str, Any]],
+    has_projected_root: bool,
+    calls: int,
+    reserved_tail_calls: int,
+    tail_breakdown: Mapping[str, Any] | None = None,
+    caller_allocation: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    breakdown = _build_reserved_cost_breakdown(
+        ledger,
+        budget=budget,
+        checkpoints=checkpoints,
+        has_projected_root=has_projected_root,
+        calls=calls,
+        reserved_tail_calls=reserved_tail_calls,
+        tail_breakdown=tail_breakdown,
+        caller_allocation=caller_allocation,
+    )
+    try:
+        budget.preflight(calls + reserved_tail_calls)
+    except ReviewInputError as error:
+        error.reserved_cost_breakdown = breakdown  # type: ignore[attr-defined]
+        if type(error).__name__ == "EvidenceBudgetExhausted":
+            from .errors import EvidenceBudgetExhausted
+
+            enriched = EvidenceBudgetExhausted(
+                f"{error}; preflight caller-budget funding refusal "
+                f"(not GitHub API quota exhaustion): "
+                f"{_format_reserved_cost_breakdown(breakdown)}"
+            )
+            enriched.reserved_cost_breakdown = breakdown  # type: ignore[attr-defined]
+            raise enriched from error
+        raise
+    return breakdown
 
 
 def _remote_inline_plan(ledger: Any, record: Any) -> Mapping[str, object] | None:
@@ -2029,7 +2263,16 @@ def stage_finding_lifecycle(
 
 
 def _price_checkpoint_alternatives(
-    ledger, record, measured, *, budget, branching, reserved_tail_calls
+    ledger,
+    record,
+    measured,
+    *,
+    budget,
+    branching,
+    reserved_tail_calls,
+    has_projected_root=False,
+    tail_breakdown=None,
+    caller_allocation=None,
 ):
     """Price detached checkpoint widths against one original frontier.
 
@@ -2061,12 +2304,13 @@ def _price_checkpoint_alternatives(
         )
         if remote_observed is not None:
             if branching:
-                prices: dict[tuple[Any, Any, Any], int] = {}
+                prices: dict[tuple[Any, Any, Any, Any], int] = {}
                 for checkpoint in checkpoints:
                     shape = (
                         checkpoint["parts"],
                         checkpoint.get("source_pricing", True),
                         checkpoint.get("inline_source_plain", False),
+                        checkpoint.get("inline_source_cas", False),
                     )
                     prices[shape] = max(
                         prices.get(shape, 0), checkpoint["conditional_calls"]
@@ -2077,6 +2321,7 @@ def _price_checkpoint_alternatives(
                             checkpoint["parts"],
                             checkpoint.get("source_pricing", True),
                             checkpoint.get("inline_source_plain", False),
+                            checkpoint.get("inline_source_cas", False),
                         )
                         if shape in prices:
                             checkpoint["conditional_calls"] = prices[shape]
@@ -2086,7 +2331,16 @@ def _price_checkpoint_alternatives(
             sum(checkpoint["conditional_calls"] for checkpoint in sequence)
             for sequence, _, _, _ in measured
         )
-    budget.preflight(calls + reserved_tail_calls)
+    _preflight_with_breakdown(
+        budget,
+        ledger=ledger,
+        checkpoints=checkpoints,
+        has_projected_root=has_projected_root,
+        calls=calls,
+        reserved_tail_calls=reserved_tail_calls,
+        tail_breakdown=tail_breakdown,
+        caller_allocation=caller_allocation,
+    )
     return checkpoints, added_parts, added_bytes, calls, remote_observed
 
 
@@ -2106,6 +2360,8 @@ def preflight_finding_lifecycle(
     exact_documents: object | None = None,
     projected_root: object | None = None,
     branch_documents: object | None = None,
+    tail_breakdown: Mapping[str, Any] | None = None,
+    caller_allocation: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Measure pending and worst-width future checkpoints before native dispatch.
 
@@ -2167,8 +2423,14 @@ def preflight_finding_lifecycle(
         if has_projected_root:
             added_parts = len(staged_parts)
             added_bytes = sum(len(raw) + PART_FRAMING_RESERVE for raw in staged_parts)
-            # This is the separate disposition/root stage, not the optimized
-            # finding-carrier writer. Keep its conservative physical cost.
+            # Plain non-trust ActionRunLedger own-CAS disposition staging without
+            # external parts reuses source pricing instead of the 17-call ceiling;
+            # trust/quarantine and part-staging keep their conservative floor.
+            source_cas = (
+                not staged_parts
+                and _inline_cas_pricing_eligible(record)
+                and _plain_non_trust_cas_eligible(ledger, projected_record)
+            )
             calls = 17 + 8 * added_parts
             checkpoints.append(
                 {
@@ -2180,7 +2442,8 @@ def preflight_finding_lifecycle(
                     "parts": added_parts,
                     "retained_bytes": added_bytes,
                     "conditional_calls": calls,
-                    "source_pricing": False,
+                    "source_pricing": source_cas,
+                    "inline_source_cas": source_cas,
                 }
             )
         for checkpoint_index, value in enumerate(documents):
@@ -2348,6 +2611,8 @@ def preflight_finding_lifecycle(
                     "conditional_calls": checkpoint_calls,
                     "inline_source_plain": is_inline
                     and _inline_checkpoint_read_free(current),
+                    "inline_source_cas": is_inline
+                    and _plain_non_trust_cas_eligible(ledger, current),
                 }
             )
             current = candidate
@@ -2362,6 +2627,9 @@ def preflight_finding_lifecycle(
             budget=budget,
             branching=branch_documents is not None,
             reserved_tail_calls=reserved_tail_calls,
+            has_projected_root=has_projected_root,
+            tail_breakdown=tail_breakdown,
+            caller_allocation=caller_allocation,
         )
     )
     if added_parts:
@@ -2458,7 +2726,16 @@ def preflight_finding_lifecycle(
             ):
                 raise ReviewInputError("finding lifecycle hosted capacity exceeded")
             calls += observed["additional_calls"]
-    budget.preflight(calls + reserved_tail_calls)
+    breakdown = _preflight_with_breakdown(
+        budget,
+        ledger=ledger,
+        checkpoints=checkpoints,
+        has_projected_root=has_projected_root,
+        calls=calls,
+        reserved_tail_calls=reserved_tail_calls,
+        tail_breakdown=tail_breakdown,
+        caller_allocation=caller_allocation,
+    )
     return {
         "schema_version": "finding-lifecycle-preflight-v1",
         "root_sha256": record.record_sha256,
@@ -2467,6 +2744,7 @@ def preflight_finding_lifecycle(
         "added_bytes": added_bytes,
         "conditional_calls": calls,
         "reserved_tail_calls": reserved_tail_calls,
+        "reserved_cost_breakdown": breakdown,
     }
 
 

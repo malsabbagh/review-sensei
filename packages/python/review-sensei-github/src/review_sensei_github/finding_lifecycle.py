@@ -3841,6 +3841,8 @@ class FindingLifecycleJournal:
         """Whole-command admission; detached previews never become authority."""
         from .command_finalization_plan import CommandFinalizationPlan
 
+        self.last_capacity_breakdown = None
+
         if type(plan) is not CommandFinalizationPlan:
             raise ReviewInputError("command finalization capacity plan is unissued")
         from review_sensei.source_registry import require_instance_source
@@ -3972,12 +3974,16 @@ class FindingLifecycleJournal:
                     for page in pages
                     if page.get("encoding") == "partitioned-json-v1"
                 )
-        native_calls = sum(reads.values()) + sum(capabilities.values())
-        native_calls += payload.get("cleanup_native_calls", 0)
-        # Exact native write and one possible readback per non-cleanup effect.
-        # Cleanup already carries its own complete mutation/readback tail.
-        native_calls += 2 * sum(path != "/graphql" for _, path, _ in requests)
-        native_calls += int(
+        from review_sensei.api_work import LEGACY_ACCOUNTING_VERSION
+
+        from . import action_receipt
+        from .api_run_plan import (
+            COMMAND_RECEIPT_CONFIRMATION_REQUESTS,
+            owner_allocations,
+        )
+        from .trust_effects import verification_profile
+
+        body_receipt_calls = int(
             bool(
                 payload.get("review_update")
                 and self._body_receipts(
@@ -3985,23 +3991,114 @@ class FindingLifecycleJournal:
                 )
             )
         )
-        native_calls += restore_calls + snapshot_reads
-        result = preflight_finding_lifecycle(
-            self.ledger,
-            self._record,
-            document=documents[0],
-            future_documents=tuple(documents[1:]),
-            operation_id=self.operation_id,
-            base_sha=self.base_sha,
-            head_sha=self.head_sha,
-            policy_digest=self.policy_digest,
-            configuration_digest=self.configuration_digest,
-            item_count=item_count,
-            reserved_tail_calls=native_calls + 6,
-            projected_root=projected,
-            branch_documents=branch_proof,
+        cleanup_threads_calls = payload.get("cleanup_native_calls", 0)
+        review_update_calls = (
+            2 if payload.get("review_update") is not None else 0
+        ) + body_receipt_calls
+        check_run_calls = 2 if payload.get("check_request") is not None else 0
+        approval_calls = 2 if payload.get("conditional_approval") is not None else 0
+        known_non_cleanup = (
+            int(payload.get("review_update") is not None)
+            + int(payload.get("check_request") is not None)
+            + int(payload.get("conditional_approval") is not None)
         )
+        other_non_cleanup = max(
+            0,
+            sum(path != "/graphql" for _, path, _ in requests) - known_non_cleanup,
+        )
+        native_calls = sum(reads.values()) + sum(capabilities.values())
+        native_calls += cleanup_threads_calls
+        # Exact native write and one possible readback per non-cleanup effect.
+        # Cleanup already carries its own complete mutation/readback tail.
+        native_calls += 2 * sum(path != "/graphql" for _, path, _ in requests)
+        native_calls += body_receipt_calls
+        native_calls += restore_calls + snapshot_reads
+        is_plain_action_command = (
+            not current_contract
+            and not getattr(self.ledger, "_quarantine_required", False)
+            and type(self.ledger) is ActionRunLedger
+            and verification_profile(caller) is None
+            and payload.get("read_contract") == "closed-plain-single-complete-page-v1"
+        )
+        cached_count = (
+            len(self.ledger._cached_comments())
+            if getattr(self.ledger, "_inventory_complete", False)
+            else None
+        )
+        plain_single_page_receipt = bool(
+            is_plain_action_command
+            and cached_count is not None
+            and cached_count
+            + len(capacity_details["staged_parts"])
+            + len(documents)
+            + 1
+            < 100
+        )
+        if plain_single_page_receipt:
+            receipt_calls = 8
+        elif is_plain_action_command:
+            receipt_calls = 4 + 1 + COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+        else:
+            receipt_calls = 6
+        acct = caller.accounting
+        alloc = owner_allocations(
+            acct.configuration.limit,
+            startup=acct.startup.liability,
+            legacy=getattr(acct, "version", None) == LEGACY_ACCOUNTING_VERSION,
+        )
+        caller_allocation = {
+            "limit": acct.configuration.limit,
+            "startup": acct.startup.liability,
+            "first_work": alloc.first_work,
+            "terminal": alloc.first_terminal,
+            "successor": alloc.successor_work + alloc.successor_terminal,
+        }
+        tail_breakdown = {
+            "native_tail_calls": {
+                "reads": dict(reads),
+                "capability_mints": sum(capabilities.values()),
+                "review_update": review_update_calls,
+                "cleanup_threads": cleanup_threads_calls,
+                "check_run": check_run_calls,
+                "approval": approval_calls,
+                "other_writes": 2 * other_non_cleanup,
+                "restore_and_snapshot_reads": restore_calls + snapshot_reads,
+                "total": native_calls,
+            },
+            "receipt_calls": receipt_calls,
+        }
+        try:
+            result = preflight_finding_lifecycle(
+                self.ledger,
+                self._record,
+                document=documents[0],
+                future_documents=tuple(documents[1:]),
+                operation_id=self.operation_id,
+                base_sha=self.base_sha,
+                head_sha=self.head_sha,
+                policy_digest=self.policy_digest,
+                configuration_digest=self.configuration_digest,
+                item_count=item_count,
+                reserved_tail_calls=native_calls + receipt_calls,
+                projected_root=projected,
+                branch_documents=branch_proof,
+                tail_breakdown=tail_breakdown,
+                caller_allocation=caller_allocation,
+            )
+        except Exception as error:
+            self.last_capacity_breakdown = getattr(
+                error, "reserved_cost_breakdown", None
+            )
+            raise
+        self.last_capacity_breakdown = result.get("reserved_cost_breakdown")
         self.preflight_native_tail(calls=native_calls)
+        if plain_single_page_receipt:
+            action_receipt._bind_plain_single_page_receipt(
+                self.ledger,
+                caller,
+                self.identity,
+                operation_id=self.operation_id,
+            )
         plan.bind_preview_capacity(
             preview_record, capacity_details, pending_documents=pending_commitments
         )
@@ -4882,10 +4979,42 @@ class FindingLifecycleJournal:
         )
         if handled:
             return response
+        request = _request_identity(raw_request)
+        key = _digest({"method": method, "path": path, "request": request})
+        legacy_key = _digest({"method": method, "path": path, "request": raw_request})
+        prepared_thread = getattr(self, "_prepared_thread_effect", None)
+        if not _prepare_only and prepared_thread is not None:
+            effect, record, root = prepared_thread
+            caller = getattr(self.ledger, "caller", None)
+            if (
+                effect not in self.effects
+                or method != "POST"
+                or path != "/graphql"
+                or effect["status"] != "pending"
+                or effect["method"] != method
+                or effect["path"] != path
+                or effect["request"] != request
+                or effect["request_sha256"] != key
+                or self._record is not record
+                or record.record_sha256 != root
+                or (caller is not None and caller._root != root)
+            ):
+                raise ReviewInputError(
+                    "finding lifecycle prepared thread resolution authority changed"
+                )
+            self._prepared_thread_effect = None
+            return self._dispatch_effect(
+                http, effect, method, path, token=token, body=body, **kwargs
+            )
+        if (
+            _prepare_only
+            and path == "/graphql"
+            and any(e["request_sha256"] in {key, legacy_key} for e in self.effects)
+        ):
+            return 0, None
         ordered = getattr(self, "_ordered_native_batch", None)
         if ordered is not None:
             ordered.before_request(method, path, raw_request)
-        request = _request_identity(raw_request)
         supported = (
             (
                 method == "POST"
@@ -4920,8 +5049,6 @@ class FindingLifecycleJournal:
             raise ReviewInputError(
                 "finding lifecycle native effect requires a supported exact readback contract"
             )
-        key = _digest({"method": method, "path": path, "request": request})
-        legacy_key = _digest({"method": method, "path": path, "request": raw_request})
         found = next(
             (e for e in self.effects if e["request_sha256"] in {key, legacy_key}), None
         )
@@ -5043,6 +5170,13 @@ class FindingLifecycleJournal:
                 raise ReviewInputError(
                     "finding lifecycle prepared review update has no owned root"
                 )
+            if path == "/graphql":
+                self._prepared_thread_effect = (
+                    effect,
+                    self._record,
+                    self._record.record_sha256,
+                )
+                return 0, None
             self._prepared_review_update = (
                 effect,
                 self._record,
@@ -5483,6 +5617,64 @@ class FindingLifecycleJournal:
             self._planned = self._updated_binding_proof_state(
                 self._planned, old, updated
             )
+
+    @contextmanager
+    def prepare_thread_resolution(self, *, token, body):
+        """Stage thread cleanup intent before opening caller readback correlation."""
+        if not self._armed:
+            yield None
+            return
+        if getattr(self, "_prepared_thread_effect", None) is not None:
+            raise ReviewInputError(
+                "finding lifecycle thread resolution preparation is nested"
+            )
+        caller = getattr(self.ledger, "caller", None)
+        self.request(
+            self._readback_http,
+            "POST",
+            "/graphql",
+            token=token,
+            body=body,
+            _prepare_only=True,
+        )
+        reconciled_before = (
+            frozenset(caller._reconciled_mutations)
+            if caller is not None and hasattr(caller, "_reconciled_mutations")
+            else frozenset()
+        )
+        prepared = getattr(self, "_prepared_thread_effect", None)
+        effect = prepared[0] if prepared is not None else None
+
+        def confirm_reconciled(thread_id: str, *, caller_confirmed: bool) -> None:
+            if effect is None or effect["status"] != "pending":
+                return
+            if caller is not None and hasattr(caller, "_reconciled_mutations"):
+                if not caller_confirmed:
+                    return
+                newly_reconciled = caller._reconciled_mutations - reconciled_before
+                if len(newly_reconciled) != 1 or not any(
+                    str(obs.get("request_id")) in newly_reconciled
+                    and obs.get("mutation")
+                    for obs in caller.observations
+                ):
+                    return
+            target = _thread_effect_target(effect)
+            if target != ("resolveReviewThread", thread_id, True):
+                return
+            payload = {
+                "data": {
+                    "resolveReviewThread": {
+                        "thread": {"id": thread_id, "isResolved": True}
+                    }
+                }
+            }
+            receipt = self._compact_response(payload, effect=effect)
+            effect["status"], effect["response"] = "confirmed", [200, receipt]
+
+        try:
+            yield confirm_reconciled
+        finally:
+            self._prepared_thread_effect = None
 
     @contextmanager
     def prepare_review_update(
