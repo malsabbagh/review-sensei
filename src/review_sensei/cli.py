@@ -93,7 +93,11 @@ from .providers.openrouter import (
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
 from .service import DEFAULT_STAGES, ReviewRun, ReviewService
-from .session import has_unconsumed_successor_grant, read_session_baseline
+from .session import (
+    SessionRecord,
+    has_unconsumed_successor_grant,
+    read_session_baseline,
+)
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .work_recovery import WorkRecoveryStore
 from .workflow import prepare_diff
@@ -3065,7 +3069,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
 
         analysis_cleanup_started = False
 
-        def cleanup_analysis_reservation(*, charge_failed_attempt: bool) -> None:
+        def cleanup_analysis_reservation(
+            *, charge_failed_attempt: bool
+        ) -> SessionRecord | None:
             """Clean up only while this invocation still owns the reservation.
 
             A ledger write can be durable even when its adapter reports an
@@ -3083,14 +3089,14 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 or held_reservation is None
                 or policy.mode not in OPERATOR_REVIEW_MODES
             ):
-                return
+                return None
             nonlocal analysis_cleanup_started
             if analysis_cleanup_started:
-                return
+                return None
             analysis_cleanup_started = True
             claim = getattr(ledger, "claim_analysis_cleanup", None)
             if callable(claim) and not claim(identity, held_reservation):
-                return
+                return None
             loaded = ledger.load(identity)
             if loaded.status not in {"ok", "migrated"} or loaded.record is None:
                 raise ReviewInputError(f"session ledger load failed: {loaded.status}")
@@ -3099,9 +3105,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 # The checkpoint may have committed despite an adapter error,
                 # or another writer may now own the identity.  Neither state
                 # is an analysis reservation this invocation may charge.
-                return
+                return None
             if charge_failed_attempt:
-                record_session_failed_attempt(
+                return record_session_failed_attempt(
                     ledger,
                     identity,
                     reservation_id=held_reservation,
@@ -3116,7 +3122,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 if can_mark_direct_abort:
                     setattr(ledger, "_direct_final_abort", True)
                 try:
-                    ledger.abort(
+                    return ledger.abort(
                         identity,
                         reservation_id=held_reservation,
                         expected_generation=current.generation,
@@ -4137,6 +4143,29 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                                 diagnostic="baseline_capacity_exceeded",
                             )
                             checkpoint_baseline = None
+                    pre_checkpoint_validation_failed = False
+                    validate_before = getattr(
+                        hosted_hooks, "validate_before_checkpoint", None
+                    )
+                    if callable(validate_before):
+                        try:
+                            validate_before(
+                                ledger=ledger,
+                                identity=identity,
+                                result=result,
+                                baseline=admission_baseline,
+                                current_key=(
+                                    current_key
+                                    if current_key is not None
+                                    else cache_key
+                                ),
+                                policy=policy,
+                                diff=diff,
+                                changed_paths=changed_paths,
+                            )
+                        except BaseException:
+                            pre_checkpoint_validation_failed = True
+                            raise
                     result = checkpoint_review_analysis(
                         ledger,
                         identity,
@@ -4194,10 +4223,36 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         )
                 except BaseException as checkpoint_error:
                     if held_reservation is not None:
+                        settled_record: SessionRecord | None = None
                         try:
-                            cleanup_analysis_reservation(charge_failed_attempt=True)
+                            settled_record = cleanup_analysis_reservation(
+                                charge_failed_attempt=True
+                            )
                         except BaseException as cleanup_error:
                             _note_cleanup_failure(checkpoint_error, cleanup_error)
+                        else:
+                            if (
+                                pre_checkpoint_validation_failed
+                                and settled_record is not None
+                            ):
+                                record_settlement = getattr(
+                                    hosted_hooks,
+                                    "record_pre_external_write_settlement",
+                                    None,
+                                )
+                                if callable(record_settlement):
+                                    try:
+                                        record_settlement(
+                                            ledger=ledger,
+                                            identity=identity,
+                                            settled_record=settled_record,
+                                            base_sha=effective_base_sha,
+                                            head_sha=head_sha,
+                                        )
+                                    except BaseException as witness_error:
+                                        _note_cleanup_failure(
+                                            checkpoint_error, witness_error
+                                        )
                     raise
         elif args.configuration_context_output is not None:
             raise ReviewInputError(

@@ -458,6 +458,126 @@ class ReviewRunHooks(ApiRunReviewHooks):
             tuple(changed_paths),
         )
 
+    def validate_before_checkpoint(
+        self,
+        *,
+        ledger,
+        identity,
+        result,
+        baseline,
+        current_key,
+        policy,
+        diff,
+        changed_paths,
+    ):
+        """Run purely in-memory pre-publication validation ahead of checkpointing."""
+        if ledger is not self.ledger or identity != self.identity:
+            raise ReviewInputError(
+                "pre-checkpoint validation does not own the admitted process"
+            )
+        from review_sensei.bounded_evidence import read_inline_evidence
+        from review_sensei.finding_drift import (
+            DriftEvaluationResult,
+            project_drift_review_result,
+        )
+        from review_sensei.finding_lifecycle import decode_lifecycle_state
+
+        from .finding_lifecycle import _unpack_journal, _validate
+        from .finding_lifecycle_dictionary import is_dictionary
+        from .publication import ReviewPublisher, _reject_conflicting_instances
+        from .quarantine_namespace import inherited_namespace_is_historical
+
+        _reject_conflicting_instances(result.comments)
+        publisher = ReviewPublisher(http=self.ledger.http)
+        prepared = publisher.prepare(
+            result=result,
+            diff=diff,
+            head_sha=self.head_sha,
+            convergence_policy=policy,
+            baseline=baseline,
+            current_key=current_key,
+            changed_paths=changed_paths,
+        )
+        publisher._validate_locations(prepared.result, diff)
+        effect_record = self.ledger.caller._effect_record
+        if effect_record is None or self.identity.repository_id is None:
+            return
+        repo_key = (self.identity.repository_id, self.identity.pull_request)
+        if effect_record.finding_lifecycle is not None:
+            manifest = effect_record.finding_lifecycle.get("manifest")
+            if not isinstance(manifest, dict) or manifest.get("encoding") != "inline-json-v1":
+                return
+            envelope = read_inline_evidence(manifest, expected_binding=manifest["binding"])
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("schema_version") != "finding-lifecycle-evidence-v2"
+            ):
+                return
+            packed = envelope.get("lifecycle")
+            if is_dictionary(packed):
+                return
+            document = _validate(_unpack_journal(packed))
+            restored = decode_lifecycle_state(document["lifecycle"])
+            if inherited_namespace_is_historical(
+                self.ledger, effect_record, restored.state, document
+            ):
+                return
+            if not isinstance(restored.state, DriftEvaluationResult):
+                return
+            publisher._drift_states[repo_key] = restored.state
+        elif ReviewRun._record_requires_finding_inventory_migration(effect_record):
+            return
+        planned, _ = publisher._plan_drift_round(
+            repository_id=self.identity.repository_id,
+            pull_request=self.identity.pull_request,
+            head_sha=self.head_sha,
+            base_sha=self.base_sha,
+            result=prepared.result,
+            diff=diff,
+            baseline=baseline,
+            convergence_policy=policy,
+            authorized_dispositions=(),
+            max_active_findings=prepared.result.limits.max_comments,
+            confirmed_fixes=(),
+            human_overrides=(),
+            coverage_acceptance=None,
+            authorized_rescan=self.rescan_request,
+            enable_drift_tracking=True,
+            drift_descriptors=(),
+            host_outdated_threads=frozenset(),
+            host_resolved_threads=frozenset(),
+        )
+        if planned is not None:
+            project_drift_review_result(prepared.result, planned)
+
+    def record_pre_external_write_settlement(
+        self,
+        *,
+        ledger,
+        identity,
+        settled_record,
+        base_sha,
+        head_sha,
+        transaction_id=None,
+    ):
+        """Emit authenticated settlement witness after pre-checkpoint failure cleanup."""
+        if ledger is not self.ledger or identity != self.identity:
+            raise ReviewInputError(
+                "settlement witness emission does not own the admitted process"
+            )
+        from .publication_failure_recovery import emit_pre_external_write_settlement
+
+        return emit_pre_external_write_settlement(
+            ledger=ledger,
+            caller=ledger.caller,
+            identity=identity,
+            settled_record=settled_record,
+            boundary="pre_checkpoint_validation",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            transaction_id=transaction_id,
+        )
+
 
 class ReviewRunLedger(ApiRunSessionLedger):
     """One funded exact readback on an uncertain write, never a replay."""
@@ -1697,13 +1817,35 @@ def bootstrap(
                     and previous_root.transaction is not None
                     and previous_root.transaction.phase == "publication_succeeded"
                 )
+                pre_write_settlement_candidate = (
+                    not historical_candidate
+                    and previous.action is None
+                    and previous.analysis_abort is None
+                    and previous.terminal_transaction is None
+                    and previous_root.reservation_id is None
+                    and previous_root.reserved_slot is None
+                    and (
+                        (
+                            previous_root.transaction is None
+                            and previous_root.failed_attempts > 0
+                            and isinstance(previous_root.failed_attempts_head_sha, str)
+                        )
+                        or (
+                            previous_root.transaction is not None
+                            and previous_root.transaction.phase == "publication_failed"
+                        )
+                    )
+                )
 
                 def observe_cessation():
                     return evidence.ceased_run_owner(
                         identity,
                         previous.identity.run_id,
                         previous.owner,
-                        complete_terminal_inventory=previous.analysis_abort is not None,
+                        complete_terminal_inventory=(
+                            previous.analysis_abort is not None
+                            or pre_write_settlement_candidate
+                        ),
                     )
 
                 stopped = None if historical_candidate else observe_cessation()

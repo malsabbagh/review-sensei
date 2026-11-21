@@ -1795,6 +1795,89 @@ class SessionRecord:
             accounting, historical=True, assessments=assessments
         )
 
+    def rollover_pre_write_settled_api_accounting(
+        self, accounting: Mapping[str, object]
+    ) -> "SessionRecord":
+        """Roll over a ceased predecessor proven settled before any external write.
+
+        The adapter must first verify an authenticated pre-external-write
+        settlement witness, ceased Actions run inventory, and complete negative
+        native census across reviews, inline comments, and check-runs.
+        """
+        from .api_work import ApiRunAccounting
+
+        previous = ApiRunAccounting.from_document(self.api_run_accounting)
+        candidate = ApiRunAccounting.from_document(accounting)
+        ref = candidate.previous_record
+        if ref is None or "completion" in ref:
+            raise ReviewInputError(
+                "pre-write-settled rollover requires an ordinary retained reference"
+            )
+        if (
+            previous.identity.repository_id != candidate.identity.repository_id
+            or previous.identity.run_id == candidate.identity.run_id
+            or candidate.owner.run_attempt != 1
+            or candidate.owner.generation != 0
+            or candidate.confirmed
+            or candidate.uncertain
+            or candidate.prior_nonstartup_liability
+            or candidate.startup_used != ((candidate.owner.job, 1),)
+            or ref["run_id"] != previous.identity.run_id
+            or ref["root_sha256"] != self.record_sha256
+            or previous.action is not None
+            or previous.analysis_abort is not None
+            or previous.terminal_transaction is not None
+            or self.reservation_id is not None
+            or self.reserved_slot is not None
+            or self.publication_staging is not None
+            or (
+                self.transaction is not None
+                and self.transaction.phase != "publication_failed"
+            )
+            or (
+                self.transaction is None
+                and (
+                    self.failed_attempts <= 0
+                    or not isinstance(self.failed_attempts_head_sha, str)
+                    or re.fullmatch(r"[a-f0-9]{40}", self.failed_attempts_head_sha)
+                    is None
+                )
+            )
+        ):
+            raise ReviewInputError(
+                "pre-write-settled predecessor state is invalid for rollover"
+            )
+        binding = cast(Mapping[str, Any], ref["manifest"])["binding"]
+        if (
+            binding["repository"] != self.repository
+            or binding["repository_id"] != self.repository_id
+            or binding["pull_request"] != self.pull_request
+            or binding["generation"] != self.generation
+        ):
+            raise ReviewInputError("retained caller root scope conflicts")
+        payload = self.to_dict()
+        del payload["schema_version"], payload["record_sha256"]
+        payload["generation"] = self.generation + 1
+        payload["api_run_accounting"] = candidate.to_document()
+        payload["transaction"] = None
+        if self.transaction is not None:
+            tx = self.transaction
+            payload["last_committed_reservation_id"] = hashlib.sha256(
+                f"{tx.reservation_id}|pre-write-settled".encode("utf-8")
+            ).hexdigest()
+            if failed_attempts_for_head(self, tx.head_sha) == 0:
+                payload["failed_attempts"] = 1
+                payload["failed_attempts_head_sha"] = tx.head_sha
+            if (
+                self.finding_lifecycle is None
+                and previous.previous_record is None
+                and self.completed_verification_rounds == 0
+                and self.completed_initial_reviews <= 1
+            ):
+                payload["completed_initial_reviews"] = 0
+                payload["convergence_history"] = None
+        return type(self)._construct(**cast(dict[str, Any], payload))
+
     def _rollover_api_accounting(
         self, accounting: Mapping[str, object], *, historical: bool, assessments=()
     ) -> "SessionRecord":
@@ -4991,17 +5074,46 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
         current = ApiRunAccounting.from_document(after.api_run_accounting)
         if previous.identity != current.identity:
             reference = current.previous_record
-            expected = (
-                before.rollover_historical_api_accounting(
+            is_pre_write_settled = (
+                reference is not None
+                and "completion" not in reference
+                and previous.action is None
+                and previous.analysis_abort is None
+                and previous.terminal_transaction is None
+                and before.reservation_id is None
+                and before.reserved_slot is None
+                and before.publication_staging is None
+                and (
+                    (
+                        before.transaction is not None
+                        and before.transaction.phase == "publication_failed"
+                    )
+                    or (
+                        before.transaction is None
+                        and before.failed_attempts > 0
+                        and isinstance(before.failed_attempts_head_sha, str)
+                        and re.fullmatch(r"[a-f0-9]{40}", before.failed_attempts_head_sha)
+                        is not None
+                    )
+                )
+                and after.transaction is None
+            )
+            if (
+                reference is not None
+                and reference.get("schema_version") == "caller-run-reference-v2"
+            ):
+                expected = before.rollover_historical_api_accounting(
                     after.api_run_accounting,
                     assessments=(after.historical_assessments or {}).get(
                         "assessments", ()
                     ),
                 )
-                if reference is not None
-                and reference.get("schema_version") == "caller-run-reference-v2"
-                else before.rollover_api_accounting(after.api_run_accounting)
-            )
+            elif is_pre_write_settled:
+                expected = before.rollover_pre_write_settled_api_accounting(
+                    after.api_run_accounting
+                )
+            else:
+                expected = before.rollover_api_accounting(after.api_run_accounting)
             if expected.record_sha256 != after.record_sha256:
                 expected_document, actual_document = expected.to_dict(), after.to_dict()
                 actual_document["finding_lifecycle"] = expected_document.get(

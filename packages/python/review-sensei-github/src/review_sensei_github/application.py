@@ -2975,7 +2975,7 @@ class GitHubApplication:
                         and durable_transaction.phase != "analysis"
                     ):
                         try:
-                            complete_review_publication(
+                            failed_record = complete_review_publication(
                                 ledger,
                                 identity,
                                 durable_transaction,
@@ -2987,6 +2987,58 @@ class GitHubApplication:
                                 f"{type(cleanup_error).__name__}: "
                                 f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                             )
+                        else:
+                            from .api_run_requests import ApiRunRequestTransport
+                            from .publication_failure_recovery import (
+                                emit_pre_external_write_settlement,
+                            )
+
+                            caller = getattr(ledger, "caller", None)
+                            if (
+                                isinstance(ledger, GitHubIssueCommentSessionLedger)
+                                and isinstance(caller, ApiRunRequestTransport)
+                                and failed_record.transaction is not None
+                                and failed_record.transaction.phase
+                                == "publication_failed"
+                                and not caller._external_business_write_attempted
+                                and not caller._provider_effect_unresolved
+                                and caller._checkpoint is None
+                                and failed_record.publication_staging is None
+                                and (
+                                    failed_record.finding_lifecycle is None
+                                    or failed_record.finding_lifecycle.get(
+                                        "operation_id"
+                                    )
+                                    != failed_record.transaction.transaction_id
+                                )
+                                and not any(
+                                    o.get("mutation")
+                                    and (
+                                        o["outcome"] in {"unknown", "expired"}
+                                        or o.get("uncertain_effect")
+                                    )
+                                    and str(o["request_id"])
+                                    not in caller._reconciled_mutations
+                                    for o in caller.observations
+                                )
+                            ):
+                                try:
+                                    emit_pre_external_write_settlement(
+                                        ledger=ledger,
+                                        caller=caller,
+                                        identity=identity,
+                                        settled_record=failed_record,
+                                        boundary="post_checkpoint_pre_write",
+                                        base_sha=failed_record.transaction.base_sha,
+                                        head_sha=failed_record.transaction.head_sha,
+                                        transaction_id=failed_record.transaction.transaction_id,
+                                    )
+                                except BaseException as witness_error:
+                                    publication_error.add_note(
+                                        "settlement witness emission failed: "
+                                        f"{type(witness_error).__name__}: "
+                                        f"{str(witness_error).replace(chr(10), ' ')[:160]}"
+                                    )
                     else:
                         publication_error.add_note(
                             "transaction phase cleanup skipped: durable transaction unavailable"

@@ -678,6 +678,61 @@ def drift_obligation_from_comment(
     )
 
 
+def _comment_impact(comment: ReviewComment) -> str:
+    """Resolve valid ranked impact for a blocking or human-gated comment."""
+    sev = (comment.severity or "").strip().lower()
+    if sev in {"critical", "high", "medium", "low"}:
+        return sev
+    return "high"
+
+
+def _transition_criterion(
+    base: OriginalFindingCriterion,
+    *,
+    comments: Sequence[ReviewComment] = (),
+) -> OriginalFindingCriterion:
+    """Update criterion from explicit comment requirements without promoting ambiguity alone.
+
+    Per ADR 0134, ambiguity holds approval via ``lifecycle_state``
+    (``ambiguous-multi-target``) while preserving the finding's original
+    severity separately. Only an already-required criterion or an explicit
+    ``blocks_approval`` / ``needs_human`` comment may promote an advisory
+    criterion into a required/ranked criterion.
+    """
+    next_blocking = base.blocking or any(c.blocks_approval for c in comments)
+    next_needs_human = base.needs_human or any(c.needs_human for c in comments)
+    next_required = next_blocking or next_needs_human
+    if not next_required and base.evidence == "advisory":
+        return replace(
+            base,
+            blocking=False,
+            needs_human=False,
+            impact=None,
+            evidence="advisory",
+        )
+    if base.evidence == "advisory":
+        promoting = [c for c in comments if c.blocks_approval or c.needs_human]
+        next_impact: str | None = (
+            min(
+                (_comment_impact(c) for c in promoting),
+                key=lambda val: IMPACT_RANKS[val],
+            )
+            if promoting
+            else "high"
+        )
+        next_evidence = "supported-source"
+    else:
+        next_impact = base.impact
+        next_evidence = base.evidence
+    return replace(
+        base,
+        blocking=next_blocking,
+        needs_human=next_needs_human,
+        impact=next_impact,
+        evidence=next_evidence,
+    )
+
+
 @dataclass(frozen=True)
 class DriftInventory:
     """Complete authoritative drift inventory across displayed and hidden items."""
@@ -1195,7 +1250,10 @@ def evaluate_drift_round(
                 )
                 reopen_comment = primary_comment
                 reopen_state = "ambiguous-multi-target"
-                reopen_crit = replace(item.criterion, blocking=True, needs_human=True)
+                reopen_crit = _transition_criterion(
+                    item.criterion,
+                    comments=tuple(result.comments[i] for i in amb_indices),
+                )
             else:
                 c_idx = reopened_by_prior[item.obligation_id]
                 reopen_comment = result.comments[c_idx]
@@ -1228,7 +1286,9 @@ def evaluate_drift_round(
                     ),
                 )
                 reopen_state = "active-unresolved"
-                reopen_crit = item.criterion
+                reopen_crit = _transition_criterion(
+                    item.criterion, comments=(reopen_comment,)
+                )
 
             if reopen_override is not None:
                 override_binding = (
@@ -1480,8 +1540,11 @@ def evaluate_drift_round(
                 next_obligations.append(
                     replace(
                         prior,
-                        criterion=replace(
-                            prior.criterion, blocking=True, needs_human=True
+                        criterion=_transition_criterion(
+                            prior.criterion,
+                            comments=tuple(
+                                result.comments[idx] for idx in matched_indices
+                            ),
                         ),
                         present_anchor=unanchored,
                         lifecycle_state="ambiguous-multi-target",
@@ -1524,10 +1587,8 @@ def evaluate_drift_round(
             next_obligations.append(
                 replace(
                     prior,
-                    criterion=replace(
-                        prior.criterion,
-                        blocking=prior.criterion.blocking or comment.blocks_approval,
-                        needs_human=prior.criterion.needs_human or comment.needs_human,
+                    criterion=_transition_criterion(
+                        prior.criterion, comments=(comment,)
                     ),
                     present_anchor=PresentLocationAnchor(
                         head_sha=head_sha,
@@ -1709,7 +1770,10 @@ def evaluate_drift_round(
         )
         created = replace(
             created,
-            criterion=replace(created.criterion, blocking=True, needs_human=True),
+            criterion=_transition_criterion(
+                created.criterion,
+                comments=tuple(result.comments[i] for i in indices),
+            ),
             present_anchor=PresentLocationAnchor(
                 head_sha=head_sha,
                 path=primary_comment.path,
