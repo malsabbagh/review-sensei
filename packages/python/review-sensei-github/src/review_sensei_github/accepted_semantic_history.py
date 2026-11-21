@@ -20,6 +20,43 @@ KEY = "accepted_semantic_history"
 VERSION = "accepted-semantic-history-v1"
 LIMIT = 2
 
+_STATE_ADVANCING_COMMAND_ACTIONS = frozenset(
+    {
+        "dismiss",
+        "defer",
+        "accept-risk",
+        "accept-coverage-uncertainty",
+        "approve-media",
+        "continue",
+        "reenroll",
+    }
+)
+_NON_ADVANCING_COMMAND_ACTIONS = frozenset({"status", "pause", "verify"})
+
+
+def _target_allows_disposition_entry(caller: Any) -> bool:
+    target = getattr(caller, "_accepted_semantic_target", None)
+    return (
+        type(target) is tuple
+        and len(target) >= 4
+        and type(target[0]) is str
+        and target[0] == "command"
+        and type(target[3]) is str
+        and target[3] in _STATE_ADVANCING_COMMAND_ACTIONS
+    )
+
+
+def _disposition_entry_allowed(caller: Any, history: dict[str, Any]) -> bool:
+    if not _target_allows_disposition_entry(caller):
+        return False
+    trailing_disposition_no_progress = 0
+    for item in reversed(history["records"]):
+        if item["made_progress"]:
+            break
+        if item.get("disposition_entry") is True:
+            trailing_disposition_no_progress += 1
+    return trailing_disposition_no_progress < LIMIT
+
 
 def _digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
@@ -61,6 +98,11 @@ def semantic_snapshot(state, journal):
             ):
                 uncertain.append(ob.obligation_id)
     coverage = state.changed_file_coverage
+    if coverage.approval_state == "partial" and not coverage.fully_reviewed:
+        criteria.append(("coverage-uncertainty", "partial"))
+        if not coverage.coverage_uncertainty_accepted:
+            unresolved.append("coverage-uncertainty")
+            unresolved.sort()
     pending = sorted(
         e["request_sha256"] for e in journal["effects"] if e["status"] == "pending"
     )
@@ -89,52 +131,81 @@ def semantic_snapshot(state, journal):
 
 def historical_snapshot(snapshot, ledger, record):
     """Observe complete authenticated origin obligations, never cursor churn."""
-    if record.quarantine_lineage is None:
-        return snapshot
-    from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
+    if record.quarantine_lineage is not None:
+        from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
 
-    authenticated = getattr(ledger, "_quarantine_authenticated", None)
-    if (
-        type(authenticated) is not AuthenticatedQuarantine
-        or authenticated not in _AUTHENTICATED
-        or authenticated.lineage != record.quarantine_lineage
-        or authenticated.original_identity != record.identity()
-    ):
-        _hold("authenticated_historical_inventory_required")
-    if authenticated.record_sha256 != record.record_sha256:
-        from .quarantine_checkpoint import confirmed_checkpoint_capacity
+        authenticated = getattr(ledger, "_quarantine_authenticated", None)
+        if (
+            type(authenticated) is not AuthenticatedQuarantine
+            or authenticated not in _AUTHENTICATED
+            or authenticated.lineage != record.quarantine_lineage
+            or authenticated.original_identity != record.identity()
+        ):
+            _hold("authenticated_historical_inventory_required")
+        if authenticated.record_sha256 != record.record_sha256:
+            from .quarantine_checkpoint import confirmed_checkpoint_capacity
 
-        caller = getattr(ledger, "caller", None)
-        if caller is None or authenticated.original_caller is not caller:
-            _hold("authenticated_historical_inventory_required")
-        receipt = confirmed_checkpoint_capacity(caller, ledger, record.identity())
-        if receipt.record.to_dict() != record.to_dict():
-            _hold("authenticated_historical_inventory_required")
-        # This exact owned GET proves the current root retained the identical
-        # complete lineage (including the decision-state manifest). The earlier
-        # authenticated observation stays attached to its original source root;
-        # neither its registration nor any serialized authority is rewritten.
-    # pending validates complete inventory digests, all origin memberships and
-    # each retained individual decision. No transport references count as work.
-    pending = authenticated.pending
-    return {
-        **snapshot,
-        "inventory_sha256": _digest(
-            {
-                "domain": "current-and-authenticated-historical-obligations-v1",
-                "current": snapshot["inventory_sha256"],
-                "historical": authenticated.inventories,
-            }
-        ),
-        "unresolved_sha256": _digest(
-            {
-                "domain": "current-and-authenticated-historical-unresolved-v1",
-                "current": snapshot["unresolved_sha256"],
-                "historical": sorted(pending),
-            }
-        ),
-        "unresolved_count": snapshot["unresolved_count"] + len(pending),
-    }
+            caller = getattr(ledger, "caller", None)
+            if caller is None or authenticated.original_caller is not caller:
+                _hold("authenticated_historical_inventory_required")
+            receipt = confirmed_checkpoint_capacity(caller, ledger, record.identity())
+            if receipt.record.to_dict() != record.to_dict():
+                _hold("authenticated_historical_inventory_required")
+            # This exact owned GET proves the current root retained the identical
+            # complete lineage (including the decision-state manifest). The earlier
+            # authenticated observation stays attached to its original source root;
+            # neither its registration nor any serialized authority is rewritten.
+        # pending validates complete inventory digests, all origin memberships and
+        # each retained individual decision. No transport references count as work.
+        pending = authenticated.pending
+        snapshot = {
+            **snapshot,
+            "inventory_sha256": _digest(
+                {
+                    "domain": "current-and-authenticated-historical-obligations-v1",
+                    "current": snapshot["inventory_sha256"],
+                    "historical": authenticated.inventories,
+                }
+            ),
+            "unresolved_sha256": _digest(
+                {
+                    "domain": "current-and-authenticated-historical-unresolved-v1",
+                    "current": snapshot["unresolved_sha256"],
+                    "historical": sorted(pending),
+                }
+            ),
+            "unresolved_count": snapshot["unresolved_count"] + len(pending),
+        }
+    historical_assessments = getattr(record, "historical_assessments", None)
+    if historical_assessments is not None:
+        from review_sensei.historical_assessments import (
+            normalize_hold,
+            pending_assessments,
+        )
+
+        hold = normalize_hold(historical_assessments)
+        if hold is None:
+            _hold("historical_assessments_invalid")
+        hold_pending = sorted(a["instance"] for a in pending_assessments(hold))
+        snapshot = {
+            **snapshot,
+            "inventory_sha256": _digest(
+                {
+                    "domain": "current-and-historical-assessments-v1",
+                    "current": snapshot["inventory_sha256"],
+                    "scope_sha256": hold["scope_sha256"],
+                }
+            ),
+            "unresolved_sha256": _digest(
+                {
+                    "domain": "current-and-historical-assessments-unresolved-v1",
+                    "current": snapshot["unresolved_sha256"],
+                    "pending": hold_pending,
+                }
+            ),
+            "unresolved_count": snapshot["unresolved_count"] + len(hold_pending),
+        }
+    return snapshot
 
 
 def semantic_advancement(before, after):
@@ -227,17 +298,26 @@ def validate_history(value, identity):
         or not 1 <= len(value["records"]) <= LIMIT
     ):
         _hold("incomplete")
+    base_keys = {
+        "operation_key",
+        "purpose",
+        "source",
+        "snapshot",
+        "made_progress",
+        "target_base_sha",
+        "target_head_sha",
+    }
     seen = set()
     for item in value["records"]:
-        if type(item) is not dict or set(item) != {
-            "operation_key",
-            "purpose",
-            "source",
-            "snapshot",
-            "made_progress",
-            "target_base_sha",
-            "target_head_sha",
-        }:
+        if type(item) is not dict or (
+            set(item) != base_keys and set(item) != (base_keys | {"disposition_entry"})
+        ):
+            _hold("invalid_record")
+        if "disposition_entry" in item and (
+            item["purpose"] != "command"
+            or item["disposition_entry"] is not True
+            or item["made_progress"] is not False
+        ):
             _hold("invalid_record")
         source = item["source"]
         if (
@@ -280,7 +360,18 @@ def validate_history(value, identity):
     return value
 
 
-def append_history(previous, identity, intent, before, after, *, target_base_sha=None):
+def append_history(
+    previous,
+    identity,
+    intent,
+    before,
+    after,
+    *,
+    target_base_sha=None,
+    disposition_entry=False,
+):
+    if type(disposition_entry) is not bool:
+        _hold("invalid_record")
     _validate_snapshot(before)
     _validate_snapshot(after)
     records = (
@@ -295,17 +386,18 @@ def append_history(previous, identity, intent, before, after, *, target_base_sha
     if records:
         progress = progress or semantic_advancement(records[-1]["snapshot"], after)
     streak = 0 if progress else min(LIMIT, (previous["streak"] if previous else 0) + 1)
-    records.append(
-        {
-            "operation_key": intent["operation_key"],
-            "purpose": intent["purpose"],
-            "source": dict(intent["source"]),
-            "snapshot": after,
-            "made_progress": progress,
-            "target_base_sha": target_base_sha,
-            "target_head_sha": intent.get("head_sha"),
-        }
-    )
+    entry = {
+        "operation_key": intent["operation_key"],
+        "purpose": intent["purpose"],
+        "source": dict(intent["source"]),
+        "snapshot": after,
+        "made_progress": progress,
+        "target_base_sha": target_base_sha,
+        "target_head_sha": intent.get("head_sha"),
+    }
+    if disposition_entry and intent["purpose"] == "command" and not progress:
+        entry["disposition_entry"] = True
+    records.append(entry)
     value = {
         "schema_version": VERSION,
         "repository_id": identity.repository_id,
@@ -486,6 +578,7 @@ def _prepare_action(run):
         if (
             previous["streak"] >= LIMIT
             and not pending
+            and not _disposition_entry_allowed(run.caller, previous)
             and not semantic_advancement(previous["records"][-1]["snapshot"], snapshot)
         ):
             _hold("finite_no_progress_stop")
@@ -610,6 +703,7 @@ def enrich_settlement(caller, ledger, identity, intent, result):
         context.before,
         after,
         target_base_sha=context.target_base_sha,
+        disposition_entry=_target_allows_disposition_entry(caller),
     )
     enriched = {**result, KEY: history}
     caller._accepted_semantic_result_cache = (caller._root, _digest(result), enriched)
@@ -638,7 +732,9 @@ def guard_carried_successor(caller, ledger, identity, record, history):
         _hold("selected_root_changed")
     if snapshot["pending_count"] or snapshot["unknown_trust_effect"]:
         return  # Original pending result reconciliation retains priority.
-    if not semantic_advancement(history["records"][-1]["snapshot"], snapshot):
+    if not _disposition_entry_allowed(caller, history) and not semantic_advancement(
+        history["records"][-1]["snapshot"], snapshot
+    ):
         _hold("finite_no_progress_stop")
 
 
@@ -819,6 +915,8 @@ def prospective_history(caller, identity, intent):
         "target_base_sha": context.target_base_sha,
         "target_head_sha": intent.get("head_sha"),
     }
+    if _target_allows_disposition_entry(caller) and intent["purpose"] == "command":
+        row["disposition_entry"] = True
     previous = context.previous
     rows = ([] if previous is None else list(previous["records"][-1:])) + [row]
     streak = 0

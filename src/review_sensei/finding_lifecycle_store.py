@@ -1357,6 +1357,7 @@ def _source_semantic_history_width(binding):
             "made_progress": False,
             "target_base_sha": "f" * 40,
             "target_head_sha": "f" * 40,
+            "disposition_entry": True,
         }
         for index in (1, 2)
     ]
@@ -2648,24 +2649,35 @@ def _validate_accepted_history_metadata(value, binding, *, depth=0):
         "fully_reviewed",
         "unknown_trust_effect",
     }
+    base_keys = {
+        "operation_key",
+        "purpose",
+        "source",
+        "snapshot",
+        "made_progress",
+        "target_base_sha",
+        "target_head_sha",
+    }
     for item in value["records"]:
         if (
             not isinstance(item, dict)
-            or set(item)
-            != {
-                "operation_key",
-                "purpose",
-                "source",
-                "snapshot",
-                "made_progress",
-                "target_base_sha",
-                "target_head_sha",
-            }
+            or (
+                set(item) != base_keys
+                and set(item) != (base_keys | {"disposition_entry"})
+            )
             or type(item["operation_key"]) is not str
             or not 1 <= len(item["operation_key"]) <= 256
             or item["operation_key"] in seen
             or item["purpose"] not in {"command", "reply"}
             or type(item["made_progress"]) is not bool
+            or (
+                "disposition_entry" in item
+                and (
+                    item["purpose"] != "command"
+                    or item["disposition_entry"] is not True
+                    or item["made_progress"] is not False
+                )
+            )
         ):
             invalid()
         seen.add(item["operation_key"])

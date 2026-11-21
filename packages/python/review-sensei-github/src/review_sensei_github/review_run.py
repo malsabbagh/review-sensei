@@ -37,6 +37,7 @@ from review_sensei.baseline import (
 from review_sensei.cli import _parser as engine_parser
 from review_sensei.cli import main as engine_main
 from review_sensei.configuration import MAX_CONFIG_BYTES, load_configuration
+from review_sensei.disposition import MAINTAINER_ACTIONS
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.models import ReviewResult, ReviewTransaction
@@ -945,6 +946,7 @@ def bootstrap(
     enable_current_trust_enrollment: bool = False,
     observe_original_actor_role: bool = False,
     input_directory: Path | None = None,
+    command_action: str | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     if purpose == "review" and args.diff is None and input_directory is None:
@@ -955,6 +957,12 @@ def bootstrap(
         raise ReviewInputError(
             "original actor-role observation requires opted v4 enrollment"
         )
+    if command_action is not None and (
+        purpose != "command"
+        or type(command_action) is not str
+        or command_action not in MAINTAINER_ACTIONS
+    ):
+        raise ReviewInputError("command action semantic target is invalid")
     lifecycle_diagnostics.phase("bootstrap")
     lifecycle_diagnostics.step("policy_checkout")
     lifecycle_diagnostics.requested(args, policy_commit)
@@ -1197,7 +1205,9 @@ def bootstrap(
         raise ReviewInputError("live reviewed base or head conflicts")
     if purpose in {"command", "reply"}:
         setattr(
-            caller, "_accepted_semantic_target", (purpose, args.base_sha, args.head_sha)
+            caller,
+            "_accepted_semantic_target",
+            (purpose, args.base_sha, args.head_sha, command_action),
         )
     title = pull.get("title", "")
     if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
