@@ -38,6 +38,7 @@ from .convergence import (
     ATTRIBUTIONS,
     LATE_REASONS,
     OPERATOR_REVIEW_MODES,
+    PREFERENCE_CATEGORIES,
     BlockerCandidate,
     ReviewConvergencePolicy,
     derive_blocker_candidate,
@@ -254,6 +255,7 @@ class BaselineFinding:
     defect_kind: str = "unknown"
     generation: int = 0
     blocking: bool = False
+    needs_human: bool | None = None
 
     def __post_init__(self) -> None:
         _require_sha256(self.fingerprint, label="baseline finding fingerprint")
@@ -279,6 +281,20 @@ class BaselineFinding:
         ):
             raise ReviewInputError("baseline finding generation is invalid")
         _require_bool(self.blocking, label="baseline finding blocking")
+        if self.needs_human is not None:
+            _require_bool(self.needs_human, label="baseline finding needs_human")
+
+    @property
+    def is_provably_advisory(self) -> bool:
+        """Return whether this prior finding was explicitly proved advisory."""
+
+        return self.blocking is False and self.needs_human is False
+
+    @property
+    def requires_gate(self) -> bool:
+        """Return whether omitting or downgrading this finding must gate approval."""
+
+        return not self.is_provably_advisory
 
     def identity_key(self) -> tuple[str, str, str]:
         return (self.path or "", self.symbol or "", self.defect_kind)
@@ -291,6 +307,16 @@ def baseline_finding_from_comment(
 
     lifecycle = finding_lifecycle_for_comment(comment, generation=generation)
     defect_kind = comment_defect_kind(comment)
+    blocking = (
+        comment.effective_blocking
+        if comment.effective_blocking is not None
+        else comment.blocks_approval
+    )
+    needs_human = (
+        comment.needs_human
+        if comment.effective_blocking is not None
+        else (True if comment.needs_human else None)
+    )
     return BaselineFinding(
         fingerprint=lifecycle.fingerprint,
         resolution_criterion=resolution_criterion_digest(
@@ -305,7 +331,8 @@ def baseline_finding_from_comment(
         symbol=comment.symbol,
         defect_kind=defect_kind,
         generation=generation,
-        blocking=comment.blocks_approval,
+        blocking=blocking,
+        needs_human=needs_human,
     )
 
 
@@ -619,7 +646,14 @@ def baseline_from_history_document(
     if not isinstance(findings_value, list):
         raise ReviewInputError("persisted baseline has an invalid shape")
     for item in findings_value:
-        if not isinstance(item, dict) or set(item) != _BASELINE_FINDING_FIELDS:
+        if not isinstance(item, dict):
+            raise ReviewInputError("persisted baseline has an invalid shape")
+        keys = set(item)
+        if keys != _BASELINE_FINDING_FIELDS and keys != (
+            _BASELINE_FINDING_FIELDS | {"needs_human"}
+        ):
+            raise ReviewInputError("persisted baseline has an invalid shape")
+        if "needs_human" in item and type(item["needs_human"]) is not bool:
             raise ReviewInputError("persisted baseline has an invalid shape")
     for item in findings_value:
         for field in ("symbol", "defect_kind"):
@@ -702,6 +736,11 @@ def _baseline_document(baseline: ReviewBaseline) -> dict[str, object]:
                 "defect_kind": finding.defect_kind,
                 "generation": finding.generation,
                 "blocking": finding.blocking,
+                **(
+                    {"needs_human": finding.needs_human}
+                    if finding.needs_human is not None
+                    else {}
+                ),
             }
             for finding in sorted(baseline.findings, key=lambda item: item.fingerprint)
         ],
@@ -746,12 +785,23 @@ def baseline_from_review(
     )
     if prior_baseline is not None:
         # Overflow refreshes preserve the original resolution contract and
-        # blocking fact even when a rediscovered comment changes its wording.
+        # blocking/human requirement facts even when a rediscovered comment
+        # changes its wording or omits admission metadata.
+        def _merged_needs_human(
+            current_needs_human: bool | None, prior_needs_human: bool | None
+        ) -> bool | None:
+            if current_needs_human is True or prior_needs_human is True:
+                return True
+            if current_needs_human is None or prior_needs_human is None:
+                return None
+            return False
+
         findings = tuple(
             replace(
                 finding,
                 resolution_criterion=prior.resolution_criterion,
                 blocking=finding.blocking or prior.blocking,
+                needs_human=_merged_needs_human(finding.needs_human, prior.needs_human),
             )
             if (prior := match_baseline_finding(comment, prior_baseline)) is not None
             else finding
@@ -767,7 +817,12 @@ def baseline_from_review(
     # A legacy result without a coverage manifest is never a complete
     # baseline. Caller-supplied reviewed paths constrain the fallback scope,
     # but do not prove that the rest of the change was enumerated and reviewed.
-    complete = result.review_status == "complete" and coverage_complete
+    # Similarly, a result with uncertain finding lifecycles never replaces the
+    # prior durable baseline or erases omitted required/unknown findings.
+    has_uncertain = any(item.state == "uncertain" for item in result.finding_lifecycles)
+    complete = (
+        result.review_status == "complete" and coverage_complete and not has_uncertain
+    )
     if complete and not reviewed:
         raise ReviewInputError(
             "complete baseline requires reviewed paths or complete coverage"
@@ -1360,11 +1415,27 @@ def reconcile_overflow_review(
     downgraded = tuple(
         prior
         for comment, prior in pairs
-        if prior.blocking and not comment.blocks_approval
+        if (prior.blocking and not comment.blocks_approval)
+        or (
+            comment.effective_blocking is not None
+            and (prior.needs_human is True or prior.needs_human is None)
+            and not comment.blocks_approval
+            and not comment.needs_human
+        )
+        or (
+            comment.effective_blocking is None
+            and not prior.blocking
+            and (prior.needs_human is True or prior.needs_human is None)
+            and (
+                (comment.severity or "").strip().casefold() not in {"high", "critical"}
+                or (comment.category or "").strip().casefold() in PREFERENCE_CATEGORIES
+            )
+        )
     )
     omitted = tuple(
         finding for finding in baseline.findings if finding.fingerprint not in matched
     )
+    gated_omitted = tuple(finding for finding in omitted if finding.requires_gate)
     # Multiple current comments claiming one historical identity are ambiguous;
     # neither comment supplies a unique rediscovery witness for checkpointing.
     multiply_claimed = tuple(
@@ -1390,7 +1461,7 @@ def reconcile_overflow_review(
                 lifecycles[fingerprint] = FindingLifecycleRecord(
                     fingerprint, "still-present"
                 )
-    for finding in (*omitted, *downgraded, *multiply_claimed):
+    for finding in (*gated_omitted, *downgraded, *multiply_claimed):
         lifecycles[finding.fingerprint] = FindingLifecycleRecord(
             finding.fingerprint, "uncertain"
         )
@@ -1400,12 +1471,7 @@ def reconcile_overflow_review(
         review_status=(
             "partial"
             if result.review_status == "complete"
-            and (
-                omitted
-                or downgraded
-                or len(result.comments) + len(omitted) > MAX_HISTORY_FINDINGS
-                or len(matches) != len(matched)
-            )
+            and len(result.comments) + len(gated_omitted) > MAX_HISTORY_FINDINGS
             else result.review_status
         ),
         finding_lifecycles=tuple(lifecycles.values()),

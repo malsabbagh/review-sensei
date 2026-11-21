@@ -542,6 +542,7 @@ class AuthoritativeObligation:
             defect_kind=self.defect_kind,
             generation=self.generation,
             blocking=self.blocking,
+            needs_human=self.needs_human,
         )
 
 
@@ -1574,14 +1575,21 @@ def evaluate_active_window_round(
             continue
 
         # Ordinary incremental or fallback-full omission: never treat absence as a fix.
+        # Provably advisory findings do not block approval when omitted.
         path_was_reviewed = prior.path is None or prior.path in reviewed_set
+        advisory_omitted = prior.evidence == "advisory" and not prior.required
         next_obligations.append(
             replace(
                 prior,
                 lifecycle_state=(
-                    "omitted-uncertain"
-                    if path_was_reviewed or coverage_mode == "fallback-full"
-                    else "active-unresolved"
+                    "ambiguous-identity"
+                    if prior.lifecycle_state == "ambiguous-identity"
+                    else (
+                        "omitted-uncertain"
+                        if (path_was_reviewed or coverage_mode == "fallback-full")
+                        and not advisory_omitted
+                        else "active-unresolved"
+                    )
                 ),
             )
         )
@@ -1977,6 +1985,7 @@ def project_display_review_result(
         comments=comments_tuple,
         finding_lifecycles=lifecycles_tuple,
         transaction=None,
+        review_verdict=None,
     )
 
 

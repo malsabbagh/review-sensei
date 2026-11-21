@@ -21,6 +21,7 @@ from .context import (
     cache_key_is_compatible,
     finding_lifecycle_for_comment,
     reconcile_finding_set,
+    stage_applies_to_paths,
 )
 from .coverage import CoverageManifest
 from .decision_configuration import DecisionConfiguration
@@ -1381,11 +1382,13 @@ class ReviewService:
                 else stage.categories
             )
             # A stage whose configured lenses do not apply to the changed paths
-            # has no useful provider work.  Stages without categories are
-            # intentionally independent and continue to run (for example an
-            # overall summary stage).
+            # has no useful provider work, without making an otherwise valid
+            # review partial.  When an applicable stage's lenses are suppressed
+            # by the caller, keep the run partial.  Stages without categories
+            # continue to run (for example an overall summary stage).
             if stage.categories and not active_categories:
-                skipped_stages += 1
+                if stage_applies_to_paths(stage, analysis.changed_paths):
+                    skipped_stages += 1
                 stage_summary[stage.name] = "skipped"
                 continue
             executed_comment_stage = (

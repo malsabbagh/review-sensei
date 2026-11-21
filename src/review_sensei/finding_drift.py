@@ -567,6 +567,8 @@ class DriftTrackedObligation:
             generation=self.generation,
             blocking=self.criterion.blocking
             or self.lifecycle_state == "ambiguous-multi-target",
+            needs_human=self.criterion.needs_human
+            or self.lifecycle_state == "ambiguous-multi-target",
         )
 
 
@@ -1648,12 +1650,21 @@ def evaluate_drift_round(
             implicated_reviewed = (
                 review_complete and coverage_state.enumeration_complete
             )
+        advisory_omitted = (
+            prior.criterion.evidence == "advisory" and not prior.criterion.required
+        )
         next_obligations.append(
             replace(
                 prior,
                 present_anchor=new_anchor,
                 lifecycle_state=(
-                    "omitted-uncertain" if implicated_reviewed else "active-unresolved"
+                    "ambiguous-multi-target"
+                    if prior.lifecycle_state == "ambiguous-multi-target"
+                    else (
+                        "omitted-uncertain"
+                        if implicated_reviewed and not advisory_omitted
+                        else "active-unresolved"
+                    )
                 ),
                 thread_binding=binding,
             )
@@ -2385,6 +2396,7 @@ def project_drift_review_result(
         comments=comments_tuple,
         finding_lifecycles=lifecycles_tuple,
         transaction=None,
+        review_verdict=None,
     )
 
 

@@ -272,11 +272,12 @@ class BaselineRecoveryTests(unittest.TestCase):
         before = self.seed_overflow(finding=True, fits=True)
         code, stderr, outcome = self.run_cli(head="d")
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["status"], "reviewed")
         self.assertEqual(self.provider.calls, 2)
         result = ReviewResult.from_dict(
             json.loads((self.root / "result.json").read_text())
         )
+        self.assertEqual(result.review_status, "complete")
         self.assertEqual(result.coverage_mode, "incremental")
         self.assertIn(
             self.baseline().findings[0].fingerprint,
@@ -288,16 +289,16 @@ class BaselineRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.record().failed_attempts, 1)
-        self.assertFalse(
-            evaluate_approval_facts(
-                approval_facts_from_result(
-                    result,
-                    enabled=True,
-                    app_authored=False,
-                    check_published=True,
-                )
-            ).approved
+        eligibility = evaluate_approval_facts(
+            approval_facts_from_result(
+                result,
+                enabled=True,
+                app_authored=False,
+                check_published=True,
+            )
         )
+        self.assertFalse(eligibility.approved)
+        self.assertIn("uncertain-finding-lifecycle", eligibility.blockers)
 
     def test_incremental_41_downgraded_blocker_cannot_replace_history(self):
         before = self.seed_overflow(finding=True, fits=True)
@@ -313,7 +314,18 @@ class BaselineRecoveryTests(unittest.TestCase):
         ]
         code, stderr, outcome = self.run_cli(head="d")
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["status"], "reviewed")
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertIn(
+            self.baseline().findings[0].fingerprint,
+            {
+                item.fingerprint
+                for item in result.finding_lifecycles
+                if item.state == "uncertain"
+            },
+        )
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.provider.calls, 2)
 
@@ -321,12 +333,12 @@ class BaselineRecoveryTests(unittest.TestCase):
         before = self.seed_overflow(finding=True)
         code, stderr, outcome = self.run_cli(head="d")
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["status"], "reviewed")
         self.assertEqual(self.provider.calls, 2)
         result = ReviewResult.from_dict(
             json.loads((self.root / "result.json").read_text())
         )
-        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(result.review_status, "complete")
         self.assertEqual(result.finding_lifecycles[0].state, "uncertain")
         self.assertEqual(
             result.finding_lifecycles[0].fingerprint,
@@ -343,7 +355,7 @@ class BaselineRecoveryTests(unittest.TestCase):
             )
         )
         self.assertFalse(eligibility.approved)
-        self.assertIn("review-partial", eligibility.blockers)
+        self.assertIn("uncertain-finding-lifecycle", eligibility.blockers)
         tx = result.transaction
         for _ in range(2):
             loaded = load_review_transaction_for_publication(
@@ -513,10 +525,11 @@ class BaselineRecoveryTests(unittest.TestCase):
         ]
         code, stderr, outcome = self.run_cli(head="d")
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["status"], "reviewed")
         result = ReviewResult.from_dict(
             json.loads((self.root / "result.json").read_text())
         )
+        self.assertEqual(result.review_status, "complete")
         self.assertIn(
             self.baseline().findings[0].fingerprint,
             {

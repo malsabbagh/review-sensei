@@ -80,6 +80,9 @@
         "has_human_adjudication_findings": {
           "type": "boolean"
         },
+        "has_uncertain_findings": {
+          "type": "boolean"
+        },
         "coverage_blocker": {
           "enum": [
             null,

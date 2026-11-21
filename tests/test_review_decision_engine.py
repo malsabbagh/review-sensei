@@ -481,15 +481,15 @@ class ReviewDecisionEngineTests(unittest.TestCase):
 
     def test_partial_analysis_refuses_decisions_and_preserves_incomplete_status(self):
         inactive = ReviewCategory(
-            id="docs",
-            title="Documentation",
+            id="code",
+            title="Code Quality",
             focus=("Accuracy",),
-            applies_to=("docs/**",),
+            applies_to=("src/**",),
         )
         stages = (
             Stage("review", "Review {diff}", ("summary", "comments")),
             Stage(
-                "docs",
+                "code",
                 "Review {review_categories} {diff}",
                 ("comments",),
                 categories=(inactive,),

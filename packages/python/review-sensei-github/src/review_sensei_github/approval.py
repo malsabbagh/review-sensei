@@ -103,9 +103,15 @@ class ApprovalFacts:
     provider: str | None = None
     qualification_binding: str | None = None
     review_verdict: ReviewVerdict | None = None
+    has_uncertain_findings: bool = False
 
     def __post_init__(self) -> None:
         import re
+
+        if type(self.has_uncertain_findings) is not bool:
+            raise ReviewInputError(
+                "approval facts has_uncertain_findings must be a boolean"
+            )
 
         if self.review_verdict is not None and (
             type(self.review_verdict) is not ReviewVerdict or self.provider is None
@@ -153,6 +159,8 @@ class ApprovalFacts:
             value["provider"] = self.provider
         if self.qualification_binding is not None:
             value["qualification_binding"] = self.qualification_binding
+        if self.has_uncertain_findings:
+            value["has_uncertain_findings"] = True
         return value
 
     @classmethod
@@ -178,6 +186,7 @@ class ApprovalFacts:
             "provider",
             "qualification_binding",
             "review_verdict",
+            "has_uncertain_findings",
         }:
             raise ReviewInputError("approval facts must contain the documented fields")
         version = value.get("schema_version")
@@ -229,6 +238,11 @@ class ApprovalFacts:
             raise ReviewInputError("approval facts coverage_blocker is invalid")
         if value.get("qualification") not in QUALIFICATION_STATES:
             raise ReviewInputError("approval facts qualification is invalid")
+        has_uncertain_findings_value = value.get("has_uncertain_findings", False)
+        if type(has_uncertain_findings_value) is not bool:
+            raise ReviewInputError(
+                "approval facts has_uncertain_findings must be a boolean"
+            )
         return cls(
             enabled=value["enabled"],
             app_authored=value["app_authored"],
@@ -245,6 +259,7 @@ class ApprovalFacts:
             review_verdict=ReviewVerdict.from_dict(value["review_verdict"])
             if "review_verdict" in value
             else None,
+            has_uncertain_findings=has_uncertain_findings_value,
         )
 
 
@@ -756,6 +771,7 @@ def approval_facts_from_result(
         evidence_policy=result.evidence_policy,
         has_blocking_findings=has_blocking_findings(result),
         has_human_adjudication_findings=has_human_adjudication_findings(result),
+        has_uncertain_findings=has_uncertain_findings(result),
         review_verdict=result.review_verdict,
         coverage_blocker=coverage_state,
         qualification=qualification,
@@ -858,6 +874,8 @@ def approval_eligibility_from_result(
             has_blocking_findings=new.has_blocking_findings
             or old.has_blocking_findings,
             has_human_adjudication_findings=bool(inventory.pending),
+            has_uncertain_findings=new.has_uncertain_findings
+            or old.has_uncertain_findings,
             coverage_blocker=old.coverage_blocker
             if old.coverage_blocker not in (None, "reviewed")
             else new.coverage_blocker,
@@ -911,6 +929,10 @@ def evaluate_approval_facts(
         blockers.append("blocking-findings-open")
     if facts.has_human_adjudication_findings is True:
         blockers.append("human-adjudication-open")
+    if not isinstance(facts.has_uncertain_findings, bool):
+        blockers.append("uncertain-findings-invalid")
+    elif facts.has_uncertain_findings is True:
+        blockers.append("uncertain-finding-lifecycle")
     if facts.has_open_review_threads is None:
         blockers.append("review-threads-incomplete")
     elif facts.has_open_review_threads is True:
@@ -1119,6 +1141,12 @@ def has_human_adjudication_findings(result: ReviewResult) -> bool:
     return any(comment.needs_human for comment in result.comments)
 
 
+def has_uncertain_findings(result: ReviewResult) -> bool:
+    """Whether a validated result has any finding lifecycle in an uncertain state."""
+
+    return any(item.state == "uncertain" for item in result.finding_lifecycles)
+
+
 _WITHHELD_DIAGNOSTICS = {
     "auto-approval-disabled": "auto_approval_disabled",
     "auto-approval-enabled-invalid": "approval_withheld",
@@ -1128,6 +1156,8 @@ _WITHHELD_DIAGNOSTICS = {
     "review-verdict-human": "human_adjudication_open",
     "blocking-findings-open": "required_fixes_open",
     "human-adjudication-open": "human_adjudication_open",
+    "uncertain-finding-lifecycle": "approval_withheld",
+    "uncertain-findings-invalid": "approval_withheld",
     "review-threads-incomplete": "review_threads_incomplete",
     "review-threads-invalid": "approval_withheld",
     "review-threads-open": "required_fixes_open",
@@ -1169,6 +1199,7 @@ __all__ = [
     "evaluate_auto_approval",
     "has_blocking_findings",
     "has_human_adjudication_findings",
+    "has_uncertain_findings",
     "qualification_state_for_configuration",
     "qualification_state_for_publication",
 ]

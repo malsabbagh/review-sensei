@@ -3885,6 +3885,7 @@ def evaluate_human_pr_review_independence(
             eligibility.facts.has_blocking_findings or has_open_sensei_threads
         ),
         required_decisions=eligibility.facts.has_human_adjudication_findings,
+        has_uncertain_findings=eligibility.facts.has_uncertain_findings,
         review_verdict=eligibility.facts.review_verdict,
     )
     sensei_conclusion = check_outcome.conclusion

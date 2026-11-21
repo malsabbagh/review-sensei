@@ -101,11 +101,7 @@ class ReviewVerdict:
         )
 
     def require_policy(self, policy: ReviewConvergencePolicy) -> None:
-        if (
-            policy.quality != "high-signal"
-            or policy.enforcement != "publication"
-            or policy.digest() != self.policy_digest
-        ):
+        if policy.enforcement != "publication" or policy.digest() != self.policy_digest:
             raise ReviewInputError("review verdict policy conflicts")
 
 
@@ -148,7 +144,24 @@ def bind_review_verdict(
     """Freeze trusted verdict provenance before accepted-result retention."""
     if result.review_verdict is not None:
         result.review_verdict.require_policy(policy)
-    if policy.quality != "high-signal" or policy.enforcement != "publication":
+    if policy.enforcement != "publication":
+        return result
+    if (
+        policy.quality != "high-signal"
+        and result.review_verdict is None
+        and (
+            not result.comments
+            or (
+                result.transaction is not None
+                and result.transaction.result_sha256 is not None
+            )
+            or any(
+                type(comment.effective_blocking) is not bool
+                or type(comment.needs_human) is not bool
+                for comment in result.comments
+            )
+        )
+    ):
         return result
     return project_review_comments(result, result.comments, policy=policy)
 
@@ -175,9 +188,9 @@ def project_review_comments(
         or not isinstance(selected, tuple)
     ):
         raise ReviewInputError("review verdict projection is invalid")
-    if policy.quality != "high-signal" or policy.enforcement != "publication":
+    if policy.enforcement != "publication":
         raise ReviewInputError(
-            "review verdict projection requires trusted high-signal publication"
+            "review verdict projection requires trusted publication enforcement"
         )
     prior = result.review_verdict or ReviewVerdict(
         policy.digest(), comment_selection_digest(result.comments)
@@ -312,3 +325,8 @@ def preserve_verified_verdict(
         review_verdict=prior.with_verified_comments(comments),
         finding_lifecycles=prior_lifecycles + added_lifecycles,
     )
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

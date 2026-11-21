@@ -246,9 +246,9 @@ class BaselineCLIContract:
         code, stderr, outcome, observed = self.run_cli(base="c", head="d")
         self.assertEqual(code, 0, stderr)
         self.assertEqual(len(observed["calls"]), 1)
-        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["status"], "reviewed")
         result = json.loads((self.root / "result.json").read_text())
-        self.assertEqual(result["review_status"], "partial")
+        self.assertEqual(result["review_status"], "complete")
         self.assertIn(
             fingerprint,
             [
