@@ -217,7 +217,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "test_review_run.py",
-            "1bf42f11032e9b5fb15c375dee615cffbd360eaa5ec414e25419bc9b3ad0599d",
+            "9a6c7fde6b61082ff8185168130e6f9262cee93a4792c461cb8dc4a1bb589a79",
         ),
         (
             "test_review_run_rescan.py",

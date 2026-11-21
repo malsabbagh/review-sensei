@@ -1867,7 +1867,6 @@ class CurrentDispatchRescanEntryTests(unittest.TestCase):
         import subprocess
         from urllib.parse import urlsplit
 
-        from review_sensei_github import review_run
         from review_sensei_github.session_ledger import parse_session_comment
 
         from review_sensei.models import ReviewResult
@@ -1933,10 +1932,7 @@ class CurrentDispatchRescanEntryTests(unittest.TestCase):
                 return original(request, timeout)
 
             fixture.external = external
-            original_engine = review_run.engine_main
-
-            def engine(argv, **kwargs):
-                return original_engine([*argv, "--orchestrate-large-changes"], **kwargs)
+            fixture.extra_core_args = ("--orchestrate-large-changes",)
 
             limits = ReviewLimits(
                 max_diff_bytes=65536,
@@ -1944,10 +1940,7 @@ class CurrentDispatchRescanEntryTests(unittest.TestCase):
                 max_diff_files=1,
                 max_diff_hunks=1,
             )
-            with (
-                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", limits),
-                patch.object(review_run, "engine_main", engine),
-            ):
+            with patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", limits):
                 self.assertEqual(fixture.invoke(), 0, fixture.error)
                 before = parse_session_comment(
                     fixture.comment["body"], identity=IDENTITY

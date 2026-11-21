@@ -153,6 +153,7 @@ class EntryFixture(LifecycleFixture):
         self.archive_bad = None
         self.abort_fault = None
         self.legacy_publication_fixture = False
+        self.extra_core_args: tuple[str, ...] = ()
 
     def external(self, request, timeout):
         import base64
@@ -506,7 +507,7 @@ class EntryFixture(LifecycleFixture):
                 # admission or publication. Current-route tests never use it.
                 with patch.object(
                     review_run.ReviewRun,
-                    "finding_inventory_migration_required",
+                    "_record_requires_finding_inventory_migration",
                     return_value=False,
                 ):
                     return original_execute(selected, *args, **kwargs)
@@ -582,6 +583,17 @@ class EntryFixture(LifecycleFixture):
                     forbid_replacement_phase_budget(),
                     redirect_stdout(io.StringIO()),
                     redirect_stderr(errors),
+                    *(
+                        [
+                            patch.object(
+                                review_run.ReviewRun,
+                                "_record_requires_finding_inventory_migration",
+                                return_value=False,
+                            )
+                        ]
+                        if fixture.legacy_publication_fixture
+                        else []
+                    ),
                 ):
                     stack.enter_context(scope)
                 result = package_cli.main(
@@ -622,6 +634,7 @@ class EntryFixture(LifecycleFixture):
                         "--learning-root",
                         str(self.root),
                         *([self.review_intent] if self.review_intent else []),
+                        *self.extra_core_args,
                         "--configuration-context-output",
                         str(self.root / "configuration.json"),
                         "--admission-context-output",
