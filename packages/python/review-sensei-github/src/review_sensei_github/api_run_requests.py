@@ -311,6 +311,13 @@ class _ThreadResolutionCapture:
     invalid: bool = False
 
 
+def _require_not_final_abort_dispatched(caller: Any) -> None:
+    if getattr(caller, "_final_abort_dispatched", False):
+        raise ReviewInputError(
+            "prospective final abort close has sealed caller mutations"
+        )
+
+
 class ApiRunRequestTransport:
     """One source-controlled startup slot, then one confirmed owned block.
 
@@ -1871,10 +1878,7 @@ class ApiRunRequestTransport:
         return result
 
     def _require_not_final_abort_dispatched(self) -> None:
-        if self._final_abort_dispatched:
-            raise ReviewInputError(
-                "prospective final abort close has sealed caller mutations"
-            )
+        _require_not_final_abort_dispatched(self)
 
     def _is_prospective_direct_abort(
         self,
@@ -1932,7 +1936,7 @@ class ApiRunRequestTransport:
     def close_analysis_abort(self, ledger, identity, confirmed):
         from dataclasses import replace
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         source = self._abort_source
         if source is None or self._abort_close_attempted:
             return confirmed
@@ -2007,7 +2011,9 @@ class ApiRunRequestTransport:
                 timeout_bound = min(
                     timeout_bound, ledger.evidence_budget._remaining_seconds()
                 )
-            safety_margin = 0.005 if timeout_bound > 0.01 else 0.0
+            safety_margin = (
+                min(0.05, timeout_bound / 4.0) if timeout_bound > 0.004 else 0.0
+            )
             deadline = int(
                 (self._clock() + max(0.001, timeout_bound - safety_margin)) * 1000
             )
@@ -2074,7 +2080,7 @@ class ApiRunRequestTransport:
     def _action_checkpoint(self, ledger, identity, mutate):
         from .errors import GitHubPublicationTransientError
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         try:
             return self.replace_checkpoint(ledger, identity, mutate)
         except GitHubPublicationTransientError:
@@ -2114,7 +2120,7 @@ class ApiRunRequestTransport:
         """
         from review_sensei.bounded_evidence import canonical_bytes
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if self._action_unresolved():
             raise ReviewInputError("caller action admission has unresolved work")
@@ -2202,7 +2208,7 @@ class ApiRunRequestTransport:
         """Durably mark entry before executing the selected command or reply."""
         from review_sensei.bounded_evidence import canonical_bytes
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         action = self.accounting.action
         if (
             action is None
@@ -2256,7 +2262,7 @@ class ApiRunRequestTransport:
 
         from .api_run_history import action_result_binding, decode_action_result_carrier
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         action = self.accounting.action
         if (
@@ -2344,7 +2350,7 @@ class ApiRunRequestTransport:
 
         from .api_run_history import read_action_result
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if (
             not isinstance(proof, ActionResultProof)
@@ -2411,7 +2417,7 @@ class ApiRunRequestTransport:
             settle_unstarted_accounting,
         )
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         verified = require_witness_issued(witness)
         if (
@@ -2519,7 +2525,7 @@ class ApiRunRequestTransport:
         """
         from dataclasses import replace
 
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         if (
             self._terminal_reason not in {"publication-completion", "already-published"}
             or self._checkpoint is not None
@@ -2566,7 +2572,7 @@ class ApiRunRequestTransport:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if self._checkpoint is not None:
             raise ReviewInputError("caller checkpoint has unresolved publication")
@@ -2735,7 +2741,7 @@ class ApiRunRequestTransport:
     def reconcile_checkpoint(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
     ) -> SessionRecord:
-        self._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self)
         self._require_ledger(ledger, identity)
         if (
             self._checkpoint is None
@@ -3665,7 +3671,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         reserved_tail_calls=0,
         _guarded_authorize=None,
     ):
-        self.caller._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self.caller)
         self.preflight_finding_lifecycle_retention(
             identity,
             added_parts=parts,
@@ -3756,7 +3762,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             _PLAIN_FINDING_ACTIVE.pop(self, None)
 
     def stage_disposition_snapshot_batch(self, identity, **kwargs):
-        self.caller._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self.caller)
         if self._part_staging_identity is not None:
             raise ReviewInputError("immutable part staging cannot nest")
         self._part_staging_identity = identity
@@ -3799,7 +3805,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         item_count: int,
         max_manifest_bytes: int,
     ) -> dict[str, object]:
-        self.caller._require_not_final_abort_dispatched()
+        _require_not_final_abort_dispatched(self.caller)
         if self._part_staging_identity is not None:
             raise ReviewInputError("immutable part staging cannot nest")
         snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
