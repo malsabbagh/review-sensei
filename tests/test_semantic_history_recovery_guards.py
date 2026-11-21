@@ -143,7 +143,6 @@ class SemanticHistoryRecoveryGuardsTests(unittest.TestCase):
             ("command", "@reviewsensei review status", "status"),
             ("command", "@reviewsensei review pause", "pause"),
             ("command", "@reviewsensei verify", "verify"),
-            ("command", "@reviewsensei unrecognized prose", None),
             ("reply", None, None),
         )
         for purpose, body, expected_action in cases:
@@ -212,6 +211,47 @@ class SemanticHistoryRecoveryGuardsTests(unittest.TestCase):
                 self.assertIs(caught.exception, sentinel)
                 self.assertEqual(len(captured), 1)
                 self.assertEqual(captured[0][1]["command_action"], expected_action)
+
+        with tempfile.TemporaryDirectory() as directory:
+            captured = []
+
+            def fail_if_bootstrap(*args, **kwargs):
+                captured.append((args, kwargs))
+                raise AssertionError("bootstrap must not run on unrecognized command")
+
+            argv = [
+                "--policy-commit",
+                "a" * 40,
+                "--run-directory",
+                directory,
+                "--",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "123",
+                "--pull-request",
+                "7",
+                "--head-sha",
+                "b" * 40,
+                "--source-comment-id",
+                "41",
+                "--allow-write",
+                "--comment-body",
+                "@reviewsensei unrecognized prose",
+                "--actor",
+                "alice",
+                "--association",
+                "OWNER",
+                "--github-session-ledger",
+            ]
+            with (
+                patch.object(action_run, "bootstrap", side_effect=fail_if_bootstrap),
+                self.assertRaisesRegex(
+                    ReviewInputError, "authenticated source is not a supported command"
+                ),
+            ):
+                action_run.run_action(argv, purpose="command")
+            self.assertEqual(captured, [])
 
     def test_execute_command_security_fence_rejects_mismatched_action_or_source(self):
         from review_sensei_github.api_run_host import review_startup_plan
