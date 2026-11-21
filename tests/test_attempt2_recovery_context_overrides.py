@@ -50,7 +50,7 @@ class _OverrideEntryFixture(EntryFixture):
     ) -> None:
         super().__init__(directory, limit=limit, runner_kind="hosted")
         self.recovery_context_dir: Path | None = None
-        self.recovery_context_key_file: Path | None = None
+        self.recovery_context_hmac_path: Path | None = None
         self.recovery_context_ttl_seconds: int | None = None
         self.override_run_directory: Path | None = None
         self.override_policy_commit: str | None = None
@@ -219,9 +219,9 @@ class _OverrideEntryFixture(EntryFixture):
             extra_review_run.extend(
                 ["--recovery-context-dir", str(self.recovery_context_dir)]
             )
-        if self.recovery_context_key_file is not None:
+        if self.recovery_context_hmac_path is not None:
             extra_review_run.extend(
-                ["--recovery-context-key-file", str(self.recovery_context_key_file)]
+                ["--recovery-context-key-file", str(self.recovery_context_hmac_path)]
             )
         if self.recovery_context_ttl_seconds is not None:
             extra_review_run.extend(
@@ -322,12 +322,12 @@ class _OverrideEntryFixture(EntryFixture):
             os.chdir(old)
 
 
-def _setup_handoff(secret_dir: Path) -> tuple[Path, Path]:
-    handoff_dir = secret_dir / "handoff"
-    key_file = secret_dir / "handoff.key"
-    key_file.write_bytes(HANDOFF_KEY)
-    key_file.chmod(0o600)
-    return handoff_dir, key_file
+def _setup_handoff(handoff_root: Path) -> tuple[Path, Path]:
+    handoff_dir = handoff_root / "handoff"
+    hmac_file = handoff_root / "handoff.hmac"
+    hmac_file.write_bytes(HANDOFF_KEY)
+    hmac_file.chmod(0o600)
+    return handoff_dir, hmac_file
 
 
 def _clear_local_diagnostics(root: Path) -> None:
@@ -401,12 +401,12 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
     def test_attempt2_recovers_with_env_provider_and_model_overrides(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
-            tempfile.TemporaryDirectory() as secret_dir,
+            tempfile.TemporaryDirectory() as handoff_root,
         ):
             fx = _OverrideEntryFixture(directory)
-            handoff_dir, key_file = _setup_handoff(Path(secret_dir))
+            handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
             fx.recovery_context_dir = handoff_dir
-            fx.recovery_context_key_file = key_file
+            fx.recovery_context_hmac_path = hmac_file
             fx.recovery_context_ttl_seconds = 600
             fx.extra_env = {
                 "REVIEWSENSEI_PROVIDER": "openai-compatible",
@@ -437,7 +437,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             _clear_local_diagnostics(fx.root)
             fx.before_publication = None
             fx.attempt = 2
-            fx.override_run_directory = Path(secret_dir) / "attempt2-run"
+            fx.override_run_directory = Path(handoff_root) / "attempt2-run"
             fx.override_run_directory.mkdir()
             # Attempt 2 does not even need the provider secret to recover retained work.
             fx.extra_env = {
@@ -452,12 +452,12 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
     ) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
-            tempfile.TemporaryDirectory() as secret_dir,
+            tempfile.TemporaryDirectory() as handoff_root,
         ):
             fx = _OverrideEntryFixture(directory)
-            handoff_dir, key_file = _setup_handoff(Path(secret_dir))
+            handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
             fx.recovery_context_dir = handoff_dir
-            fx.recovery_context_key_file = key_file
+            fx.recovery_context_hmac_path = hmac_file
             fx.recovery_context_ttl_seconds = 600
             fx.extra_env = {
                 "REVIEWSENSEI_PROVIDER": "openrouter",
@@ -488,7 +488,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             _clear_local_diagnostics(fx.root)
             fx.before_publication = None
             fx.attempt = 2
-            fx.override_run_directory = Path(secret_dir) / "attempt2-run"
+            fx.override_run_directory = Path(handoff_root) / "attempt2-run"
             fx.override_run_directory.mkdir()
             fx.extra_env = {
                 "REVIEWSENSEI_PROVIDER": "openrouter",
@@ -525,12 +525,12 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             with (
                 self.subTest(case=label),
                 tempfile.TemporaryDirectory() as directory,
-                tempfile.TemporaryDirectory() as secret_dir,
+                tempfile.TemporaryDirectory() as handoff_root,
             ):
                 fx = _OverrideEntryFixture(directory)
-                handoff_dir, key_file = _setup_handoff(Path(secret_dir))
+                handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
                 fx.recovery_context_dir = handoff_dir
-                fx.recovery_context_key_file = key_file
+                fx.recovery_context_hmac_path = hmac_file
                 fx.extra_engine_args = list(cli_args)
                 fx.extra_env = dict(attempt1_env)
                 fx.before_publication = lambda: (_ for _ in ()).throw(
@@ -551,7 +551,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
                 _clear_local_diagnostics(fx.root)
                 fx.before_publication = None
                 fx.attempt = 2
-                fx.override_run_directory = Path(secret_dir) / "attempt2-run"
+                fx.override_run_directory = Path(handoff_root) / "attempt2-run"
                 fx.override_run_directory.mkdir()
                 self.assertEqual(fx.invoke(), 0, fx.error)
                 self._assert_attempt2_approved_and_closed(fx)
@@ -559,7 +559,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
     def test_attempt2_recovers_with_custom_stages_and_categories(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
-            tempfile.TemporaryDirectory() as secret_dir,
+            tempfile.TemporaryDirectory() as handoff_root,
         ):
             extra_files = {
                 "docs/storage.md": "Storage writes must be atomic.\n",
@@ -567,9 +567,9 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
                 ".reviewsensei/stages/10-storage.json": _custom_stage_json(),
             }
             fx = _OverrideEntryFixture(directory, extra_files=extra_files)
-            handoff_dir, key_file = _setup_handoff(Path(secret_dir))
+            handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
             fx.recovery_context_dir = handoff_dir
-            fx.recovery_context_key_file = key_file
+            fx.recovery_context_hmac_path = hmac_file
             fx.extra_engine_args = [
                 "--stages-dir",
                 ".reviewsensei/stages",
@@ -595,7 +595,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             _clear_local_diagnostics(fx.root)
             fx.before_publication = None
             fx.attempt = 2
-            fx.override_run_directory = Path(secret_dir) / "attempt2-run"
+            fx.override_run_directory = Path(handoff_root) / "attempt2-run"
             fx.override_run_directory.mkdir()
             self.assertEqual(fx.invoke(), 0, fx.error)
             self._assert_attempt2_approved_and_closed(fx)
@@ -716,16 +716,16 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
     def test_attempt2_recovers_with_symbol_context_enabled(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
-            tempfile.TemporaryDirectory() as secret_dir,
+            tempfile.TemporaryDirectory() as handoff_root,
         ):
             extra_files = {
                 "src/app.py": "import helper\nkeep\nchange\n",
                 "src/helper.py": "VALUE = 1\n",
             }
             fx = _OverrideEntryFixture(directory, extra_files=extra_files)
-            handoff_dir, key_file = _setup_handoff(Path(secret_dir))
+            handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
             fx.recovery_context_dir = handoff_dir
-            fx.recovery_context_key_file = key_file
+            fx.recovery_context_hmac_path = hmac_file
             fx.extra_engine_args = [
                 "--enable-symbol-context",
                 "--symbol-context-allowed-path",
@@ -740,7 +740,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             _clear_local_diagnostics(fx.root)
             fx.before_publication = None
             fx.attempt = 2
-            fx.override_run_directory = Path(secret_dir) / "attempt2-run"
+            fx.override_run_directory = Path(handoff_root) / "attempt2-run"
             fx.override_run_directory.mkdir()
             self.assertEqual(fx.invoke(), 0, fx.error)
             self._assert_attempt2_approved_and_closed(fx)
@@ -993,7 +993,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
     def test_negative_controls_fail_closed_with_zero_native_writes(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
-            tempfile.TemporaryDirectory() as secret_dir,
+            tempfile.TemporaryDirectory() as handoff_root,
         ):
             extra_files = {
                 "docs/storage.md": "Storage writes must be atomic.\n",
@@ -1001,9 +1001,9 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
                 ".reviewsensei/stages/10-storage.json": _custom_stage_json(),
             }
             fx = _OverrideEntryFixture(directory, extra_files=extra_files)
-            handoff_dir, key_file = _setup_handoff(Path(secret_dir))
+            handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
             fx.recovery_context_dir = handoff_dir
-            fx.recovery_context_key_file = key_file
+            fx.recovery_context_hmac_path = hmac_file
             fx.extra_env = {
                 "REVIEWSENSEI_PROVIDER": "openai-compatible",
                 "REVIEWSENSEI_MODEL": "gpt-4o",
@@ -1036,7 +1036,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
                 fx.comment["body"] = saved_comment
                 fx.trace = [entry for entry in fx.trace if entry[0] != 2]
                 run_counter[0] += 1
-                fresh_run = Path(secret_dir) / f"neg-run-{run_counter[0]}"
+                fresh_run = Path(handoff_root) / f"neg-run-{run_counter[0]}"
                 fresh_run.mkdir(parents=True, exist_ok=True)
                 fx.override_run_directory = fresh_run
                 fx.override_policy_commit = None
@@ -1136,7 +1136,7 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             )
 
             # 7. Path traversal outside source_root for stages_dir fails closed
-            outside = Path(secret_dir) / "outside_stages"
+            outside = Path(handoff_root) / "outside_stages"
             outside.mkdir()
             (outside / "10-storage.json").write_bytes(saved_stage_bytes)
             with self.assertRaisesRegex(

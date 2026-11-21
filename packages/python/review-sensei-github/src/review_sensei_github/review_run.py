@@ -441,7 +441,8 @@ class ReviewRun:
             ),
             stages_dir=getattr(args, "stages_dir", None),
             categories_dir=getattr(args, "categories_dir", None),
-            use_customization_directories=getattr(args, "stages_dir", None) is not None,
+            # review_sensei.cli only loads custom stages when --stages-dir is explicit.
+            use_customization_directories=False,
             orchestrate_large_changes=bool(
                 getattr(args, "orchestrate_large_changes", False)
             ),
