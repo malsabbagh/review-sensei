@@ -3078,7 +3078,21 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             calls=tuple(
                 (5 if n == 0 else 4 + 3 * n)
                 + 2 * ((len(page_plan.page_bounds) if page_plan is not None else 1) - 1)
-                + guard_calls
+                + (
+                    # _plain_finding_selected_input guarantees self._broker is None
+                    # (0 live-head GETs) and page_plan is None guarantees a single-page
+                    # frontier, so worst-case calls are 2 (business_guard) + 2*n
+                    # (POST + read_part) + 3 (PATCH + 2 confirm) = 5 + 2*n <= 4 + 3*n
+                    # for every n >= 1.
+                    0
+                    if (
+                        type(self) is ActionRunLedger
+                        and trust_profile is None
+                        and page_plan is None
+                        and n >= 1
+                    )
+                    else guard_calls
+                )
                 + int(trust_profile is not None)
                 for n in checkpoint_parts
             ),

@@ -261,17 +261,42 @@ class FindingThreadResolver:
     ) -> bool:
         """Reconcile an ambiguous response once, without repeating a mutation."""
         from .caller_operation import caller_for_http
+        from .finding_lifecycle import _JournalTransport
 
-        caller = caller_for_http(self.http)
-        correlation = (
-            caller.thread_resolution_readback(self.http, thread_id=thread_id)
-            if caller is not None
+        mutation_body = {
+            "operationName": "ResolveReviewThread",
+            "query": _MUTATION,
+            "variables": {"input": {"threadId": thread_id}},
+        }
+        journal = None
+        cursor: Any = self.http
+        seen: set[int] = set()
+        while cursor is not None and id(cursor) not in seen:
+            seen.add(id(cursor))
+            if type(cursor) is _JournalTransport:
+                journal = cursor.journal
+                break
+            cursor = getattr(cursor, "transport", None)
+        journal_prep = (
+            journal.prepare_thread_resolution(token=token, body=mutation_body)
+            if journal is not None
             else nullcontext(None)
         )
-        with correlation as confirm:
-            return self._resolve_with_readback(
-                token=token, thread_id=thread_id, observer=observer, confirm=confirm
+        with journal_prep as confirm_journal:
+            caller = caller_for_http(self.http)
+            correlation = (
+                caller.thread_resolution_readback(self.http, thread_id=thread_id)
+                if caller is not None
+                else nullcontext(None)
             )
+            with correlation as confirm:
+                return self._resolve_with_readback(
+                    token=token,
+                    thread_id=thread_id,
+                    observer=observer,
+                    confirm=confirm,
+                    confirm_journal=confirm_journal,
+                )
 
     def _resolve_with_readback(
         self,
@@ -280,6 +305,7 @@ class FindingThreadResolver:
         thread_id: str,
         observer: OperationObserver | None,
         confirm: Callable[[], None] | None,
+        confirm_journal: Callable[..., None] | None = None,
     ) -> bool:
         try:
             status, payload = self.http.request(
@@ -331,6 +357,8 @@ class FindingThreadResolver:
             )
             if resolved and confirm is not None:
                 confirm()
+            if resolved and confirm_journal is not None:
+                confirm_journal(thread_id, caller_confirmed=confirm is not None)
             return resolved
         except (GitHubHTTPError, AttributeError, TypeError):
             return False

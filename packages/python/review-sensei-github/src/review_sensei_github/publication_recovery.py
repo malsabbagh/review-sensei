@@ -731,6 +731,8 @@ def _store(
     transaction: ReviewTransaction | None = None,
     source_app_id: int | None = None,
     compact_write: bool = False,
+    verified_app_user_id: int | None = None,
+    verified_pull_request: bool = False,
 ) -> ResultPartStore:
     if (
         not isinstance(app_slug, str)
@@ -740,42 +742,49 @@ def _store(
         is None
     ):
         raise ReviewInputError("retention requires the configured Bot login")
-    status, user = http.request(
-        "GET", "/users/" + quote(app_slug, safe=""), token=token
-    )
-    user_id = user.get("id") if isinstance(user, dict) else None
-    if (
-        status != 200
-        or not isinstance(user, dict)
-        or not isinstance(user.get("login"), str)
-        or user["login"].casefold() != app_slug.casefold()
-        or user.get("type") != "Bot"
-        or type(user_id) is not int
-        or user_id <= 0
-    ):
-        raise ReviewInputError("retention Bot identity is unavailable")
-    status, pr = http.request(
-        "GET",
-        http.repository_path(identity.repository, f"/pulls/{identity.pull_request}"),
-        token=token,
-    )
-    base = pr.get("base") if isinstance(pr, dict) else None
-    head = pr.get("head") if isinstance(pr, dict) else None
-    repo = base.get("repo") if isinstance(base, dict) else None
-    if (
-        status != 200
-        or not isinstance(pr, dict)
-        or pr.get("state") != "open"
-        or not isinstance(base, dict)
-        or base.get("sha") != base_sha
-        or not isinstance(head, dict)
-        or head.get("sha") != head_sha
-        or not isinstance(repo, dict)
-        or type(repo.get("id")) is not int
-        or repo.get("id") != identity.repository_id
-        or repo.get("full_name") != identity.repository
-    ):
-        raise ReviewInputError("retention current pull request identity mismatches")
+    user_id: int | None
+    if type(verified_app_user_id) is int and verified_app_user_id > 0:
+        user_id = verified_app_user_id
+    else:
+        status, user = http.request(
+            "GET", "/users/" + quote(app_slug, safe=""), token=token
+        )
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if (
+            status != 200
+            or not isinstance(user, dict)
+            or not isinstance(user.get("login"), str)
+            or user["login"].casefold() != app_slug.casefold()
+            or user.get("type") != "Bot"
+            or type(user_id) is not int
+            or user_id <= 0
+        ):
+            raise ReviewInputError("retention Bot identity is unavailable")
+    if not verified_pull_request:
+        status, pr = http.request(
+            "GET",
+            http.repository_path(
+                identity.repository, f"/pulls/{identity.pull_request}"
+            ),
+            token=token,
+        )
+        base = pr.get("base") if isinstance(pr, dict) else None
+        head = pr.get("head") if isinstance(pr, dict) else None
+        repo = base.get("repo") if isinstance(base, dict) else None
+        if (
+            status != 200
+            or not isinstance(pr, dict)
+            or pr.get("state") != "open"
+            or not isinstance(base, dict)
+            or base.get("sha") != base_sha
+            or not isinstance(head, dict)
+            or head.get("sha") != head_sha
+            or not isinstance(repo, dict)
+            or type(repo.get("id")) is not int
+            or repo.get("id") != identity.repository_id
+            or repo.get("full_name") != identity.repository
+        ):
+            raise ReviewInputError("retention current pull request identity mismatches")
     port = GitHubIssueCommentOperationPort(
         http,
         token=token,
