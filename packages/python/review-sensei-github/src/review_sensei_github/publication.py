@@ -3581,12 +3581,12 @@ class ReviewApprovalFinalizer:
         window_had_uncertain = False
         preview_window_uncertain = False
         if window_state is not None and window_state.head_sha == head_sha:
-            window_had_uncertain = (
-                window_state.display_active_findings.has_uncertain_slots
-                or any(
-                    ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
-                    for ob in window_state.authoritative_decision_inventory.obligations
-                )
+            window_had_uncertain = any(
+                s.state == "uncertain"
+                for s in window_state.display_active_findings.slots
+            ) or any(
+                ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                for ob in window_state.authoritative_decision_inventory.obligations
             )
             preview_window = apply_dispositions_to_window_state(
                 window_state,
@@ -3615,12 +3615,12 @@ class ReviewApprovalFinalizer:
                 has_blocking = True
             if preview_window.changed_file_coverage.coverage_uncertainty_accepted:
                 coverage_accepted = True
-            preview_window_uncertain = (
-                preview_window.display_active_findings.has_uncertain_slots
-                or any(
-                    ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
-                    for ob in preview_window.authoritative_decision_inventory.obligations
-                )
+            preview_window_uncertain = any(
+                s.state == "uncertain"
+                for s in preview_window.display_active_findings.slots
+            ) or any(
+                ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                for ob in preview_window.authoritative_decision_inventory.obligations
             )
         preview_drift: DriftEvaluationResult | None = None
         drift_had_uncertain = False
@@ -9702,6 +9702,9 @@ class ReviewPublisher:
             retained_eligibility=retained_eligibility,
         )
         if planned_window_state is not None or planned_drift_state is not None:
+            # ``admitted_result`` is the pre-projection admitted result for this exact
+            # head/publish() call; window/drift projection strips ``review_verdict``
+            # from ``result``, so unselected blockers must be preserved explicitly.
             admitted_verdict = admitted_result.review_verdict
             prospective_eligibility = replace(
                 prospective_eligibility,
@@ -10848,6 +10851,8 @@ class ReviewPublisher:
             retained_eligibility=retained_eligibility,
         )
         if planned_window_state is not None or planned_drift_state is not None:
+            # ``admitted_verdict`` comes from the pre-projection ``admitted_result`` of
+            # this exact publish() call so projected results keep unselected blockers.
             eligibility = replace(
                 eligibility,
                 facts=replace(

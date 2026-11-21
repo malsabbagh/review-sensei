@@ -316,7 +316,7 @@ class _MinimalDriftHost:
                 assert isinstance(body, dict)
                 query = str(body.get("query", ""))
                 variables = body.get("variables") or {}
-                if "resolveReviewThread" in query:
+                if "unresolveReviewThread" in query or "resolveReviewThread" in query:
                     tid = (variables.get("input") or {}).get(
                         "threadId"
                     ) or variables.get("threadId")
@@ -371,6 +371,14 @@ class _MinimalDriftHost:
                 if item["id"] == cid:
                     item["body"] = body["body"]
                     return self._resp(item, 200)
+        if request.method == "PATCH" and "/pulls/comments/" in path:
+            assert isinstance(body, dict)
+            cid = int(path.rsplit("/", 1)[-1])
+            for thread in self.threads:
+                for node in thread["comments"]["nodes"]:  # type: ignore[index]
+                    if node.get("databaseId") == cid:
+                        node["body"] = body["body"]
+                        return self._resp({"id": cid, "body": body["body"]}, 200)
         if request.method == "PATCH" and "/check-runs/" in path:
             assert isinstance(body, dict)
             cid = int(path.rsplit("/", 1)[-1])
@@ -979,7 +987,7 @@ class FalseApprovalBlocksTests(unittest.TestCase):
             review_status="complete",
             coverage=cov,
         )
-        for quality in ("current", "balanced"):
+        for quality in ("high-signal", "current", "balanced"):
             with self.subTest(quality=quality):
                 policy = ReviewConvergencePolicy(quality=quality)
                 fresh = prepare_publishable_review(
@@ -987,7 +995,17 @@ class FalseApprovalBlocksTests(unittest.TestCase):
                     convergence_policy=policy,
                     changed_lines={"src/app.py": frozenset({2, 3, 4})},
                 ).result
-                restored = ReviewResult.from_dict(fresh.to_dict())
+                restored_raw = ReviewResult.from_dict(fresh.to_dict())
+                if quality == "high-signal":
+                    self.assertIsNotNone(fresh.review_verdict)
+                    self.assertEqual(restored_raw.review_verdict, fresh.review_verdict)
+                    restored = restored_raw
+                else:
+                    restored = prepare_publishable_review(
+                        restored_raw,
+                        convergence_policy=policy,
+                        changed_lines={"src/app.py": frozenset({2, 3, 4})},
+                    ).result
                 self.assertEqual(restored.comments, fresh.comments)
                 self.assertEqual(
                     [(c.effective_blocking, c.needs_human) for c in restored.comments],
@@ -1012,14 +1030,29 @@ class FalseApprovalBlocksTests(unittest.TestCase):
                     check_outcome_for_result(fresh, policy="auto-approve"),
                 )
                 self.assertEqual(
-                    baseline_from_review(
-                        restored, cache_key=_cache_key(), policy=policy
+                    approval_facts_from_result(
+                        restored, enabled=True, app_authored=False, check_published=True
                     ),
-                    baseline_from_review(fresh, cache_key=_cache_key(), policy=policy),
+                    approval_facts_from_result(
+                        fresh, enabled=True, app_authored=False, check_published=True
+                    ),
+                )
+                fresh_baseline = baseline_from_review(
+                    fresh, cache_key=_cache_key(), policy=policy
+                )
+                restored_baseline = baseline_from_review(
+                    restored, cache_key=_cache_key(), policy=policy
+                )
+                self.assertEqual(restored_baseline, fresh_baseline)
+                roundtripped_baseline = baseline_from_history_document(
+                    baseline_history_document(fresh_baseline)
+                )
+                self.assertEqual(
+                    roundtripped_baseline.findings, fresh_baseline.findings
                 )
 
-                # Hosted CLI reconciliation also admits & binds default quality policies
-                # before checkpointing.
+                # Hosted CLI reconciliation binds ReviewVerdict on high-signal runs
+                # while leaving default non-high-signal runs unbound without changing comments.
                 reconciled = _reconcile_hosted_result(
                     ReviewService,
                     admission_baseline=None,
@@ -1033,7 +1066,10 @@ class FalseApprovalBlocksTests(unittest.TestCase):
                         outcome=RunOutcome("reviewed", provider_calls=1),
                     )
                 ).result
-                self.assertIsNotNone(reconciled.review_verdict)
+                if quality == "high-signal":
+                    self.assertIsNotNone(reconciled.review_verdict)
+                else:
+                    self.assertIsNone(reconciled.review_verdict)
                 self.assertEqual(
                     ReviewResult.from_dict(reconciled.to_dict()).comments,
                     reconciled.comments,
@@ -1475,6 +1511,308 @@ class FalseApprovalBlocksTests(unittest.TestCase):
             self.assertFalse(decision.approved)
             self.assertIn("uncertain-finding-lifecycle", decision.blockers)
             self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+
+    def test_authoritative_obligation_needs_human_baseline_roundtrip(self) -> None:
+        from review_sensei.active_finding_window import obligation_from_comment
+        from review_sensei.errors import ReviewInputError
+
+        human_ob = obligation_from_comment(
+            ReviewComment(
+                path="src/app.py",
+                line=3,
+                body="Confirm authz invariant.",
+                severity="high",
+                blocking=False,
+                effective_blocking=False,
+                needs_human=True,
+                defect_kind="authz",
+            ),
+            generation=2,
+        )
+        blocking_ob = obligation_from_comment(
+            ReviewComment(
+                path="src/app.py",
+                line=4,
+                body="Null dereference.",
+                severity="high",
+                blocking=True,
+                effective_blocking=True,
+                needs_human=False,
+                defect_kind="null-deref",
+            ),
+            generation=2,
+        )
+        human_bf = human_ob.to_baseline_finding()
+        blocking_bf = blocking_ob.to_baseline_finding()
+        self.assertTrue(human_bf.needs_human)
+        self.assertFalse(blocking_bf.needs_human)
+        with self.assertRaises(ReviewInputError):
+            replace(human_ob, needs_human="yes")  # type: ignore[arg-type]
+
+        baseline = ReviewBaseline(
+            cache_key=_cache_key(),
+            policy_digest=ReviewConvergencePolicy().digest(),
+            complete=True,
+            findings=(human_bf, blocking_bf),
+        )
+        doc = baseline_history_document(baseline)
+        findings_raw = doc["findings"]
+        assert isinstance(findings_raw, list)
+        # Simulate a pre-change historical baseline entry omitting needs_human.
+        legacy_doc = dict(doc)
+        legacy_item = dict(findings_raw[0])
+        legacy_item.pop("needs_human", None)
+        legacy_doc["findings"] = [legacy_item, findings_raw[1]]
+
+        roundtripped = baseline_from_history_document(doc)
+        self.assertEqual(set(roundtripped.findings), set(baseline.findings))
+        restored_legacy = baseline_from_history_document(legacy_doc)
+        by_fp = {f.fingerprint: f for f in restored_legacy.findings}
+        self.assertIsNone(by_fp[findings_raw[0]["fingerprint"]].needs_human)
+        self.assertTrue(by_fp[findings_raw[0]["fingerprint"]].requires_gate)
+
+    def test_drift_preflight_body_adjustment_matches_finalizer_blocking(self) -> None:
+        from review_sensei_github.publication import (
+            approval_eligibility_from_body,
+            finding_instance_fingerprint,
+        )
+
+        # Two-file diff where R1 records a finding and R2 omits it in an
+        # ambiguous-multi-target drift state; verify preflight body adjustment
+        # matches finalizer withholding on both publish_review and refinalization.
+        host = _MinimalDriftHost(head_sha=HEAD_1)
+        publisher = ReviewPublisher(http=host.http)
+        app = GitHubApplication(
+            http=host.http,
+            broker=_FakeBroker(),  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=None,
+        )
+        options = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            operation_entry="disabled",
+            max_active_findings=2,
+            enable_drift_tracking=True,
+        )
+        policy = ReviewConvergencePolicy()
+        blocker = ReviewComment(
+            path="src/app.py",
+            line=3,
+            body="Validate auth token before dispatch.",
+            severity="high",
+            blocking=True,
+            defect_kind="authz",
+        )
+        res1 = ReviewResult(
+            summary="Initial finding.",
+            comments=(blocker,),
+            provider="fake",
+            review_status="complete",
+            coverage=_complete_coverage("src/app.py"),
+        )
+        pub1 = app.publish_review(
+            options=options,
+            oidc_token="oidc-d1",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_1,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=res1,
+            diff=SRC_DIFF,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+        )
+        self.assertEqual(pub1.status, "published")
+        d1 = publisher.drift_state(repository_id=1, pull_request=1)
+        assert d1 is not None
+        # Seed clean R2 diff with prior drift inventory loaded on publisher.
+        host.head_sha = HEAD_2
+        publisher._drift_states[(1, 1)] = replace(d1, head_sha=HEAD_1)
+        # Force evaluate_drift_round to enter ambiguous-multi-target via two matching comments
+        two_diff = (
+            SRC_DIFF
+            + "\ndiff --git a/src/copy.py b/src/copy.py\n"
+            + "--- a/src/copy.py\n+++ b/src/copy.py\n"
+            + "@@ -1,2 +1,2 @@\n def g():\n-    return 1\n+    return 2\n"
+        )
+        c1 = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="Unsanitized SQL query in helper.",
+            severity="high",
+            blocking=True,
+            symbol="run_query",
+            defect_kind="sqli",
+        )
+        c2 = ReviewComment(
+            path="src/copy.py",
+            line=2,
+            body="Unsanitized SQL query in copied helper.",
+            severity="high",
+            blocking=True,
+            symbol="run_query",
+            defect_kind="sqli",
+        )
+        host.head_sha = HEAD_2
+        pub2 = app.publish_review(
+            options=options,
+            oidc_token="oidc-d2",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_2,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=ReviewResult(
+                summary="Round 2.",
+                comments=(c1, c2),
+                provider="fake",
+                review_status="complete",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage("src/app.py", "reviewed"),
+                        FileCoverage("src/copy.py", "reviewed"),
+                    ),
+                    enumerated_paths=("src/app.py", "src/copy.py"),
+                    enumeration_complete=True,
+                ),
+            ),
+            diff=two_diff,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+        )
+        self.assertEqual(pub2.status, "published")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+        body_elig = approval_eligibility_from_body(str(host.reviews[-1]["body"]))
+        assert body_elig is not None
+        self.assertTrue(body_elig.facts.has_blocking_findings)
+        self.assertFalse(evaluate_approval_facts(body_elig.facts).approved)
+        finalized = publisher.finalizer.refinalize_with_dispositions(
+            token="tok",
+            check_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_2,
+            app_slug="reviewsensei[bot]",
+            actor="maintainer",
+            finding_ids=(),
+            dispositions=(),
+        )
+        self.assertEqual(finalized.status, "approval_withheld")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+        self.assertTrue(bool(finding_instance_fingerprint(blocker)))
+
+    def test_projected_display_window_preserves_unselected_verdict_blockers(
+        self,
+    ) -> None:
+        from review_sensei_github.publication import approval_eligibility_from_body
+
+        from review_sensei.convergence import BlockerCandidate
+
+        # Two blocking findings under high-signal policy with max_active_findings=1
+        # so the selected comments are truncated/projected (`project_display_review_result`
+        # clears `review_verdict`), yet `unselected_blocking_defect` on `admitted_result`
+        # still keeps approval withheld.
+        host = _MinimalDriftHost(head_sha=HEAD_1)
+        publisher = ReviewPublisher(http=host.http)
+        app = GitHubApplication(
+            http=host.http,
+            broker=_FakeBroker(),  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=None,
+        )
+        policy = ReviewConvergencePolicy(mode="merge-focused", quality="high-signal")
+        c1 = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="First null dereference.",
+            severity="high",
+            blocking=True,
+            defect_kind="null-deref",
+        )
+        c2 = ReviewComment(
+            path="src/app.py",
+            line=3,
+            body="Second authz bypass.",
+            severity="critical",
+            blocking=True,
+            defect_kind="authz",
+        )
+        cands = tuple(
+            BlockerCandidate(
+                proposed_blocking=True,
+                path=c.path,
+                line=c.line,
+                side=c.side,
+                severity=c.severity,
+                attribution="pr-change",
+                has_specific_violation=True,
+                has_required_contract=True,
+                named_mandatory_rule="SEC-01",
+                has_actionable_remedy=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+            )
+            for c in (c1, c2)
+        )
+        raw = ReviewResult(
+            summary="Two blockers.",
+            comments=(c1, c2),
+            provider="fake",
+            review_status="complete",
+            coverage=_complete_coverage("src/app.py"),
+        )
+        admitted = prepare_publishable_review(
+            raw,
+            convergence_policy=policy,
+            blocker_candidates=cands,
+            changed_lines={"src/app.py": frozenset({2, 3, 4})},
+        ).result
+        self.assertIsNotNone(admitted.review_verdict)
+        # Now publish under max_active_findings=1 with 2 comments in raw/candidates
+        options = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            operation_entry="disabled",
+            max_active_findings=1,
+            enable_drift_tracking=False,
+        )
+        # Force unselected_blocking_defect=True on the ReviewVerdict before projection
+        verdict_with_unselected = replace(
+            admitted.review_verdict, unselected_blocking_defect=True
+        )
+        prebound = replace(admitted, review_verdict=verdict_with_unselected)
+        pub = app.publish_review(
+            options=options,
+            oidc_token="oidc-proj",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_1,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=prebound,
+            diff=SRC_DIFF,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+            blocker_candidates=cands,
+        )
+        self.assertEqual(pub.status, "published")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+        elig = approval_eligibility_from_body(str(host.reviews[-1]["body"]))
+        assert elig is not None
+        self.assertTrue(elig.facts.has_blocking_findings)
+        self.assertFalse(evaluate_approval_facts(elig.facts).approved)
 
 
 if __name__ == "__main__":

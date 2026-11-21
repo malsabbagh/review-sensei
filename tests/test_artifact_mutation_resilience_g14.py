@@ -1039,6 +1039,8 @@ class _ArtifactGitHubHost:
                                         "pullRequestReview": {"databaseId": review_id},
                                         "commit": {"oid": body["commit_id"]},
                                         "body": comment["body"],
+                                        "path": comment["path"],
+                                        "line": comment["line"],
                                         "edited_by_human": False,
                                         "author": {
                                             "login": self.app_slug,
@@ -1306,6 +1308,11 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
         app, _pub, options = self._make_app(host)
         policy = ReviewConvergencePolicy(mode="strict")
         res1, blockers1 = self._blocking_result()
+        # Re-anchor onto line 4 (the changed fallback line present in both DIFF_1 and
+        # DIFF_CLEAN) so pub2 observes the edited blocking thread and pub3 observes the
+        # deleted blocking thread without recreating it.
+        res1 = replace(res1, comments=(replace(res1.comments[0], line=4),))
+        blockers1 = (replace(blockers1[0], line=4),)
 
         pub1 = app.publish_review(
             options=options,

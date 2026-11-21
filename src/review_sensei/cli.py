@@ -2531,7 +2531,7 @@ def _reconcile_hosted_result(
             )
         if (
             isinstance(convergence_policy, ReviewConvergencePolicy)
-            and convergence_policy.enforcement == "publication"
+            and convergence_policy.quality == "high-signal"
         ):
             reconciled = admit_review_result(
                 reconciled,

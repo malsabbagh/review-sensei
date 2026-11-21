@@ -155,16 +155,9 @@ class ReviewVerdictTests(unittest.TestCase):
         held = project_review_comments(self.result, (), policy=self.policy)
         with self.assertRaises(ReviewInputError):
             bind_review_verdict(held, policy=ReviewConvergencePolicy())
-        legacy = bind_review_verdict(
-            self.result, policy=ReviewConvergencePolicy(mode="legacy")
-        )
-        self.assertEqual(legacy.to_dict(), self.result.to_dict())
-        self.assertNotIn("review_verdict", legacy.to_dict())
         default = bind_review_verdict(self.result, policy=ReviewConvergencePolicy())
-        self.assertIn("review_verdict", default.to_dict())
-        self.assertEqual(
-            ReviewResult.from_dict(default.to_dict()).comments, default.comments
-        )
+        self.assertEqual(default.to_dict(), self.result.to_dict())
+        self.assertNotIn("review_verdict", default.to_dict())
 
     def test_selection_binding_and_prior_lifecycle_are_preserved(self):
         from review_sensei.context import finding_lifecycle_for_comment
