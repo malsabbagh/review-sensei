@@ -113,6 +113,7 @@ from .approval import (
     evaluate_approval_facts,
     has_blocking_findings,
     has_human_adjudication_findings,
+    has_uncertain_findings,
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
@@ -572,6 +573,8 @@ def _review_summary_state(
         # it is also not a clean review: the summary must not claim that no
         # required fixes were found while a maintainer decision is pending.
         return WITHHELD_STATE, "a required human assessment is pending"
+    if has_uncertain_findings(result):
+        return WITHHELD_STATE, "prior findings have uncertain resolution status"
     if not _coverage_complete(result):
         return WITHHELD_STATE, "coverage was not complete for every changed file"
     if auto_approve:
@@ -614,6 +617,7 @@ def _approval_eligible(result: ReviewResult) -> bool:
         _incomplete_reason(result) is None
         and not has_blocking_findings(result)
         and not has_human_adjudication_findings(result)
+        and not has_uncertain_findings(result)
         and _coverage_complete(result)
     )
 
@@ -3573,7 +3577,17 @@ class ReviewApprovalFinalizer:
             policy_digest=policy_digest,
         )
         window_state = self._active_window_states.get((repository_id, pull_request))
+        drift_state = self._drift_states.get((repository_id, pull_request))
+        window_had_uncertain = False
+        preview_window_uncertain = False
         if window_state is not None and window_state.head_sha == head_sha:
+            window_had_uncertain = any(
+                s.state == "uncertain"
+                for s in window_state.display_active_findings.slots
+            ) or any(
+                ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                for ob in window_state.authoritative_decision_inventory.obligations
+            )
             preview_window = apply_dispositions_to_window_state(
                 window_state,
                 honored_fingerprints=active,
@@ -3601,11 +3615,25 @@ class ReviewApprovalFinalizer:
                 has_blocking = True
             if preview_window.changed_file_coverage.coverage_uncertainty_accepted:
                 coverage_accepted = True
-        drift_state = self._drift_states.get((repository_id, pull_request))
+            preview_window_uncertain = any(
+                s.state == "uncertain"
+                for s in preview_window.display_active_findings.slots
+            ) or any(
+                ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                for ob in preview_window.authoritative_decision_inventory.obligations
+            )
         preview_drift: DriftEvaluationResult | None = None
+        drift_had_uncertain = False
+        preview_drift_uncertain = False
         if drift_state is not None and drift_state.head_sha == head_sha:
             from .finding_lifecycle import register_compact_actor
 
+            drift_had_uncertain = any(
+                s.state == "uncertain" for s in drift_state.slots
+            ) or any(
+                ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
+                for ob in drift_state.inventory.obligations
+            )
             register_compact_actor(actor)
             preview_drift = apply_dispositions_to_drift_state(
                 drift_state,
@@ -3622,10 +3650,26 @@ class ReviewApprovalFinalizer:
                 has_blocking = True
             if preview_drift.changed_file_coverage.coverage_uncertainty_accepted:
                 coverage_accepted = True
+            preview_drift_uncertain = any(
+                s.state == "uncertain" for s in preview_drift.slots
+            ) or any(
+                ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
+                for ob in preview_drift.inventory.obligations
+            )
+        non_state_uncertain = eligibility.facts.has_uncertain_findings and not (
+            window_had_uncertain or drift_had_uncertain
+        )
+        has_uncertain = (
+            non_state_uncertain or preview_window_uncertain or preview_drift_uncertain
+        )
         adjusted = eligibility.with_fresh_human_review(human)
         adjusted = replace(
             adjusted,
-            facts=replace(adjusted.facts, has_blocking_findings=has_blocking),
+            facts=replace(
+                adjusted.facts,
+                has_blocking_findings=has_blocking,
+                has_uncertain_findings=has_uncertain,
+            ),
         )
         with _capture_quarantine_pr(self, token=token) as quarantine_pr:
             adjusted = self.attach_carried(
@@ -4083,6 +4127,7 @@ class ReviewApprovalFinalizer:
                 review_status=adjusted.facts.review_status,
                 required_fixes=has_blocking,
                 required_decisions=has_human,
+                has_uncertain_findings=adjusted.facts.has_uncertain_findings,
                 coverage_uncertainty_accepted=coverage_accepted,
                 review_verdict=adjusted.facts.review_verdict,
             )
@@ -4405,6 +4450,7 @@ class ReviewApprovalFinalizer:
                 review_status=adjusted.facts.review_status,
                 required_fixes=has_blocking,
                 required_decisions=has_human,
+                has_uncertain_findings=adjusted.facts.has_uncertain_findings,
                 coverage_uncertainty_accepted=coverage_accepted,
                 review_verdict=adjusted.facts.review_verdict,
             )
@@ -5750,6 +5796,9 @@ class ReviewApprovalFinalizer:
                             review_status=eligibility.facts.review_status,
                             required_fixes=has_open_fixes,
                             required_decisions=has_open_decisions,
+                            has_uncertain_findings=(
+                                eligibility.facts.has_uncertain_findings
+                            ),
                             review_verdict=eligibility.facts.review_verdict,
                         ),
                     )
@@ -8830,6 +8879,10 @@ class ReviewPublisher:
                     replay_eligibility.facts.has_human_adjudication_findings
                     or has_human_adjudication_findings(result)
                 ),
+                has_uncertain_findings=(
+                    replay_eligibility.facts.has_uncertain_findings
+                    or has_uncertain_findings(result)
+                ),
                 coverage_uncertainty_accepted=True,
                 review_verdict=result.review_verdict,
             )
@@ -8842,6 +8895,10 @@ class ReviewPublisher:
                 policy=policy,
                 required_fixes=replay_eligibility.facts.has_blocking_findings,
                 required_decisions=replay_eligibility.facts.has_human_adjudication_findings,
+                has_uncertain_findings=(
+                    replay_eligibility.facts.has_uncertain_findings
+                    or has_uncertain_findings(result)
+                ),
             )
         )
         check_diagnostic = self._check_state_or_diagnostic(
@@ -9644,7 +9701,11 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
-        if planned_window_state is not None:
+        if planned_window_state is not None or planned_drift_state is not None:
+            # ``admitted_result`` is the pre-projection admitted result for this exact
+            # head/publish() call; window/drift projection strips ``review_verdict``
+            # from ``result``, so unselected blockers must be preserved explicitly.
+            admitted_verdict = admitted_result.review_verdict
             prospective_eligibility = replace(
                 prospective_eligibility,
                 facts=replace(
@@ -9652,10 +9713,18 @@ class ReviewPublisher:
                     has_blocking_findings=(
                         prospective_eligibility.facts.has_blocking_findings
                         or window_non_inline_blocking
+                        or bool(
+                            admitted_verdict
+                            and admitted_verdict.unselected_blocking_defect
+                        )
                     ),
                     has_human_adjudication_findings=(
                         prospective_eligibility.facts.has_human_adjudication_findings
                         or window_has_human
+                        or bool(
+                            admitted_verdict
+                            and admitted_verdict.unselected_human_decision
+                        )
                     ),
                 ),
             )
@@ -9731,12 +9800,23 @@ class ReviewPublisher:
         # disagree. The finding review event and the finalizer's gate
         # maintenance still follow the operator's opt-in, so a blocking finding
         # keeps requesting changes on an ineligible review.
-        base_result_eligible = _approval_eligible(result) or (
-            planned_window_state is not None
-            and window_coverage_accepted
-            and _incomplete_reason(result) is None
-            and not has_blocking_findings(result)
-            and not has_human_adjudication_findings(result)
+        admitted_verdict = admitted_result.review_verdict
+        base_result_eligible = (
+            _approval_eligible(result)
+            or (
+                (planned_window_state is not None or planned_drift_state is not None)
+                and window_coverage_accepted
+                and _incomplete_reason(result) is None
+                and not has_blocking_findings(result)
+                and not has_human_adjudication_findings(result)
+                and not has_uncertain_findings(result)
+            )
+        ) and not (
+            admitted_verdict is not None
+            and (
+                admitted_verdict.unselected_blocking_defect
+                or admitted_verdict.unselected_human_decision
+            )
         )
         approval_eligible = (
             base_result_eligible
@@ -9775,21 +9855,26 @@ class ReviewPublisher:
             # can update a check or finalize an already published result. False
             # reserves the longer check/author boolean spelling; body placement
             # determines the same blocking fact used by the actual writer.
-            preflight_review = self._adjust_assembled_for_window(
-                self._assemble_review_body(
-                    result=result,
-                    analysis=analysis,
-                    convergence_policy=convergence_policy,
-                    read_facts=lambda: self._conversation_resolution_facts(
-                        token=token, repository=repository, branch=base_branch
+            preflight_review = self._adjust_assembled_for_drift(
+                self._adjust_assembled_for_window(
+                    self._assemble_review_body(
+                        result=result,
+                        analysis=analysis,
+                        convergence_policy=convergence_policy,
+                        read_facts=lambda: self._conversation_resolution_facts(
+                            token=token, repository=repository, branch=base_branch
+                        ),
+                        auto_approve=auto_approval,
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
                     ),
-                    auto_approve=auto_approval,
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_sha=base_sha,
+                    planned_window_state,
+                    convergence_policy=convergence_policy,
+                    auto_approval=auto_approval,
                 ),
-                planned_window_state,
+                planned_drift_state,
                 convergence_policy=convergence_policy,
                 auto_approval=auto_approval,
             )
@@ -10607,6 +10692,10 @@ class ReviewPublisher:
                     or has_human_adjudication_findings(result)
                     or window_has_human
                 ),
+                has_uncertain_findings=(
+                    prospective_eligibility.facts.has_uncertain_findings
+                    or has_uncertain_findings(result)
+                ),
                 coverage_uncertainty_accepted=True,
                 review_verdict=result.review_verdict,
             )
@@ -10624,6 +10713,10 @@ class ReviewPublisher:
                 required_decisions=(
                     prospective_eligibility.facts.has_human_adjudication_findings
                     or window_has_human
+                ),
+                has_uncertain_findings=(
+                    prospective_eligibility.facts.has_uncertain_findings
+                    or has_uncertain_findings(result)
                 ),
             )
         )
@@ -10758,13 +10851,26 @@ class ReviewPublisher:
             retained_eligibility=retained_eligibility,
         )
         if planned_window_state is not None or planned_drift_state is not None:
+            # ``admitted_verdict`` comes from the pre-projection ``admitted_result`` of
+            # this exact publish() call so projected results keep unselected blockers.
             eligibility = replace(
                 eligibility,
                 facts=replace(
                     eligibility.facts,
+                    has_blocking_findings=(
+                        eligibility.facts.has_blocking_findings
+                        or bool(
+                            admitted_verdict
+                            and admitted_verdict.unselected_blocking_defect
+                        )
+                    ),
                     has_human_adjudication_findings=(
                         eligibility.facts.has_human_adjudication_findings
                         or window_has_human
+                        or bool(
+                            admitted_verdict
+                            and admitted_verdict.unselected_human_decision
+                        )
                     ),
                 ),
             )

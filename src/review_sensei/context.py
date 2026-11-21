@@ -184,6 +184,19 @@ def _matches(path: str, pattern: str) -> bool:
     return len(pattern_parts) in globstar_closure(states)
 
 
+def stage_applies_to_paths(stage: Stage, changed_paths: Sequence[str]) -> bool:
+    """Return whether *stage* applies to at least one path in *changed_paths*."""
+
+    if not stage.categories:
+        return True
+    return any(
+        _matches(path, pattern)
+        for path in changed_paths
+        for category in stage.categories
+        for pattern in category.applies_to
+    )
+
+
 def _is_secret_like(path: Path) -> bool:
     name = path.name.lower()
     return (

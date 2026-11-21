@@ -304,7 +304,7 @@ class ReviewVerdictTests(unittest.TestCase):
         reconciled = reconcile_overflow_review(
             downgraded, baseline, coverage_mode="full", retain_matched_obligations=True
         )
-        self.assertEqual(reconciled.review_status, "partial")
+        self.assertEqual(reconciled.review_status, "complete")
         self.assertEqual(
             reconciled.finding_lifecycles,
             (FindingLifecycleRecord(fingerprint, "uncertain"),),
@@ -582,7 +582,7 @@ class ReviewVerdictTests(unittest.TestCase):
                     current_key=_key(head_sha="c" * 40),
                 )(run).result
                 if quality == "high-signal":
-                    self.assertEqual(reconciled.review_status, "partial")
+                    self.assertEqual(reconciled.review_status, "complete")
                     self.assertEqual(
                         reconciled.finding_lifecycles[0].state, "uncertain"
                     )

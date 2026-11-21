@@ -811,6 +811,9 @@
                       },
                       "blocking": {
                         "type": "boolean"
+                      },
+                      "needs_human": {
+                        "type": "boolean"
                       }
                     }
                   }

@@ -255,7 +255,7 @@ class BaselinePlanTests(unittest.TestCase):
             _result(_comment()), cache_key=_key(), policy=policy
         )
         result = reconcile_overflow_review(_result(), baseline)
-        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(result.review_status, "complete")
         self.assertEqual(
             result.finding_lifecycles[0].fingerprint, baseline.findings[0].fingerprint
         )
@@ -299,8 +299,15 @@ class BaselinePlanTests(unittest.TestCase):
         downgraded = _result(
             _comment(body="Reworded concern", blocking=False, severity="low")
         )
-        self.assertEqual(
-            reconcile_overflow_review(downgraded, baseline).review_status, "partial"
+        downgraded_reconciled = reconcile_overflow_review(downgraded, baseline)
+        self.assertEqual(downgraded_reconciled.review_status, "complete")
+        self.assertIn(
+            baseline.findings[0].fingerprint,
+            {
+                item.fingerprint
+                for item in downgraded_reconciled.finding_lifecycles
+                if item.state == "uncertain"
+            },
         )
         too_many = _result(
             _comment(), _comment(path="src/one.py"), _comment(path="src/two.py")
@@ -313,7 +320,7 @@ class BaselinePlanTests(unittest.TestCase):
             baseline,
             coverage_mode="incremental",
         )
-        self.assertEqual(multiply_claimed.review_status, "partial")
+        self.assertEqual(multiply_claimed.review_status, "complete")
         self.assertIn(
             baseline.findings[0].fingerprint,
             {

@@ -562,6 +562,7 @@ def prepare_reply_capacity(
         required_fixes=refreshed.facts.has_blocking_findings,
         required_decisions=refreshed.facts.has_human_adjudication_findings
         or bool(inventory.pending),
+        has_uncertain_findings=refreshed.facts.has_uncertain_findings,
         review_verdict=refreshed.facts.review_verdict,
     )
     check = ReviewCheckPublisher(http=operation.http).plan_completion(

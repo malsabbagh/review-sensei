@@ -761,7 +761,8 @@ class CurrentCommandEntryTests(unittest.TestCase):
                 self.assertEqual(current.dispositions, old.dispositions)
                 eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
                 self.assertEqual(eligibility.historical_assessments["pending"], [])
-                self.assertEqual(eligibility.facts.review_status, "partial")
+                self.assertEqual(eligibility.facts.review_status, "complete")
+                self.assertTrue(eligibility.facts.has_uncertain_findings)
                 self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
                 self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
                 self.assertEqual(

@@ -89,7 +89,7 @@ class ReviewServiceTests(unittest.TestCase):
         )
         self.assertEqual(provider.requests, [])
         self.assertTrue(result.summary)
-        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(result.review_status, "summary-only")
 
     def test_all_inactive_category_stage_makes_zero_provider_calls(self):
         docs = ReviewCategory(
@@ -118,7 +118,7 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(result.comments, ())
         self.assertTrue(result.summary)
         self.assertNotIn("unused", result.summary)
-        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(result.review_status, "summary-only")
 
     def test_category_less_independent_output_stage_makes_one_provider_call(self):
         inactive = ReviewCategory(
@@ -145,7 +145,7 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(len(provider.requests), 1)
         self.assertIn("Summarize independently:", provider.requests[0].prompt)
         self.assertIn("Independent overview.", result.summary)
-        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(result.review_status, "summary-only")
 
     def test_summary_only_stage_is_not_approval_eligible(self):
         stage = Stage(

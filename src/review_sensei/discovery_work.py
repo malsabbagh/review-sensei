@@ -14,6 +14,7 @@ from .context import (
     PromptContextDeadline,
     ReviewContextCacheKey,
     admit_prompt_context,
+    stage_applies_to_paths,
 )
 from .diff import analyze_diff
 from .document_context import DocumentSelectionReport
@@ -41,6 +42,7 @@ from .planning import (
     _coverage_for,
     _hunk_record,
     _reconcile_file_outcomes_from_hunks,
+    apply_chunk_outcomes,
     extract_prior_reviewed_coverage,
     plan_work,
 )
@@ -232,6 +234,7 @@ def discover(
         1,
         tracker.budget.max_provider_calls // max(1, active_stage_count),
     )
+    skipped_applicable_stage = False
     for stage in service.stages:
         categories = tuple(
             category
@@ -241,8 +244,10 @@ def discover(
         )
         if stage.categories and not categories:
             stage_summary[stage.name] = "skipped"
-            failed = True
-            actual_failure = True
+            if stage_applies_to_paths(stage, analysis.changed_paths):
+                skipped_applicable_stage = True
+                failed = True
+                actual_failure = True
             continue
         comment_stage = comment_stage or "comments" in stage.outputs
         stage_provider = service._provider_for_stage(stage, default=provider)
@@ -696,8 +701,6 @@ def discover(
                     )
             for index in item.hunk_indexes:
                 hunk_outcomes[index] = ("budget-exhausted", diagnostic)
-    if not comment_stage:
-        failed = True
     for path in analysis.changed_paths:
         file_outcomes.setdefault(path, ("unsupported", "incomplete-enumeration"))
     _reconcile_file_outcomes_from_hunks(
@@ -709,10 +712,24 @@ def discover(
         hunk_outcomes=hunk_outcomes,
         limits=request.limits,
     )
+    if not comment_stage:
+        failed = True
+        coverage = apply_chunk_outcomes(
+            coverage,
+            paths=tuple(
+                entry.path for entry in coverage.files if entry.outcome == "reviewed"
+            ),
+            hunk_indexes=tuple(
+                entry.index for entry in coverage.hunks if entry.outcome == "reviewed"
+            ),
+            outcome="unsupported",
+            reason="no-review-stage",
+            limits=request.limits,
+        )
     # A finished diff stays complete when only optional documents were
     # trimmed. Unfinished required work and incomplete diff coverage do not.
     status = "partial" if failed or not coverage.fully_reviewed else "complete"
-    if not comment_stage:
+    if not comment_stage and not skipped_applicable_stage:
         status = "summary-only"
     context_admission = context_admission_document(context_diagnostics)
     refusal_summary = (

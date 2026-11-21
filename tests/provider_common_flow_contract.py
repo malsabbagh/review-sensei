@@ -949,7 +949,7 @@ class _CommonFlows:
                 reconciled = reconcile_overflow_review(
                     refreshed.result, baseline, coverage_mode=scope.coverage_mode
                 )
-                self.assertEqual(reconciled.review_status, "partial")
+                self.assertEqual(reconciled.review_status, "complete")
                 self.assertIn(
                     baseline.findings[0].fingerprint,
                     [

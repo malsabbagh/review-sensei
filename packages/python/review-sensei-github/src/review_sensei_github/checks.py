@@ -24,6 +24,7 @@ from review_sensei.review_verdict import ReviewVerdict
 from review_sensei.validation import validate_bounded_text
 
 from .approval import has_blocking_findings, has_human_adjudication_findings
+from .approval import has_uncertain_findings as _result_has_uncertain_findings
 from .check_accounting import native_check_call
 from .check_diagnostics import (
     CheckFailure,
@@ -82,6 +83,7 @@ def review_check_outcome(
     review_status: str,
     required_fixes: bool,
     required_decisions: bool = False,
+    has_uncertain_findings: bool = False,
     mixed_coverage_satisfied: bool = False,
     coverage_uncertainty_accepted: bool = False,
     review_verdict: ReviewVerdict | None = None,
@@ -174,6 +176,16 @@ def review_check_outcome(
                 + (" " + required_guidance if unselected_decisions else "")
             ),
         )
+    if has_uncertain_findings is True:
+        return CheckOutcome(
+            conclusion="action_required",
+            title="Review requires attention",
+            summary=(
+                "The completed review left prior findings with uncertain "
+                "resolution status, so the check stays non-passing until "
+                "resolved."
+            ),
+        )
     if review_status == "partial" and bounded_mixed:
         return CheckOutcome(
             conclusion="success",
@@ -260,6 +272,7 @@ def check_outcome_for_result(
     policy: str,
     required_fixes: bool | None = None,
     required_decisions: bool | None = None,
+    has_uncertain_findings: bool | None = None,
     mixed_coverage_satisfied: bool = False,
 ) -> CheckOutcome:
     """Map one validated review result onto the gate conclusions."""
@@ -276,6 +289,11 @@ def check_outcome_for_result(
             has_human_adjudication_findings(result)
             if required_decisions is None
             else required_decisions
+        ),
+        has_uncertain_findings=(
+            _result_has_uncertain_findings(result)
+            if has_uncertain_findings is None
+            else has_uncertain_findings
         ),
         mixed_coverage_satisfied=mixed_coverage_satisfied,
         review_verdict=result.review_verdict,

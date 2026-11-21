@@ -3164,7 +3164,10 @@ def checkpoint_review_analysis(
             transaction,
             result_digest,
             baseline=baseline,
-            review_complete=result.review_status == "complete",
+            review_complete=result.review_status == "complete"
+            and not any(
+                item.state == "uncertain" for item in result.finding_lifecycles
+            ),
             progress=checkpoint_remaining_progress(ledger, identity, record, result),
             now=now,
             partition_writer=(
@@ -3287,7 +3290,10 @@ def load_review_transaction_for_publication(
                 analysis_transaction,
                 result_digest,
                 baseline=baseline,
-                review_complete=result.review_status == "complete",
+                review_complete=result.review_status == "complete"
+                and not any(
+                    item.state == "uncertain" for item in result.finding_lifecycles
+                ),
                 progress=checkpoint_remaining_progress(
                     ledger, identity, current, result
                 ),

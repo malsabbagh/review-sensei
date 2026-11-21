@@ -85,6 +85,7 @@ from .approval import (
     ReviewApprovalEligibility,
     has_blocking_findings,
     has_human_adjudication_findings,
+    has_uncertain_findings,
     qualification_state_for_publication,
 )
 from .artifact_authority import (
@@ -2364,6 +2365,7 @@ class GitHubApplication:
                     callable(getattr(reviewer, "prepare", None))
                     or not validated_transaction_recovery
                     or result.review_status == "partial"
+                    or has_uncertain_findings(result)
                 )
             ):
                 prepare = getattr(reviewer, "prepare", None)
@@ -2411,7 +2413,9 @@ class GitHubApplication:
                         evidence_confirmed_concerns=evidence_confirmed_concerns,
                         authorized_dispositions=authorized_dispositions,
                     )
-                if result.review_status == "complete":
+                if result.review_status == "complete" and not has_uncertain_findings(
+                    result
+                ):
                     current_blockers = blocker_set_digest(
                         tuple(
                             finding_lifecycle_for_comment(comment).fingerprint
@@ -3138,6 +3142,11 @@ class GitHubApplication:
                 window_after is not None
                 and not window_after.approval_eligibility.approved
             ):
+                flags["independently_approval_eligible"] = False
+            drift_after = reviewer.drift_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if drift_after is not None and not drift_after.approved:
                 flags["independently_approval_eligible"] = False
         if (
             isinstance(result, ReviewResult)
@@ -4352,6 +4361,10 @@ class GitHubApplication:
             policy=effective_policy,
             required_fixes=req_fixes,
             required_decisions=req_decisions,
+            has_uncertain_findings=(
+                "uncertain-finding-lifecycle" in blockers
+                or has_uncertain_findings(review_result)
+            ),
             mixed_coverage_satisfied=mixed_satisfied
             and not non_coverage_structural_blockers,
         )
@@ -6377,6 +6390,7 @@ def _publication_round_flags(result: ReviewResult) -> dict[str, bool]:
         and result.review_status == "complete"
         and not has_blocking_findings(result)
         and not has_human_adjudication_findings(result)
+        and not has_uncertain_findings(result)
     )
     return {
         "coverage_complete": coverage_complete,
