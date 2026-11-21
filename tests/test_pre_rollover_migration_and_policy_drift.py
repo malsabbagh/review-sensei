@@ -473,6 +473,63 @@ class PreRolloverMigrationAndPolicyDriftTests(unittest.TestCase):
             self.assertEqual(expected_policy, tx["policy_digest"])
             self.assertEqual(expected_config, tx["configuration_digest"])
 
+    def test_nonterminal_predecessor_is_not_masked_by_pre_rollover_hold(self) -> None:
+        from review_sensei_github.session_ledger import render_session_comment
+
+        # 1. Interrupted `publication_pending` predecessor (finding_lifecycle is None)
+        #    must still hit normal non-terminal rollover refusal, never migration hold.
+        with tempfile.TemporaryDirectory() as directory:
+            f = _PreRolloverFixture(directory)
+
+            def cancel() -> None:
+                raise KeyboardInterrupt()
+
+            f.before_publication = cancel
+            self.assertEqual(f.invoke(), 130, f.error)
+            pending = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert pending is not None and pending.transaction is not None
+            self.assertEqual(pending.transaction.phase, "publication_pending")
+            self.assertIsNone(pending.finding_lifecycle)
+
+            f.before_publication = None
+            f.next_run()
+            self.assertEqual(f.invoke(), 1)
+            self.assertIn("previous caller run is not terminal", f.error)
+            self.assertNotIn("finding_inventory_migration_required", f.error)
+
+        # 2. Wedged `phase=no-transaction` predecessor with legacy counters
+        #    (`finding_lifecycle is None`) must preserve `phase=no-transaction`.
+        from review_sensei.errors import ProviderError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f2 = _PreRolloverFixture(directory)
+
+            def crash_in_provider() -> None:
+                raise ProviderError("provider connection lost mid-call", transient=True)
+
+            f2.before_provider = crash_in_provider
+            self.assertEqual(f2.invoke(), 1)
+            wedged = parse_session_comment(f2.comment["body"], identity=IDENTITY)
+            assert wedged is not None
+            self.assertIsNone(wedged.transaction)
+            self.assertIsNone(wedged.api_run_accounting["analysis_abort"])
+            legacy_wedged = wedged.evolve(
+                generation=wedged.generation + 1,
+                completed_initial_reviews=1,
+                finding_lifecycle=None,
+            )
+            f2.comment["body"] = render_session_comment(
+                repository_id=123,
+                pull_request=7,
+                record=legacy_wedged,
+            )
+            f2.before_provider = None
+            f2.next_run()
+            self.assertEqual(f2.invoke(), 1)
+            self.assertIn("previous caller run is not terminal", f2.error)
+            self.assertIn("phase=no-transaction", f2.error)
+            self.assertNotIn("finding_inventory_migration_required", f2.error)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -622,22 +622,13 @@ class TitleFreshnessG19Tests(unittest.TestCase):
                     encoding="utf-8",
                     newline="\n",
                 )
-                orig_engine_main = review_run.engine_main
+                b_hosted.extra_core_args = ("--orchestrate-large-changes",)
                 max_calls_for_run = 1
-
-                def chunked_engine_main(argv_in: list[str], **kw: Any) -> int:
-                    return orig_engine_main(
-                        [*argv_in, "--orchestrate-large-changes"],
-                        **kw,
-                    )
 
                 def capped_budget(budget: ResourceBudget, _cfg: Any) -> ResourceBudget:
                     return replace(budget, max_provider_calls=max_calls_for_run)
 
                 with (
-                    patch.object(
-                        review_run, "engine_main", side_effect=chunked_engine_main
-                    ),
                     patch(
                         "review_sensei.cli.DEFAULT_REVIEW_LIMITS",
                         replace(ReviewLimits(), max_diff_files=1),

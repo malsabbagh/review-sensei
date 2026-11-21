@@ -153,6 +153,7 @@ class EntryFixture(LifecycleFixture):
         self.archive_bad = None
         self.abort_fault = None
         self.legacy_publication_fixture = False
+        self.extra_core_args: tuple[str, ...] = ()
 
     def external(self, request, timeout):
         import base64
@@ -633,6 +634,7 @@ class EntryFixture(LifecycleFixture):
                         "--learning-root",
                         str(self.root),
                         *([self.review_intent] if self.review_intent else []),
+                        *self.extra_core_args,
                         "--configuration-context-output",
                         str(self.root / "configuration.json"),
                         "--admission-context-output",

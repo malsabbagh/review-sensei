@@ -99,12 +99,34 @@ def _write_migration_hold_outcome(publication_output: Path, *, reason: str) -> i
     return 1
 
 
+def _is_ordinary_terminal_predecessor(
+    record: SessionRecord, accounting: ApiRunAccounting
+) -> bool:
+    """Return True only when an ordinary predecessor run closed cleanly."""
+    if (
+        accounting.uncertain != 0
+        or accounting.analysis_abort is not None
+        or record.reservation_id is not None
+        or record.reserved_slot is not None
+    ):
+        return False
+    if accounting.action is not None:
+        return accounting.action.get("phase") == "terminal"
+    return (
+        record.transaction is not None
+        and record.transaction.phase
+        in {"publication_succeeded", "publication_suppressed"}
+        and accounting.terminal_transaction == record.transaction.transaction_id
+    )
+
+
 def _expected_transaction_digests(
     args: argparse.Namespace,
     *,
     configuration_path: Path | None,
 ) -> tuple[str, str]:
     """Compute exact (policy_digest, configuration_digest) matching review_sensei.cli."""
+    from review_sensei import cli as core_cli
     from review_sensei.cli import (
         _CANONICAL_BACKEND_ADAPTERS,
         _adapter_for_provider,
@@ -129,7 +151,6 @@ def _expected_transaction_digests(
         category_catalog_for_configured_stages,
         load_stages_from_dir,
     )
-    from review_sensei.validation import DEFAULT_REVIEW_LIMITS
 
     work_configuration = load_configuration(configuration_path)
     categories_dir = getattr(args, "categories_dir", None)
@@ -245,7 +266,7 @@ def _expected_transaction_digests(
     )
     work_budgets = work_configuration.advanced.review_work
     resource_budget = _configured_resource_budget(
-        ResourceBudget.for_limits(DEFAULT_REVIEW_LIMITS), work_configuration
+        ResourceBudget.for_limits(core_cli.DEFAULT_REVIEW_LIMITS), work_configuration
     )
     work_policy_digest = review_work_policy_digest(
         work_budgets,
@@ -1647,21 +1668,28 @@ def bootstrap(
                     )
                 else:
                     if rollover_service is None:
-                        if purpose == "review" and restart_registration is None:
+                        if (
+                            purpose == "review"
+                            and restart_registration is None
+                            and _is_ordinary_terminal_predecessor(
+                                previous_root, previous
+                            )
+                        ):
                             if ReviewRun._record_requires_finding_inventory_migration(
                                 previous_root
                             ):
                                 raise _PreRolloverMigrationHold(
                                     "finding_inventory_migration_required"
                                 )
-                            if previous_root.finding_lifecycle is not None:
-                                binding = cast(
-                                    Mapping[str, Any],
-                                    cast(
-                                        Mapping[str, Any],
-                                        previous_root.finding_lifecycle,
-                                    )["manifest"],
-                                )["binding"]
+                            from review_sensei.finding_lifecycle_store import (
+                                normalize_reference,
+                            )
+
+                            lifecycle_ref = normalize_reference(
+                                previous_root.finding_lifecycle
+                            )
+                            if lifecycle_ref is not None:
+                                binding = lifecycle_ref["manifest"]["binding"]
                                 expected_policy, expected_configuration = (
                                     _expected_transaction_digests(
                                         args, configuration_path=configuration_path
