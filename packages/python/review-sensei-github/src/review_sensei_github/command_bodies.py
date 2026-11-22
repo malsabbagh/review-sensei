@@ -41,7 +41,12 @@ from review_sensei.recovery_context import (
     resolve_recovery_context_store,
 )
 from review_sensei.service import ReviewRun, ReviewService
-from review_sensei.session import SessionIdentity, SessionLedger, SessionRecord
+from review_sensei.session import (
+    LocalSessionLedger,
+    SessionIdentity,
+    SessionLedger,
+    SessionRecord,
+)
 from review_sensei.work_recovery import WorkRecoveryStore
 
 if TYPE_CHECKING:
@@ -447,8 +452,8 @@ def _github_parser() -> argparse.ArgumentParser:
     review.add_argument("--policy-commit", type=str, default=None)
     review.add_argument("--original-api-limit", type=int, default=None)
     review.add_argument("--prior-consumed-requests", type=int, default=0)
-    review.add_argument("--provider", default=None)
-    review.add_argument("--model", default=None)
+    review.add_argument("--provider", default=argparse.SUPPRESS)
+    review.add_argument("--model", default=argparse.SUPPRESS)
     review.add_argument(
         "--stages-dir",
         type=Path,
@@ -1137,7 +1142,19 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         preloaded_cli_metrics: tuple[int, int, int, int, int] | None = None
         cli_ledger_checked = False
         if context_source_ledger is not None:
-            context_record = context_source_ledger.load(publish_identity)
+            # When --recovery-context-dir is omitted, pre-inspecting a local
+            # ledger through a fresh LocalSessionLedger keeps session_ledger's
+            # evidence_budget untouched (important on Windows cold part reads).
+            inspection_ledger: SessionLedger = (
+                LocalSessionLedger(
+                    context_source_ledger.root,
+                    evidence_budget=EvidenceReadBudget(),
+                )
+                if recovery_store is None
+                and isinstance(context_source_ledger, LocalSessionLedger)
+                else context_source_ledger
+            )
+            context_record = inspection_ledger.load(publish_identity)
             cli_ledger_checked = True
             if recovery_store is not None and (
                 context_record.status not in {"ok", "migrated"}
@@ -1156,7 +1173,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
 
                 preloaded_cli_metrics = measure_staged_recovery_footprint(
                     context_record.record,
-                    ledger=context_source_ledger,
+                    ledger=inspection_ledger,
                     identity=publish_identity,
                 )
         configuration_context = (

@@ -10,6 +10,7 @@ import hashlib
 import json
 import time
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
@@ -196,6 +197,14 @@ def _snapshot_from_authority(
         if obs["schema_version"] == "current-observation-v2"
         else actor_permission
     )
+    capability = obs.get("capability")
+    required_permissions = (
+        dict(capability["permissions"])
+        if isinstance(capability, Mapping)
+        and isinstance(capability.get("permissions"), Mapping)
+        and capability["permissions"]
+        else None
+    )
     return AuthenticatedTrustSnapshot(
         repository_id=repo["id"],
         owner_id=repo["owner_id"],
@@ -216,6 +225,7 @@ def _snapshot_from_authority(
         head_sha=authority["head_sha"],
         permission_epoch=None,
         continuous_history="unavailable",
+        required_permissions=required_permissions,
     )
 
 

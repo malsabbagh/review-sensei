@@ -445,6 +445,204 @@ class PublicationCliRecoveryTests(unittest.TestCase):
             {"custom_stages": True, "cli_overrides": True},
         )
 
+    def test_standalone_publish_preserves_local_ledger_budget_without_recovery_dir(
+        self,
+    ):
+        import hashlib
+
+        import review_sensei_github as github
+
+        from review_sensei.baseline import (
+            ReviewBaseline,
+            admission_context_document,
+            baseline_finding_from_comment,
+        )
+        from review_sensei.context import ReviewContextCacheKey
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.models import ReviewComment, ReviewTransaction
+        from review_sensei.session import (
+            LocalSessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            prepare_review_transaction,
+        )
+
+        comments = tuple(
+            ReviewComment(
+                path=f"src/pkg_{i % 32}/mod_{i}_{hashlib.sha256(f'p{i}'.encode()).hexdigest()[:12]}.py",
+                line=i + 1,
+                side="RIGHT",
+                body=f"Finding {i}: check boundary handling.",
+                severity="high",
+                blocking=True,
+                symbol=f"sym_{hashlib.sha256(f's{i}'.encode()).hexdigest()[:24]}",
+                defect_kind="correctness",
+                evidence_id=hashlib.sha256(f"e{i}".encode()).hexdigest(),
+            )
+            for i in range(120)
+        )
+        raw_result = ReviewResult(
+            summary="Validated complete result.",
+            comments=comments,
+            provider="fixture",
+            model="fixture-model",
+            review_status="complete",
+        )
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        cfg_doc = {
+            "provider": {
+                "name": "fixture",
+                "profile": None,
+                "base_url": None,
+                "timeout_seconds": 900.0,
+                "max_output_tokens": None,
+                "allow_custom_endpoint": False,
+                "openrouter_policy": None,
+            },
+            "model": "fixture-model",
+            "stages": [],
+            "category_policy": [],
+            "orchestration": {"enabled": False},
+            "publication_mode": "merge-focused",
+        }
+        ev_doc = {"evidence_policy": "legacy", "snapshot_sha256": None}
+        identity = SessionIdentity("owner/repo", 11, repository_id=7)
+        key = ReviewContextCacheKey(
+            repository="owner/repo",
+            pull_request=11,
+            base_sha="b" * 40,
+            head_sha="a" * 40,
+            engine="fixture",
+            model="fixture-model",
+            profile="default",
+            stage_digest="1" * 64,
+            context_digest="2" * 64,
+            learning_digest="3" * 64,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger_dir = root / "ledger"
+            ledger = LocalSessionLedger(ledger_dir, enable_partition_writes=True)
+            prepared = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="d" * 64,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    cfg_doc
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(ev_doc),
+            )
+            baseline = ReviewBaseline(
+                cache_key=key,
+                policy_digest=policy.digest(),
+                complete=True,
+                coverage_complete=True,
+                generation=prepared.record.generation + 1,
+                findings=tuple(
+                    sorted(
+                        (baseline_finding_from_comment(c) for c in comments),
+                        key=lambda item: item.fingerprint,
+                    )
+                ),
+                reviewed_paths=tuple(sorted({c.path for c in comments})),
+            )
+            committed = checkpoint_review_analysis(
+                ledger, identity, prepared, raw_result, baseline=baseline
+            )
+            self.assertEqual(
+                ledger.load(identity).record.convergence_history["baseline"][
+                    "encoding"
+                ],
+                "partitioned-json-v1",
+            )
+            (root / "result.json").write_text(
+                json.dumps(committed.to_dict()), encoding="utf-8"
+            )
+            (root / "diff.patch").write_text(
+                "diff --git a/a.py b/a.py\n--- a/a.py\n+++ a/a.py\n@@ -1 +1 @@\n-x\n+y\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (root / "configuration.json").write_text(
+                json.dumps(cfg_doc), encoding="utf-8"
+            )
+            (root / "evidence.json").write_text(json.dumps(ev_doc), encoding="utf-8")
+            (root / "admission.json").write_text(
+                json.dumps(admission_context_document(None, key)), encoding="utf-8"
+            )
+            (root / "config.yml").write_text(
+                "schema: 1\ngithub:\n  publication_inventory: complete\n  operation_entry: disabled\n"
+            )
+
+            calls_before_publish = []
+
+            class Application:
+                def __init__(self, *, session_ledger=None, **kwargs):
+                    self.session_ledger = session_ledger
+
+                def publish_review(self, **kwargs):
+                    calls_before_publish.append(
+                        self.session_ledger.evidence_budget.calls
+                    )
+                    return SimpleNamespace(status="published")
+
+            arguments = [
+                "publish",
+                "--result",
+                str(root / "result.json"),
+                "--diff",
+                str(root / "diff.patch"),
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "7",
+                "--pull-request",
+                "11",
+                "--head-sha",
+                "a" * 40,
+                "--base-sha",
+                "b" * 40,
+                "--base-branch",
+                "main",
+                "--session-ledger",
+                str(ledger_dir),
+                "--config",
+                str(root / "config.yml"),
+                "--configuration-context",
+                str(root / "configuration.json"),
+                "--evidence-context",
+                str(root / "evidence.json"),
+                "--admission-context",
+                str(root / "admission.json"),
+                "--allow-write",
+                "--enable-review",
+            ]
+            stderr = StringIO()
+            with (
+                patch("sys.platform", "win32"),
+                patch.dict(
+                    os.environ, {"GITHUB_TOKEN": "fixture-metadata"}, clear=True
+                ),
+                patch.multiple(
+                    github,
+                    BrokerClient=lambda: object(),
+                    GitHubHttp=lambda: object(),
+                    ReviewPublisher=lambda **kwargs: object(),
+                    LearningPRPublisher=lambda **kwargs: object(),
+                    ConversationPublisher=lambda **kwargs: object(),
+                    GitHubApplication=Application,
+                ),
+                redirect_stdout(StringIO()),
+                redirect_stderr(stderr),
+            ):
+                code = main(arguments)
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(calls_before_publish, [0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -280,6 +280,10 @@ class TrustEnrollmentEntryTests(unittest.TestCase):
             self.assertEqual(
                 snapshot.granted_permissions, dict(fixture.observed_permissions)
             )
+            self.assertEqual(
+                snapshot.required_permissions,
+                {"metadata": "read", "pull_requests": "write"},
+            )
             with self.assertRaises(ReviewInputError):
                 enrolled_trust_snapshot_from_record(
                     replace(record, trust_enrollment=None)

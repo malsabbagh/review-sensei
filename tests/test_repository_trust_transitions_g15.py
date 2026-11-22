@@ -2001,6 +2001,80 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
                     migration=bad_migration,
                 )
 
+    def test_capability_scoped_required_permissions_and_synthetic_default(self) -> None:
+        capability_perms = {"metadata": "read", "pull_requests": "write"}
+        enrolled = replace(
+            _enrolled_snapshot(),
+            granted_permissions=capability_perms,
+            required_permissions=capability_perms,
+            permission_epoch=None,
+            continuous_history="unavailable",
+        )
+        observed_same = replace(enrolled)
+        self.assertEqual(detect_trust_transitions(enrolled, observed_same), ())
+        ok = evaluate_trust_boundary(
+            enrolled, observed_same, phase="before_admission", operation="command"
+        )
+        self.assertTrue(ok.allowed)
+
+        # Downgrading or changing granted_permissions still triggers permission_revoke_or_restore.
+        downgraded = replace(
+            enrolled, granted_permissions={"metadata": "read", "pull_requests": "read"}
+        )
+        self.assertIn(
+            "permission_revoke_or_restore",
+            detect_trust_transitions(enrolled, downgraded, operation="command"),
+        )
+        revoked_extra_enrolled = replace(
+            enrolled,
+            granted_permissions={
+                "metadata": "read",
+                "pull_requests": "write",
+                "contents": "read",
+            },
+        )
+        self.assertIn(
+            "permission_revoke_or_restore",
+            detect_trust_transitions(revoked_extra_enrolled, observed_same),
+        )
+
+        # Synthetic snapshots without required_permissions retain DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS.
+        synthetic = replace(
+            _enrolled_snapshot(),
+            granted_permissions=capability_perms,
+            required_permissions=None,
+        )
+        self.assertIn(
+            "permission_revoke_or_restore",
+            detect_trust_transitions(synthetic, replace(synthetic)),
+        )
+
+        # Capability-scoped migration succeeds when target meets effective required permissions.
+        renamed = replace(enrolled, repository_slug="acme/widgets-renamed")
+        migration = AuthenticatedTrustMigration(
+            old_snapshot_sha256=enrolled.digest(),
+            new_snapshot_sha256=renamed.digest(),
+            operator_id=enrolled.actor_id,
+            operator_login=enrolled.actor_login,
+            operator_association=enrolled.actor_association,
+            operator_permission=enrolled.actor_permission,
+            reason="Verified rename under capability-scoped permissions.",
+            operator_attestation_sha256=_sha("rename-capability-scoped"),
+        )
+        receipt = verify_and_migrate_trust_boundary(
+            enrolled=enrolled,
+            target=renamed,
+            session_record=_session_with_charges(enrolled),
+            inventory=_blocking_inventory(),
+            migration=migration,
+        )
+        self.assertEqual(receipt.migrated_session.repository, "acme/widgets-renamed")
+
+        for bad_required in ({}, {"": "read"}, {"metadata": "super"}):
+            with self.subTest(bad_required=bad_required):
+                with self.assertRaises(ReviewInputError):
+                    replace(enrolled, required_permissions=bad_required)
+
 
 if __name__ == "__main__":
     unittest.main()
