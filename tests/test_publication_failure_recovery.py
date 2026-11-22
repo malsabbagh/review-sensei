@@ -1028,9 +1028,19 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                 )
 
             # Recovery command restores Round 1's baseline and round counters without
-            # burning a verification round for the unpublished Round 2 failure.
+            # burning a verification round for the unpublished Round 2 failure,
+            # reads previous_record once, and leaves no leaked prior_record handoff.
+            from review_sensei_github import publication_failure_recovery as pfr
+
             f.select_command("@reviewsensei review status", new_run=True)
-            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            with patch.object(
+                pfr, "read_previous_run", wraps=pfr.read_previous_run
+            ) as mock_read_prev:
+                self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            self.assertEqual(mock_read_prev.call_count, 1)
+            self.assertIsNone(
+                pfr.consume_admitted_prior_record(f.selected.ledger, settled)
+            )
             restored = parse_session_comment(f.comment["body"], identity=IDENTITY)
             self.assertIsNone(restored.transaction)
             self.assertEqual(restored.completed_initial_reviews, 1)
@@ -1343,6 +1353,53 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                 witnesses = _witnesses_from_extra(f.extra_comments)
                 self.assertEqual(len(witnesses), 1)
                 self.assertEqual(witnesses[0][2].boundary, "pre_checkpoint_validation")
+
+    def test_bug2_failed_mutate_clears_admitted_prior_record_without_leak(self):
+        from review_sensei_github import publication_failure_recovery as pfr
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=512)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic round-2 pre-write crash")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            ledger = f.selected.ledger
+            orig_consume = pfr.consume_admitted_prior_record
+            seen = []
+
+            def failing_mutate(record):
+                ledger._mutation_active = True
+                pfr._ADMITTED_PRIOR_RECORDS[ledger] = (record.record_sha256, r1)
+                raise RuntimeError("synthetic mutate failure after admission")
+
+            with patch.object(
+                pfr,
+                "consume_admitted_prior_record",
+                side_effect=lambda lgr, rec: seen.append(orig_consume(lgr, rec)),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "synthetic mutate failure after admission"
+                ):
+                    ledger._native.replace(IDENTITY, failing_mutate) if hasattr(
+                        ledger, "_native"
+                    ) else ledger.replace(IDENTITY, failing_mutate)
+            self.assertEqual(seen, [])
+            self.assertIsNone(pfr.consume_admitted_prior_record(ledger, settled))
+
+            # Follow-up rollover recovery succeeds cleanly with zero stale state.
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(after.transaction)
+            self.assertEqual(after.completed_initial_reviews, 1)
+            self.assertEqual(after.completed_verification_rounds, 0)
 
 
 if __name__ == "__main__":

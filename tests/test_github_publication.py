@@ -4082,11 +4082,16 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
 
         for label, body, headers in (
             ("retry_after", b'{"message":"nope"}', {"Retry-After": "60"}),
+            (
+                "retry_after_http_date",
+                b'{"message":"nope"}',
+                {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+            ),
             ("ratelimit_remaining_0", b"{}", {"X-RateLimit-Remaining": "0"}),
             (
                 "secondary_rate_limit_body",
                 b'{"message":"You have exceeded a secondary rate limit."}',
-                {},
+                {"X-RateLimit-Remaining": "10"},
             ),
         ):
             with self.subTest(case=label):
@@ -4105,26 +4110,52 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
                         base_sha="a" * 40,
                     )
 
-        perm_http = make_403(
-            body=b'{"message":"Resource not accessible by integration"}',
-            headers={"X-RateLimit-Remaining": "4999"},
+        non_transient_403_cases = (
+            (
+                "permission_error",
+                b'{"message":"Resource not accessible by integration"}',
+                {"X-RateLimit-Remaining": "4999"},
+            ),
+            (
+                "retry_after_zero",
+                b'{"message":"Resource not accessible by integration"}',
+                {"Retry-After": "0"},
+            ),
+            (
+                "unrelated_rate_limit_doc_with_remaining_10",
+                (
+                    b'{"message":"Resource not accessible; see docs on rate limit behavior",'
+                    b'"documentation_url":"https://docs.github.com/rest#rate-limiting"}'
+                ),
+                {"X-RateLimit-Remaining": "10"},
+            ),
+            (
+                "contradictory_remaining_10_with_api_rate_limit_exceeded",
+                b'{"message":"API rate limit exceeded"}',
+                {"X-RateLimit-Remaining": "10"},
+            ),
         )
-        status, payload = perm_http.request(
-            "POST", "/graphql", token="tok", body={"query": "{}"}
-        )
-        self.assertEqual((status, payload), (403, None))
-        with self.assertRaises(GitHubPublicationError) as raised:
-            ReviewPublisher(http=perm_http)._published_finding_suppression(
-                token="tok",
-                repository="owner/repo",
-                pull_request=2,
-                app_slug="reviewsensei[bot]",
-                repository_id=1,
-                head_sha="b" * 40,
-                base_sha="a" * 40,
-            )
-        self.assertNotIsInstance(raised.exception, GitHubPublicationTransientError)
-        self.assertIn("http 403", str(raised.exception).lower())
+        for label, body, headers in non_transient_403_cases:
+            with self.subTest(non_transient_case=label):
+                perm_http = make_403(body=body, headers=headers)
+                status, payload = perm_http.request(
+                    "POST", "/graphql", token="tok", body={"query": "{}"}
+                )
+                self.assertEqual((status, payload), (403, None))
+                with self.assertRaises(GitHubPublicationError) as raised:
+                    ReviewPublisher(http=perm_http)._published_finding_suppression(
+                        token="tok",
+                        repository="owner/repo",
+                        pull_request=2,
+                        app_slug="reviewsensei[bot]",
+                        repository_id=1,
+                        head_sha="b" * 40,
+                        base_sha="a" * 40,
+                    )
+                self.assertNotIsInstance(
+                    raised.exception, GitHubPublicationTransientError
+                )
+                self.assertIn("http 403", str(raised.exception).lower())
 
 
 if __name__ == "__main__":

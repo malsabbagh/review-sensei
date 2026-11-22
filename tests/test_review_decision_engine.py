@@ -628,11 +628,15 @@ class ReviewDecisionEngineTests(unittest.TestCase):
         self.assertNotEqual(original_key, baseline.context_cache_key(request))
 
     def test_binary_only_partial_preserved_only_when_decisions_complete(self):
-        from tests.test_coverage_planning import BINARY
+        binary_diff = (
+            "diff --git a/assets/logo.png b/assets/logo.png\n"
+            "index 1111111..2222222 100644\n"
+            "Binary files a/assets/logo.png and b/assets/logo.png differ\n"
+        )
 
         binary_request = replace(
             self.request("src/app.py"),
-            diff=diff_for("src/app.py") + BINARY,
+            diff=diff_for("src/app.py") + binary_diff,
         )
         clean_binary_run = self.service(
             ReviewFixture(comments=[]), DecisionFixture()

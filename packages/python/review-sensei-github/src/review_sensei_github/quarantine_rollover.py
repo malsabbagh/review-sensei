@@ -243,6 +243,8 @@ def replace_quarantine_rollover(
             # Its retention preflight is derived from this issued exact-root
             # transaction; ordinary three-census rollover remains unchanged.
             updated = prepare(record)
+            # admit_publication_failure_recovery stashes the prior record only while
+            # _mutation_active is True inside prepare(); finally clears on failure.
             admitted_prior = consume_admitted_prior_record(ledger, record)
             require_native_decision(ledger, record, updated)
             _validate_queue_retention(record, updated, prior_record=admitted_prior)

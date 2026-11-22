@@ -365,6 +365,42 @@ def _build():
 
         cls.publish_review = invoke
 
+    def authenticated_quarantine_without_lifecycle(ledger, record):
+        if record.quarantine_lineage is None or record.finding_lifecycle is not None:
+            return False
+        from .quarantine_origin import (
+            _AUTHENTICATED,
+            AuthenticatedQuarantine,
+            read_predecessor,
+        )
+
+        authenticated = getattr(ledger, "_quarantine_authenticated", None)
+        caller = getattr(ledger, "caller", None)
+        if (
+            type(authenticated) is not AuthenticatedQuarantine
+            or authenticated not in _AUTHENTICATED
+            or caller is None
+            or authenticated.original_caller is not caller
+            or authenticated.original_identity != record.identity()
+            or canonical_bytes(record.quarantine_lineage) != authenticated.lineage_bytes
+        ):
+            return False
+        try:
+            predecessor = read_predecessor(authenticated.archive)
+        except ReviewInputError:
+            return False
+        target_isolation = authenticated.archive.get("target_isolation")
+        return (
+            isinstance(target_isolation, dict)
+            and target_isolation.get("contract") == "body-limit-prepublication-v1"
+            and predecessor.identity() == record.identity()
+            and predecessor.record_sha256
+            == record.quarantine_lineage["predecessor_record_sha256"]
+            and predecessor.transaction is not None
+            and predecessor.transaction.phase == "publication_failed"
+            and predecessor.finding_lifecycle is None
+        )
+
     def install_restore(original):
         frame = inspect.currentframe()
         defining_source(
@@ -388,8 +424,9 @@ def _build():
                 record.finding_lifecycle is not None
                 and record.quarantine_lineage is not None
             )
-            original_empty = (
-                record.finding_lifecycle is None and record.quarantine_lineage is None
+            original_empty = record.finding_lifecycle is None and (
+                record.quarantine_lineage is None
+                or authenticated_quarantine_without_lifecycle(ledger, record)
             )
             if not historical and not original_empty and not restored_empty:
                 return record, document

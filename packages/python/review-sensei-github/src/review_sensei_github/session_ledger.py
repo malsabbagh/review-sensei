@@ -2402,6 +2402,8 @@ class GitHubIssueCommentSessionLedger:
         self._mutation_active = True
         try:
             updated = mutate(record)
+            # admit_publication_failure_recovery stashes the prior record only while
+            # _mutation_active is True inside mutate(); finally clears on failure.
             admitted_prior = consume_admitted_prior_record(self, record)
             if record.quarantine_lineage is not None:
                 from .quarantine_action import require_native_decision

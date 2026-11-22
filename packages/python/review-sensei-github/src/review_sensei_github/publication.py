@@ -294,8 +294,13 @@ def _raise_review_thread_lookup_error(
                 "review thread reconciliation is unavailable; publication "
                 f"requires GraphQL read access to review threads (http {status})"
             )
+        detail = (
+            "GraphQL authentication failed"
+            if status == 401
+            else "GraphQL access denied"
+        )
         raise GitHubPublicationError(
-            f"review thread lookup failed (http {status}; GraphQL access denied)"
+            f"review thread lookup failed (http {status}; {detail})"
         )
     if status < 200 or status >= 300 or not isinstance(payload, dict):
         raise GitHubPublicationError(
