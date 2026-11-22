@@ -112,11 +112,12 @@ class PublicationFailureRecoveryFixture(CommandEntryFixture):
             if self.witness_post_fault == "absent":
                 self.witness_post_fault = None
                 raise TimeoutError("synthetic lost settlement witness POST (absent)")
-            cid = 2_000_000 + len(self.extra_comments) + 1
+            cid = 3_000_000 + len(self.extra_comments) + 1
             row = {
                 "id": cid,
                 "body": payload["body"],
                 "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+                "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
             }
             self.extra_comments[cid] = copy.deepcopy(row)
             if self.witness_post_fault == "stored":
@@ -1400,6 +1401,468 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
             self.assertIsNone(after.transaction)
             self.assertEqual(after.completed_initial_reviews, 1)
             self.assertEqual(after.completed_verification_rounds, 0)
+
+    def test_bug2_round1_pre_write_failure_resets_rescan_state_and_consecutive_failures(
+        self,
+    ):
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.bounded_evidence import evidence_manifest, partition_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = PublicationFailureRecoveryFixture(directory, limit=512)
+            f.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "Validate caller input before updating state.",
+                    "severity": "high",
+                    "blocking": True,
+                    "needs_human": False,
+                    "symbol": "apply_change",
+                    "defect_kind": "missing_validation",
+                }
+            ]
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic round-1 pre-write crash")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r1.transaction.phase, "publication_failed")
+            self.assertEqual(r1.completed_initial_reviews, 1)
+            self.assertIsNone(
+                ApiRunAccounting.from_document(r1.api_run_accounting).previous_record
+            )
+
+            # Direct SessionRecord check: Round-1 pre-write rollover resets rescan_state too.
+            from dataclasses import replace
+
+            published_source = replace(
+                r1.transaction, phase="publication_succeeded"
+            ).to_dict()
+            r1_with_rescan = r1._construct(
+                **{
+                    **{
+                        k: v
+                        for k, v in r1.to_dict().items()
+                        if k not in {"schema_version", "record_sha256"}
+                    },
+                    "transaction": r1.transaction,
+                    "rescan_state": {
+                        "issue_comment": 10,
+                        "workflow_dispatch": 0,
+                        "receipts": [
+                            {
+                                "kind": "issue_comment",
+                                "request_id": 10,
+                                "review_id": 101,
+                                "source": published_source,
+                                "ordinary_reservation": "a" * 64,
+                                "reservation": "b" * 64,
+                            }
+                        ],
+                    },
+                }
+            )
+            prev_binding = {
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "base_sha": r1.transaction.base_sha,
+                "head_sha": r1.transaction.head_sha,
+                "policy_digest": r1.transaction.policy_digest,
+                "configuration_digest": r1.transaction.configuration_digest,
+                "generation": r1_with_rescan.generation,
+                "producer": "github-bot:999",
+                "purpose": "evidence",
+                "schema_version": "1.0",
+            }
+            prev_payload = r1_with_rescan.to_dict()
+            prev_parts = partition_evidence(
+                prev_payload, binding=prev_binding, item_count=1
+            )
+            prev_manifest = evidence_manifest(
+                prev_payload,
+                binding=prev_binding,
+                item_count=1,
+                parts=prev_parts,
+                storage_ids=tuple(str(900 + i) for i in range(len(prev_parts))),
+            )
+            next_acc = {
+                **r1.api_run_accounting,
+                "identity": {
+                    **r1.api_run_accounting["identity"],
+                    "run_id": r1.api_run_accounting["identity"]["run_id"] + 1,
+                },
+                "owner": {"run_attempt": 1, "job": "hosted", "generation": 0},
+                "completed": [],
+                "prior_nonstartup_liability": 0,
+                "blocks": [],
+                "previous_record": {
+                    "run_id": r1.api_run_accounting["identity"]["run_id"],
+                    "root_sha256": r1_with_rescan.record_sha256,
+                    "manifest": prev_manifest,
+                },
+                "action": None,
+                "analysis_abort": None,
+                "terminal_transaction": None,
+            }
+            rolled = r1_with_rescan.rollover_pre_write_settled_api_accounting(next_acc)
+            self.assertEqual(rolled.completed_initial_reviews, 0)
+            self.assertEqual(rolled.completed_verification_rounds, 0)
+            self.assertIsNone(rolled.convergence_history)
+            self.assertIsNone(rolled.rescan_state)
+
+            # Consecutive Round-1 pre-write failures: Run 2 rolls over R1 (resets to 0, 0)
+            # and crashes pre-write again; Run 3 walks past R1 (publication_failed) -> None.
+            f.next_review_run(head_sha=HEAD_2)
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            r2 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r2.transaction.phase, "publication_failed")
+            self.assertEqual(r2.completed_initial_reviews, 1)
+
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            restored = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(restored.transaction)
+            self.assertEqual(restored.completed_initial_reviews, 0)
+            self.assertEqual(restored.completed_verification_rounds, 0)
+            self.assertIsNone(restored.convergence_history)
+            self.assertIsNone(restored.rescan_state)
+
+            f.next_review_run(head_sha=HEAD_3)
+            self.assertEqual(f.invoke(), 0, f.error)
+            r4 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r4.transaction.phase, "publication_succeeded")
+            self.assertEqual(r4.completed_initial_reviews, 1)
+            self.assertEqual(r4.completed_verification_rounds, 0)
+
+    def test_bug2_consecutive_round2_pre_write_failures_walk_to_settled_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = PublicationFailureRecoveryFixture(directory, limit=512)
+            f.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "Validate caller input before updating state.",
+                    "severity": "high",
+                    "blocking": True,
+                    "needs_human": False,
+                    "symbol": "apply_change",
+                    "defect_kind": "missing_validation",
+                }
+            ]
+            self.assertEqual(f.invoke(), 0, f.error)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            r1_history = copy.deepcopy(r1.convergence_history)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic round-2+ pre-write crash")
+
+            # Run 2 fails pre-write at Round 2 on HEAD_2.
+            f.next_review_run(head_sha=HEAD_2)
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            r2 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r2.transaction.phase, "publication_failed")
+            self.assertEqual(r2.completed_verification_rounds, 1)
+
+            # Run 3 directly rolls over R2 (restores R1 baseline), advances to Round 2
+            # on HEAD_3, and fails pre-write again!
+            f.next_review_run(head_sha=HEAD_3)
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            r3 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r3.transaction.phase, "publication_failed")
+            self.assertEqual(r3.completed_verification_rounds, 1)
+            self.assertEqual(
+                r3.convergence_history["baseline"]["cache_key"]["head_sha"], HEAD_3
+            )
+
+            # Recovery walks past R2 (publication_failed) back to R1 (publication_succeeded)
+            # instead of resurrecting R2's unpublished HEAD_2 / verification_rounds=1 state.
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            restored = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(restored.transaction)
+            self.assertEqual(restored.completed_initial_reviews, 1)
+            self.assertEqual(restored.completed_verification_rounds, 0)
+            self.assertEqual(
+                restored.convergence_history["baseline"], r1_history["baseline"]
+            )
+            self.assertEqual(
+                restored.convergence_history["progress"], r1_history["progress"]
+            )
+
+            # Subsequent review on HEAD_4 succeeds with verification_rounds == 1.
+            head_4 = "f" * 40
+            f.next_review_run(head_sha=head_4)
+            self.assertEqual(f.invoke(), 0, f.error)
+            r5 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r5.transaction.phase, "publication_succeeded")
+            self.assertEqual(r5.completed_initial_reviews, 1)
+            self.assertEqual(r5.completed_verification_rounds, 1)
+            self.assertEqual(
+                r5.convergence_history["baseline"]["cache_key"]["head_sha"], head_4
+            )
+
+    def test_bug2_pre_validation_and_hop_bound_refuse_before_archive_post(self):
+        import hashlib
+
+        from review_sensei_github import publication_failure_recovery as pfr
+
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=512)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic pre-write crash")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            # Corrupt prior_record returned by read_previous_run to have higher counters than settled.
+            inflated_r1 = SessionRecord._construct(
+                **{
+                    **{
+                        k: v
+                        for k, v in r1.to_dict().items()
+                        if k not in {"schema_version", "record_sha256"}
+                    },
+                    "transaction": r1.transaction,
+                    "completed_verification_rounds": settled.completed_verification_rounds
+                    + 1,
+                }
+            )
+            bad_settled = SessionRecord._construct(
+                **{
+                    **{
+                        k: v
+                        for k, v in settled.to_dict().items()
+                        if k not in {"schema_version", "record_sha256"}
+                    },
+                    "transaction": settled.transaction,
+                    "api_run_accounting": {
+                        **settled.api_run_accounting,
+                        "previous_record": {
+                            **settled.api_run_accounting["previous_record"],
+                            "root_sha256": inflated_r1.record_sha256,
+                        },
+                    },
+                }
+            )
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=bad_settled
+            )
+            cid, _, w = _witnesses_from_extra(f.extra_comments)[0]
+            saved_witness_body = f.extra_comments[cid]["body"]
+
+            def _signed_witness_body(target_record: SessionRecord) -> str:
+                payload = {
+                    **w.to_dict(),
+                    "settled_root_sha256": target_record.record_sha256,
+                    "settled_generation": target_record.generation,
+                }
+                unsigned = {k: v for k, v in payload.items() if k != "content_sha256"}
+                payload["content_sha256"] = hashlib.sha256(
+                    canonical_bytes(unsigned)
+                ).hexdigest()
+                encoded = json.dumps(
+                    payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                )
+                return (
+                    "ReviewSensei recorded a pre-external-write failure settlement witness "
+                    "(data only; requires independent Actions cessation and native negative census).\n\n"
+                    f"```json\n{encoded}\n```\n"
+                    f"{SETTLEMENT_WITNESS_MARKER}"
+                )
+
+            f.extra_comments[cid]["body"] = _signed_witness_body(bad_settled)
+            extra_before = len(f.extra_comments)
+            f.select_command("@reviewsensei review status", new_run=True)
+            with patch.object(pfr, "read_previous_run", return_value=inflated_r1):
+                self.assertNotEqual(f.invoke_command(), 0)
+            self.assertIn(
+                "prior settled session root conflicts with predecessor", f.error
+            )
+            self.assertEqual(len(f.extra_comments), extra_before)
+
+            # Walk > 8 hops of publication_failed roots fails closed before archive POST.
+            base_ref = settled.api_run_accounting["previous_record"]
+            settled_fields = {
+                k: v
+                for k, v in settled.to_dict().items()
+                if k not in {"schema_version", "record_sha256"}
+            }
+            chain_by_key: dict[tuple[int, str], SessionRecord] = {}
+            prev_ref = copy.deepcopy(base_ref)
+            base_gen = r1.generation
+            for step in range(1, 10):
+                hop_run_id = 700 + step
+                hop_rec = SessionRecord._construct(
+                    **{
+                        **settled_fields,
+                        "generation": base_gen + step,
+                        "transaction": settled.transaction,
+                        "api_run_accounting": {
+                            **settled.api_run_accounting,
+                            "identity": {
+                                **settled.api_run_accounting["identity"],
+                                "run_id": hop_run_id,
+                            },
+                            "previous_record": prev_ref,
+                        },
+                    }
+                )
+                chain_by_key[(hop_run_id, hop_rec.record_sha256)] = hop_rec
+                prev_ref = {
+                    **base_ref,
+                    "run_id": hop_run_id,
+                    "root_sha256": hop_rec.record_sha256,
+                }
+
+            loop_settled = SessionRecord._construct(
+                **{
+                    **settled_fields,
+                    "generation": base_gen + 10,
+                    "transaction": settled.transaction,
+                    "api_run_accounting": {
+                        **settled.api_run_accounting,
+                        "previous_record": prev_ref,
+                    },
+                }
+            )
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=loop_settled
+            )
+            f.extra_comments[cid]["body"] = _signed_witness_body(loop_settled)
+            extra_before_loop = len(f.extra_comments)
+            f.select_command("@reviewsensei review status", new_run=True)
+            with patch.object(
+                pfr,
+                "read_previous_run",
+                side_effect=lambda _ledger, _identity, ref: chain_by_key[
+                    (ref["run_id"], ref["root_sha256"])
+                ],
+            ):
+                self.assertNotEqual(f.invoke_command(), 0)
+            self.assertIn("archive walk bound", f.error)
+            self.assertEqual(len(f.extra_comments), extra_before_loop)
+            f.extra_comments[cid]["body"] = saved_witness_body
+
+    def test_bug2_earlier_settled_effects_accepts_intervening_terminal_command_on_same_head(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=512)
+            reviews_before = len(f.reviews)
+            checks_before = len(f.check_runs)
+
+            # Intervening terminal command on same_head leaves action.phase == "terminal"
+            # and terminal_transaction is None while retaining Round 1's transaction.
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            after_cmd = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(
+                after_cmd.api_run_accounting["action"]["phase"], "terminal"
+            )
+            self.assertIsNone(after_cmd.api_run_accounting["terminal_transaction"])
+
+            # Pre-write publication failure on HEAD_2 after the terminal command on same_head
+            # (after_cmd still holds action.phase == "terminal" and terminal_transaction is None
+            # while retaining Round 1's transaction).
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError(
+                    "synthetic pre-write crash after terminal command"
+                )
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            self.assertEqual(len(f.reviews), reviews_before)
+            self.assertEqual(len(f.check_runs), checks_before)
+            self.assertEqual(len(_witnesses_from_extra(f.extra_comments)), 1)
+
+            # Recovery must accept R1's existing reviews/inline comments/check-runs
+            # via the intervening terminal command ancestor.
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            restored = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(restored.transaction)
+            self.assertEqual(restored.completed_initial_reviews, 1)
+            self.assertEqual(restored.completed_verification_rounds, 0)
+
+    def test_bug4_read_cached_manifest_in_memory_validates_binding_and_producer(self):
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.review_run import _read_cached_manifest_in_memory
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        from review_sensei.bounded_evidence import inline_manifest
+
+        base_binding = {
+            "repository": IDENTITY.repository,
+            "repository_id": IDENTITY.repository_id,
+            "pull_request": IDENTITY.pull_request,
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "policy_digest": "1" * 64,
+            "configuration_digest": "2" * 64,
+            "generation": 2,
+            "producer": "github-bot:999",
+            "purpose": "finding-lifecycle",
+            "schema_version": "1.0",
+        }
+        payload = {"schema_version": "finding-lifecycle-evidence-v2", "lifecycle": {}}
+        http = GitHubHttp(
+            api_url="https://api.github.test",
+            opener=lambda _r, timeout=None: json_response(
+                {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
+            ),
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="tok", app_slug="reviewsensei[bot]"
+        )
+        ledger._evidence_author_id = 999
+
+        valid_manifest = inline_manifest(payload, binding=base_binding, item_count=1)
+        self.assertEqual(
+            _read_cached_manifest_in_memory(
+                ledger, IDENTITY, valid_manifest, max_generation=3
+            ),
+            payload,
+        )
+
+        for field, bad_value in (
+            ("repository", "other/repo"),
+            ("repository_id", 888),
+            ("pull_request", 99),
+            ("producer", "github-bot:123"),
+            ("generation", 5),
+        ):
+            with self.subTest(field=field):
+                bad_binding = {**base_binding, field: bad_value}
+                bad_manifest = inline_manifest(
+                    payload, binding=bad_binding, item_count=1
+                )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "finding lifecycle manifest binding conflicts"
+                ):
+                    _read_cached_manifest_in_memory(
+                        ledger, IDENTITY, bad_manifest, max_generation=3
+                    )
 
 
 if __name__ == "__main__":

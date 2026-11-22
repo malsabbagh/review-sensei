@@ -263,17 +263,19 @@ def _classify_graphql_errors(errors: object) -> tuple[bool, str]:
                 if fragment in lowered:
                     msg_tag = safe_tag
                     break
-        entry_transient = any(
-            token in _TRANSIENT_GRAPHQL_ERROR_TYPES for token in matched_tokens
-        ) or (msg_tag is not None)
-        all_transient = all_transient and entry_transient
         if matched_tokens:
+            entry_transient = any(
+                token in _TRANSIENT_GRAPHQL_ERROR_TYPES for token in matched_tokens
+            )
             for token in matched_tokens:
                 _add_tag(token)
         elif msg_tag is not None:
+            entry_transient = True
             _add_tag(msg_tag)
         else:
+            entry_transient = False
             _add_tag("unknown_error")
+        all_transient = all_transient and entry_transient
     summary = ",".join(tags)[:120] or "unknown_error"
     return all_transient, summary
 

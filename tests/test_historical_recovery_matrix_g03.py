@@ -211,6 +211,8 @@ def _make_record(
 
 def _diagnostic_ledger(
     fixture: object,
+    *,
+    completed_pre_attempt2_run: bool = False,
 ) -> tuple[GitHubIssueCommentSessionLedger, list[tuple[str, str]]]:
     """Build a pure read-only ledger over `fixture` (never mutating `fixture.trace`)."""
     observed: list[tuple[str, str]] = []
@@ -220,6 +222,21 @@ def _diagnostic_ledger(
         target = urlsplit(request.full_url)
         path, method = target.path, request.get_method()
         observed.append((method, path))
+        if (
+            completed_pre_attempt2_run
+            and method == "GET"
+            and path.endswith(f"/actions/runs/{getattr(fixture, 'run_id', None)}")
+        ):
+            return json_response(
+                {
+                    "id": getattr(fixture, "run_id"),
+                    "run_attempt": 1,
+                    "repository": {"id": 123, "full_name": "owner/repo"},
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "event": "pull_request",
+                }
+            )
         if path == "/user" or path.startswith("/users/"):
             return json_response(bot)
         if path.endswith("/issues/7/comments") and method == "GET":
@@ -1297,7 +1314,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             self.assertEqual(fp.invoke(), 130, fp.error)
             fp.attempt = 2
             fp.before_publication = None
-            pending_ledger, _ = _diagnostic_ledger(fp)
+            pending_ledger, _ = _diagnostic_ledger(fp, completed_pre_attempt2_run=True)
             pending_class = classify_live_ledger_recovery(
                 ledger=pending_ledger,
                 identity=IDENTITY,
@@ -1964,7 +1981,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                 )
 
             fp.attempt = 2
-            ledger_proj, _ = _diagnostic_ledger(fp)
+            ledger_proj, _ = _diagnostic_ledger(fp, completed_pre_attempt2_run=True)
             proj_class = classify_live_ledger_recovery(
                 ledger=ledger_proj,
                 identity=IDENTITY,
@@ -1982,7 +1999,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
 
             # Without `app_id` (`authenticated_app_id=None`), compact checkpoint
             # source authentication fails closed -> `nonterminal_transaction_isolation_required`!
-            ledger_no_app, _ = _diagnostic_ledger(fp)
+            ledger_no_app, _ = _diagnostic_ledger(fp, completed_pre_attempt2_run=True)
             ledger_no_app.authenticated_app_id = None
             no_app_class = classify_live_ledger_recovery(
                 ledger=ledger_no_app,

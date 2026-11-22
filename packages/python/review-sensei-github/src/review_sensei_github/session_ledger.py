@@ -2396,6 +2396,7 @@ class GitHubIssueCommentSessionLedger:
         _history_legacy_write_guard(self, record)
         from .publication_failure_recovery import (
             clear_admitted_prior_record,
+            consume_admitted_prior_chain,
             consume_admitted_prior_record,
         )
 
@@ -2405,11 +2406,17 @@ class GitHubIssueCommentSessionLedger:
             # admit_publication_failure_recovery stashes the prior record only while
             # _mutation_active is True inside mutate(); finally clears on failure.
             admitted_prior = consume_admitted_prior_record(self, record)
+            admitted_chain = consume_admitted_prior_chain(self, record)
             if record.quarantine_lineage is not None:
                 from .quarantine_action import require_native_decision
 
                 require_native_decision(self, record, updated)
-            _validate_queue_retention(record, updated, prior_record=admitted_prior)
+            _validate_queue_retention(
+                record,
+                updated,
+                prior_record=admitted_prior,
+                skipped_failed_ancestors=admitted_chain,
+            )
             read_session_baseline(self, updated)
             read_session_dispositions(self, updated)
             read_session_assessment_queue(self, updated)

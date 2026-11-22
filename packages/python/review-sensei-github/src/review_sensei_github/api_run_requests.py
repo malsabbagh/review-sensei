@@ -1909,8 +1909,12 @@ class ApiRunRequestTransport:
                     state.to_document(), assessments=completion.assessments
                 )
             elif pre_write_settlement_candidate:
+                from .publication_failure_recovery import peek_admitted_prior_chain
+
                 updated = record.rollover_pre_write_settled_api_accounting(
-                    state.to_document(), prior_record=settled_prior_record
+                    state.to_document(),
+                    prior_record=settled_prior_record,
+                    skipped_failed_ancestors=peek_admitted_prior_chain(ledger, record),
                 )
             else:
                 updated = record.rollover_api_accounting(state.to_document())

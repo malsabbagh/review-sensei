@@ -79,6 +79,8 @@ def _read_cached_manifest_in_memory(
     ledger: Any,
     identity: SessionIdentity,
     manifest: object,
+    *,
+    max_generation: int | None = None,
 ) -> object | None:
     """Decode inline or already-cached partitioned evidence with zero HTTP or cache writes."""
     from review_sensei.bounded_evidence import (
@@ -87,13 +89,25 @@ def _read_cached_manifest_in_memory(
         canonical_bytes,
         read_inline_evidence,
         read_partitioned_evidence,
+        validate_binding,
     )
 
     if not isinstance(manifest, dict):
         return None
-    binding = manifest.get("binding")
-    if not isinstance(binding, dict):
-        raise ReviewInputError("finding lifecycle manifest binding is invalid")
+    binding = validate_binding(manifest.get("binding"))
+    producer_fn = getattr(ledger, "evidence_producer", None)
+    if not callable(producer_fn):
+        raise ReviewInputError("finding lifecycle manifest producer is unavailable")
+    binding_gen = binding["generation"]
+    if (
+        binding["repository"] != identity.repository
+        or binding["repository_id"] != identity.repository_id
+        or binding["pull_request"] != identity.pull_request
+        or binding["producer"] != producer_fn()
+        or type(binding_gen) is not int
+        or (max_generation is not None and not 0 <= binding_gen <= max_generation)
+    ):
+        raise ReviewInputError("finding lifecycle manifest binding conflicts")
     encoding = manifest.get("encoding")
     if encoding == "inline-json-v1":
         return read_inline_evidence(manifest, expected_binding=binding)
@@ -570,7 +584,6 @@ class ReviewRunHooks(ApiRunReviewHooks):
             from .finding_lifecycle import _unpack_journal, _validate
             from .finding_lifecycle_dictionary import is_dictionary, unpack
             from .publication import ReviewPublisher, _reject_conflicting_instances
-            from .quarantine_namespace import inherited_namespace_is_historical
 
             _reject_conflicting_instances(result.comments)
             publisher = ReviewPublisher(http=self.ledger.http)
@@ -595,7 +608,10 @@ class ReviewRunHooks(ApiRunReviewHooks):
             if effect_record.finding_lifecycle is not None:
                 manifest = effect_record.finding_lifecycle.get("manifest")
                 envelope = _read_cached_manifest_in_memory(
-                    self.ledger, self.identity, manifest
+                    self.ledger,
+                    self.identity,
+                    manifest,
+                    max_generation=effect_record.generation,
                 )
                 if (
                     not isinstance(envelope, dict)
@@ -604,11 +620,19 @@ class ReviewRunHooks(ApiRunReviewHooks):
                     return
                 assert isinstance(manifest, dict)
                 binding = manifest["binding"]
+                binding_generation = binding.get("generation")
+                if type(binding_generation) is not int:
+                    raise ReviewInputError(
+                        "finding lifecycle manifest generation is invalid"
+                    )
                 packed = envelope.get("lifecycle")
                 if isinstance(packed, dict) and is_dictionary(packed):
                     dict_manifest = packed.get("dictionary_manifest")
                     base = _read_cached_manifest_in_memory(
-                        self.ledger, self.identity, dict_manifest
+                        self.ledger,
+                        self.identity,
+                        dict_manifest,
+                        max_generation=binding_generation,
                     )
                     if base is None:
                         return
@@ -616,10 +640,6 @@ class ReviewRunHooks(ApiRunReviewHooks):
                 else:
                     document = _validate(_unpack_journal(packed))
                 restored = decode_lifecycle_state(document["lifecycle"])
-                if inherited_namespace_is_historical(
-                    self.ledger, effect_record, restored.state, document
-                ):
-                    return
                 if not isinstance(restored.state, DriftEvaluationResult):
                     return
                 publisher._drift_states[repo_key] = restored.state
