@@ -396,6 +396,91 @@ class P0LaterAttemptCessationTests(unittest.TestCase):
         ):
             ev.ceased_run_owner(IDENTITY, 500, ApiExecutionOwner(2, "hosted", 0))
 
+    def test_ceased_run_owner_omitted_conclusion_allows_same_attempt_legacy_and_refuses_later_or_complete(
+        self,
+    ) -> None:
+        state: dict[str, object] = {
+            "latest_attempt": 1,
+            "include_conclusion": False,
+            "run_conclusion": None,
+        }
+
+        def opener(request, timeout=None):
+            _ = timeout
+            path = urlsplit(request.full_url).path
+            if path == "/repos/owner/repo/actions/runs/600":
+                payload: dict[str, object] = {
+                    "id": 600,
+                    "run_attempt": state["latest_attempt"],
+                    "status": "completed",
+                    "repository": {"id": 123, "full_name": "owner/repo"},
+                    "event": "pull_request",
+                }
+                if state["include_conclusion"]:
+                    payload["conclusion"] = state["run_conclusion"]
+                return json_response(payload)
+            if path == "/repos/owner/repo/actions/runs/600/attempts/1/jobs":
+                rows = _attempt1_jobs(600, job="hosted", conclusion="success")
+                return json_response({"total_count": len(rows), "jobs": rows})
+            if path == "/repos/owner/repo/actions/runs/600/attempts/2/jobs":
+                rows = [_skipped_step_job(job_id=602, run_id=600, attempt=2)]
+                return json_response({"total_count": len(rows), "jobs": rows})
+            raise AssertionError(path)
+
+        ev = ApiRunActionsEvidence(
+            GitHubHttp(api_url="https://api.github.test", opener=opener),
+            token="actions-tok",
+            command_run_id="601",
+            job="hosted",
+        )
+        owner = ApiExecutionOwner(1, "hosted", 0)
+
+        # (a) Same-attempt complete_terminal_inventory=False with status="completed" and
+        #     omitted conclusion succeeds (matching test_media_cli_activation mock).
+        proof = ev.ceased_run_owner(
+            IDENTITY, 600, owner, complete_terminal_inventory=False
+        )
+        self.assertEqual(proof, (600, 60001, "2026-11-22T12:00:00Z", "success"))
+
+        # (b) Later-attempt (run_attempt=2, predecessor 1) with omitted conclusion STILL refuses.
+        state["latest_attempt"] = 2
+        with self.assertRaisesRegex(
+            ReviewInputError, "previous Actions run has not ceased"
+        ):
+            ev.ceased_run_owner(IDENTITY, 600, owner, complete_terminal_inventory=False)
+
+        # (c) Same-attempt complete_terminal_inventory=True with omitted conclusion STILL refuses.
+        state["latest_attempt"] = 1
+        with self.assertRaisesRegex(
+            ReviewInputError, "previous Actions run has not ceased"
+        ):
+            ev.ceased_run_owner(IDENTITY, 600, owner, complete_terminal_inventory=True)
+
+        # (d) Same-attempt complete_terminal_inventory=False with explicit non-terminal
+        #     conclusion (e.g., None/"in_progress"/"bogus") STILL refuses (G08-1).
+        state["include_conclusion"] = True
+        for bad_conclusion in (None, "in_progress", "bogus"):
+            with self.subTest(bad_conclusion=bad_conclusion):
+                state["run_conclusion"] = bad_conclusion
+                with self.assertRaisesRegex(
+                    ReviewInputError, "previous Actions run has not ceased"
+                ):
+                    ev.ceased_run_owner(
+                        IDENTITY, 600, owner, complete_terminal_inventory=False
+                    )
+
+        # (e) Invalid/non-int run_attempt with omitted conclusion refuses cleanly (no TypeError).
+        state["include_conclusion"] = False
+        for bad_attempt in (None, "2", True, 0, -1):
+            with self.subTest(bad_attempt=bad_attempt):
+                state["latest_attempt"] = bad_attempt
+                with self.assertRaisesRegex(
+                    ReviewInputError, "previous Actions run has not ceased"
+                ):
+                    ev.ceased_run_owner(
+                        IDENTITY, 600, owner, complete_terminal_inventory=False
+                    )
+
     def test_end_to_end_rollover_handles_skipped_attempt2_blocks_entered_attempt2_and_detects_toctou(
         self,
     ) -> None:

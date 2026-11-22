@@ -268,9 +268,14 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             or type(repository.get("id")) is not int
             or repository.get("full_name") != identity.repository
             or run.get("status") != "completed"
-            or not _terminal_job(run)
             or type(latest_attempt) is not int
             or latest_attempt < 1
+            or (
+                complete_terminal_inventory
+                or latest_attempt > predecessor.run_attempt
+                or "conclusion" in run
+            )
+            and not _terminal_job(run)
         ):
             raise ReviewInputError(
                 "previous Actions run has not ceased or its identity conflicts"
