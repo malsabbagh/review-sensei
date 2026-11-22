@@ -1407,6 +1407,15 @@ class FindingLocationDriftG16Tests(unittest.TestCase):
         self.assertEqual(rec_deferred.resolved_threads, 0)
         self.assertFalse(publisher.threads["gh-drift-thread-1"].resolved)
 
+    def test_drift_tracked_obligation_latest_comment_type_guard(self) -> None:
+        valid = drift_obligation_from_comment(_comment(), head_sha=HEAD_1)
+        self.assertIsInstance(valid.latest_comment, ReviewComment)
+        cleared = replace(valid, latest_comment=None)
+        self.assertIsNone(cleared.latest_comment)
+        for bad_value in ({"path": "src/legacy_auth.py"}, "not-a-comment"):
+            with self.assertRaises(ReviewInputError):
+                replace(valid, latest_comment=bad_value)  # type: ignore[arg-type]
+
 
 class _DriftFakeBroker:
     def request_oidc_token(self) -> str:
@@ -2556,6 +2565,438 @@ class OrdinaryPublisherFindingDriftTests(unittest.TestCase):
                     for r in host2.reviews
                 )
             )
+
+    def test_ordinary_publisher_ambiguous_reply_and_uncertain_slot_hold_native_threads_open(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei_github import (
+            ConversationPublisher,
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+        from review_sensei_github.finding_lifecycle import restore_finding_lifecycle
+        from review_sensei_github.publication import (
+            ReviewPublisher,
+            approval_eligibility_from_body,
+        )
+
+        from review_sensei.baseline import baseline_from_review
+        from review_sensei.context import ReviewContextCacheKey
+        from review_sensei.human_assessment import finding_instance_fingerprint
+        from review_sensei.session import (
+            LocalSessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            prepare_review_transaction,
+            session_reservation_id,
+        )
+
+        identity = SessionIdentity(
+            repository="owner/repo", pull_request=1, repository_id=1
+        )
+        policy = ReviewConvergencePolicy()
+        config_ctx = {
+            "provider": {
+                "name": "fixture",
+                "profile": None,
+                "base_url": None,
+                "timeout_seconds": 900.0,
+                "max_output_tokens": None,
+                "allow_custom_endpoint": False,
+                "openrouter_policy": None,
+            },
+            "model": "fixture-v1",
+            "stages": [],
+            "category_policy": [],
+            "orchestration": {"enabled": False},
+            "publication_mode": "strict",
+        }
+        evidence_ctx = {"evidence_policy": "legacy", "snapshot_sha256": None}
+        diff_r1 = (
+            "diff --git a/src/crypto.py b/src/crypto.py\n"
+            "--- a/src/crypto.py\n"
+            "+++ b/src/crypto.py\n"
+            "@@ -1,1 +1,2 @@\n"
+            "-def derive_key(pw): return pw\n"
+            "+def derive_key(pw):\n"
+            "+    return pw.encode('utf-8')\n"
+            "diff --git a/src/auth.py b/src/auth.py\n"
+            "--- a/src/auth.py\n"
+            "+++ b/src/auth.py\n"
+            "@@ -1,1 +1,2 @@\n"
+            "-def check_auth(tok): return True\n"
+            "+def check_auth(tok):\n"
+            "+    return bool(tok)\n"
+        )
+        diff_split = (
+            "diff --git a/src/a.py b/src/a.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/src/a.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+def derive_key(pw):\n"
+            "+    return pw.encode('utf-8')\n"
+            "diff --git a/src/b.py b/src/b.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/src/b.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+def derive_key(pw):\n"
+            "+    return pw.encode('utf-8')\n"
+            "diff --git a/src/auth.py b/src/auth.py\n"
+            "--- a/src/auth.py\n"
+            "+++ b/src/auth.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def check_auth(tok):\n"
+            "-    return bool(tok)\n"
+            "+    return len(tok) > 8\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pathlib import Path
+
+            host = _DriftGitHubHost(head_sha=HEAD_1)
+            ledger = LocalSessionLedger(
+                Path(tmpdir) / "ledger", enable_finding_lifecycle_writes=True
+            )
+            ledger.initialize(identity)
+            publisher = ReviewPublisher(http=host.http)
+            app = GitHubApplication(
+                http=host.http,
+                broker=_DriftFakeBroker(),  # type: ignore[arg-type]
+                reviewer=publisher,
+                learner=None,
+                replier=ConversationPublisher(http=host.http),
+                session_ledger=ledger,
+            )
+            options = GitHubWriteOptions(
+                auto_review=True,
+                auto_approve=True,
+                github_writes=True,
+                operation_entry="disabled",
+                max_active_findings=4,
+                enable_drift_tracking=True,
+            )
+            c_crypto = _comment(
+                "src/crypto.py",
+                line=2,
+                body="Weak KDF.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            c_auth = _comment(
+                "src/auth.py",
+                line=2,
+                body="Auth length check missing.",
+                symbol="check_auth",
+                defect_kind="auth_bypass",
+                blocking=False,
+                needs_human=True,
+            )
+            res1 = replace(
+                _result(c_crypto, c_auth, paths=("src/crypto.py", "src/auth.py")),
+                model="fixture-v1",
+            )
+            key1 = ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_1,
+                engine="fixture",
+                model="fixture-v1",
+                profile="default",
+                stage_digest=_sha("stage"),
+                context_digest=_sha("ctx"),
+                learning_digest=_sha("learn"),
+            )
+            prep1 = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id=session_reservation_id(
+                    repository="owner/repo",
+                    pull_request=1,
+                    head_sha=HEAD_1,
+                    kind="publish",
+                ),
+                base_sha=BASE_SHA,
+                head_sha=HEAD_1,
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    config_ctx
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(evidence_ctx),
+            )
+            res1 = checkpoint_review_analysis(
+                ledger,
+                identity,
+                prep1,
+                res1,
+                baseline=baseline_from_review(
+                    res1,
+                    cache_key=key1,
+                    policy=policy,
+                    generation=prep1.record.generation + 1,
+                ),
+            )
+            app.publish_review(
+                options=options,
+                oidc_token="oidc-r1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=diff_r1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                current_key=key1,
+                configuration_context=config_ctx,
+                evidence_context=evidence_ctx,
+                blocker_candidates=self._blockers(res1),
+            )
+            self.assertEqual(len(host.threads), 2)
+
+            host.head_sha = HEAD_2
+            ledger2 = LocalSessionLedger(
+                Path(tmpdir) / "ledger", enable_finding_lifecycle_writes=True
+            )
+            publisher2 = ReviewPublisher(http=host.http)
+            app2 = GitHubApplication(
+                http=host.http,
+                broker=_DriftFakeBroker(),  # type: ignore[arg-type]
+                reviewer=publisher2,
+                learner=None,
+                replier=ConversationPublisher(http=host.http),
+                session_ledger=ledger2,
+            )
+            dup_a = _comment(
+                "src/a.py",
+                line=2,
+                body="Weak KDF in a.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            dup_b = _comment(
+                "src/b.py",
+                line=2,
+                body="Weak KDF in b.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            res2 = replace(
+                _result(
+                    dup_a,
+                    dup_b,
+                    c_auth,
+                    paths=("src/a.py", "src/b.py", "src/auth.py"),
+                ),
+                model="fixture-v1",
+            )
+            key2 = replace(key1, head_sha=HEAD_2)
+            prep2 = prepare_review_transaction(
+                ledger2,
+                identity,
+                policy,
+                reservation_id=session_reservation_id(
+                    repository="owner/repo",
+                    pull_request=1,
+                    head_sha=HEAD_2,
+                    kind="publish",
+                ),
+                base_sha=BASE_SHA,
+                head_sha=HEAD_2,
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    config_ctx
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(evidence_ctx),
+            )
+            res2 = checkpoint_review_analysis(
+                ledger2,
+                identity,
+                prep2,
+                res2,
+                baseline=baseline_from_review(
+                    res2,
+                    cache_key=key2,
+                    policy=policy,
+                    generation=prep2.record.generation + 1,
+                ),
+            )
+            app2.publish_review(
+                options=options,
+                oidc_token="oidc-r2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res2,
+                diff=diff_split,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                current_key=key2,
+                configuration_context=config_ctx,
+                evidence_context=evidence_ctx,
+                blocker_candidates=self._blockers(res2),
+                drift_descriptors=(
+                    FileDriftDescriptor(
+                        drift_kind="cross_file_move",
+                        source_path="src/crypto.py",
+                        target_paths=("src/a.py", "src/b.py"),
+                        moved_symbols=("derive_key",),
+                    ),
+                    FileDriftDescriptor(
+                        drift_kind="duplicate_code",
+                        source_path="src/crypto.py",
+                        target_paths=("src/a.py", "src/b.py"),
+                    ),
+                ),
+            )
+            dstate = app2.drift_state(repository_id=1, pull_request=1)
+            assert dstate is not None
+            obs = {o.criterion.origin_symbol: o for o in dstate.inventory.obligations}
+            self.assertEqual(
+                obs["derive_key"].lifecycle_state, "ambiguous-multi-target"
+            )
+            self.assertEqual(obs["check_auth"].lifecycle_state, "active-unresolved")
+
+            # Cold-restart finalizer: restore durable lifecycle and verify ambiguous
+            # and uncertain slots are both excluded from native thread cleanup.
+            cold_ledger = LocalSessionLedger(
+                Path(tmpdir) / "ledger", enable_finding_lifecycle_writes=True
+            )
+            cold_pub = ReviewPublisher(http=host.http)
+            restore_finding_lifecycle(cold_pub, cold_ledger, identity)
+            cold_state = cold_pub._drift_states[(1, 1)]
+            cold_obs = {
+                o.criterion.origin_symbol: o for o in cold_state.inventory.obligations
+            }
+            inst_ambig = finding_instance_fingerprint(
+                cold_obs["derive_key"].latest_comment
+            )
+            inst_clean = finding_instance_fingerprint(
+                cold_obs["check_auth"].latest_comment
+            )
+            ambig_tid = cold_obs["derive_key"].thread_binding.thread_id
+            clean_tid = cold_obs["check_auth"].thread_binding.thread_id
+            for idx, ob in enumerate(cold_state.inventory.obligations):
+                if ob.criterion.origin_symbol == "check_auth":
+                    cold_state_unc = replace(
+                        cold_state,
+                        inventory=DriftInventory(
+                            obligations=tuple(
+                                replace(
+                                    o,
+                                    thread_binding=replace(
+                                        o.thread_binding, slot_state="uncertain"
+                                    ),
+                                )
+                                if i == idx
+                                else o
+                                for i, o in enumerate(cold_state.inventory.obligations)
+                            )
+                        ),
+                    )
+                    break
+            cold_pub._drift_states[(1, 1)] = cold_state_unc
+            cold_pub.finalizer._drift_states = cold_pub._drift_states
+            held = cold_pub.finalizer._held_cleanup_instances(
+                repository_id=1, pull_request=1, head_sha=HEAD_2
+            )
+            self.assertIn(inst_ambig, held)
+            self.assertIn(inst_clean, held)
+
+            # Re-restore clean state where only derive_key is ambiguous and check_auth is confirmed:
+            clean_pub = ReviewPublisher(http=host.http)
+            restore_finding_lifecycle(clean_pub, cold_ledger, identity)
+            reviews = clean_pub.finalizer._load_head_reviews(
+                token="tok-review", repository="owner/repo", pull_request=1
+            )
+            published_elig = approval_eligibility_from_body(reviews[-1]["body"])
+            assert published_elig is not None
+            ambig_proj_fp = next(
+                f.fingerprint
+                for f in published_elig.human_review.findings
+                if f.path == "src/a.py"
+            )
+            self.assertIn(ambig_proj_fp, held)
+            idx_res = clean_pub.finalizer.finding_index_from_reviews(
+                reviews,
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                app_slug="reviewsensei[bot]",
+                eligibility=published_elig,
+            )
+            idx_clean_inst = next(
+                e.instance for e in idx_res.entries if not e.body_placed
+            )
+            # 1) When check_auth's slot is uncertain, cleanup holds even with honored_instances:
+            unc_pub = ReviewPublisher(http=host.http)
+            restore_finding_lifecycle(unc_pub, cold_ledger, identity)
+            unc_pub._drift_states[(1, 1)] = cold_state_unc
+            unc_pub.finalizer._drift_states = unc_pub._drift_states
+            rec_unc = unc_pub.finalizer.reconcile_decided_threads(
+                token="tok-review",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                app_slug="reviewsensei[bot]",
+                eligibility=published_elig,
+                index=idx_res,
+                reviews=reviews,
+                honored_instances=frozenset((idx_clean_inst,)),
+            )
+            self.assertIn(idx_clean_inst, rec_unc.unconfirmed)
+            self.assertEqual(rec_unc.resolved, ())
+            by_tid = {t["id"]: t for t in host.threads}
+            self.assertFalse(by_tid[ambig_tid]["isResolved"])
+            self.assertFalse(by_tid[clean_tid]["isResolved"])
+
+            # 2) On confirmed slot for check_auth, authenticated resolution & cleanup resolve
+            # check_auth while keeping ambiguous derive_key open/unresolved:
+            from review_sensei_github.conversation import (
+                apply_authenticated_finding_resolution,
+            )
+
+            apply_authenticated_finding_resolution(
+                clean_pub.finalizer,
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                instances=(ambig_proj_fp, idx_clean_inst),
+                evidence_sha256=_sha("auth-evidence"),
+            )
+            post_obs = {
+                o.criterion.origin_symbol: o
+                for o in clean_pub._drift_states[(1, 1)].inventory.obligations
+            }
+            self.assertEqual(
+                post_obs["derive_key"].lifecycle_state, "ambiguous-multi-target"
+            )
+            self.assertEqual(post_obs["check_auth"].lifecycle_state, "verified-fixed")
+
+            rec = clean_pub.finalizer.reconcile_decided_threads(
+                token="tok-review",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                app_slug="reviewsensei[bot]",
+                eligibility=published_elig,
+                index=idx_res,
+                reviews=reviews,
+                honored_instances=frozenset((idx_clean_inst,)),
+            )
+            self.assertIn(idx_clean_inst, rec.resolved)
+            by_tid = {t["id"]: t for t in host.threads}
+            self.assertFalse(by_tid[ambig_tid]["isResolved"])
+            self.assertTrue(by_tid[clean_tid]["isResolved"])
 
 
 if __name__ == "__main__":

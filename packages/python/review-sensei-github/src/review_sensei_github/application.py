@@ -973,6 +973,52 @@ class GitHubApplication:
             absent_proof_sha256=absent_proof_sha256,
         )
 
+    def _reenroll_lifecycle_risk(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        lifecycle_document: Mapping[str, Any] | None = None,
+    ) -> tuple[int, bool]:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            return 0, False
+        active_blocking = self.reviewer.active_blocking_obligations_count(
+            repository_id=repository_id, pull_request=pull_request
+        )
+        has_uncertain = any(
+            hrid == repository_id and hpr == pull_request
+            for (hrid, hpr, _sha) in self.reviewer._response_loss_holds
+        ) or self.reviewer.has_unknown_trust_effect(
+            repository_id=repository_id, pull_request=pull_request
+        )
+        window_state = self.reviewer.active_window_state(
+            repository_id=repository_id, pull_request=pull_request
+        )
+        if window_state is not None:
+            if window_state.display_active_findings.has_uncertain_slots or any(
+                ob.native_target is not None and ob.target_state == "uncertain"
+                for ob in window_state.authoritative_decision_inventory.obligations
+            ):
+                has_uncertain = True
+        drift_state = self.reviewer.drift_state(
+            repository_id=repository_id, pull_request=pull_request
+        )
+        if drift_state is not None:
+            if any(s.state == "uncertain" for s in drift_state.slots) or any(
+                ob.thread_binding is not None
+                and ob.thread_binding.slot_state == "uncertain"
+                for ob in drift_state.inventory.obligations
+            ):
+                has_uncertain = True
+        if lifecycle_document is not None:
+            if bool(lifecycle_document.get("unknown_trust_effect")) or any(
+                not isinstance(eff, Mapping)
+                or eff.get("status") not in {"confirmed", "rejected"}
+                for eff in lifecycle_document.get("effects", ())
+            ):
+                has_uncertain = True
+        return active_blocking, has_uncertain
+
     def execute_operator_reenroll(
         self,
         *,
@@ -987,16 +1033,23 @@ class GitHubApplication:
         ):
             rid = request.identity.repository_id
             pr = request.identity.pull_request
+            loaded = ledger.load(request.identity, now=now)
+            lifecycle_document: Mapping[str, Any] | None = None
+            if loaded.status in {"ok", "migrated"}:
+                from .finding_lifecycle import restore_finding_lifecycle
+
+                _rec, lifecycle_document = restore_finding_lifecycle(
+                    self.reviewer, ledger, request.identity, loaded=loaded
+                )
+            restored_blocking, restored_uncertain = self._reenroll_lifecycle_risk(
+                repository_id=rid,
+                pull_request=pr,
+                lifecycle_document=lifecycle_document,
+            )
             active_blocking = max(
-                request.active_blocking_obligations,
-                self.reviewer.active_blocking_obligations_count(
-                    repository_id=rid, pull_request=pr
-                ),
+                request.active_blocking_obligations, restored_blocking
             )
-            has_uncertain = request.has_uncertain_write or any(
-                hrid == rid and hpr == pr
-                for (hrid, hpr, _sha) in self.reviewer._response_loss_holds
-            )
+            has_uncertain = request.has_uncertain_write or restored_uncertain
             if (
                 active_blocking != request.active_blocking_obligations
                 or has_uncertain != request.has_uncertain_write
@@ -3950,6 +4003,32 @@ class GitHubApplication:
         command_policy_digest = (
             convergence_policy or ReviewConvergencePolicy()
         ).digest()
+        if (
+            lifecycle_record is not None
+            and lifecycle_record.finding_lifecycle is not None
+            and command.action
+            in {
+                "verify",
+                "accept-risk",
+                "dismiss",
+                "defer",
+                "accept-coverage-uncertainty",
+            }
+        ):
+            binding = cast(
+                Mapping[str, Any], lifecycle_record.finding_lifecycle["manifest"]
+            )["binding"]
+            if binding["policy_digest"] != command_policy_digest:
+                return MaintainerCommandResult(
+                    action=command.action,
+                    applied=False,
+                    operator_paused=lifecycle_record.operator_paused,
+                    evaluation_failed=False,
+                    summary=(
+                        "durable_finding_inventory_policy_drift: "
+                        "policy conflicts with enrolled finding lifecycle"
+                    ),
+                )
         command_provenance = (
             f"comment:{source_comment_id}"
             if isinstance(source_comment_id, int)
@@ -4057,12 +4136,10 @@ class GitHubApplication:
                     return capacity_outcome
                 command_finalization_plan = capacity_outcome
         if command.action == "reenroll" and isinstance(self.reviewer, ReviewPublisher):
-            active_blocking = self.reviewer.active_blocking_obligations_count(
-                repository_id=repository_id, pull_request=pull_request
-            )
-            has_uncertain = any(
-                hrid == repository_id and hpr == pull_request
-                for (hrid, hpr, _sha) in self.reviewer._response_loss_holds
+            active_blocking, has_uncertain = self._reenroll_lifecycle_risk(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                lifecycle_document=lifecycle_document,
             )
             if active_blocking > 0 or has_uncertain:
                 reenroll_check = evaluate_operator_reenroll(
@@ -5302,6 +5379,11 @@ class GitHubApplication:
                 binding = cast(Mapping[str, Any], record.finding_lifecycle["manifest"])[
                     "binding"
                 ]
+                if (
+                    policy_digest is not None
+                    and policy_digest != binding["policy_digest"]
+                ):
+                    raise ReviewInputError("finding lifecycle policy conflicts")
                 journal = FindingLifecycleJournal(
                     self.reviewer,
                     ledger,

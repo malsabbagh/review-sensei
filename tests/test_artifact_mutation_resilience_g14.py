@@ -852,6 +852,342 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
         http, _ = make_http([json_response([])])
         self.assertIsNotNone(http)
 
+    def test_restricted_reenroll_expired_record_blocks_on_uncertain_accounting_and_lifecycle(
+        self,
+    ) -> None:
+        from urllib.parse import urlparse
+
+        from review_sensei_github.api_run_host import review_startup_plan
+
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunAccounting,
+            ApiRunIdentity,
+            CallerRequestBlock,
+            FrozenApiConfiguration,
+            PendingApiRequest,
+        )
+
+        class _StatefulExpiredHost:
+            def __init__(self) -> None:
+                self.comments: list[dict[str, object]] = []
+
+            def opener(self, request, timeout=None):
+                del timeout
+                path = urlparse(request.full_url).path
+                body = (
+                    json.loads(request.data.decode("utf-8")) if request.data else None
+                )
+                if request.method == "GET" and path == "/user":
+                    return FakeHTTPResponse(
+                        json.dumps(
+                            {
+                                "id": 9001,
+                                "login": "reviewsensei[bot]",
+                                "type": "Bot",
+                            }
+                        ).encode("utf-8"),
+                        status=200,
+                    )
+                if request.method == "GET" and path.endswith("/issues/136/comments"):
+                    return FakeHTTPResponse(
+                        json.dumps(self.comments).encode("utf-8"), status=200
+                    )
+                if request.method == "GET" and "/issues/comments/" in path:
+                    cid = int(path.rsplit("/", 1)[-1])
+                    item = next((c for c in self.comments if c["id"] == cid), None)
+                    return FakeHTTPResponse(
+                        json.dumps(item or {"message": "Not Found"}).encode("utf-8"),
+                        status=200 if item else 404,
+                    )
+                if request.method == "POST" and path.endswith("/issues/136/comments"):
+                    cid = 1000 + len(self.comments)
+                    item = {
+                        "id": cid,
+                        "body": body["body"],
+                        "user": {
+                            "id": 9001,
+                            "login": "reviewsensei[bot]",
+                            "type": "Bot",
+                        },
+                    }
+                    self.comments.append(item)
+                    return FakeHTTPResponse(
+                        json.dumps(item).encode("utf-8"), status=201
+                    )
+                if request.method == "PATCH" and "/issues/comments/" in path:
+                    cid = int(path.rsplit("/", 1)[-1])
+                    item = next(c for c in self.comments if c["id"] == cid)
+                    item["body"] = body["body"]
+                    return FakeHTTPResponse(
+                        json.dumps(item).encode("utf-8"), status=200
+                    )
+                raise AssertionError(f"Unhandled request: {request.method} {path}")
+
+        from datetime import datetime, timezone
+
+        live_now = datetime.now(timezone.utc)
+        expired_now = live_now + timedelta(days=31)
+        exec_owner = ApiExecutionOwner(run_attempt=1, job="hosted", generation=0)
+        uncertain_acc = ApiRunAccounting(
+            identity=ApiRunIdentity(repository_id=99, run_id=10),
+            configuration=FrozenApiConfiguration(
+                commit=HEAD_SHA, digest=_sha("cfg"), limit=512
+            ),
+            owner=exec_owner,
+            startup=review_startup_plan("hosted"),
+            startup_used=(("hosted", 1),),
+            blocks=(
+                CallerRequestBlock(
+                    block_id="blk_1",
+                    issued_by=exec_owner,
+                    undispatched=0,
+                    pending=(
+                        PendingApiRequest(
+                            request_id="req_unc_1", deadline_unix_ms=9999999999999
+                        ),
+                    ),
+                ),
+            ),
+        ).to_document()
+
+        # 1) Expired record with api_run_accounting["uncertain"] > 0 refuses!
+        acc_host = _StatefulExpiredHost()
+        acc_ledger = GitHubIssueCommentSessionLedger(
+            GitHubHttp(api_url="https://api.github.test", opener=acc_host.opener),
+            token="token",
+            app_slug="reviewsensei[bot]",
+            enable_finding_lifecycle_writes=True,
+        )
+        rec_acc = SessionRecord.create(
+            IDENTITY,
+            now=live_now,
+            ttl=timedelta(days=30),
+            completed_initial_reviews=1,
+            generation=1,
+            api_run_accounting=uncertain_acc,
+        )
+        acc_host.comments.append(
+            {
+                "id": 901,
+                "body": render_session_comment(
+                    repository_id=99, pull_request=136, record=rec_acc
+                ),
+                "user": {"id": 9001, "login": "reviewsensei[bot]", "type": "Bot"},
+            }
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "reenroll-blocked-by-uncertain-write"
+        ):
+            execute_restricted_operator_reenroll(
+                acc_ledger,
+                OperatorReenrollRequest(
+                    identity=IDENTITY,
+                    head_sha=HEAD_SHA,
+                    operator_login="repo-admin",
+                    association="OWNER",
+                    permission="admin",
+                    reason="Attempt expired reenroll with uncertain accounting.",
+                ),
+                now=expired_now,
+            )
+
+        # 2) Expired record with unresolved OR uncertain finding_lifecycle refuses!
+        from review_sensei_github.errors import GitHubPublicationTransientError
+
+        from review_sensei.baseline import baseline_from_review
+        from review_sensei.context import ReviewContextCacheKey
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.models import ReviewTransaction
+        from review_sensei.session import (
+            checkpoint_review_analysis,
+            prepare_review_transaction,
+            session_reservation_id,
+        )
+
+        policy_exp = ReviewConvergencePolicy(mode="strict")
+        cfg_exp = {
+            "provider": {
+                "name": "fixture",
+                "profile": None,
+                "base_url": None,
+                "timeout_seconds": 900.0,
+                "max_output_tokens": None,
+                "allow_custom_endpoint": False,
+                "openrouter_policy": None,
+            },
+            "model": "fixture-model",
+            "stages": [],
+            "category_policy": [],
+            "orchestration": {"enabled": False},
+            "publication_mode": "strict",
+        }
+        ev_exp = {"evidence_policy": "legacy", "snapshot_sha256": None}
+        id_exp = SessionIdentity(
+            repository="owner/repo", pull_request=1, repository_id=1
+        )
+        for case in ("blocking", "pending-effect", "clean-resolved"):
+            with self.subTest(case=case):
+                exp_host = _ArtifactGitHubHost(head_sha=HEAD_SHA)
+                exp_ledger = GitHubIssueCommentSessionLedger(
+                    exp_host.http,
+                    token="tok-exp",
+                    app_slug="reviewsensei[bot]",
+                    enable_finding_lifecycle_writes=True,
+                )
+                exp_ledger.initialize(id_exp, now=live_now)
+                exp_app, _exp_pub, exp_opts = (
+                    OrdinaryPublisherArtifactResilienceTests._make_app(
+                        exp_host, local_ledger=exp_ledger
+                    )
+                )
+                cov = CoverageManifest(
+                    files=(FileCoverage("src/auth.py", "reviewed"),),
+                    enumerated_paths=("src/auth.py",),
+                    enumeration_complete=True,
+                )
+                if case == "blocking":
+                    exp_res, exp_blockers = (
+                        OrdinaryPublisherArtifactResilienceTests._blocking_result()
+                    )
+                    exp_res = replace(exp_res, model="fixture-model")
+                else:
+                    exp_res = ReviewResult(
+                        summary="Clean expired control.",
+                        comments=(),
+                        provider="fixture",
+                        review_status="complete",
+                        model="fixture-model",
+                        coverage=cov,
+                    )
+                    exp_blockers = ()
+                key_exp = ReviewContextCacheKey(
+                    repository="owner/repo",
+                    pull_request=1,
+                    base_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest=_sha("stage"),
+                    context_digest=_sha("ctx"),
+                    learning_digest=_sha("learn"),
+                )
+                prep_exp = prepare_review_transaction(
+                    exp_ledger,
+                    id_exp,
+                    policy_exp,
+                    reservation_id=session_reservation_id(
+                        repository="owner/repo",
+                        pull_request=1,
+                        head_sha=HEAD_SHA,
+                        kind="publish",
+                    ),
+                    base_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                    configuration_digest=ReviewTransaction.compute_configuration_digest(
+                        cfg_exp
+                    ),
+                    evidence_digest=ReviewTransaction.compute_evidence_digest(ev_exp),
+                )
+                exp_res = checkpoint_review_analysis(
+                    exp_ledger,
+                    id_exp,
+                    prep_exp,
+                    exp_res,
+                    baseline=baseline_from_review(
+                        exp_res,
+                        cache_key=key_exp,
+                        policy=policy_exp,
+                        generation=prep_exp.record.generation + 1,
+                    ),
+                )
+                if case == "pending-effect":
+                    exp_host.fail_before_review_post = True
+                    with self.assertRaises(
+                        (GitHubPublicationTransientError, ReviewInputError)
+                    ):
+                        exp_app.publish_review(
+                            options=exp_opts,
+                            oidc_token="oidc-exp",
+                            repository="owner/repo",
+                            repository_id=1,
+                            pull_request=1,
+                            head_sha=HEAD_SHA,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            result=exp_res,
+                            diff=OrdinaryPublisherArtifactResilienceTests.DIFF_CLEAN,
+                            app_slug="reviewsensei[bot]",
+                            convergence_policy=policy_exp,
+                            current_key=key_exp,
+                            configuration_context=cfg_exp,
+                            evidence_context=ev_exp,
+                            blocker_candidates=exp_blockers,
+                        )
+                else:
+                    exp_app.publish_review(
+                        options=exp_opts,
+                        oidc_token="oidc-exp",
+                        repository="owner/repo",
+                        repository_id=1,
+                        pull_request=1,
+                        head_sha=HEAD_SHA,
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        result=exp_res,
+                        diff=(
+                            OrdinaryPublisherArtifactResilienceTests.DIFF_1
+                            if case == "blocking"
+                            else OrdinaryPublisherArtifactResilienceTests.DIFF_CLEAN
+                        ),
+                        app_slug="reviewsensei[bot]",
+                        convergence_policy=policy_exp,
+                        current_key=key_exp,
+                        configuration_context=cfg_exp,
+                        evidence_context=ev_exp,
+                        blocker_candidates=exp_blockers,
+                    )
+                stored_rec = exp_ledger.load(id_exp, now=live_now).record
+                assert stored_rec is not None
+                assert stored_rec.finding_lifecycle is not None
+                cold_exp_ledger = GitHubIssueCommentSessionLedger(
+                    exp_host.http,
+                    token="tok-exp",
+                    app_slug="reviewsensei[bot]",
+                    enable_finding_lifecycle_writes=True,
+                )
+                req = OperatorReenrollRequest(
+                    identity=id_exp,
+                    head_sha=HEAD_SHA,
+                    operator_login="repo-admin",
+                    association="OWNER",
+                    permission="admin",
+                    reason="Expired record lifecycle reenroll check.",
+                    enrollment_witness_present=True,
+                    enrollment_witness_sha256=stored_rec.record_sha256,
+                )
+                if case == "blocking":
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "reenroll-blocked-by-active-obligations"
+                    ):
+                        execute_restricted_operator_reenroll(
+                            cold_exp_ledger, req, now=expired_now
+                        )
+                elif case == "pending-effect":
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "reenroll-blocked-by-uncertain-write"
+                    ):
+                        execute_restricted_operator_reenroll(
+                            cold_exp_ledger, req, now=expired_now
+                        )
+                else:
+                    restored, receipt = execute_restricted_operator_reenroll(
+                        cold_exp_ledger, req, now=expired_now
+                    )
+                    self.assertEqual(receipt.previous_status, "expired")
+                    self.assertIsNotNone(restored.record_sha256)
+
 
 class _BrokerSessionStub:
     def __init__(self, token: str, state: str) -> None:
@@ -975,6 +1311,12 @@ class _ArtifactGitHubHost:
                 return self._resp({"message": "Not Found"}, 404)
             if path.endswith("/issues/1/comments"):
                 return self._resp(list(self.issue_comments))
+            if "/issues/comments/" in path:
+                cid = int(path.rsplit("/", 1)[-1])
+                item = next((c for c in self.issue_comments if c["id"] == cid), None)
+                return self._resp(
+                    item or {"message": "Not Found"}, 200 if item else 404
+                )
             if path.endswith("/check-runs"):
                 matching = [
                     r for r in self.check_runs if r.get("head_sha") == self.head_sha
@@ -2031,6 +2373,367 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
         self.assertEqual(receipt.previous_status, "missing")
         self.assertEqual(restored_rec.record_sha256, receipt.restored_record_sha256)
         self.assertEqual(len(host_hold.issue_comments), 1)
+
+    def test_cold_reenroll_blocks_on_restored_unknown_holds_uncertain_slots_and_pending_effects(
+        self,
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from review_sensei_github import (
+            ConversationPublisher,
+            GitHubApplication,
+            LearningPRPublisher,
+            ReviewPublisher,
+        )
+        from review_sensei_github.errors import GitHubPublicationTransientError
+
+        from review_sensei.baseline import baseline_from_review
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.models import ReviewTransaction
+        from review_sensei.session import (
+            checkpoint_review_analysis,
+            prepare_review_transaction,
+            session_reservation_id,
+        )
+
+        live_now = datetime.now(timezone.utc)
+        policy = ReviewConvergencePolicy(mode="strict")
+        identity = SessionIdentity(
+            repository="owner/repo", pull_request=1, repository_id=1
+        )
+        cfg_ctx = {
+            "provider": {
+                "name": "fixture",
+                "profile": None,
+                "base_url": None,
+                "timeout_seconds": 900.0,
+                "max_output_tokens": None,
+                "allow_custom_endpoint": False,
+                "openrouter_policy": None,
+            },
+            "model": "fixture-model",
+            "stages": [],
+            "category_policy": [],
+            "orchestration": {"enabled": False},
+            "publication_mode": "strict",
+        }
+        ev_ctx = {"evidence_policy": "legacy", "snapshot_sha256": None}
+
+        # Case 1: Cold response-loss hold after round 1 resolved -> blocks BOTH
+        # execute_operator_reenroll and apply_maintainer_command("reenroll").
+        host = _ArtifactGitHubHost(head_sha=HEAD_SHA)
+        ledger = GitHubIssueCommentSessionLedger(
+            host.http,
+            token="tok-cold",
+            app_slug="reviewsensei[bot]",
+            enable_finding_lifecycle_writes=True,
+        )
+        ledger.initialize(identity, now=live_now)
+        app, _pub, options = self._make_app(host, local_ledger=ledger)
+        res1, blockers1 = self._blocking_result()
+        res1 = replace(res1, model="fixture-model")
+        prep1 = prepare_review_transaction(
+            ledger,
+            identity,
+            policy,
+            reservation_id=session_reservation_id(
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD_SHA,
+                kind="publish",
+            ),
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=ReviewTransaction.compute_configuration_digest(
+                cfg_ctx
+            ),
+            evidence_digest=ReviewTransaction.compute_evidence_digest(ev_ctx),
+        )
+        res1 = checkpoint_review_analysis(
+            ledger,
+            identity,
+            prep1,
+            res1,
+            baseline=baseline_from_review(
+                res1,
+                cache_key=self._cache_key(HEAD_SHA),
+                policy=policy,
+                generation=prep1.record.generation + 1,
+            ),
+        )
+        app.publish_review(
+            options=options,
+            oidc_token="oidc-r1",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_SHA,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=res1,
+            diff=self.DIFF_1,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+            blocker_candidates=blockers1,
+            current_key=self._cache_key(HEAD_SHA),
+            configuration_context=cfg_ctx,
+            evidence_context=ev_ctx,
+        )
+        # Reopen with response loss on HEAD_SHA_2 leaving durable unknown-effect hold.
+        host.head_sha = HEAD_SHA_2
+        ledger_r2 = GitHubIssueCommentSessionLedger(
+            host.http,
+            token="tok-cold",
+            app_slug="reviewsensei[bot]",
+            enable_finding_lifecycle_writes=True,
+        )
+        app_r2, _pub_r2, _ = self._make_app(host, local_ledger=ledger_r2)
+        clean_res2 = replace(self._clean_result(), model="fixture-model")
+        prep2 = prepare_review_transaction(
+            ledger_r2,
+            identity,
+            policy,
+            reservation_id=session_reservation_id(
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD_SHA_2,
+                kind="publish",
+            ),
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA_2,
+            configuration_digest=ReviewTransaction.compute_configuration_digest(
+                cfg_ctx
+            ),
+            evidence_digest=ReviewTransaction.compute_evidence_digest(ev_ctx),
+        )
+        clean_res2 = checkpoint_review_analysis(
+            ledger_r2,
+            identity,
+            prep2,
+            clean_res2,
+            baseline=baseline_from_review(
+                clean_res2,
+                cache_key=self._cache_key(HEAD_SHA_2),
+                policy=policy,
+                generation=prep2.record.generation + 1,
+            ),
+        )
+        from review_sensei.errors import ReviewInputError as _ReviewInputErr
+
+        host.fail_before_review_post = True
+        with self.assertRaises((GitHubPublicationTransientError, _ReviewInputErr)):
+            app_r2.publish_review(
+                options=options,
+                oidc_token="oidc-r2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_SHA_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=clean_res2,
+                diff=self.DIFF_CLEAN,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                current_key=self._cache_key(HEAD_SHA_2),
+                configuration_context=cfg_ctx,
+                evidence_context=ev_ctx,
+            )
+        # Cold instance (no in-memory response-loss cache):
+        cold_ledger = GitHubIssueCommentSessionLedger(
+            host.http,
+            token="tok-cold",
+            app_slug="reviewsensei[bot]",
+            enable_finding_lifecycle_writes=True,
+        )
+        cold_pub = ReviewPublisher(http=host.http)
+        cold_app = GitHubApplication(
+            http=host.http,
+            broker=_ArtifactFakeBroker(),  # type: ignore[arg-type]
+            reviewer=cold_pub,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=cold_ledger,
+        )
+        cmd_res = cold_app.apply_maintainer_command(
+            options=options,
+            oidc_token="oidc-cmd-cold",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_SHA_2,
+            body="@reviewsensei review reenroll",
+            actor_login="repo-admin",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            actor_permission="admin",
+        )
+        self.assertFalse(cmd_res.applied)
+        self.assertTrue(cmd_res.operator_paused)
+        self.assertIn(
+            cmd_res.summary,
+            {
+                "reenroll-blocked-by-active-obligations",
+                "reenroll-blocked-by-uncertain-write",
+            },
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "restricted operator reenroll refused:"
+        ):
+            cold_app.execute_operator_reenroll(
+                ledger=cold_ledger,
+                request=OperatorReenrollRequest(
+                    identity=identity,
+                    head_sha=HEAD_SHA_2,
+                    operator_login="repo-admin",
+                    association="OWNER",
+                    permission="admin",
+                    reason="Cold reenroll attempt while holds exist.",
+                ),
+                now=live_now,
+            )
+
+        # Case 2 & 3: Zero active blocking obligations, yet pending lifecycle effect
+        # OR uncertain drift slot stored via real publish_review -> cold reenroll refuses!
+        from review_sensei.baseline import baseline_from_review
+        from review_sensei.context import ReviewContextCacheKey
+
+        for scenario in ("pending-effect", "uncertain-drift-slot"):
+            with self.subTest(scenario=scenario):
+                h2 = _ArtifactGitHubHost(head_sha=HEAD_SHA)
+                l2 = GitHubIssueCommentSessionLedger(
+                    h2.http,
+                    token="tok-2",
+                    app_slug="reviewsensei[bot]",
+                    enable_finding_lifecycle_writes=True,
+                )
+                l2.initialize(identity, now=live_now)
+                app2, _pub2, opts2 = self._make_app(h2, local_ledger=l2)
+                if scenario == "uncertain-drift-slot":
+                    opts2 = replace(opts2, enable_drift_tracking=True)
+                cov = CoverageManifest(
+                    files=(FileCoverage("src/auth.py", "reviewed"),),
+                    enumerated_paths=("src/auth.py",),
+                    enumeration_complete=True,
+                )
+                clean_r = ReviewResult(
+                    summary="Uncertain effect without active blockers.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                    model="fixture-model",
+                    coverage=cov,
+                )
+                key2 = ReviewContextCacheKey(
+                    repository="owner/repo",
+                    pull_request=1,
+                    base_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest=_sha("stage"),
+                    context_digest=_sha("ctx"),
+                    learning_digest=_sha("learn"),
+                )
+                prep2b = prepare_review_transaction(
+                    l2,
+                    identity,
+                    policy,
+                    reservation_id=session_reservation_id(
+                        repository="owner/repo",
+                        pull_request=1,
+                        head_sha=HEAD_SHA,
+                        kind="publish",
+                    ),
+                    base_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                    configuration_digest=ReviewTransaction.compute_configuration_digest(
+                        cfg_ctx
+                    ),
+                    evidence_digest=ReviewTransaction.compute_evidence_digest(ev_ctx),
+                )
+                clean_r = checkpoint_review_analysis(
+                    l2,
+                    identity,
+                    prep2b,
+                    clean_r,
+                    baseline=baseline_from_review(
+                        clean_r,
+                        cache_key=key2,
+                        policy=policy,
+                        generation=prep2b.record.generation + 1,
+                    ),
+                )
+                h2.fail_before_review_post = True
+                with self.assertRaises(
+                    (GitHubPublicationTransientError, ReviewInputError)
+                ):
+                    app2.publish_review(
+                        options=opts2,
+                        oidc_token="oidc-unc",
+                        repository="owner/repo",
+                        repository_id=1,
+                        pull_request=1,
+                        head_sha=HEAD_SHA,
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        result=clean_r,
+                        diff=self.DIFF_CLEAN,
+                        app_slug="reviewsensei[bot]",
+                        convergence_policy=policy,
+                        current_key=key2,
+                        configuration_context=cfg_ctx,
+                        evidence_context=ev_ctx,
+                    )
+                rec = l2.load(identity, now=live_now).record
+                assert rec is not None
+                cold2_ledger = GitHubIssueCommentSessionLedger(
+                    h2.http,
+                    token="tok-2",
+                    app_slug="reviewsensei[bot]",
+                    enable_finding_lifecycle_writes=True,
+                )
+                cold2_app = GitHubApplication(
+                    http=h2.http,
+                    broker=_ArtifactFakeBroker(),  # type: ignore[arg-type]
+                    reviewer=ReviewPublisher(http=h2.http),
+                    learner=LearningPRPublisher(http=h2.http),
+                    replier=ConversationPublisher(http=h2.http),
+                    session_ledger=cold2_ledger,
+                )
+                cmd_out = cold2_app.apply_maintainer_command(
+                    options=opts2,
+                    oidc_token="oidc-cmd-2",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD_SHA,
+                    body="@reviewsensei review reenroll",
+                    actor_login="repo-admin",
+                    association="OWNER",
+                    app_slug="reviewsensei[bot]",
+                    actor_permission="admin",
+                )
+                self.assertFalse(cmd_out.applied)
+                self.assertEqual(cmd_out.summary, "reenroll-blocked-by-uncertain-write")
+                with self.assertRaisesRegex(
+                    ReviewInputError, "reenroll-blocked-by-uncertain-write"
+                ):
+                    cold2_app.execute_operator_reenroll(
+                        ledger=cold2_ledger,
+                        request=OperatorReenrollRequest(
+                            identity=identity,
+                            head_sha=HEAD_SHA,
+                            operator_login="repo-admin",
+                            association="OWNER",
+                            permission="admin",
+                            reason="Cold reenroll attempt on uncertain lifecycle.",
+                            enrollment_witness_present=True,
+                            enrollment_witness_sha256=rec.record_sha256,
+                        ),
+                        now=live_now,
+                    )
 
 
 if __name__ == "__main__":

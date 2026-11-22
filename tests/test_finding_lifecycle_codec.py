@@ -423,3 +423,265 @@ class LifecycleCodecTests(unittest.TestCase):
         )
         restored = decode_lifecycle_state(json.loads(json.dumps(document)))
         self.assertEqual(encode_lifecycle_state(restored.state), document)
+
+    def test_packed_journal_v4_v5_v6_preserve_all_thirteen_comment_fields_and_counterexample(
+        self,
+    ):
+        from review_sensei_github import (
+            finding_lifecycle_dictionary as v4_codec,
+        )
+        from review_sensei_github import (
+            finding_lifecycle_prefix as v5_codec,
+        )
+        from review_sensei_github.finding_lifecycle import (
+            _digest,
+            _pack_compact_journal,
+            _pack_journal,
+            _request_identity,
+            _unpack_journal,
+            _validate,
+        )
+
+        from review_sensei.bounded_evidence import (
+            evidence_manifest,
+            partition_evidence,
+        )
+
+        # All 13 ReviewComment fields explicitly populated including compare=False fields.
+        comments = tuple(
+            ReviewComment(
+                path=f"src/mod_{idx}.py",
+                line=10 + idx,
+                body=f"Detailed non-default finding {idx} requiring confirmation.",
+                blocking=idx % 2 == 0,
+                severity="critical" if idx % 2 == 0 else "low",
+                category="security" if idx % 2 == 0 else "correctness",
+                fix_effort="medium",
+                symbol=f"handler_{idx}",
+                defect_kind="authz" if idx % 2 == 0 else "logic",
+                evidence_id=f"ev-{idx}",
+                side="LEFT",
+                effective_blocking=idx % 2 == 0,
+                needs_human=idx % 2 == 1,
+            )
+            for idx in range(25)
+        )
+        eval_state = evaluate_drift_round(
+            ReviewResult(
+                summary="25-finding round.",
+                comments=comments,
+                provider="fixture",
+                review_status="complete",
+                coverage=CoverageManifest(
+                    files=tuple(FileCoverage(c.path, "reviewed") for c in comments),
+                    enumerated_paths=tuple(c.path for c in comments),
+                    enumeration_complete=True,
+                ),
+            ),
+            head_sha=HEAD,
+            base_sha=BASE,
+            max_active_findings=8,
+        )
+        binding = {
+            "producer": "github-bot:999",
+            "repository": "owner/repo",
+            "repository_id": 123,
+            "pull_request": 7,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "policy_digest": "1" * 64,
+            "configuration_digest": "2" * 64,
+            "generation": 1,
+            "purpose": "finding-lifecycle",
+            "schema_version": "1.0",
+        }
+        raw_effects = [
+            {
+                "method": "POST",
+                "path": "/repos/owner/repo/check-runs",
+                "request": {
+                    "external_id": "reviewsensei-review-v1",
+                    "head_sha": HEAD,
+                    "name": "ReviewSensei",
+                    "output": {"summary": "running", "title": "running"},
+                    "status": "in_progress",
+                },
+                "status": "confirmed",
+                "response": [
+                    201,
+                    {"id": 502, "app_id": 999, "producer_id": None, "mutation": None},
+                ],
+            },
+            {
+                "method": "PATCH",
+                "path": "/repos/owner/repo/check-runs/502",
+                "request": {
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "output": {"summary": "done", "title": "done"},
+                },
+                "check_update_precondition": {
+                    "check_run_id": 502,
+                    "head_sha": HEAD,
+                    "app_id": 999,
+                    "app_slug": "reviewsensei",
+                },
+                "status": "confirmed",
+                "response": [
+                    200,
+                    {"id": 502, "app_id": 999, "producer_id": None, "mutation": None},
+                ],
+            },
+            {
+                "method": "POST",
+                "path": "/repos/owner/repo/pulls/7/reviews",
+                "request": {
+                    "commit_id": HEAD,
+                    "event": "COMMENT",
+                    "body": {"$body_sha256": "3" * 64, "utf8_bytes": 100},
+                    "comments": [],
+                },
+                "status": "confirmed",
+                "response": [
+                    200,
+                    {"id": 102, "producer_id": 999, "app_id": None, "mutation": None},
+                ],
+            },
+            {
+                "method": "POST",
+                "path": "/graphql",
+                "request": {
+                    "operationName": "ResolveReviewThread",
+                    "query": "mutation ResolveReviewThread($input: ResolveReviewThreadInput!) { resolveReviewThread(input: $input) { thread { id isResolved } } }",
+                    "variables": {"input": {"threadId": "PRRT_1"}},
+                },
+                "status": "confirmed",
+                "response": [
+                    200,
+                    {
+                        "app_id": None,
+                        "id": None,
+                        "producer_id": None,
+                        "mutation": {
+                            "name": "resolveReviewThread",
+                            "resolved": True,
+                            "thread_id": "PRRT_1",
+                        },
+                    },
+                ],
+            },
+        ]
+        for eff in raw_effects:
+            eff["request_sha256"] = _digest(
+                {
+                    "method": eff["method"],
+                    "path": eff["path"],
+                    "request": _request_identity(eff["request"]),
+                }
+            )
+        v2_doc = {
+            "schema_version": "finding-lifecycle-journal-v2",
+            "effects": raw_effects,
+            "lifecycle": encode_lifecycle_state(eval_state),
+            "native_receipts": [],
+            "unknown_trust_effect": False,
+            "accepted_semantic_history": None,
+        }
+
+        def assert_all_13_preserved(unpacked_doc):
+            validated = _validate(unpacked_doc)
+            restored_state = decode_lifecycle_state(validated["lifecycle"]).state
+            before_obs = eval_state.inventory.obligations
+            after_obs = restored_state.inventory.obligations
+            self.assertEqual(len(after_obs), len(before_obs))
+            for before_ob, after_ob in zip(before_obs, after_obs, strict=True):
+                for f in fields(ReviewComment):
+                    self.assertEqual(
+                        getattr(before_ob.latest_comment, f.name),
+                        getattr(after_ob.latest_comment, f.name),
+                    )
+            # Explicit == counterexample: dataclass equality ignores compare=False fields!
+            mutated = replace(
+                after_obs[0],
+                latest_comment=replace(
+                    after_obs[0].latest_comment,
+                    needs_human=not after_obs[0].latest_comment.needs_human,
+                    severity="info",
+                    symbol="mutated_sym",
+                    evidence_id="ev-changed",
+                ),
+            )
+            self.assertEqual(after_obs[0], mutated)
+            self.assertNotEqual(
+                after_obs[0].latest_comment.needs_human,
+                mutated.latest_comment.needs_human,
+            )
+
+        # v6 packed journal roundtrip + negative controls
+        v6_packed = _pack_compact_journal(v2_doc)
+        self.assertEqual(v6_packed["schema_version"], "finding-lifecycle-packed-v6")
+        assert_all_13_preserved(_unpack_journal(v6_packed))
+
+        from review_sensei_github.guarded_publication_batch import describe_pair
+
+        # v5 prefix packed journal roundtrip + negative controls
+        v3_doc = {
+            **v2_doc,
+            "schema_version": "finding-lifecycle-journal-v3",
+            "guarded_publication_pair": describe_pair(raw_effects),
+        }
+        v5_packed = v5_codec.pack(v3_doc, prefix_count=3)
+        self.assertEqual(v5_packed["schema_version"], "finding-lifecycle-packed-v5")
+        assert_all_13_preserved(_unpack_journal(v5_packed))
+        tampered_v5 = copy.deepcopy(v5_packed)
+        tampered_v5["prefix"]["sha256"] = "0" * 64
+        with self.assertRaises(ReviewInputError):
+            _unpack_journal(tampered_v5)
+
+        # v4 dictionary packed journal roundtrip + omitted/changed payload negative controls
+        base_doc = copy.deepcopy(v2_doc)
+        base_doc["effects"] = v2_doc["effects"][:3]
+        base_envelope = {
+            "schema_version": "finding-lifecycle-evidence-v2",
+            "lifecycle": _pack_journal(base_doc),
+        }
+        base_manifest = evidence_manifest(
+            base_envelope,
+            binding=binding,
+            item_count=1,
+            parts=(
+                parts := partition_evidence(
+                    base_envelope, binding=binding, item_count=1
+                )
+            ),
+            storage_ids=tuple(str(1000 + i) for i in range(len(parts))),
+        )
+        current_binding = {**binding, "generation": 2}
+        v4_packed = v4_codec.pack(
+            v2_doc,
+            base=base_envelope,
+            manifest=base_manifest,
+            current_binding=current_binding,
+        )
+        self.assertEqual(v4_packed["schema_version"], "finding-lifecycle-packed-v4")
+        v4_unpacked = v4_codec.unpack(
+            v4_packed, base=base_envelope, current_binding=current_binding
+        )
+        assert_all_13_preserved(v4_unpacked)
+        tampered_v4 = dict(v4_packed, sha256="f" * 64)
+        with self.assertRaises(ReviewInputError):
+            v4_codec.unpack(
+                tampered_v4, base=base_envelope, current_binding=current_binding
+            )
+        changed_base_doc = copy.deepcopy(base_doc)
+        changed_base_doc["lifecycle"]["state"]["inventory"]["obligations"][0][
+            "latest_comment"
+        ]["symbol"] = "tampered_symbol"
+        changed_base = {
+            "schema_version": "finding-lifecycle-evidence-v2",
+            "lifecycle": _pack_journal(changed_base_doc),
+        }
+        with self.assertRaises(ReviewInputError):
+            v4_codec.unpack(
+                v4_packed, base=changed_base, current_binding=current_binding
+            )

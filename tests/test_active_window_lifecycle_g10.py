@@ -1602,6 +1602,185 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
                 slots=(PublishedSlot("thread-login", "active", _sha("claimed")),),
             )
 
+    def test_advisory_promotion_and_ambiguity_all_four_paths_and_comment_type_guard(
+        self,
+    ) -> None:
+
+        cov = _coverage("src/app.py")
+        adv = _comment(
+            "src/app.py",
+            line=5,
+            body="Style note.",
+            blocking=False,
+            needs_human=False,
+            severity="low",
+            symbol="helper",
+            defect_kind="style",
+        )
+        r1 = evaluate_active_window_round(
+            _result(adv, coverage=cov),
+            head_sha=HEAD_1,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=1,
+        )
+        adv_ob = r1.authoritative_decision_inventory.obligations[0]
+        self.assertEqual(adv_ob.evidence, "advisory")
+        self.assertIsNone(adv_ob.impact)
+
+        # Path 4: active advisory prior matched 1-to-1 by blocking / needs_human comment promotes cleanly.
+        promoted_comment = _comment(
+            "src/app.py",
+            line=6,
+            body="Style note.",
+            blocking=True,
+            needs_human=False,
+            severity="medium",
+            symbol="helper",
+            defect_kind="style",
+        )
+        r2_p4 = evaluate_active_window_round(
+            _result(promoted_comment, coverage=cov),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            prior_inventory=r1.authoritative_decision_inventory,
+        )
+        ob_p4 = r2_p4.authoritative_decision_inventory.obligations[0]
+        self.assertTrue(ob_p4.blocking)
+        self.assertEqual(ob_p4.evidence, "supported-source")
+        self.assertEqual(ob_p4.impact, "medium")
+
+        # Path 3: advisory priors entering ambiguous-identity preserve advisory severity when comments are advisory,
+        # and promote when matching a blocking comment.
+        dup_adv_a = _comment(
+            "src/app.py",
+            line=8,
+            body="First duplicate style note.",
+            blocking=False,
+            needs_human=False,
+            severity="low",
+            symbol="helper",
+            defect_kind="style",
+        )
+        dup_adv_b = _comment(
+            "src/app.py",
+            line=9,
+            body="Second duplicate style note.",
+            blocking=False,
+            needs_human=False,
+            severity="low",
+            symbol="helper",
+            defect_kind="style",
+        )
+        r2_p3_adv = evaluate_active_window_round(
+            _result(dup_adv_a, dup_adv_b, coverage=cov),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            prior_inventory=r1.authoritative_decision_inventory,
+        )
+        ambig_priors = [
+            o
+            for o in r2_p3_adv.authoritative_decision_inventory.obligations
+            if o.obligation_id == adv_ob.obligation_id
+        ]
+        self.assertEqual(len(ambig_priors), 1)
+        for o in ambig_priors:
+            self.assertEqual(o.lifecycle_state, "ambiguous-identity")
+            self.assertEqual(o.evidence, "advisory")
+            self.assertFalse(o.blocking)
+            self.assertFalse(o.needs_human)
+            self.assertIsNone(o.impact)
+            self.assertTrue(o.blocks_approval_now)
+            self.assertTrue(o.to_baseline_finding().requires_gate)
+
+        # Path 2: resolved advisory prior reopened cleanly (both active and override branches) with blocking comment.
+        resolved_inv = AuthoritativeDecisionInventory(
+            obligations=(
+                replace(
+                    adv_ob,
+                    lifecycle_state="verified-fixed",
+                    native_target="thread-adv",
+                    target_state="released",
+                    target_proof_sha256=_sha("adv-released"),
+                    resolution_proof_sha256=_sha("adv-fixed"),
+                ),
+            )
+        )
+        r2_p2_active = evaluate_active_window_round(
+            _result(promoted_comment, coverage=cov),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            prior_inventory=resolved_inv,
+            slots=(PublishedSlot("thread-adv", "released", _sha("adv-released")),),
+        )
+        ob_p2_active = r2_p2_active.authoritative_decision_inventory.obligations[0]
+        self.assertEqual(ob_p2_active.lifecycle_state, "active-unresolved")
+        self.assertTrue(ob_p2_active.blocking)
+        self.assertEqual(ob_p2_active.evidence, "supported-source")
+        self.assertEqual(ob_p2_active.impact, "medium")
+
+        r2_p2_override = evaluate_active_window_round(
+            _result(promoted_comment, coverage=cov),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            prior_inventory=resolved_inv,
+            slots=(PublishedSlot("thread-adv", "released", _sha("adv-released")),),
+            human_overrides=(
+                AuthorizedHumanOverride(
+                    obligation_id=adv_ob.obligation_id,
+                    action="accept-risk",
+                    actor="maintainer",
+                    association="OWNER",
+                    reason="Waived advisory regression",
+                    head_sha=HEAD_2,
+                    proof_sha256=_sha("adv-reopen-override"),
+                ),
+            ),
+        )
+        ob_p2_ov = r2_p2_override.authoritative_decision_inventory.obligations[0]
+        self.assertEqual(ob_p2_ov.lifecycle_state, "authorized-override")
+        self.assertEqual(ob_p2_ov.evidence, "supported-source")
+
+        # Path 1: resolved advisory prior hitting ambiguous_reopen_prior_ids never crash.
+        r2_p1 = evaluate_active_window_round(
+            _result(dup_adv_a, dup_adv_b, coverage=cov),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            prior_inventory=resolved_inv,
+            slots=(PublishedSlot("thread-adv", "released", _sha("adv-released")),),
+        )
+        reopened_ambig = [
+            o
+            for o in r2_p1.authoritative_decision_inventory.obligations
+            if o.obligation_id == adv_ob.obligation_id
+        ]
+        self.assertEqual(len(reopened_ambig), 1)
+        for o in reopened_ambig:
+            self.assertEqual(o.lifecycle_state, "ambiguous-identity")
+            self.assertEqual(o.evidence, "advisory")
+            self.assertIsNone(o.impact)
+            self.assertTrue(o.blocks_approval_now)
+
+        # compare=False comment field requires exact ReviewComment instance.
+        class _CommentSubclass(ReviewComment):
+            pass
+
+        sub = _CommentSubclass(path="src/app.py", line=5, body="Subclass.")
+        with self.assertRaisesRegex(ReviewInputError, "ReviewComment"):
+            replace(adv_ob, comment=sub)
+        with self.assertRaisesRegex(ReviewInputError, "ReviewComment"):
+            replace(adv_ob, comment="not-a-comment")  # type: ignore[arg-type]
+
 
 ORDINARY_DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py

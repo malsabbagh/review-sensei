@@ -504,6 +504,8 @@ class AuthoritativeObligation:
             raise ReviewInputError(
                 "unresolved obligation cannot carry resolution_proof_sha256"
             )
+        if self.comment is not None and type(self.comment) is not ReviewComment:
+            raise ReviewInputError("obligation comment must be a ReviewComment")
 
     @property
     def required(self) -> bool:
@@ -541,8 +543,9 @@ class AuthoritativeObligation:
             symbol=self.symbol,
             defect_kind=self.defect_kind,
             generation=self.generation,
-            blocking=self.blocking,
-            needs_human=self.needs_human,
+            blocking=self.blocking or self.lifecycle_state == "ambiguous-identity",
+            needs_human=self.needs_human
+            or self.lifecycle_state == "ambiguous-identity",
         )
 
 
@@ -1138,6 +1141,42 @@ def _match_prior_obligations(
     return None, ()
 
 
+def _comment_impact(comment: ReviewComment) -> str:
+    """Resolve valid ranked impact for a blocking or human-gated comment."""
+    sev = (comment.severity or "").strip().lower()
+    if sev in {"critical", "high", "medium", "low"}:
+        return sev
+    return "high"
+
+
+def _transition_obligation_fields(
+    base: AuthoritativeObligation,
+    *,
+    comments: Sequence[ReviewComment] = (),
+) -> tuple[bool, bool, str | None, str]:
+    """Update severity/evidence from matching comments without promoting ambiguity alone."""
+    next_blocking = base.blocking or any(c.blocks_approval for c in comments)
+    next_needs_human = base.needs_human or any(c.needs_human for c in comments)
+    next_required = next_blocking or next_needs_human
+    if not next_required and base.evidence == "advisory":
+        return False, False, None, "advisory"
+    if base.evidence == "advisory":
+        promoting = [c for c in comments if c.blocks_approval or c.needs_human]
+        next_impact: str | None = (
+            min(
+                (_comment_impact(c) for c in promoting),
+                key=lambda val: IMPACT_RANKS[val],
+            )
+            if promoting
+            else "high"
+        )
+        next_evidence = "supported-source"
+    else:
+        next_impact = base.impact
+        next_evidence = base.evidence
+    return next_blocking, next_needs_human, next_impact, next_evidence
+
+
 def evaluate_active_window_round(
     result: ReviewResult,
     *,
@@ -1246,10 +1285,12 @@ def evaluate_active_window_round(
     # Match current comments against unresolved prior obligations first.
     claimed_by_prior: dict[str, list[int]] = {}
     ambiguous_prior_ids: set[str] = set()
+    ambiguous_comments_for_prior: dict[str, list[ReviewComment]] = {}
     ambiguous_comment_indices: set[int] = set()
     matched_prior_for_comment: dict[int, AuthoritativeObligation] = {}
     reopen_claims: dict[str, list[int]] = {}
     ambiguous_reopen_prior_ids: set[str] = set()
+    ambiguous_reopen_comments_for_prior: dict[str, list[ReviewComment]] = {}
 
     for index, comment in enumerate(result.comments):
         matched, candidates = _match_prior_obligations(comment, unresolved_priors)
@@ -1257,6 +1298,9 @@ def evaluate_active_window_round(
             ambiguous_comment_indices.add(index)
             for candidate in candidates:
                 ambiguous_prior_ids.add(candidate.obligation_id)
+                ambiguous_comments_for_prior.setdefault(
+                    candidate.obligation_id, []
+                ).append(comment)
         elif matched is not None:
             matched_prior_for_comment[index] = matched
             claimed_by_prior.setdefault(matched.obligation_id, []).append(index)
@@ -1277,6 +1321,9 @@ def evaluate_active_window_round(
                     ambiguous_comment_indices.add(index)
                     for candidate in reopen_ambiguous:
                         ambiguous_reopen_prior_ids.add(candidate.obligation_id)
+                        ambiguous_reopen_comments_for_prior.setdefault(
+                            candidate.obligation_id, []
+                        ).append(comment)
                 elif reopened is not None:
                     reopen_claims.setdefault(reopened.obligation_id, []).append(index)
                     matched_prior_for_comment[index] = reopened
@@ -1286,6 +1333,9 @@ def evaluate_active_window_round(
         if len(indices) > 1 or prior_id in ambiguous_reopen_prior_ids:
             ambiguous_reopen_prior_ids.add(prior_id)
             ambiguous_comment_indices.update(indices)
+            ambiguous_reopen_comments_for_prior.setdefault(prior_id, []).extend(
+                result.comments[idx] for idx in indices
+            )
         else:
             reopened_by_prior[prior_id] = indices[0]
 
@@ -1308,6 +1358,9 @@ def evaluate_active_window_round(
         if len(indices) > 1:
             ambiguous_prior_ids.add(prior_id)
             ambiguous_comment_indices.update(indices)
+            ambiguous_comments_for_prior.setdefault(prior_id, []).extend(
+                result.comments[idx] for idx in indices
+            )
 
     next_obligations: list[AuthoritativeObligation] = []
     # Retain already-resolved historical obligations unless a fixed target regressed.
@@ -1329,11 +1382,21 @@ def evaluate_active_window_round(
                 if item.native_target is not None
                 else None
             )
+            next_blocking, next_needs_human, next_impact, next_evidence = (
+                _transition_obligation_fields(
+                    item,
+                    comments=ambiguous_reopen_comments_for_prior.get(
+                        item.obligation_id, ()
+                    ),
+                )
+            )
             next_obligations.append(
                 replace(
                     item,
-                    blocking=True,
-                    needs_human=True,
+                    blocking=next_blocking,
+                    needs_human=next_needs_human,
+                    impact=next_impact,
+                    evidence=next_evidence,
                     lifecycle_state="ambiguous-identity",
                     target_proof_sha256=reopen_proof,
                     resolution_proof_sha256=None,
@@ -1344,6 +1407,9 @@ def evaluate_active_window_round(
             comment = result.comments[c_idx]
             proposal = proposal_by_index.get(c_idx)
             reopen_override = overrides_by_id.get(item.obligation_id)
+            next_blocking, next_needs_human, next_impact, next_evidence = (
+                _transition_obligation_fields(item, comments=(comment,))
+            )
             if reopen_override is not None:
                 new_target_state = item.target_state
                 if item.native_target is not None:
@@ -1369,6 +1435,10 @@ def evaluate_active_window_round(
                         line=comment.line,
                         side=comment.side,
                         symbol=comment.symbol or item.symbol,
+                        blocking=next_blocking,
+                        needs_human=next_needs_human,
+                        impact=next_impact,
+                        evidence=next_evidence,
                         lifecycle_state="authorized-override",
                         target_state=new_target_state,
                         target_proof_sha256=(
@@ -1402,8 +1472,10 @@ def evaluate_active_window_round(
                         line=comment.line,
                         side=comment.side,
                         symbol=comment.symbol or item.symbol,
-                        blocking=item.blocking or comment.blocks_approval,
-                        needs_human=item.needs_human or comment.needs_human,
+                        blocking=next_blocking,
+                        needs_human=next_needs_human,
+                        impact=next_impact,
+                        evidence=next_evidence,
                         lifecycle_state="active-unresolved",
                         target_proof_sha256=reopen_proof,
                         resolution_proof_sha256=None,
@@ -1458,11 +1530,19 @@ def evaluate_active_window_round(
             continue
 
         if prior.obligation_id in ambiguous_prior_ids:
+            next_blocking, next_needs_human, next_impact, next_evidence = (
+                _transition_obligation_fields(
+                    prior,
+                    comments=ambiguous_comments_for_prior.get(prior.obligation_id, ()),
+                )
+            )
             next_obligations.append(
                 replace(
                     prior,
-                    blocking=True,
-                    needs_human=True,
+                    blocking=next_blocking,
+                    needs_human=next_needs_human,
+                    impact=next_impact,
+                    evidence=next_evidence,
                     lifecycle_state="ambiguous-identity",
                 )
             )
@@ -1475,8 +1555,9 @@ def evaluate_active_window_round(
             proposal = proposal_by_index.get(c_idx)
             # Never allow model output or #427 proposal to clear a prior obligation
             # or downgrade its blocking/human status.
-            preserved_blocking = prior.blocking or comment.blocks_approval
-            preserved_human = prior.needs_human or comment.needs_human
+            preserved_blocking, preserved_human, next_impact, next_evidence = (
+                _transition_obligation_fields(prior, comments=(comment,))
+            )
             downgraded = prior.blocking and not comment.blocks_approval
             next_obligations.append(
                 replace(
@@ -1487,6 +1568,8 @@ def evaluate_active_window_round(
                     symbol=comment.symbol or prior.symbol,
                     blocking=preserved_blocking,
                     needs_human=preserved_human,
+                    impact=next_impact,
+                    evidence=next_evidence,
                     lifecycle_state=(
                         "omitted-uncertain" if downgraded else "active-unresolved"
                     ),

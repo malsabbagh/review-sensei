@@ -238,6 +238,8 @@ def execute_reply(
         )
     ).hexdigest()
     caller = run.caller
+    if run.finding_inventory_migration_required():
+        raise ReviewInputError("durable_finding_inventory_recovery_required")
     intent = caller.admit_action(
         run.ledger,
         run.identity,

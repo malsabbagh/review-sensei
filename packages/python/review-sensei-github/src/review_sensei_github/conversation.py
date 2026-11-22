@@ -7,7 +7,7 @@ import binascii
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import quote
@@ -2809,12 +2809,23 @@ def apply_authenticated_finding_resolution(
     from review_sensei.active_finding_window import apply_dispositions_to_window_state
     from review_sensei.bounded_evidence import canonical_bytes
     from review_sensei.finding_drift import apply_dispositions_to_drift_state
+    from review_sensei.human_assessment import finding_instance_fingerprint
 
     if (
         not isinstance(evidence_sha256, str)
         or re.fullmatch(r"[a-f0-9]{64}", evidence_sha256) is None
     ):
         raise GitHubConversationError("finding resolution evidence is invalid")
+    receipts: tuple[Mapping[str, Any], ...] = ()
+    for carrier_name in ("_finding_lifecycle_consumer", "_finding_lifecycle_journal"):
+        carrier = getattr(finalizer, carrier_name, None)
+        reviewer = getattr(carrier, "reviewer", None) if carrier is not None else None
+        reader = getattr(reviewer, "native_finding_receipts", None)
+        if callable(reader):
+            receipts = tuple(
+                reader(repository_id=repository_id, pull_request=pull_request)
+            )
+            break
     key = (repository_id, pull_request)
     for attr, apply, inventory_attr in (
         (
@@ -2830,16 +2841,111 @@ def apply_authenticated_finding_resolution(
             continue
         inventory = getattr(state, inventory_attr)
         # Existing instance matching handles projected moved anchors. Restrict
-        # its selected candidates first so no ambiguous whole concern is waived.
-        held = {
-            item.obligation_id
-            for item in inventory.obligations
-            if item.lifecycle_state in {"ambiguous-multi-target", "ambiguous-identity"}
-        }
+        # its selected candidates first so no ambiguous whole concern or uncertain
+        # native slot is waived by a reply/assessment.
+        held: set[str] = set()
+        held_instances: set[str] = set()
+        if attr == "_active_window_states":
+            slot_states = {
+                s.target: s.state for s in state.display_active_findings.slots
+            }
+            for item in inventory.obligations:
+                uncertain = item.native_target is not None and (
+                    slot_states.get(item.native_target, item.target_state)
+                    == "uncertain"
+                    or item.target_state == "uncertain"
+                )
+                if uncertain or item.lifecycle_state in {
+                    "ambiguous-multi-target",
+                    "ambiguous-identity",
+                }:
+                    held.add(item.obligation_id)
+                    if item.comment is not None:
+                        held_instances.add(finding_instance_fingerprint(item.comment))
+                        projected = replace(
+                            item.comment,
+                            path=item.path or item.comment.path,
+                            line=item.line
+                            if item.line is not None
+                            else item.comment.line,
+                            side=item.side,
+                            symbol=(
+                                item.symbol
+                                if item.symbol is not None
+                                else item.comment.symbol
+                            ),
+                        )
+                        held_instances.add(finding_instance_fingerprint(projected))
+                    for r in receipts:
+                        if r.get("obligation_id") == item.obligation_id or (
+                            item.native_target is not None
+                            and (
+                                r.get("thread_id") == item.native_target
+                                or r.get("target") == item.native_target
+                            )
+                        ):
+                            inst = r.get("instance")
+                            if isinstance(inst, str):
+                                held_instances.add(inst)
+        else:
+            from review_sensei.finding_drift import project_drift_review_result
+            from review_sensei.models import ReviewResult as _DriftProjResult
+
+            projected_result = project_drift_review_result(
+                _DriftProjResult(
+                    summary="drift-projection",
+                    comments=(),
+                    provider="internal",
+                    review_status="complete" if state.review_complete else "partial",
+                ),
+                state,
+            )
+            projected_by_oid = {
+                entry.obligation_id: p_comment
+                for entry, p_comment in zip(
+                    state.active_entries, projected_result.comments, strict=False
+                )
+            }
+            slot_states = {s.target: s.state for s in state.slots}
+            for item in inventory.obligations:
+                tb = item.thread_binding
+                uncertain = tb is not None and (
+                    tb.slot_state == "uncertain"
+                    or slot_states.get(tb.thread_id) == "uncertain"
+                )
+                if uncertain or item.lifecycle_state in {
+                    "ambiguous-multi-target",
+                    "ambiguous-identity",
+                }:
+                    held.add(item.obligation_id)
+                    held_instances.add(
+                        finding_instance_fingerprint(
+                            item.synthetic_comment_for_placement()
+                        )
+                    )
+                    if item.latest_comment is not None:
+                        held_instances.add(
+                            finding_instance_fingerprint(item.latest_comment)
+                        )
+                    proj_c = projected_by_oid.get(item.obligation_id)
+                    if proj_c is not None:
+                        held_instances.add(finding_instance_fingerprint(proj_c))
+                    for r in receipts:
+                        if r.get("obligation_id") == item.obligation_id or (
+                            tb is not None
+                            and (
+                                r.get("thread_id") == tb.thread_id
+                                or r.get("target") == tb.thread_id
+                            )
+                        ):
+                            inst = r.get("instance")
+                            if isinstance(inst, str):
+                                held_instances.add(inst)
+        safe_instances = tuple(inst for inst in instances if inst not in held_instances)
         candidate = apply(
             state,
             honored_fingerprints=(),
-            honored_instances=instances,
+            honored_instances=safe_instances,
             actor="authenticated-resolution",
             head_sha=head_sha,
             slot_released=False,
@@ -2850,8 +2956,7 @@ def apply_authenticated_finding_resolution(
             old = before[item.obligation_id]
             if old.unresolved and not item.unresolved:
                 if item.obligation_id in held:
-                    # Whole-obligation ambiguity needs all-path authority, not
-                    # a one-instance response; leave the entire state held.
+                    # Defense in depth: never discharge an ambiguous or uncertain obligation.
                     return
                 proof = hashlib.sha256(
                     canonical_bytes(

@@ -977,12 +977,41 @@ class ReviewRun:
             )
         return self._record_requires_finding_inventory_migration(record)
 
+    def finding_inventory_policy_drift(self, argv: Sequence[str]) -> bool:
+        if self.restart_id is not None:
+            return False
+        record = self.caller._effect_record
+        if record is None or record.record_sha256 != self.caller._root:
+            raise ReviewInputError(
+                "authenticated finding inventory admission is unavailable"
+            )
+        from review_sensei.finding_lifecycle_store import normalize_reference
+
+        lifecycle_ref = normalize_reference(record.finding_lifecycle)
+        if lifecycle_ref is None:
+            return False
+        args = engine_parser(include_hosted=True).parse_args(list(argv))
+        cfg = getattr(args, "config", None) or self.configuration_path
+        expected_policy, expected_configuration = _expected_transaction_digests(
+            args,
+            configuration_path=Path(cfg) if isinstance(cfg, str) else cfg,
+        )
+        binding = lifecycle_ref["manifest"]["binding"]
+        return (
+            binding["policy_digest"] != expected_policy
+            or binding["configuration_digest"] != expected_configuration
+        )
+
     def execute(self, argv: list[str], *, publication_output: Path) -> int:
         lifecycle_diagnostics.phase("analysis")
         retained = self.retained_analysis(argv)
         if retained is None and self.finding_inventory_migration_required():
             return _write_migration_hold_outcome(
                 publication_output, reason="finding_inventory_migration_required"
+            )
+        if retained is None and self.finding_inventory_policy_drift(argv):
+            return _write_migration_hold_outcome(
+                publication_output, reason="finding_inventory_policy_drift"
             )
         if retained is None and self.plan.runner_kind == "local":
             # Provider discovery is caller API work; inference remains governed
@@ -1900,6 +1929,11 @@ def bootstrap(
                 )
                 create_quarantine(prepared, actions_token=actions_token)
             elif loaded.status == "missing":
+                if session.state == "known":
+                    raise ReviewInputError(
+                        "session ledger marker missing after prior enrollment; "
+                        "operator reenroll required"
+                    )
                 lifecycle_diagnostics.step("initial_enrollment")
                 caller.initialize_and_activate(
                     native,
@@ -1988,12 +2022,28 @@ def bootstrap(
                         native, identity, frozen, owner, previous_root, authenticate
                     )
                 else:
+                    if (
+                        purpose == "reply"
+                        and restart_registration is None
+                        and ReviewRun._record_requires_finding_inventory_migration(
+                            previous_root
+                        )
+                    ):
+                        raise _PreRolloverMigrationHold(
+                            "finding_inventory_migration_required"
+                        )
                     if rollover_service is None:
                         if (
                             purpose == "review"
                             and restart_registration is None
-                            and _is_ordinary_terminal_predecessor(
-                                previous_root, previous
+                            and (
+                                _is_ordinary_terminal_predecessor(
+                                    previous_root, previous
+                                )
+                                or (
+                                    pre_write_settlement_candidate
+                                    and previous_root.finding_lifecycle is not None
+                                )
                             )
                         ):
                             if ReviewRun._record_requires_finding_inventory_migration(

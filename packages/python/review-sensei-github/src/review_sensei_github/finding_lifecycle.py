@@ -32,6 +32,8 @@ from review_sensei.finding_lifecycle import (
 from review_sensei.finding_lifecycle_store import _sizing_producer
 from review_sensei.session import SessionIdentity
 
+from .thread_resolution import graphql_app_author
+
 VERSION = "finding-lifecycle-journal-v1"
 CURRENT_VERSION = "finding-lifecycle-journal-v2"
 MAX_EFFECTS = 32
@@ -6505,10 +6507,13 @@ class FindingLifecycleJournal:
             or not isinstance(comment.get("body"), str)
             or hashlib.sha256(comment["body"].encode()).hexdigest()
             != receipt["body_sha256"]
+            or comment.get("edited_by_human") is True
+            or comment.get("pullRequestReview") != {"databaseId": receipt["review_id"]}
+            or comment.get("commit") != {"oid": receipt["native_head_sha"]}
             or not isinstance(author, dict)
             or author.get("databaseId") != receipt["producer_id"]
             or author.get("__typename") != "Bot"
-            or author.get("login") != self.app_slug
+            or not graphql_app_author(author, self.app_slug)
         ):
             return None
         return 200, {

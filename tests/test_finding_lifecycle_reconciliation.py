@@ -295,6 +295,97 @@ class FindingLifecycleReconciliationTests(unittest.TestCase):
                     )
                     self.assertEqual(len(service.reviews), 1)
 
+    def test_unsuffixed_graphql_bot_login_and_thread_readback_integrity(self):
+        from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
+
+        for mode in ("window", "drift"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                service, ledger, reviewer = self.fixture(Path(directory), mode)
+                raw = reviewer.native_finding_receipts(repository_id=1, pull_request=1)[
+                    0
+                ]
+                receipt = NativeFindingReceipt(
+                    **{k: v for k, v in raw.items() if k != "schema_version"}
+                )
+                root = service.threads[0]["comments"]["nodes"][0]
+                # GitHub GraphQL frequently returns an unsuffixed app login on Bot nodes.
+                root["author"]["login"] = "reviewsensei"
+                root["author"]["__typename"] = "Bot"
+
+                state = self.call(reviewer, ledger, mode, receipt)
+                self.assertIsNotNone(state)
+
+                binding = ledger.load(restart.IDENTITY).record.finding_lifecycle[
+                    "manifest"
+                ]["binding"]
+                # Positive journal readback with unsuffixed Bot login and matching bindings.
+                journal = FindingLifecycleJournal(
+                    reviewer=reviewer,
+                    ledger=ledger,
+                    identity=restart.IDENTITY,
+                    operation_id="op-readback-test",
+                    base_sha=binding["base_sha"],
+                    head_sha=root["commit"]["oid"],
+                    policy_digest=binding["policy_digest"],
+                    configuration_digest=binding["configuration_digest"],
+                    app_slug="reviewsensei[bot]",
+                )
+                service.threads[0]["isResolved"] = True
+                effect = {
+                    "status": "pending",
+                    "request": {
+                        "query": (
+                            "mutation resolveReviewThread($input: ResolveReviewThreadInput!) "
+                            "{ resolveReviewThread(input: $input) { thread { id isResolved } } }"
+                        ),
+                        "variables": {"input": {"threadId": receipt.target}},
+                    },
+                }
+                confirmed = journal._readback_thread(effect, token="fixture-token")
+                self.assertIsNotNone(confirmed)
+
+                # Reject non-Bot author even when unsuffixed login matches app_slug.
+                root["author"]["__typename"] = "User"
+                self.assertIsNone(
+                    journal._readback_thread(effect, token="fixture-token")
+                )
+                with self.assertRaises(ReviewInputError):
+                    self.call(
+                        reviewer,
+                        ledger,
+                        mode,
+                        receipt,
+                        resolved_state="released",
+                    )
+
+                # Reject human-edited root comments, review mismatches, and commit mismatches.
+                root["author"]["__typename"] = "Bot"
+                for bad_key, bad_val in (
+                    ("edited_by_human", True),
+                    ("pullRequestReview", {"databaseId": 999}),
+                    ("commit", {"oid": "f" * 40}),
+                ):
+                    saved = root.get(bad_key)
+                    has_key = bad_key in root
+                    root[bad_key] = bad_val
+                    try:
+                        self.assertIsNone(
+                            journal._readback_thread(effect, token="fixture-token")
+                        )
+                        with self.assertRaises(ReviewInputError):
+                            self.call(
+                                reviewer,
+                                ledger,
+                                mode,
+                                receipt,
+                                resolved_state="released",
+                            )
+                    finally:
+                        if has_key:
+                            root[bad_key] = saved
+                        else:
+                            root.pop(bad_key, None)
+
 
 class CurrentRunPartitionPreflightTests(unittest.TestCase):
     def test_current_run_without_issued_complete_frontier_cannot_mint_capacity(self):

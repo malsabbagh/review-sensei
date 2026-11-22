@@ -472,6 +472,13 @@ class DriftTrackedObligation:
             raise ReviewInputError(
                 "unresolved drift obligation cannot carry resolution_proof_sha256"
             )
+        if (
+            self.latest_comment is not None
+            and type(self.latest_comment) is not ReviewComment
+        ):
+            raise ReviewInputError(
+                "drift obligation latest_comment must be a ReviewComment"
+            )
 
     @property
     def obligation_id(self) -> str:
