@@ -2394,20 +2394,27 @@ class GitHubIssueCommentSessionLedger:
                 record.api_run_accounting
             ).require_writer_version()
         _history_legacy_write_guard(self, record)
+        from .publication_failure_recovery import (
+            clear_admitted_prior_record,
+            consume_admitted_prior_record,
+        )
+
         self._mutation_active = True
         try:
             updated = mutate(record)
+            admitted_prior = consume_admitted_prior_record(self, record)
             if record.quarantine_lineage is not None:
                 from .quarantine_action import require_native_decision
 
                 require_native_decision(self, record, updated)
-            _validate_queue_retention(record, updated)
+            _validate_queue_retention(record, updated, prior_record=admitted_prior)
             read_session_baseline(self, updated)
             read_session_dispositions(self, updated)
             read_session_assessment_queue(self, updated)
             _history_legacy_write_guard(self, updated)
         finally:
             self._mutation_active = False
+            clear_admitted_prior_record(self)
         if self.evidence_budget is not None:
             self._list_refresh = True
             preactivation_id, preactivation = self._discover(identity, now=now)

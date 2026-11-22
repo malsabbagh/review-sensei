@@ -302,8 +302,12 @@ def run_decisions(
                 record["action"] = "human_review"
                 record["verification"] = "unavailable"
         verification_called = work.calls > before
-    complete = analysis_complete and all(
+    decisions_complete = all(
         r["action"] in {"continue", "optional_suggestion"} for r in records
+    )
+    complete = analysis_complete and decisions_complete
+    preserve_coverage_only_partial = bool(
+        result.coverage_only_partial and decisions_complete
     )
     receipt = {
         "schema_version": "1.0",
@@ -339,7 +343,7 @@ def run_decisions(
             decision_pass=receipt,
             review_status=result.review_status if complete else "partial",
             bounded_work_receipt=None,
-            coverage_only_partial=False,
+            coverage_only_partial=preserve_coverage_only_partial,
         )
     except ReviewInputError:
         # Optional presentation cannot discard an already valid inventory. Try
@@ -351,7 +355,7 @@ def run_decisions(
                 decision_pass=receipt,
                 review_status=result.review_status if complete else "partial",
                 bounded_work_receipt=None,
-                coverage_only_partial=False,
+                coverage_only_partial=preserve_coverage_only_partial,
             )
         except ReviewInputError:
             return replace(

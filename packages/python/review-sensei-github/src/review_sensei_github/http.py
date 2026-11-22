@@ -302,7 +302,26 @@ class GitHubHttp:
                     guard.after_response(method, value)
                 return status, value
         except HTTPError as exc:
-            self._read_bounded_error_body(exc)
+            error_body = self._read_bounded_error_body(exc)
+            if exc.code == 403:
+                err_headers = exc.headers
+                retry_after = (
+                    err_headers.get("Retry-After") if err_headers is not None else None
+                )
+                remaining = (
+                    err_headers.get("X-RateLimit-Remaining")
+                    if err_headers is not None
+                    else None
+                )
+                is_rate_limit = bool(
+                    (isinstance(retry_after, str) and retry_after.strip())
+                    or (isinstance(remaining, str) and remaining.strip() == "0")
+                    or ("rate limit" in error_body.lower())
+                )
+                if is_rate_limit:
+                    raise GitHubHTTPTransientError(
+                        "GitHub request rate limited (http 403)"
+                    ) from exc
             # Preserve the status as data so callers can reconcile ambiguous
             # write responses (409/422/429/5xx) without exposing the bounded
             # error body.  Network failures remain typed exceptions below.

@@ -1796,7 +1796,10 @@ class SessionRecord:
         )
 
     def rollover_pre_write_settled_api_accounting(
-        self, accounting: Mapping[str, object]
+        self,
+        accounting: Mapping[str, object],
+        *,
+        prior_record: "SessionRecord | None" = None,
     ) -> "SessionRecord":
         """Roll over a ceased predecessor proven settled before any external write.
 
@@ -1868,14 +1871,48 @@ class SessionRecord:
             if failed_attempts_for_head(self, tx.head_sha) == 0:
                 payload["failed_attempts"] = 1
                 payload["failed_attempts_head_sha"] = tx.head_sha
-            if (
-                self.finding_lifecycle is None
-                and previous.previous_record is None
-                and self.completed_verification_rounds == 0
-                and self.completed_initial_reviews <= 1
-            ):
+            if previous.previous_record is None:
+                if prior_record is not None:
+                    raise ReviewInputError(
+                        "pre-write-settled rollover without previous_record cannot supply prior_record"
+                    )
                 payload["completed_initial_reviews"] = 0
+                payload["completed_verification_rounds"] = 0
                 payload["convergence_history"] = None
+            else:
+                if not isinstance(prior_record, SessionRecord):
+                    raise ReviewInputError(
+                        "pre-write-settled rollover with previous_record requires authenticated prior_record"
+                    )
+                if (
+                    prior_record.identity() != self.identity()
+                    or prior_record.record_sha256
+                    != previous.previous_record.get("root_sha256")
+                    or prior_record.generation >= self.generation
+                    or prior_record.completed_initial_reviews
+                    > self.completed_initial_reviews
+                    or prior_record.completed_verification_rounds
+                    > self.completed_verification_rounds
+                ):
+                    raise ReviewInputError(
+                        "pre-write-settled rollover prior_record conflicts with previous_record"
+                    )
+                payload["completed_initial_reviews"] = (
+                    prior_record.completed_initial_reviews
+                )
+                payload["completed_verification_rounds"] = (
+                    prior_record.completed_verification_rounds
+                )
+                payload["convergence_history"] = (
+                    _copied_convergence_history(prior_record.convergence_history)
+                    if prior_record.convergence_history is not None
+                    else None
+                )
+                payload["rescan_state"] = (
+                    json.loads(json.dumps(prior_record.rescan_state))
+                    if prior_record.rescan_state is not None
+                    else None
+                )
         return type(self)._construct(**cast(dict[str, Any], payload))
 
     def _rollover_api_accounting(
@@ -5021,7 +5058,12 @@ def _history_preserve_sources(
             )
 
 
-def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+def _validate_queue_retention(
+    before: SessionRecord,
+    after: SessionRecord,
+    *,
+    prior_record: SessionRecord | None = None,
+) -> None:
     from .historical_assessments import require_hold_successor
 
     require_hold_successor(before.historical_assessments, after.historical_assessments)
@@ -5118,7 +5160,8 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
                 )
             elif is_pre_write_settled:
                 expected = before.rollover_pre_write_settled_api_accounting(
-                    after.api_run_accounting
+                    after.api_run_accounting,
+                    prior_record=prior_record,
                 )
             else:
                 expected = before.rollover_api_accounting(after.api_run_accounting)

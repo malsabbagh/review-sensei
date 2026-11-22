@@ -1854,16 +1854,19 @@ class ApiRunRequestTransport:
                 getattr(self, "_accepted_semantic_predecessor", None),
             )
             carried_reference = preview_candidate.finding_lifecycle
+            settled_prior_record: SessionRecord | None = None
             if old.analysis_abort is not None:
                 from .pre_entry_abort_admission import require_pre_entry_abort_admission
 
                 require_pre_entry_abort_admission(ledger, identity, record, old)
             elif pre_write_settlement_candidate:
                 from .publication_failure_recovery import (
-                    require_publication_failure_admission,
+                    admit_publication_failure_recovery,
                 )
 
-                require_publication_failure_admission(ledger, identity, record, old)
+                _, settled_prior_record = admit_publication_failure_recovery(
+                    ledger, identity, record, old
+                )
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
@@ -1907,7 +1910,7 @@ class ApiRunRequestTransport:
                 )
             elif pre_write_settlement_candidate:
                 updated = record.rollover_pre_write_settled_api_accounting(
-                    state.to_document()
+                    state.to_document(), prior_record=settled_prior_record
                 )
             else:
                 updated = record.rollover_api_accounting(state.to_document())

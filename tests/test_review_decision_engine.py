@@ -627,6 +627,35 @@ class ReviewDecisionEngineTests(unittest.TestCase):
         )
         self.assertNotEqual(original_key, baseline.context_cache_key(request))
 
+    def test_binary_only_partial_preserved_only_when_decisions_complete(self):
+        from tests.test_coverage_planning import BINARY
+
+        binary_request = replace(
+            self.request("src/app.py"),
+            diff=diff_for("src/app.py") + BINARY,
+        )
+        clean_binary_run = self.service(
+            ReviewFixture(comments=[]), DecisionFixture()
+        ).run(binary_request)
+        self.assertEqual(clean_binary_run.result.review_status, "partial")
+        self.assertTrue(clean_binary_run.result.coverage_only_partial)
+        self.assertEqual(clean_binary_run.result.decision_pass["candidates"], [])
+
+        blocking_binary_run = self.service(
+            ReviewFixture(comments=[comment(blocking=True)]),
+            DecisionFixture(),
+        ).run(binary_request)
+        self.assertEqual(blocking_binary_run.result.review_status, "partial")
+        self.assertFalse(blocking_binary_run.result.coverage_only_partial)
+
+        for failure in ("malformed", "transport"):
+            with self.subTest(failure=failure):
+                failed_run = self.service(
+                    ReviewFixture(), DecisionFixture(failure=failure)
+                ).run(self.request())
+                self.assertEqual(failed_run.result.review_status, "partial")
+                self.assertFalse(failed_run.result.coverage_only_partial)
+
 
 if __name__ == "__main__":
     unittest.main()

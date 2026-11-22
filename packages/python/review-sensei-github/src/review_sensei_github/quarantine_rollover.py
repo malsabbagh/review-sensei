@@ -231,6 +231,11 @@ def replace_quarantine_rollover(
         snapshot.get(record, snapshot.body)
         reader.current_scope.require()
         _history_legacy_write_guard(ledger, record)
+        from .publication_failure_recovery import (
+            clear_admitted_prior_record,
+            consume_admitted_prior_record,
+        )
+
         ledger._mutation_active = True
         try:
             # The original issuer still checks exact previous root, ceased
@@ -238,14 +243,16 @@ def replace_quarantine_rollover(
             # Its retention preflight is derived from this issued exact-root
             # transaction; ordinary three-census rollover remains unchanged.
             updated = prepare(record)
+            admitted_prior = consume_admitted_prior_record(ledger, record)
             require_native_decision(ledger, record, updated)
-            _validate_queue_retention(record, updated)
+            _validate_queue_retention(record, updated, prior_record=admitted_prior)
             read_session_baseline(ledger, updated)
             read_session_dispositions(ledger, updated)
             read_session_assessment_queue(ledger, updated)
             _history_legacy_write_guard(ledger, updated)
         finally:
             ledger._mutation_active = False
+            clear_admitted_prior_record(ledger)
         snapshot.get(record, snapshot.body)
         reader.current_scope.require()
         body = ledger._render_comment(
