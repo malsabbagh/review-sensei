@@ -45,6 +45,16 @@ def _witnesses_from_extra(
     return found
 
 
+def _replace_finding_lifecycle(
+    record: SessionRecord, lifecycle: dict[str, object]
+) -> SessionRecord:
+    payload = record.to_dict()
+    del payload["schema_version"], payload["record_sha256"]
+    payload["transaction"] = record.transaction
+    payload["finding_lifecycle"] = lifecycle
+    return SessionRecord._construct(**payload)
+
+
 class PublicationFailureRecoveryFixture(CommandEntryFixture):
     """Command+review fixture serving head-filtered check-runs and witness writes."""
 
@@ -55,6 +65,8 @@ class PublicationFailureRecoveryFixture(CommandEntryFixture):
         self.fail_publication_failed_patch: str | None = None
         self.fail_publication_failed_patch_skip: int = 0
         self.fail_finish_patch: str | None = None
+        self.graphql_response: object = None
+        self.fail_review_post_status: int | None = None
 
     def next_review_run(self, *, head_sha: str | None = None) -> None:
         self.past_jobs[self.run_id] = self.owner_job
@@ -150,6 +162,30 @@ class PublicationFailureRecoveryFixture(CommandEntryFixture):
                 else:
                     self._meter_if_unmetered(request)
                 raise TimeoutError("synthetic lost finish_review_run patch")
+        if (
+            self.graphql_response is not None
+            and method == "POST"
+            and path == "/graphql"
+        ):
+            self._meter_if_unmetered(request)
+            response_obj = (
+                self.graphql_response(payload)
+                if callable(self.graphql_response)
+                else self.graphql_response
+            )
+            if response_obj is not None:
+                return copy.deepcopy(response_obj)
+        if (
+            self.fail_review_post_status is not None
+            and method == "POST"
+            and path.endswith("/pulls/7/reviews")
+        ):
+            self._meter_if_unmetered(request)
+            status_code = self.fail_review_post_status
+            self.fail_review_post_status = None
+            return json_response(
+                {"message": "synthetic review publish error"}, status_code
+            )
         response = super().external(request, timeout)
         if (
             not self.command_active
@@ -843,6 +879,527 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
 
             self._assert_next_command_held(f, expected_error="phase=no-transaction")
             self._assert_next_review_held(f, expected_error="phase=no-transaction")
+
+    def test_bug1_pre_write_graphql_failure_after_journal_plan_and_post_effect_contrast(
+        self,
+    ):
+        # 1) Pre-write failure AFTER lifecycle_journal.plan() inside _published_finding_suppression
+        #    (profile#130 pattern) must NOT checkpoint finding_lifecycle with operation_id == tx_id,
+        #    must emit post_checkpoint_pre_write witness, and must allow subsequent recovery.
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=512)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            r1_op_id = r1.finding_lifecycle["operation_id"]
+
+            f.next_review_run(head_sha=HEAD_2)
+            reviews_before = len(f.reviews)
+            checks_before = len(f.check_runs)
+            f.graphql_response = json_response({"errors": [{"message": "not exposed"}]})
+            self.assertEqual(f.invoke(), 1)
+            self.assertIn("graphql unknown_error", f.error)
+            self.assertEqual(len(f.reviews), reviews_before)
+            self.assertEqual(len(f.check_runs), checks_before)
+            self.assertFalse(f.accounted._external_business_write_attempted)
+
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(settled.transaction.phase, "publication_failed")
+            self.assertIsNotNone(settled.finding_lifecycle)
+            self.assertEqual(settled.finding_lifecycle["operation_id"], r1_op_id)
+            self.assertNotEqual(
+                settled.finding_lifecycle["operation_id"],
+                settled.transaction.transaction_id,
+            )
+            witnesses = _witnesses_from_extra(f.extra_comments)
+            self.assertEqual(len(witnesses), 1)
+            self.assertEqual(witnesses[0][2].boundary, "post_checkpoint_pre_write")
+
+            f.graphql_response = None
+            f.next_review_run(head_sha=HEAD_3)
+            self.assertEqual(f.invoke(), 0, f.error)
+            r3 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r3.transaction.phase, "publication_succeeded")
+            self.assertEqual(len(f.reviews), 2)
+
+        # 2) Contrast: once a native effect (check-run POST) was recorded in journal.effects,
+        #    a later failure on review POST STILL checkpoints finding_lifecycle and MUST NOT
+        #    emit a pre-write settlement witness.
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=1024)
+            f.next_review_run(head_sha=HEAD_2)
+            f.fail_review_post_status = 422
+            self.assertEqual(f.invoke(), 1)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(settled.transaction.phase, "publication_failed")
+            self.assertEqual(
+                settled.finding_lifecycle["operation_id"],
+                settled.transaction.transaction_id,
+            )
+            self.assertEqual(len(_witnesses_from_extra(f.extra_comments)), 0)
+            self._assert_next_review_held(
+                f,
+                expected_error="finding lifecycle",
+                head_sha=HEAD_3,
+            )
+
+    def test_bug2_round2_pre_write_recovery_restores_baseline_and_round_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = PublicationFailureRecoveryFixture(directory, limit=512)
+            f.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "Validate caller input before updating state.",
+                    "severity": "high",
+                    "blocking": True,
+                    "needs_human": False,
+                    "symbol": "apply_change",
+                    "defect_kind": "missing_validation",
+                }
+            ]
+            self.assertEqual(f.invoke(), 0, f.error)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r1.completed_initial_reviews, 1)
+            self.assertEqual(r1.completed_verification_rounds, 0)
+            r1_history = copy.deepcopy(r1.convergence_history)
+            self.assertEqual(
+                r1_history["baseline"]["cache_key"]["head_sha"],
+                f.live_head,
+            )
+
+            # Direct unit contract: SessionRecord.rollover_pre_write_settled_api_accounting
+            # rejects missing or mismatched prior_record when previous_record exists.
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic round-2 pre-write crash")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(settled.transaction.phase, "publication_failed")
+            self.assertEqual(settled.completed_initial_reviews, 1)
+            self.assertEqual(settled.completed_verification_rounds, 1)
+            self.assertEqual(
+                settled.convergence_history["baseline"]["cache_key"]["head_sha"],
+                HEAD_2,
+            )
+
+            dummy_next_accounting = {
+                **settled.api_run_accounting,
+                "identity": {
+                    **settled.api_run_accounting["identity"],
+                    "run_id": settled.api_run_accounting["identity"]["run_id"] + 1,
+                },
+                "owner": {
+                    "run_attempt": 1,
+                    "job": "hosted",
+                    "generation": 0,
+                },
+                "confirmed": [],
+                "uncertain": [],
+                "prior_nonstartup_liability": 0,
+                "startup": {
+                    "slots": [
+                        {
+                            "attempt": 1,
+                            "job": "hosted",
+                            "requests": ["repository-policy"],
+                        }
+                    ]
+                },
+                "blocks": [],
+                "previous_record": {
+                    **settled.api_run_accounting["previous_record"],
+                    "run_id": settled.api_run_accounting["identity"]["run_id"],
+                    "root_sha256": settled.record_sha256,
+                },
+                "action": None,
+                "analysis_abort": None,
+                "terminal_transaction": None,
+            }
+            with self.assertRaises(ReviewInputError):
+                settled.rollover_pre_write_settled_api_accounting(dummy_next_accounting)
+            with self.assertRaises(ReviewInputError):
+                settled.rollover_pre_write_settled_api_accounting(
+                    dummy_next_accounting, prior_record=settled
+                )
+
+            # Recovery command restores Round 1's baseline and round counters without
+            # burning a verification round for the unpublished Round 2 failure,
+            # reads previous_record once, and leaves no leaked prior_record handoff.
+            from review_sensei_github import publication_failure_recovery as pfr
+
+            f.select_command("@reviewsensei review status", new_run=True)
+            with patch.object(
+                pfr, "read_previous_run", wraps=pfr.read_previous_run
+            ) as mock_read_prev:
+                self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            self.assertEqual(mock_read_prev.call_count, 1)
+            self.assertIsNone(
+                pfr.consume_admitted_prior_record(f.selected.ledger, settled)
+            )
+            restored = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(restored.transaction)
+            self.assertEqual(restored.completed_initial_reviews, 1)
+            self.assertEqual(restored.completed_verification_rounds, 0)
+            self.assertEqual(
+                restored.convergence_history["baseline"], r1_history["baseline"]
+            )
+            self.assertEqual(
+                restored.convergence_history["progress"], r1_history["progress"]
+            )
+
+            # Subsequent push uses the restored Round 1 baseline and completes with
+            # verification round count 1 (not 2).
+            f.next_review_run(head_sha=HEAD_3)
+            self.assertEqual(f.invoke(), 0, f.error)
+            r3 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r3.transaction.phase, "publication_succeeded")
+            self.assertEqual(r3.completed_initial_reviews, 1)
+            self.assertEqual(r3.completed_verification_rounds, 1)
+            self.assertEqual(
+                r3.convergence_history["baseline"]["cache_key"]["head_sha"],
+                HEAD_3,
+            )
+
+    def test_bug4a_dictionary_packed_settled_ancestor_explains_same_head_effects(self):
+        from review_sensei_github import finding_lifecycle_dictionary as dict_codec
+        from review_sensei_github.finding_lifecycle import _unpack_journal, _validate
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.publication_failure_recovery import (
+            _NO_EARLIER_EFFECTS,
+            _earlier_settled_effects,
+        )
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.bounded_evidence import (
+            EvidenceReadBudget,
+            canonical_bytes,
+            evidence_manifest,
+            inline_manifest,
+            partition_evidence,
+            read_inline_evidence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=1024)
+            same_head = f.live_head
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            orig_ref = r1.finding_lifecycle
+            orig_manifest = orig_ref["manifest"]
+            orig_binding = orig_manifest["binding"]
+            orig_envelope = read_inline_evidence(
+                orig_manifest, expected_binding=orig_binding
+            )
+            journal_doc = _validate(_unpack_journal(orig_envelope["lifecycle"]))
+
+            # Part 1: end-to-end real partitioned-json-v1 same-head pre-write recovery.
+            base_parts = partition_evidence(
+                orig_envelope, binding=orig_binding, item_count=1
+            )
+            base_storage_ids: list[str] = []
+            for idx, part in enumerate(base_parts):
+                cid = 2_000_100 + idx
+                f.extra_comments[cid] = {
+                    "id": cid,
+                    "issue_url": f"{f.api_url}/repos/owner/repo/issues/7",
+                    "body": (
+                        "ReviewSensei immutable evidence part v1\n```json\n"
+                        + canonical_bytes(part).decode("utf-8")
+                        + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+                    ),
+                    "user": {
+                        "type": "Bot",
+                        "login": "reviewsensei[bot]",
+                        "id": 999,
+                    },
+                }
+                base_storage_ids.append(str(cid))
+            base_part_manifest = evidence_manifest(
+                orig_envelope,
+                binding=orig_binding,
+                item_count=1,
+                parts=base_parts,
+                storage_ids=tuple(base_storage_ids),
+            )
+            r1_part = _replace_finding_lifecycle(
+                r1, {**orig_ref, "manifest": base_part_manifest}
+            )
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=r1_part
+            )
+
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic pre-write failure")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            self.assertEqual(len(_witnesses_from_extra(f.extra_comments)), 1)
+            settled_part = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(after.transaction)
+
+            # Part 2: direct _earlier_settled_effects verification for defensive
+            # finding-lifecycle-packed-v4 referencing the partitioned base.
+            dict_payload = dict_codec.pack(
+                journal_doc,
+                base=orig_envelope,
+                manifest=base_part_manifest,
+                current_binding=orig_binding,
+            )
+            dict_envelope = {
+                "schema_version": "finding-lifecycle-evidence-v2",
+                "lifecycle": dict_payload,
+            }
+            dict_manifest = inline_manifest(
+                dict_envelope, binding=orig_binding, item_count=1
+            )
+            r1_dict = _replace_finding_lifecycle(
+                r1_part, {**orig_ref, "manifest": dict_manifest}
+            )
+            settled_payload = settled_part.to_dict()
+            del settled_payload["schema_version"], settled_payload["record_sha256"]
+            settled_payload["transaction"] = settled_part.transaction
+            settled_payload["finding_lifecycle"] = r1_dict.finding_lifecycle
+            accounting_doc = copy.deepcopy(settled_payload["api_run_accounting"])
+            accounting_doc["previous_record"]["root_sha256"] = r1_dict.record_sha256
+            settled_payload["api_run_accounting"] = accounting_doc
+            settled_dict = SessionRecord._construct(**settled_payload)
+
+            def local_opener(request, timeout=None):
+                _ = timeout
+                path = urlsplit(request.full_url).path
+                bot = {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
+                if path == "/user" or path.startswith("/users/"):
+                    return json_response(bot)
+                if path.endswith("/issues/7/comments"):
+                    rows = ([f.comment] if f.comment else []) + list(
+                        f.extra_comments.values()
+                    )
+                    return json_response(copy.deepcopy(rows))
+                cid = int(path.rsplit("/", 1)[1])
+                return json_response(copy.deepcopy(f.extra_comments[cid]))
+
+            budget = EvidenceReadBudget()
+            http = GitHubHttp(api_url=f.api_url, opener=local_opener)
+            ledger = GitHubIssueCommentSessionLedger(
+                http, token="tok", app_slug="reviewsensei[bot]", evidence_budget=budget
+            )
+            self.assertEqual(ledger.load(IDENTITY).status, "ok")
+            ledger._reuse_listed_parts = True
+            earlier = _earlier_settled_effects(
+                ledger,
+                IDENTITY,
+                settled_dict,
+                ApiRunAccounting.from_document(settled_dict.api_run_accounting),
+                same_head,
+                999,
+                budget,
+                prior_record=r1_dict,
+            )
+            self.assertIsNot(earlier, _NO_EARLIER_EFFECTS)
+            self.assertGreaterEqual(len(f.reviews), 1)
+            self.assertGreaterEqual(len(f.inline), 1)
+            self.assertGreaterEqual(len(f.check_runs), 1)
+            self.assertTrue(
+                all(earlier.explains(row, inline=False) for row in f.reviews)
+            )
+            self.assertTrue(
+                all(
+                    earlier.explains(
+                        {**row, "original_commit_id": row["commit_id"]}, inline=True
+                    )
+                    for row in f.inline
+                )
+            )
+            self.assertTrue(
+                all(earlier.explains_check_run(row) for row in f.check_runs)
+            )
+
+    def test_bug4b_validate_before_checkpoint_handles_cached_partitioned_and_dictionary_lifecycles(
+        self,
+    ):
+        from review_sensei_github import finding_lifecycle_dictionary as dict_codec
+        from review_sensei_github.finding_lifecycle import _unpack_journal, _validate
+        from review_sensei_github.review_run import ReviewRunHooks
+
+        from review_sensei.bounded_evidence import (
+            canonical_bytes,
+            evidence_manifest,
+            inline_manifest,
+            partition_evidence,
+            read_inline_evidence,
+        )
+
+        for variant in ("partitioned", "dictionary"):
+            with (
+                self.subTest(variant=variant),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = self._blocking_and_advisory_round1(directory, limit=1024)
+                r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                orig_ref = r1.finding_lifecycle
+                orig_manifest = orig_ref["manifest"]
+                orig_binding = orig_manifest["binding"]
+                orig_envelope = read_inline_evidence(
+                    orig_manifest, expected_binding=orig_binding
+                )
+
+                base_parts = partition_evidence(
+                    orig_envelope, binding=orig_binding, item_count=1
+                )
+                base_storage_ids: list[str] = []
+                for idx, part in enumerate(base_parts):
+                    cid = 2_000_100 + idx
+                    f.extra_comments[cid] = {
+                        "id": cid,
+                        "issue_url": f"{f.api_url}/repos/owner/repo/issues/7",
+                        "body": (
+                            "ReviewSensei immutable evidence part v1\n```json\n"
+                            + canonical_bytes(part).decode("utf-8")
+                            + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+                        ),
+                        "user": {
+                            "type": "Bot",
+                            "login": "reviewsensei[bot]",
+                            "id": 999,
+                        },
+                    }
+                    base_storage_ids.append(str(cid))
+                base_part_manifest = evidence_manifest(
+                    orig_envelope,
+                    binding=orig_binding,
+                    item_count=1,
+                    parts=base_parts,
+                    storage_ids=tuple(base_storage_ids),
+                )
+
+                r1_updated = _replace_finding_lifecycle(
+                    r1, {**orig_ref, "manifest": base_part_manifest}
+                )
+                f.comment["body"] = render_session_comment(
+                    repository_id=123, pull_request=7, record=r1_updated
+                )
+
+                f.next_review_run(head_sha=HEAD_2)
+                reviews_before = len(f.reviews)
+                checks_before = len(f.check_runs)
+
+                orig_validate = ReviewRunHooks.validate_before_checkpoint
+                if variant == "dictionary":
+                    journal_doc = _validate(_unpack_journal(orig_envelope["lifecycle"]))
+                    dict_payload = dict_codec.pack(
+                        journal_doc,
+                        base=orig_envelope,
+                        manifest=base_part_manifest,
+                        current_binding=orig_binding,
+                    )
+                    dict_envelope = {
+                        "schema_version": "finding-lifecycle-evidence-v2",
+                        "lifecycle": dict_payload,
+                    }
+                    dict_manifest = inline_manifest(
+                        dict_envelope, binding=orig_binding, item_count=1
+                    )
+
+                    def wrapped_validate(hooks_self, **kwargs):
+                        orig_effect_record = hooks_self.ledger.caller._effect_record
+                        hooks_self.ledger.caller._effect_record = (
+                            _replace_finding_lifecycle(
+                                orig_effect_record,
+                                {**orig_ref, "manifest": dict_manifest},
+                            )
+                        )
+                        try:
+                            return orig_validate(hooks_self, **kwargs)
+                        finally:
+                            hooks_self.ledger.caller._effect_record = orig_effect_record
+
+                else:
+                    wrapped_validate = orig_validate
+
+                with (
+                    patch.object(
+                        ReviewRunHooks, "validate_before_checkpoint", wrapped_validate
+                    ),
+                    patch(
+                        "review_sensei.finding_drift.project_drift_review_result",
+                        side_effect=ReviewInputError(
+                            "synthetic post-decode validation error"
+                        ),
+                    ) as mock_project,
+                ):
+                    self.assertEqual(f.invoke(), 1)
+                self.assertEqual(mock_project.call_count, 1)
+
+                self.assertIn("synthetic post-decode validation error", f.error)
+                self.assertFalse(f.accounted._external_business_write_attempted)
+                self.assertEqual(len(f.reviews), reviews_before)
+                self.assertEqual(len(f.check_runs), checks_before)
+                settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(settled.transaction)
+                self.assertEqual(settled.failed_attempts, 1)
+                self.assertEqual(settled.failed_attempts_head_sha, HEAD_2)
+                witnesses = _witnesses_from_extra(f.extra_comments)
+                self.assertEqual(len(witnesses), 1)
+                self.assertEqual(witnesses[0][2].boundary, "pre_checkpoint_validation")
+
+    def test_bug2_failed_mutate_clears_admitted_prior_record_without_leak(self):
+        from review_sensei_github import publication_failure_recovery as pfr
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=512)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic round-2 pre-write crash")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            ledger = f.selected.ledger
+            orig_consume = pfr.consume_admitted_prior_record
+            seen = []
+
+            def failing_mutate(record):
+                ledger._mutation_active = True
+                pfr._ADMITTED_PRIOR_RECORDS[ledger] = (record.record_sha256, r1)
+                raise RuntimeError("synthetic mutate failure after admission")
+
+            with patch.object(
+                pfr,
+                "consume_admitted_prior_record",
+                side_effect=lambda lgr, rec: seen.append(orig_consume(lgr, rec)),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "synthetic mutate failure after admission"
+                ):
+                    ledger._native.replace(IDENTITY, failing_mutate) if hasattr(
+                        ledger, "_native"
+                    ) else ledger.replace(IDENTITY, failing_mutate)
+            self.assertEqual(seen, [])
+            self.assertIsNone(pfr.consume_admitted_prior_record(ledger, settled))
+
+            # Follow-up rollover recovery succeeds cleanly with zero stale state.
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(after.transaction)
+            self.assertEqual(after.completed_initial_reviews, 1)
+            self.assertEqual(after.completed_verification_rounds, 0)
 
 
 if __name__ == "__main__":

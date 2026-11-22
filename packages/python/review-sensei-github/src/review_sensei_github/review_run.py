@@ -73,6 +73,88 @@ from .session_ledger import GitHubIssueCommentSessionLedger
 
 _SHA = re.compile(r"[a-f0-9]{40}\Z")
 _REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
+
+
+def _read_cached_manifest_in_memory(
+    ledger: Any,
+    identity: SessionIdentity,
+    manifest: object,
+) -> object | None:
+    """Decode inline or already-cached partitioned evidence with zero HTTP or cache writes."""
+    from review_sensei.bounded_evidence import (
+        MAX_PART_BYTES,
+        AuthenticatedPart,
+        canonical_bytes,
+        read_inline_evidence,
+        read_partitioned_evidence,
+    )
+
+    if not isinstance(manifest, dict):
+        return None
+    binding = manifest.get("binding")
+    if not isinstance(binding, dict):
+        raise ReviewInputError("finding lifecycle manifest binding is invalid")
+    encoding = manifest.get("encoding")
+    if encoding == "inline-json-v1":
+        return read_inline_evidence(manifest, expected_binding=binding)
+    if encoding != "partitioned-json-v1":
+        return None
+    parts = manifest.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return None
+    budget = getattr(ledger, "evidence_budget", None)
+    verified_parts = getattr(ledger, "_verified_parts", None)
+    comments_by_id = getattr(ledger, "_comments_by_id", None)
+    part_is_listed = getattr(ledger, "_part_is_listed", None)
+    if (
+        budget is None
+        or not isinstance(verified_parts, dict)
+        or not isinstance(comments_by_id, dict)
+        or not callable(part_is_listed)
+    ):
+        return None
+    for ref in parts:
+        if not isinstance(ref, dict):
+            return None
+        sid = ref.get("storage_id")
+        if not isinstance(sid, str) or re.fullmatch(r"[1-9][0-9]{0,18}", sid) is None:
+            return None
+        if sid not in verified_parts and not part_is_listed(sid):
+            return None
+
+    def cached_reader(storage_id: str) -> AuthenticatedPart:
+        cached = verified_parts.get(storage_id)
+        if cached is not None:
+            return cached
+        item = comments_by_id.get(int(storage_id))
+        owned = ledger._part_owner(item, identity)
+        if type(owned.get("id")) is not int or owned.get("id") != int(storage_id):
+            raise ReviewInputError("GitHub partition identity does not match")
+        body = owned.get("body")
+        if (
+            not isinstance(body, str)
+            or len(body.encode()) > MAX_PART_BYTES
+            or not body.startswith("ReviewSensei immutable evidence part v1\n```json\n")
+            or not body.endswith("\n```\n<!-- reviewsensei:evidence-part:v1 -->")
+        ):
+            raise ReviewInputError("GitHub partition framing is invalid")
+        raw = body.split("\n```json\n", 1)[1].rsplit("\n```\n", 1)[0]
+        try:
+            document = json.loads(raw)
+            if canonical_bytes(document).decode() != raw:
+                raise ValueError("noncanonical part")
+        except (ValueError, UnicodeError) as exc:
+            raise ReviewInputError("GitHub partition JSON is invalid") from exc
+        return AuthenticatedPart(document, ledger.evidence_producer())
+
+    return read_partitioned_evidence(
+        manifest,
+        reader=cached_reader,
+        expected_binding=binding,
+        budget=budget,
+    )
+
+
 _CONFIRMED_WITHHELD_CLOSE_DIAGNOSTICS = frozenset(
     {
         "required_fixes_open",
@@ -479,7 +561,6 @@ class ReviewRunHooks(ApiRunReviewHooks):
         before_observations = len(caller.observations)
         caller._pre_checkpoint_validation_failed = False
         try:
-            from review_sensei.bounded_evidence import read_inline_evidence
             from review_sensei.finding_drift import (
                 DriftEvaluationResult,
                 project_drift_review_result,
@@ -487,7 +568,7 @@ class ReviewRunHooks(ApiRunReviewHooks):
             from review_sensei.finding_lifecycle import decode_lifecycle_state
 
             from .finding_lifecycle import _unpack_journal, _validate
-            from .finding_lifecycle_dictionary import is_dictionary
+            from .finding_lifecycle_dictionary import is_dictionary, unpack
             from .publication import ReviewPublisher, _reject_conflicting_instances
             from .quarantine_namespace import inherited_namespace_is_historical
 
@@ -508,29 +589,32 @@ class ReviewRunHooks(ApiRunReviewHooks):
                 raise ReviewInputError(
                     "pre-checkpoint validation requires an admitted session record"
                 )
+            if effect_record.quarantine_lineage is not None:
+                return
             repo_key = (self.identity.repository_id, self.identity.pull_request)
             if effect_record.finding_lifecycle is not None:
                 manifest = effect_record.finding_lifecycle.get("manifest")
-                if (
-                    not isinstance(manifest, dict)
-                    or manifest.get("encoding") != "inline-json-v1"
-                ):
-                    return
-                binding = manifest.get("binding")
-                if not isinstance(binding, dict):
-                    raise ReviewInputError(
-                        "finding lifecycle inline manifest binding is invalid"
-                    )
-                envelope = read_inline_evidence(manifest, expected_binding=binding)
+                envelope = _read_cached_manifest_in_memory(
+                    self.ledger, self.identity, manifest
+                )
                 if (
                     not isinstance(envelope, dict)
                     or envelope.get("schema_version") != "finding-lifecycle-evidence-v2"
                 ):
                     return
+                assert isinstance(manifest, dict)
+                binding = manifest["binding"]
                 packed = envelope.get("lifecycle")
-                if is_dictionary(packed):
-                    return
-                document = _validate(_unpack_journal(packed))
+                if isinstance(packed, dict) and is_dictionary(packed):
+                    dict_manifest = packed.get("dictionary_manifest")
+                    base = _read_cached_manifest_in_memory(
+                        self.ledger, self.identity, dict_manifest
+                    )
+                    if base is None:
+                        return
+                    document = unpack(packed, base=base, current_binding=binding)
+                else:
+                    document = _validate(_unpack_journal(packed))
                 restored = decode_lifecycle_state(document["lifecycle"])
                 if inherited_namespace_is_historical(
                     self.ledger, effect_record, restored.state, document

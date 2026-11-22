@@ -22,6 +22,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+from weakref import WeakKeyDictionary
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
@@ -673,6 +674,27 @@ class _EarlierSettledEffects:
 
 
 _NO_EARLIER_EFFECTS = _EarlierSettledEffects(frozenset(), frozenset(), frozenset())
+_ADMITTED_PRIOR_RECORDS: WeakKeyDictionary[Any, tuple[str, SessionRecord | None]] = (
+    WeakKeyDictionary()
+)
+
+
+def consume_admitted_prior_record(
+    ledger: Any, before_record: SessionRecord
+) -> SessionRecord | None:
+    """Return and clear the prior record authenticated for this exact rollover root."""
+    entry = _ADMITTED_PRIOR_RECORDS.pop(ledger, None)
+    if entry is None:
+        return None
+    root_sha256, prior_record = entry
+    if root_sha256 != before_record.record_sha256:
+        return None
+    return prior_record
+
+
+def clear_admitted_prior_record(ledger: Any) -> None:
+    """Drop any unclaimed admitted prior record on cleanup."""
+    _ADMITTED_PRIOR_RECORDS.pop(ledger, None)
 
 
 def _earlier_settled_effects(
@@ -683,12 +705,23 @@ def _earlier_settled_effects(
     head_sha: str,
     producer_id: int,
     budget: EvidenceReadBudget,
+    *,
+    prior_record: SessionRecord | None = None,
 ) -> _EarlierSettledEffects:
     """Explain only exact visible bytes/IDs proved by the settled ancestor run."""
+    from review_sensei.bounded_evidence import read_inline_evidence
     from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
 
     from .finding_lifecycle import _unpack_journal, _validate
-    from .finding_lifecycle_dictionary import is_dictionary
+    from .finding_lifecycle_dictionary import (
+        _manifest as _dict_manifest,
+    )
+    from .finding_lifecycle_dictionary import (
+        is_dictionary,
+    )
+    from .finding_lifecycle_dictionary import (
+        unpack as _unpack_dictionary,
+    )
 
     archive, reference = old.previous_record, current.finding_lifecycle
     if archive is None or reference is None:
@@ -706,9 +739,18 @@ def _earlier_settled_effects(
         or binding.get("head_sha") != head_sha
     ):
         return _NO_EARLIER_EFFECTS
-    _protect_tail(budget, 1 + len(manifest.get("parts", ())), record=current)
+    need_prior_read = prior_record is None
+    _protect_tail(
+        budget,
+        int(need_prior_read) + len(manifest.get("parts", ())),
+        record=current,
+    )
     try:
-        prior = read_previous_run(ledger, identity, archive)
+        prior = (
+            prior_record
+            if prior_record is not None
+            else read_previous_run(ledger, identity, archive)
+        )
         prior_caller = ApiRunAccounting.from_document(prior.api_run_accounting)
         tx = prior.transaction
         if (
@@ -734,9 +776,33 @@ def _earlier_settled_effects(
         ):
             return _NO_EARLIER_EFFECTS
         stored = _decode_selected_lifecycle(ledger, current)
-        if stored is None or is_dictionary(stored):
+        if stored is None:
             return _NO_EARLIER_EFFECTS
-        journal = _validate(_unpack_journal(stored))
+        if is_dictionary(stored):
+            dict_manifest = stored.get("dictionary_manifest")
+            base_binding = _dict_manifest(dict_manifest, binding)
+            if not isinstance(dict_manifest, dict):
+                raise ReviewInputError(
+                    "finding lifecycle dictionary manifest is invalid"
+                )
+            base_parts = (
+                0
+                if dict_manifest.get("encoding") == "inline-json-v1"
+                else len(dict_manifest.get("parts", ()))
+                if isinstance(dict_manifest.get("parts"), list)
+                else 0
+            )
+            _protect_tail(budget, base_parts, record=current)
+            base = (
+                read_inline_evidence(dict_manifest, expected_binding=base_binding)
+                if dict_manifest.get("encoding") == "inline-json-v1"
+                else ledger.read_evidence(
+                    identity, dict_manifest, expected_binding=base_binding
+                )
+            )
+            journal = _unpack_dictionary(stored, base=base, current_binding=binding)
+        else:
+            journal = _validate(_unpack_journal(stored))
     except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
         raise _hold(
             "earlier native effect evidence is unavailable", record=current
@@ -854,13 +920,13 @@ def _earlier_settled_effects(
     )
 
 
-def require_publication_failure_admission(
+def admit_publication_failure_recovery(
     ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
     record: SessionRecord,
     old: ApiRunAccounting,
-) -> PreExternalWriteSettlementWitness:
-    """Verify witness + 3-surface negative native census inside rollover CAS."""
+) -> tuple[PreExternalWriteSettlementWitness, SessionRecord | None]:
+    """Verify witness, 3-surface negative census, and prior root inside rollover CAS."""
     if (
         old.action is not None
         or old.analysis_abort is not None
@@ -907,6 +973,32 @@ def require_publication_failure_admission(
     deadline = http.evidence_monotonic() + _CENSUS_WALL_SECONDS
     head_sha = witness.head_sha
 
+    prior_record: SessionRecord | None = None
+    if record.transaction is not None and old.previous_record is not None:
+        prev_manifest = old.previous_record.get("manifest")
+        prev_parts = (
+            prev_manifest.get("parts", ())
+            if isinstance(prev_manifest, dict)
+            and isinstance(prev_manifest.get("parts"), list)
+            else ()
+        )
+        _protect_tail(budget, max(1, len(prev_parts)), record=record)
+        try:
+            prior_record = read_previous_run(ledger, identity, old.previous_record)
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            raise _hold(
+                "prior settled session root is unavailable", record=record
+            ) from None
+        if (
+            prior_record.identity() != identity
+            or prior_record.record_sha256 != old.previous_record.get("root_sha256")
+            or prior_record.generation >= record.generation
+        ):
+            raise _hold(
+                "prior settled session root conflicts with predecessor",
+                record=record,
+            )
+
     earlier: _EarlierSettledEffects | None = None
     earlier_review_ids: set[int] = set()
 
@@ -914,7 +1006,14 @@ def require_publication_failure_admission(
         nonlocal earlier
         if earlier is None:
             earlier = _earlier_settled_effects(
-                ledger, identity, record, old, head_sha, producer_id, budget
+                ledger,
+                identity,
+                record,
+                old,
+                head_sha,
+                producer_id,
+                budget,
+                prior_record=prior_record,
             )
         return earlier
 
@@ -1101,6 +1200,19 @@ def require_publication_failure_admission(
     inspect_pr_surface("reviews", classify_review)
     inspect_pr_surface("comments", classify_inline, inline=True)
     inspect_check_runs()
+    if prior_record is not None and ledger._mutation_active:
+        _ADMITTED_PRIOR_RECORDS[ledger] = (record.record_sha256, prior_record)
+    return witness, prior_record
+
+
+def require_publication_failure_admission(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+) -> PreExternalWriteSettlementWitness:
+    """Verify witness + 3-surface negative native census inside rollover CAS."""
+    witness, _ = admit_publication_failure_recovery(ledger, identity, record, old)
     return witness
 
 
@@ -1109,6 +1221,9 @@ __all__ = [
     "SETTLEMENT_BOUNDARIES",
     "SETTLEMENT_WITNESS_MARKER",
     "SETTLEMENT_WITNESS_SCHEMA",
+    "admit_publication_failure_recovery",
+    "clear_admitted_prior_record",
+    "consume_admitted_prior_record",
     "emit_pre_external_write_settlement",
     "find_authenticated_settlement_witness",
     "parse_settlement_witness_comment",

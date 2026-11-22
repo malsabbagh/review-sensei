@@ -3930,5 +3930,233 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
 
 
+class ReviewThreadLookupClassificationTests(unittest.TestCase):
+    def test_review_thread_lookup_error_classification_and_diagnostics(self):
+        head = "b" * 40
+        base = "a" * 40
+
+        def call_site(site, response):
+            http, _ = make_http([response])
+            publisher = ReviewPublisher(http=http)
+            if site == "suppression":
+                return publisher._published_finding_suppression(
+                    token="tok",
+                    repository="owner/repo",
+                    pull_request=2,
+                    app_slug="reviewsensei[bot]",
+                    repository_id=1,
+                    head_sha=head,
+                    base_sha=base,
+                )
+            if site == "blocking":
+                return ReviewApprovalFinalizer(http=http)._scan_blocking_threads(
+                    token="tok",
+                    repository="owner/repo",
+                    pull_request=2,
+                    repository_id=1,
+                    head_sha=head,
+                    base_sha=base,
+                    app_slug="reviewsensei[bot]",
+                )
+            return publisher._has_open_review_threads(
+                token="tok",
+                repository="owner/repo",
+                pull_request=2,
+            )
+
+        transient_cases = [
+            (
+                "rate_limited_type",
+                json_response(
+                    {
+                        "errors": [
+                            {
+                                "type": "RATE_LIMITED",
+                                "message": "API rate limit exceeded",
+                            }
+                        ]
+                    }
+                ),
+                "graphql rate_limited",
+            ),
+            (
+                "internal_code_extension",
+                json_response(
+                    {
+                        "errors": [
+                            {
+                                "extensions": {"code": "INTERNAL"},
+                                "message": "Something went wrong while executing your query",
+                            }
+                        ]
+                    }
+                ),
+                "graphql internal",
+            ),
+            (
+                "transient_message_only",
+                json_response(
+                    {
+                        "errors": [
+                            {
+                                "message": "Something went wrong while executing your query"
+                            }
+                        ]
+                    }
+                ),
+                "graphql something_went_wrong",
+            ),
+            ("http_502", json_response({"message": "bad gateway"}, 502), "http 502"),
+            ("http_429", json_response({"message": "slow down"}, 429), "http 429"),
+        ]
+        for site in ("suppression", "blocking", "has_unresolved"):
+            for label, response, expected_fragment in transient_cases:
+                with self.subTest(site=site, case=label):
+                    with self.assertRaises(GitHubPublicationTransientError) as raised:
+                        call_site(site, response)
+                    self.assertIn(expected_fragment, str(raised.exception).lower())
+
+        non_transient_cases = [
+            (
+                "forbidden_type",
+                json_response(
+                    {"errors": [{"type": "FORBIDDEN", "message": "not accessible"}]}
+                ),
+                "graphql forbidden",
+            ),
+            (
+                "mixed_with_fourth_non_transient",
+                json_response(
+                    {
+                        "errors": [
+                            {"type": "RATE_LIMITED", "message": "rate limit"},
+                            {"type": "RATE_LIMITED", "message": "rate limit"},
+                            {"type": "RATE_LIMITED", "message": "rate limit"},
+                            {"type": "FORBIDDEN", "message": "denied at index 3"},
+                        ]
+                    }
+                ),
+                "graphql",
+            ),
+            (
+                "non_list_errors",
+                json_response({"errors": "malformed"}),
+                "invalid_errors=str",
+            ),
+            ("http_401", json_response({}, 401), "http 401"),
+            ("http_403", json_response({}, 403), "http 403"),
+        ]
+        for site in ("suppression", "blocking", "has_unresolved"):
+            for label, response, expected_fragment in non_transient_cases:
+                with self.subTest(site=site, case=label):
+                    with self.assertRaises(GitHubPublicationError) as raised:
+                        call_site(site, response)
+                    self.assertNotIsInstance(
+                        raised.exception, GitHubPublicationTransientError
+                    )
+                    self.assertIn(expected_fragment, str(raised.exception).lower())
+                    if site == "suppression" and label in {"http_401", "http_403"}:
+                        self.assertIn(
+                            "review thread reconciliation",
+                            str(raised.exception).lower(),
+                        )
+
+    def test_http_403_rate_limit_vs_permission_error(self):
+        from email.message import Message
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        from review_sensei_github.errors import GitHubHTTPTransientError
+        from review_sensei_github.http import GitHubHttp
+
+        def make_403(*, body: bytes, headers: dict[str, str]):
+            msg = Message()
+            for key, value in headers.items():
+                msg[key] = value
+
+            def opener(request, timeout=None):
+                _ = timeout
+                raise HTTPError(request.full_url, 403, "Forbidden", msg, BytesIO(body))
+
+            return GitHubHttp(api_url="https://api.github.test", opener=opener)
+
+        for label, body, headers in (
+            ("retry_after", b'{"message":"nope"}', {"Retry-After": "60"}),
+            (
+                "retry_after_http_date",
+                b'{"message":"nope"}',
+                {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+            ),
+            ("ratelimit_remaining_0", b"{}", {"X-RateLimit-Remaining": "0"}),
+            (
+                "secondary_rate_limit_body",
+                b'{"message":"You have exceeded a secondary rate limit."}',
+                {"X-RateLimit-Remaining": "10"},
+            ),
+        ):
+            with self.subTest(case=label):
+                http = make_403(body=body, headers=headers)
+                with self.assertRaises(GitHubHTTPTransientError):
+                    http.request("POST", "/graphql", token="tok", body={"query": "{}"})
+                publisher = ReviewPublisher(http=http)
+                with self.assertRaises(GitHubPublicationTransientError):
+                    publisher._published_finding_suppression(
+                        token="tok",
+                        repository="owner/repo",
+                        pull_request=2,
+                        app_slug="reviewsensei[bot]",
+                        repository_id=1,
+                        head_sha="b" * 40,
+                        base_sha="a" * 40,
+                    )
+
+        non_transient_403_cases = (
+            (
+                "permission_error",
+                b'{"message":"Resource not accessible by integration"}',
+                {"X-RateLimit-Remaining": "4999"},
+            ),
+            (
+                "retry_after_zero",
+                b'{"message":"Resource not accessible by integration"}',
+                {"Retry-After": "0"},
+            ),
+            (
+                "unrelated_rate_limit_doc_with_remaining_10",
+                (
+                    b'{"message":"Resource not accessible; see docs on rate limit behavior",'
+                    b'"documentation_url":"https://docs.github.com/rest#rate-limiting"}'
+                ),
+                {"X-RateLimit-Remaining": "10"},
+            ),
+            (
+                "contradictory_remaining_10_with_api_rate_limit_exceeded",
+                b'{"message":"API rate limit exceeded"}',
+                {"X-RateLimit-Remaining": "10"},
+            ),
+        )
+        for label, body, headers in non_transient_403_cases:
+            with self.subTest(non_transient_case=label):
+                perm_http = make_403(body=body, headers=headers)
+                status, payload = perm_http.request(
+                    "POST", "/graphql", token="tok", body={"query": "{}"}
+                )
+                self.assertEqual((status, payload), (403, None))
+                with self.assertRaises(GitHubPublicationError) as raised:
+                    ReviewPublisher(http=perm_http)._published_finding_suppression(
+                        token="tok",
+                        repository="owner/repo",
+                        pull_request=2,
+                        app_slug="reviewsensei[bot]",
+                        repository_id=1,
+                        head_sha="b" * 40,
+                        base_sha="a" * 40,
+                    )
+                self.assertNotIsInstance(
+                    raised.exception, GitHubPublicationTransientError
+                )
+                self.assertIn("http 403", str(raised.exception).lower())
+
+
 if __name__ == "__main__":
     unittest.main()

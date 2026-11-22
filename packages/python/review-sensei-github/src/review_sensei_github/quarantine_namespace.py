@@ -71,10 +71,30 @@ def inherited_namespace_is_historical(ledger, record, state, document):
         raise ReviewInputError(
             "quarantine finding namespace original lifecycle is absent"
         )
+    sources = json.loads(authenticated.source_documents_bytes)
+    allowed_scopes = {
+        (predecessor.transaction.head_sha, predecessor.transaction.base_sha)
+    }
     if (
-        state.head_sha != predecessor.transaction.head_sha
-        or state.base_sha != predecessor.transaction.base_sha
+        predecessor.transaction.phase == "publication_failed"
+        and predecessor.finding_lifecycle.get("operation_id")
+        != predecessor.transaction.transaction_id
     ):
+        fl_binding = predecessor.finding_lifecycle["manifest"]["binding"]
+        for origin in authenticated.archive["assessment_origins"]["origins"]:
+            if (
+                sources[origin["kind"]]["schema_version"]
+                == "quarantine-lifecycle-published-assessment-source-v1"
+            ):
+                inv_binding = origin["inventory_manifest"]["binding"]
+                if (inv_binding["head_sha"], inv_binding["base_sha"]) == (
+                    fl_binding["head_sha"],
+                    fl_binding["base_sha"],
+                ):
+                    allowed_scopes.add(
+                        (inv_binding["head_sha"], inv_binding["base_sha"])
+                    )
+    if (state.head_sha, state.base_sha) not in allowed_scopes:
         raise ReviewInputError(
             "quarantine finding namespace original snapshot conflicts"
         )
@@ -92,7 +112,6 @@ def inherited_namespace_is_historical(ledger, record, state, document):
             "quarantine finding namespace has unclassified native liabilities"
         )
     inventories = authenticated.inventories
-    sources = json.loads(authenticated.source_documents_bytes)
     covered = set()
     archived = set()
     for origin in authenticated.archive["assessment_origins"]["origins"]:

@@ -7,6 +7,7 @@ import math
 import re
 import time
 from collections.abc import Callable
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -41,6 +42,47 @@ def _unique_json_object(pairs):
             raise ValueError("duplicate GitHub response key")
         value[key] = item
     return value
+
+
+def _is_rate_limited_403(headers: Any, error_body: str) -> bool:
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    if isinstance(retry_after, str):
+        stripped_retry = retry_after.strip()
+        if stripped_retry:
+            if re.fullmatch(r"-?\d+", stripped_retry):
+                if int(stripped_retry) > 0:
+                    return True
+            else:
+                try:
+                    parsedate_to_datetime(stripped_retry)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    return True
+    remaining = headers.get("X-RateLimit-Remaining") if headers is not None else None
+    stripped_remaining = remaining.strip() if isinstance(remaining, str) else ""
+    if stripped_remaining == "0":
+        return True
+    has_positive_remaining = bool(
+        re.fullmatch(r"\d+", stripped_remaining) and int(stripped_remaining) > 0
+    )
+    message = ""
+    if error_body:
+        try:
+            parsed_body = json.loads(error_body)
+        except ValueError:
+            parsed_body = None
+        if isinstance(parsed_body, dict) and isinstance(
+            parsed_body.get("message"), str
+        ):
+            message = parsed_body["message"].lower()
+    if "secondary rate limit" in message or "abuse detection" in message:
+        return True
+    if not has_positive_remaining and (
+        "api rate limit exceeded" in message or "rate limit exceeded" in message
+    ):
+        return True
+    return False
 
 
 def _invalid_json_number(_value):
@@ -302,7 +344,11 @@ class GitHubHttp:
                     guard.after_response(method, value)
                 return status, value
         except HTTPError as exc:
-            self._read_bounded_error_body(exc)
+            error_body = self._read_bounded_error_body(exc)
+            if exc.code == 403 and _is_rate_limited_403(exc.headers, error_body):
+                raise GitHubHTTPTransientError(
+                    "GitHub request rate limited (http 403)"
+                ) from exc
             # Preserve the status as data so callers can reconcile ambiguous
             # write responses (409/422/429/5xx) without exposing the bounded
             # error body.  Network failures remain typed exceptions below.
