@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.8.23 - 2026-11-22
+
+Changes since [v0.8.22](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.22), from [51b1d91f63a0c86f17a0526e1d2f60bcc8dd00ce](https://github.com/malsabbagh/review-sensei/commit/51b1d91f63a0c86f17a0526e1d2f60bcc8dd00ce) through [e016d09abb6e75db321bb4b6e58a5ed593464404](https://github.com/malsabbagh/review-sensei/commit/e016d09abb6e75db321bb4b6e58a5ed593464404).
+
+Previous annotated tag object: `6ee2832c37252abea4ce1bd28f77365b3fec9513`.
+
+- Fix installed Python qualification pagination and lifecycle scheduling \(\#476\) ([ceda47dc1f1dfd41abe392dfede61c5cf68ff2e7](https://github.com/malsabbagh/review-sensei/commit/ceda47dc1f1dfd41abe392dfede61c5cf68ff2e7)).
+- Cut Python 3.11 installed lifecycle overhead and expose qualification progress \(\#477\) ([bce57cb31219a5c22316d5f77085b15369814ef9](https://github.com/malsabbagh/review-sensei/commit/bce57cb31219a5c22316d5f77085b15369814ef9)).
+- Remove avoidable tracing and loopback setup cost from qualifications \(\#478\) ([06c1bd6e4b1dedffc5aa5d470f0aafbcee72d90f](https://github.com/malsabbagh/review-sensei/commit/06c1bd6e4b1dedffc5aa5d470f0aafbcee72d90f)).
+- fix: allow state-advancing disposition commands past semantic no-progress stop \(\#470\) ([8dd272f75fd57c3e80d4e4a9f43d7ff1f0c59790](https://github.com/malsabbagh/review-sensei/commit/8dd272f75fd57c3e80d4e4a9f43d7ff1f0c59790)).
+- fix\(github\): close confirmed withheld-approval accounting runs \(\#471\) ([f401f115542da02a463f7c07c1dd29e0f407bbdd](https://github.com/malsabbagh/review-sensei/commit/f401f115542da02a463f7c07c1dd29e0f407bbdd)).
+- Hold legacy finding-inventory migration and policy drift before session rollover \(\#472\) ([33122c5d831e1229fc2dc086b69580f7b736de04](https://github.com/malsabbagh/review-sensei/commit/33122c5d831e1229fc2dc086b69580f7b736de04)).
+- Reconstruct Attempt-2 recovery contexts with trusted overrides and custom stages \(\#473\) ([1b3fa9d8fb494a908873665853c6e02baf697f50](https://github.com/malsabbagh/review-sensei/commit/1b3fa9d8fb494a908873665853c6e02baf697f50)).
+- Fix pre-effect command stranding and add opt-in G32 CLI cancellation \(\#474\) ([f7a2229b64cfca9479e922e06d2895af45b7daf1](https://github.com/malsabbagh/review-sensei/commit/f7a2229b64cfca9479e922e06d2895af45b7daf1)).
+- fix\(github\): wire ADR 0142 prospective abort close witness \(\#475\) ([a1e0be59257d873ee8ce3f36c655f940820c9052](https://github.com/malsabbagh/review-sensei/commit/a1e0be59257d873ee8ce3f36c655f940820c9052)).
+- fix\(github\): fix advisory drift promotion crash and add authenticated pre-write settlement recovery \(\#479\) ([330f5e96d7cdb46de16882da238771e245cae6c7](https://github.com/malsabbagh/review-sensei/commit/330f5e96d7cdb46de16882da238771e245cae6c7)).
+- fix\(approval\): separate coverage from findings and enforce reconstruction parity \(\#480\) ([e8413fded43a8086bf090fde838c70df7fbe5e99](https://github.com/malsabbagh/review-sensei/commit/e8413fded43a8086bf090fde838c70df7fbe5e99)).
+- fix\(capacity\): break down preflight budget and prove K=1..5 fit within 512 \(\#481\) ([e016d09abb6e75db321bb4b6e58a5ed593464404](https://github.com/malsabbagh/review-sensei/commit/e016d09abb6e75db321bb4b6e58a5ed593464404)).
+
+## review-sensei-github 0.3.29 - 2026-11-22
+
+- Pin `review-sensei==0.8.23`.
+
 ## 0.8.22 - 2026-11-19
 
 - Add a purpose-bound durable finding lifecycle, cold reply/command consumers,
