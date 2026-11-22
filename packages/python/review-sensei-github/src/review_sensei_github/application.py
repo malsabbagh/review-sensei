@@ -6025,6 +6025,7 @@ class GitHubApplication:
                             retained_eligibility=retained,
                             continuation_digest=human.authority_digest,
                             source_guard=source_guard,
+                            observed_trust=observed_trust,
                         )
                         completed_reply = replace(
                             reply_outcome,

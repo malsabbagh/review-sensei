@@ -4,21 +4,40 @@ import copy
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
 from review_sensei_github import cli as package_cli
+from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.http import GitHubHttp
+from review_sensei_github.publication import ReviewPublisher
 from review_sensei_github.run_authority import parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from review_sensei_github.trust_enrollment import enrolled_trust_snapshot_from_record
 from test_action_run import CommandEntryFixture
 from test_api_work_persistence import IDENTITY
+
+from review_sensei.errors import ReviewInputError
 
 
 class ObservedEntryFixture(CommandEntryFixture):
     def __init__(self, directory):
         super().__init__(directory, limit=512)
         self.observed_installation = 99
+        self.observed_permissions = {
+            "metadata": "read",
+            "pull_requests": "write",
+            "contents": "read",
+            "issues": "write",
+            "checks": "write",
+        }
+        self.observed_pr_repo_override = None
+        self.observed_schema_version = "current-observation-v1"
+        self.observed_actor_permission = None
+        self.observed_actor_role = None
+        self.observed_actor_role_requests = []
         self.observed_requests = []
 
     def select_command(self, *args, **kwargs):
@@ -38,6 +57,10 @@ class ObservedEntryFixture(CommandEntryFixture):
                 self.observed_requests.append(
                     ("verify" if verifying else payload["capability"], 4)
                 )
+                if not verifying:
+                    self.observed_actor_role_requests.append(
+                        bool(payload.get("observe_actor_role"))
+                    )
                 receipt = {
                     **payload["control_budget"],
                     "dispatched": min(
@@ -50,8 +73,20 @@ class ObservedEntryFixture(CommandEntryFixture):
                     )
                 assert payload["capability"] == "review_session"
                 actor = self._actor() if self.command_active else None
+                actor_obs = {
+                    "id": 101,
+                    "login": "alice",
+                    "source_association": actor["association"] if actor else None,
+                }
+                if self.observed_schema_version == "current-observation-v2":
+                    actor_obs["repository_permission"] = (
+                        self.observed_actor_permission or "write"
+                    )
+                    actor_obs["repository_role"] = (
+                        self.observed_actor_role or "maintain"
+                    )
                 observation = {
-                    "schema_version": "current-observation-v1",
+                    "schema_version": self.observed_schema_version,
                     "repository": {
                         "id": 123,
                         "full_name": "owner/repo",
@@ -63,17 +98,13 @@ class ObservedEntryFixture(CommandEntryFixture):
                         "id": self.observed_installation,
                         "repository_selection": "selected",
                         "repository_access": True,
-                        "permissions": {"metadata": "read", "pull_requests": "write"},
+                        "permissions": dict(self.observed_permissions),
                     },
                     "capability": {
                         "name": "review_session",
                         "permissions": {"metadata": "read", "pull_requests": "write"},
                     },
-                    "actor": {
-                        "id": 101,
-                        "login": "alice",
-                        "source_association": actor["association"] if actor else None,
-                    },
+                    "actor": actor_obs,
                 }
                 return json_response(
                     {
@@ -94,13 +125,56 @@ class ObservedEntryFixture(CommandEntryFixture):
                         },
                     }
                 )
-        return super().external(request, timeout)
+        response = super().external(request, timeout)
+        if (
+            request.get_method() == "GET"
+            and urlsplit(request.full_url).path == "/repos/owner/repo/pulls/7"
+        ):
+            pull = json.loads(response.read(512 * 1024))
+            repo_fields = (
+                dict(self.observed_pr_repo_override)
+                if self.observed_pr_repo_override is not None
+                else {
+                    "id": 123,
+                    "full_name": "owner/repo",
+                    "fork": False,
+                    "owner": {"id": 42, "login": "owner"},
+                }
+            )
+            pull.setdefault("base", {}).setdefault("repo", {}).update(repo_fields)
+            return json_response(pull, response.status)
+        return response
 
     def opted(self, call):
         original = package_cli.main
 
         def invoke(argv):
             return original([argv[0], "--enable-current-trust-enrollment", *argv[1:]])
+
+        with patch.object(package_cli, "main", side_effect=invoke):
+            return call()
+
+    def opted_with_actor_role(self, call):
+        original = package_cli.main
+
+        def invoke(argv):
+            return original(
+                [
+                    argv[0],
+                    "--enable-current-trust-enrollment",
+                    "--observe-original-actor-role",
+                    *argv[1:],
+                ]
+            )
+
+        with patch.object(package_cli, "main", side_effect=invoke):
+            return call()
+
+    def only_actor_role_opt_in(self, call):
+        original = package_cli.main
+
+        def invoke(argv):
+            return original([argv[0], "--observe-original-actor-role", *argv[1:]])
 
         with patch.object(package_cli, "main", side_effect=invoke):
             return call()
@@ -184,3 +258,240 @@ class TrustEnrollmentEntryTests(unittest.TestCase):
             self.assertEqual(fixture.opted(fixture.invoke_command), 1, fixture.error)
             self.assertIn("legacy migration required", fixture.error)
             self.assertEqual(fixture.comment, before)
+
+    def test_enrolled_trust_snapshot_from_record_contract_and_tamper_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ObservedEntryFixture(directory)
+            self.assertEqual(fixture.opted(fixture.invoke), 0, fixture.error)
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            snapshot = enrolled_trust_snapshot_from_record(record)
+            self.assertEqual(snapshot.continuous_history, "unavailable")
+            self.assertIsNone(snapshot.permission_epoch)
+            self.assertIsNone(snapshot.actor_permission)
+            self.assertEqual(snapshot.repository_id, 123)
+            self.assertEqual(snapshot.owner_id, 42)
+            self.assertEqual(snapshot.owner_login, "owner")
+            self.assertEqual(snapshot.repository_slug, "owner/repo")
+            self.assertFalse(snapshot.is_fork)
+            self.assertEqual(snapshot.installation_id, 99)
+            self.assertTrue(snapshot.repository_selected)
+            self.assertEqual(snapshot.actor_id, 101)
+            self.assertEqual(snapshot.actor_login, "alice")
+            self.assertEqual(
+                snapshot.granted_permissions, dict(fixture.observed_permissions)
+            )
+            with self.assertRaises(ReviewInputError):
+                enrolled_trust_snapshot_from_record(
+                    replace(record, trust_enrollment=None)
+                )
+            tampered_doc = copy.deepcopy(record.trust_enrollment)
+            assert tampered_doc is not None
+            tampered_doc["document"]["authority"]["current_observation"]["repository"][
+                "owner_id"
+            ] = 999
+            with self.assertRaises(ReviewInputError):
+                enrolled_trust_snapshot_from_record(
+                    replace(record, trust_enrollment=tampered_doc)
+                )
+            tampered_sha = copy.deepcopy(record.trust_enrollment)
+            assert tampered_sha is not None
+            tampered_sha["sha256"] = "0" * 64
+            with self.assertRaises(ReviewInputError):
+                enrolled_trust_snapshot_from_record(
+                    replace(record, trust_enrollment=tampered_sha)
+                )
+
+    def test_ordinary_hosted_runs_enforce_live_pr_trust_boundaries_and_finalizer_preflight(
+        self,
+    ):
+        for kind, repo_override, expected_error in (
+            (
+                "ownership_transfer",
+                {
+                    "id": 123,
+                    "full_name": "newowner/repo",
+                    "fork": False,
+                    "owner": {"id": 999, "login": "newowner"},
+                },
+                "retention current pull request identity mismatches",
+            ),
+            (
+                "fork_status_change",
+                {
+                    "id": 123,
+                    "full_name": "owner/repo",
+                    "fork": True,
+                    "owner": {"id": 42, "login": "owner"},
+                },
+                "repository trust transition refused",
+            ),
+        ):
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = ObservedEntryFixture(directory)
+                after_provider_start = []
+
+                def inject_drift():
+                    after_provider_start.append(len(fixture.trace))
+                    fixture.observed_pr_repo_override = copy.deepcopy(repo_override)
+
+                fixture.before_provider = inject_drift
+                self.assertEqual(fixture.opted(fixture.invoke), 1, fixture.error)
+                self.assertIn(expected_error, fixture.error)
+                if kind == "fork_status_change":
+                    self.assertIn(kind, fixture.error)
+                self.assertTrue(after_provider_start)
+                self.assertFalse(
+                    any(
+                        method != "GET" and ("/pulls/" in path or "/check-runs" in path)
+                        for _, method, path in fixture.trace[after_provider_start[0] :]
+                    )
+                )
+
+        # Cold action_run permission revocation refuses before business writes, and
+        # ReviewApprovalFinalizer._preflight refuses live PR fork/ownership drift when enrolled.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ObservedEntryFixture(directory)
+            self.assertEqual(fixture.opted(fixture.invoke), 0, fixture.error)
+            before = copy.deepcopy(fixture.comment)
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            snapshot = enrolled_trust_snapshot_from_record(record)
+
+            # Direct ReviewApprovalFinalizer._preflight enforcement on PR drift:
+            for drift_kind, drift_repo in (
+                (
+                    "fork_status_change",
+                    {
+                        "id": 123,
+                        "full_name": "owner/repo",
+                        "fork": True,
+                        "owner": {"id": 42, "login": "owner"},
+                    },
+                ),
+                (
+                    "ownership_transfer",
+                    {
+                        "id": 123,
+                        "full_name": "newowner/repo",
+                        "fork": False,
+                        "owner": {"id": 999, "login": "newowner"},
+                    },
+                ),
+            ):
+                with self.subTest(finalizer_drift=drift_kind):
+                    finalizer_requests = []
+
+                    def finalizer_opener(request, timeout, repo_payload=drift_repo):
+                        finalizer_requests.append(
+                            (request.get_method(), urlsplit(request.full_url).path)
+                        )
+                        return json_response(
+                            {
+                                "number": 7,
+                                "base": {
+                                    "ref": "main",
+                                    "sha": "a" * 40,
+                                    "repo": copy.deepcopy(repo_payload),
+                                },
+                                "head": {"sha": fixture.requested_head},
+                                "user": {"login": "contributor"},
+                            },
+                            200,
+                        )
+
+                    publisher = ReviewPublisher(
+                        http=GitHubHttp(opener=finalizer_opener)
+                    )
+                    publisher.enroll_trust_snapshot(snapshot=snapshot)
+                    publisher.finalizer._observed_trust_context = snapshot
+                    with self.assertRaisesRegex(
+                        GitHubPublicationError,
+                        rf"repository trust transition refused.*{drift_kind}",
+                    ):
+                        publisher.finalizer._preflight(
+                            token="synthetic-token",
+                            repository="owner/repo",
+                            pull_request=7,
+                            head_sha=fixture.requested_head,
+                            app_slug="reviewsensei[bot]",
+                        )
+                    self.assertEqual(
+                        finalizer_requests, [("GET", "/repos/owner/repo/pulls/7")]
+                    )
+
+            fixture.select_command("@reviewsensei review status", new_run=True)
+            fixture.observed_permissions["pull_requests"] = "none"
+            start = len(fixture.trace)
+            self.assertEqual(fixture.opted(fixture.invoke_command), 1, fixture.error)
+            self.assertIn("trust", fixture.error)
+            self.assertEqual(fixture.comment, before)
+            self.assertFalse(
+                any(
+                    method != "GET" and path.startswith("/repos/")
+                    for _, method, path in fixture.trace[start:]
+                )
+            )
+
+    def test_observe_original_actor_role_is_default_off_and_forwards_when_opted_in(
+        self,
+    ):
+        # 1. Default-off opted review keeps observe_actor_role=False and v1 (None).
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ObservedEntryFixture(directory)
+            self.assertEqual(fixture.opted(fixture.invoke), 0, fixture.error)
+            self.assertEqual(fixture.observed_actor_role_requests, [False])
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            snapshot = enrolled_trust_snapshot_from_record(record)
+            self.assertIsNone(snapshot.actor_permission)
+
+        # 2. --observe-original-actor-role without --enable-current-trust-enrollment fails closed.
+        for label, invoke_fn in (
+            ("review_run", lambda f: f.invoke()),
+            (
+                "action_run",
+                lambda f: (
+                    f.select_command("@reviewsensei review status", new_run=True),
+                    f.invoke_command(),
+                )[1],
+            ),
+        ):
+            with (
+                self.subTest(route=label),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = ObservedEntryFixture(directory)
+                code = fixture.only_actor_role_opt_in(lambda: invoke_fn(fixture))
+                self.assertEqual(code, 1, fixture.error)
+                self.assertIn(
+                    "original actor-role observation requires opted v4 enrollment",
+                    fixture.error,
+                )
+                self.assertEqual(fixture.observed_requests, [])
+
+        # 3. Opted with both flags forwards observe_actor_role=True and records v2 actor_permission.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ObservedEntryFixture(directory)
+            fixture.observed_schema_version = "current-observation-v2"
+            fixture.observed_actor_permission = "write"
+            fixture.observed_actor_role = "maintain"
+            self.assertEqual(
+                fixture.opted_with_actor_role(fixture.invoke), 0, fixture.error
+            )
+            self.assertEqual(fixture.observed_actor_role_requests, [True])
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            snapshot = enrolled_trust_snapshot_from_record(record)
+            self.assertEqual(snapshot.actor_permission, "write")
+            self.assertEqual(snapshot.continuous_history, "unavailable")
+            self.assertIsNone(snapshot.permission_epoch)
+
+            fixture.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(
+                fixture.opted_with_actor_role(fixture.invoke_command),
+                0,
+                fixture.error,
+            )
+            self.assertEqual(fixture.observed_actor_role_requests, [True, True])
+            after = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(after.trust_enrollment, record.trust_enrollment)

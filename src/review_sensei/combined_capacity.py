@@ -69,6 +69,15 @@ from .disposition_snapshot import (
     validate_page_index,
 )
 from .errors import ReviewInputError
+from .finding_lifecycle_store import (
+    MAX_REFERENCE_BYTES as MAX_FINDING_LIFECYCLE_REFERENCE_BYTES,
+)
+from .finding_lifecycle_store import (
+    normalize_reference as normalize_finding_lifecycle_reference,
+)
+from .finding_lifecycle_store import (
+    read_finding_lifecycle,
+)
 from .models import ReviewResult
 from .provenance_manifest import (
     RecoveryPrescription,
@@ -78,6 +87,7 @@ from .provenance_manifest import (
     prescribe_recovery,
 )
 from .publication_staging import MAX_PUBLICATION_PARTS, MAX_STAGING_BYTES
+from .recovery_authority import COMMENT_ALLOCATIONS as MAX_REVIEW_COMMENTS
 from .recovery_context import (
     MAX_DECODED_RESULT_BYTES,
     MAX_RECOVERY_ANCESTOR_DEPTH,
@@ -110,6 +120,8 @@ from .session import (
     SessionRecord,
     disposition_array_bytes,
     disposition_snapshot_capacity,
+    read_session_assessment_queue,
+    read_session_baseline,
     read_session_dispositions,
 )
 from .terminal_representability import (
@@ -119,12 +131,14 @@ from .terminal_representability import (
     estimate_session_comment_bytes,
     estimate_session_record_bytes,
 )
+from .trust_enrollment import MAX_MANIFEST_BYTES as MAX_TRUST_ENROLLMENT_BYTES
 
 RESERVED_FENCE_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_FENCE_READS
 MAX_PUBLISHED_REVIEW_BODY_BYTES = 65_536
 MAX_INDEXED_FINDINGS = 250
 FINDING_INDEX_ENTRY_BYTES = 65
+QUARANTINE_API_REQUEST_LIMIT = 1_152
 
 SUPPORTED_ENVELOPE_WRITER_VERSIONS = frozenset(
     {LEGACY_ACCOUNTING_VERSION, ACCOUNTING_VERSION}
@@ -548,6 +562,38 @@ REPRESENTATION_LIMIT_INVENTORY: tuple[RepresentationLimit, ...] = (
         module_source="review_sensei.api_work.DEFAULT_API_REQUEST_LIMIT",
         rationale="Default per-run physical GitHub/broker API request allowance.",
     ),
+    RepresentationLimit(
+        layer="session_root",
+        name="finding_lifecycle_reference_bytes",
+        unit="utf8_bytes",
+        ceiling=MAX_FINDING_LIFECYCLE_REFERENCE_BYTES,
+        module_source="review_sensei.finding_lifecycle_store.MAX_REFERENCE_BYTES",
+        rationale="Maximum UTF-8 bytes for finding_lifecycle reference manifest in SessionRecord.",
+    ),
+    RepresentationLimit(
+        layer="session_root",
+        name="trust_enrollment_bytes",
+        unit="utf8_bytes",
+        ceiling=MAX_TRUST_ENROLLMENT_BYTES,
+        module_source="review_sensei.trust_enrollment.MAX_MANIFEST_BYTES",
+        rationale="Maximum UTF-8 bytes for trust_enrollment reference manifest in SessionRecord.",
+    ),
+    RepresentationLimit(
+        layer="publication_and_api",
+        name="quarantine_api_request_limit",
+        unit="requests",
+        ceiling=QUARANTINE_API_REQUEST_LIMIT,
+        module_source="review_sensei.combined_capacity.QUARANTINE_API_REQUEST_LIMIT",
+        rationale="Quarantine publication hold/checkpoint escalation threshold (>= 1,152 requests).",
+    ),
+    RepresentationLimit(
+        layer="publication_and_api",
+        name="max_review_comments",
+        unit="count",
+        ceiling=MAX_REVIEW_COMMENTS,
+        module_source="review_sensei.recovery_authority.COMMENT_ALLOCATIONS",
+        rationale="Maximum comment allocations per review publication pass.",
+    ),
 )
 
 _INVENTORY_BY_NAME: dict[str, RepresentationLimit] = {
@@ -667,6 +713,8 @@ class CombinedComponentFootprint:
     accounting_manifest_bytes: int = 0
     quarantine_lineage_bytes: int = 0
     historical_assessments_bytes: int = 0
+    finding_lifecycle_bytes: int = 0
+    trust_enrollment_bytes: int = 0
     future_root_reserve_bytes: int = 0
     future_growth_bytes: int = 0
     intermediate_peak_record_bytes: int = 0
@@ -682,6 +730,7 @@ class CombinedComponentFootprint:
     terminal_action_manifest_bytes: int = 0
     published_review_summary_utf8_bytes: int = 0
     published_finding_count: int = 0
+    published_review_comment_count: int = 0
     published_marker_overhead_bytes: int = 1_024
     stored_parts_count: int = 0
     stored_parts_total_bytes: int = 0
@@ -690,6 +739,9 @@ class CombinedComponentFootprint:
     recovery_context_part_reads: int = 0
     ancestry_part_reads: int = 0
     publication_reconciliation_reads: int = 0
+    finding_lifecycle_part_reads: int = 0
+    convergence_history_baseline_part_reads: int = 0
+    assessment_queue_part_reads: int = 0
     startup_requests: int = 0
     ancestry_requests: int = 0
     retry_reconcile_requests: int = 0
@@ -719,6 +771,8 @@ class CombinedComponentFootprint:
             "accounting_manifest_bytes",
             "quarantine_lineage_bytes",
             "historical_assessments_bytes",
+            "finding_lifecycle_bytes",
+            "trust_enrollment_bytes",
             "future_root_reserve_bytes",
             "future_growth_bytes",
             "intermediate_peak_record_bytes",
@@ -733,6 +787,7 @@ class CombinedComponentFootprint:
             "terminal_action_manifest_bytes",
             "published_review_summary_utf8_bytes",
             "published_finding_count",
+            "published_review_comment_count",
             "published_marker_overhead_bytes",
             "stored_parts_count",
             "stored_parts_total_bytes",
@@ -741,6 +796,9 @@ class CombinedComponentFootprint:
             "recovery_context_part_reads",
             "ancestry_part_reads",
             "publication_reconciliation_reads",
+            "finding_lifecycle_part_reads",
+            "convergence_history_baseline_part_reads",
+            "assessment_queue_part_reads",
             "startup_requests",
             "ancestry_requests",
             "retry_reconcile_requests",
@@ -791,6 +849,8 @@ class CombinedComponentFootprint:
             + self.accounting_manifest_bytes
             + self.quarantine_lineage_bytes
             + self.historical_assessments_bytes
+            + self.finding_lifecycle_bytes
+            + self.trust_enrollment_bytes
             + self.future_root_reserve_bytes
             + self.future_growth_bytes
         )
@@ -854,6 +914,9 @@ class CombinedComponentFootprint:
             + self.recovery_context_part_reads
             + self.ancestry_part_reads
             + self.publication_reconciliation_reads
+            + self.finding_lifecycle_part_reads
+            + self.convergence_history_baseline_part_reads
+            + self.assessment_queue_part_reads
         )
 
     @property
@@ -1149,6 +1212,21 @@ def evaluate_combined_capacity(
             MAX_INDEXED_FINDINGS,
         ),
         (
+            "published_review_comment_count",
+            footprint.published_review_comment_count,
+            MAX_REVIEW_COMMENTS,
+        ),
+        (
+            "finding_lifecycle_bytes",
+            footprint.finding_lifecycle_bytes,
+            MAX_FINDING_LIFECYCLE_REFERENCE_BYTES,
+        ),
+        (
+            "trust_enrollment_bytes",
+            footprint.trust_enrollment_bytes,
+            MAX_TRUST_ENROLLMENT_BYTES,
+        ),
+        (
             "retained_result_part_reads",
             footprint.retained_result_part_reads,
             MAX_PARTS,
@@ -1156,6 +1234,21 @@ def evaluate_combined_capacity(
         (
             "disposition_snapshot_part_reads",
             footprint.disposition_snapshot_part_reads,
+            MAX_PARTS,
+        ),
+        (
+            "finding_lifecycle_part_reads",
+            footprint.finding_lifecycle_part_reads,
+            MAX_PARTS,
+        ),
+        (
+            "convergence_history_baseline_part_reads",
+            footprint.convergence_history_baseline_part_reads,
+            MAX_PARTS,
+        ),
+        (
+            "assessment_queue_part_reads",
+            footprint.assessment_queue_part_reads,
             MAX_PARTS,
         ),
         (
@@ -1408,6 +1501,7 @@ def estimate_lifecycle_future_growth_bytes(
     *,
     include_staging_peak: bool = False,
     include_snapshot_promotion: bool = False,
+    include_lifecycle_reserve: bool = False,
 ) -> int:
     """Measure exact canonical UTF-8 byte growth under worst-width lifecycle evolution."""
 
@@ -1459,7 +1553,44 @@ def estimate_lifecycle_future_growth_bytes(
         if cap > inline_bytes:
             shell["dispositions"] = []
             shell["disposition_snapshot"] = "d" * cap
+    if include_lifecycle_reserve or record.finding_lifecycle is not None:
+        # Match session._reserve_publication_staging (`session.py:2250-2252`).
+        shell["finding_lifecycle"] = "f" * MAX_FINDING_LIFECYCLE_REFERENCE_BYTES
     return max(0, len(canonical_bytes(shell)) - current_bytes)
+
+
+def _manifest_part_reads(manifest: object) -> int:
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("encoding") != PARTITION_ENCODING
+    ):
+        return 0
+    parts = manifest.get("parts")
+    return len(parts) if isinstance(parts, list) else 0
+
+
+def _finding_lifecycle_part_reads_from_record(record: SessionRecord) -> int:
+    if record.finding_lifecycle is None:
+        return 0
+    ref = normalize_finding_lifecycle_reference(record.finding_lifecycle)
+    if ref is None:
+        return 0
+    return _manifest_part_reads(ref.get("manifest"))
+
+
+def _convergence_baseline_part_reads_from_record(record: SessionRecord) -> int:
+    if (
+        record.convergence_history is None
+        or "baseline" not in record.convergence_history
+    ):
+        return 0
+    return _manifest_part_reads(record.convergence_history.get("baseline"))
+
+
+def _assessment_queue_part_reads_from_record(record: SessionRecord) -> int:
+    if record.assessment_queue is None:
+        return 0
+    return _manifest_part_reads(record.assessment_queue.get("state_manifest"))
 
 
 def _snapshot_part_reads_from_record(record: SessionRecord) -> int:
@@ -1556,6 +1687,19 @@ def decompose_session_and_result_footprint(
         if record.historical_assessments
         else 0
     )
+    lifecycle_bytes = (
+        len(canonical_bytes(record.finding_lifecycle))
+        if record.finding_lifecycle is not None
+        else 0
+    )
+    trust_bytes = (
+        len(canonical_bytes(record.trust_enrollment))
+        if record.trust_enrollment is not None
+        else 0
+    )
+    lifecycle_part_reads = _finding_lifecycle_part_reads_from_record(record)
+    baseline_part_reads = _convergence_baseline_part_reads_from_record(record)
+    queue_part_reads = _assessment_queue_part_reads_from_record(record)
 
     accounting_version = ACCOUNTING_VERSION
     acc_manifest_bytes = 0
@@ -1734,6 +1878,8 @@ def decompose_session_and_result_footprint(
         + acc_manifest_bytes
         + quarantine_bytes
         + hist_assess_bytes
+        + lifecycle_bytes
+        + trust_bytes
     )
     base_shell = max(0, raw_record_bytes - sub_total)
 
@@ -1755,6 +1901,8 @@ def decompose_session_and_result_footprint(
         accounting_manifest_bytes=acc_manifest_bytes,
         quarantine_lineage_bytes=quarantine_bytes,
         historical_assessments_bytes=hist_assess_bytes,
+        finding_lifecycle_bytes=lifecycle_bytes,
+        trust_enrollment_bytes=trust_bytes,
         future_root_reserve_bytes=reserve,
         future_growth_bytes=growth_bytes,
         intermediate_peak_record_bytes=inter_rec_peak,
@@ -1771,6 +1919,9 @@ def decompose_session_and_result_footprint(
         stored_parts_total_bytes=stored_parts_total_bytes,
         retained_result_part_reads=result_part_reads,
         disposition_snapshot_part_reads=snap_part_reads,
+        finding_lifecycle_part_reads=lifecycle_part_reads,
+        convergence_history_baseline_part_reads=baseline_part_reads,
+        assessment_queue_part_reads=queue_part_reads,
         ancestry_part_reads=ancestry_reads,
         startup_requests=startup_reqs,
         ancestry_requests=ancestry_reads,
@@ -2462,14 +2613,31 @@ class BoundaryInterruptionResult:
             raise ReviewInputError(
                 "read-only snapshot qualification does not measure effect or inference replay"
             )
-        expected_status = {
-            (): {"not_exercised", "capacity_refused", "retained_artifacts_required"},
-            ("session_root",): {"root_verified"},
-            ("session_root", "disposition_snapshot"): {"snapshot_graph_verified"},
-        }
-        if self.qualification_status not in expected_status.get(
-            self.qualified_components, set()
+        expected_rest = (
+            "disposition_snapshot",
+            "convergence_history_baseline",
+            "assessment_queue",
+            "finding_lifecycle",
+        )
+        if not self.qualified_components:
+            valid_status = {
+                "not_exercised",
+                "capacity_refused",
+                "retained_artifacts_required",
+            }
+        elif self.qualified_components == ("session_root",):
+            valid_status = {"root_verified"}
+        elif (
+            self.qualified_components[0] == "session_root"
+            and len(self.qualified_components) > 1
+            and all(item in expected_rest for item in self.qualified_components[1:])
+            and [item for item in expected_rest if item in self.qualified_components]
+            == list(self.qualified_components[1:])
         ):
+            valid_status = {"snapshot_graph_verified"}
+        else:
+            valid_status = set()
+        if self.qualification_status not in valid_status:
             raise ReviewInputError(
                 "snapshot qualification status does not match evidence"
             )
@@ -2498,6 +2666,28 @@ class BoundaryInterruptionResult:
             )
 
     def to_dict(self) -> dict[str, Any]:
+        unqualified = [
+            "retained_result",
+            "archive",
+            "quarantined_state",
+            "historical_assessments",
+        ]
+        if "assessment_queue" not in self.qualified_components:
+            unqualified.append("assessment_queue")
+        if "convergence_history_baseline" not in self.qualified_components:
+            unqualified.append("convergence_history")
+        else:
+            unqualified.append("convergence_history_rounds")
+        if "finding_lifecycle" not in self.qualified_components:
+            unqualified.append("finding_lifecycle")
+        unqualified.extend(
+            [
+                "recovery_context",
+                "publication",
+                "terminal_accounting",
+                "historical_settlement",
+            ]
+        )
         return {
             "interruption_stage": self.interruption_stage,
             "interruption_mode": self.interruption_mode,
@@ -2514,29 +2704,22 @@ class BoundaryInterruptionResult:
             "qualification_status": self.qualification_status,
             "qualified_components": list(self.qualified_components),
             "physical_reads": self.physical_reads,
-            "unqualified_components": [
-                "retained_result",
-                "archive",
-                "quarantined_state",
-                "historical_assessments",
-                "assessment_queue",
-                "convergence_history",
-                "recovery_context",
-                "publication",
-                "terminal_accounting",
-                "historical_settlement",
-            ],
+            "unqualified_components": unqualified,
         }
 
 
 def _snapshot_reader_identity() -> dict[str, str]:
-    """Fingerprint the executing probe and public reader at their loaded origins."""
-    modules = (sys.modules[__name__], sys.modules[read_session_dispositions.__module__])
+    """Fingerprint the executing probe and public readers at their loaded origins."""
+    modules = (
+        sys.modules[__name__],
+        sys.modules[read_session_dispositions.__module__],
+        sys.modules[read_finding_lifecycle.__module__],
+    )
     return {
         str(Path(module.__file__).resolve()): hashlib.sha256(
             Path(module.__file__).read_bytes()
         ).hexdigest()
-        for module in modules
+        for module in dict.fromkeys(modules)
         if module.__file__ is not None
     }
 
@@ -2567,7 +2750,7 @@ def _snapshot_probe_command() -> list[str]:
 def _run_snapshot_probe(
     command: list[str], request: bytes
 ) -> subprocess.CompletedProcess[bytes]:
-    """Never retain more than 1025 output bytes; discard stderr at the OS sink."""
+    """Never retain more than 2049 output bytes; discard stderr at the OS sink."""
     with tempfile.TemporaryFile() as input_file:
         input_file.write(request)
         input_file.seek(0)
@@ -2579,8 +2762,8 @@ def _run_snapshot_probe(
 
             def drain() -> None:
                 assert process.stdout is not None
-                output.extend(process.stdout.read(1025))
-                if len(output) > 1024:
+                output.extend(process.stdout.read(2_049))
+                if len(output) > 2_048:
                     process.kill()
 
             reader = threading.Thread(target=drain, daemon=True)
@@ -2598,13 +2781,34 @@ def _run_snapshot_probe(
             )
 
 
+def _expected_snapshot_components(record: SessionRecord) -> list[str]:
+    expected = ["session_root"]
+    if record.disposition_snapshot is not None:
+        expected.append("disposition_snapshot")
+    if (
+        record.convergence_history is not None
+        and "baseline" in record.convergence_history
+    ):
+        expected.append("convergence_history_baseline")
+    if record.assessment_queue is not None:
+        expected.append("assessment_queue")
+    if record.finding_lifecycle is not None:
+        expected.append("finding_lifecycle")
+    return expected
+
+
 def _snapshot_probe_main() -> None:
     """Bounded read-only subprocess worker; emits no retained source bytes."""
     request = json.loads(sys.stdin.buffer.read(16_385))
     identity = SessionIdentity(**request["identity"])
     budget = EvidenceReadBudget()
-    ledger = LocalSessionLedger(Path(request["directory"]), evidence_budget=budget)
-    record = ledger.load(identity).record
+    ledger = LocalSessionLedger(
+        Path(request["directory"]),
+        evidence_budget=budget,
+        enable_history_graph=True,
+    )
+    loaded = ledger.load(identity)
+    record = loaded.record
     if (
         record is None
         or hashlib.sha256(canonical_bytes(record.to_dict())).hexdigest()
@@ -2615,6 +2819,18 @@ def _snapshot_probe_main() -> None:
     if record.disposition_snapshot is not None:
         read_session_dispositions(ledger, record)
         components.append("disposition_snapshot")
+    if (
+        record.convergence_history is not None
+        and "baseline" in record.convergence_history
+    ):
+        read_session_baseline(ledger, record)
+        components.append("convergence_history_baseline")
+    if record.assessment_queue is not None:
+        read_session_assessment_queue(ledger, record)
+        components.append("assessment_queue")
+    if record.finding_lifecycle is not None:
+        read_finding_lifecycle(ledger, record, _selected_load=loaded)
+        components.append("finding_lifecycle")
     budget.check()
     print(
         json.dumps(
@@ -2659,15 +2875,13 @@ def _qualify_snapshot_subprocess(
         raise ReviewInputError(
             "retained snapshot subprocess unavailable or timed out"
         ) from exc
-    if process.returncode != 0 or len(process.stdout) > 1_024:
+    if process.returncode != 0 or len(process.stdout) > 2_048:
         raise ReviewInputError("retained snapshot subprocess authentication failed")
     try:
         observed = json.loads(process.stdout)
         components = observed["components"]
         calls = observed["physical_reads"]
-        expected = ["session_root"] + (
-            ["disposition_snapshot"] if record.disposition_snapshot is not None else []
-        )
+        expected = _expected_snapshot_components(record)
         if (
             observed.get("reader_identity") != _snapshot_reader_identity()
             or components != expected
@@ -2823,11 +3037,7 @@ def qualify_retained_interruption_replay(
         qualified, physical_reads = _qualify_snapshot_subprocess(
             ledger_directory, identity=identity, record=record
         )
-        status = (
-            "snapshot_graph_verified"
-            if "disposition_snapshot" in qualified
-            else "root_verified"
-        )
+        status = "snapshot_graph_verified" if len(qualified) > 1 else "root_verified"
     snapshot_ok = "disposition_snapshot" in qualified
     fence_tail_ok = footprint.protected_tail_requests >= RESERVED_FENCE_READS
 

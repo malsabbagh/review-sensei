@@ -32,7 +32,10 @@ from test_api_work_persistence import HEAD, IDENTITY
 from test_publication_recovery import BASE as PUB_BASE
 from test_publication_recovery import HEAD as PUB_HEAD
 from test_publication_recovery import IDENTITY as PUB_IDENTITY
-from test_terminal_representability_g34 import _G34CommandFixture
+from test_terminal_representability_g34 import (
+    _deterministic_valid_path,
+    _G34CommandFixture,
+)
 
 from review_sensei.api_work import (
     ACCOUNTING_VERSION,
@@ -1980,6 +1983,623 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 recovery=prescribe_recovery("supported_read_only_observation"),
             )
         self.assertGreater(raw_com_bytes, raw_rec_bytes)
+
+    def test_inventory_decomposition_and_growth_cover_lifecycle_and_trust(
+        self,
+    ) -> None:
+        from dataclasses import replace
+
+        from test_evidence_capacity import varied_baseline
+
+        from review_sensei.baseline import baseline_history_document
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.finding_lifecycle_store import stage_finding_lifecycle
+        from review_sensei.session import session_reservation_id
+        from review_sensei.trust_enrollment import (
+            DOCUMENT_VERSION as TRUST_DOC_VERSION,
+        )
+        from review_sensei.trust_enrollment import (
+            VERSION as TRUST_REF_VERSION,
+        )
+
+        # 1. Verify all 4 newly inventoried limits match authoritative constants:
+        self.assertEqual(
+            lookup_representation_limit("finding_lifecycle_reference_bytes").ceiling,
+            8_192,
+        )
+        self.assertEqual(
+            lookup_representation_limit("trust_enrollment_bytes").ceiling,
+            8_192,
+        )
+        self.assertEqual(
+            lookup_representation_limit("quarantine_api_request_limit").ceiling,
+            1_152,
+        )
+        self.assertEqual(
+            lookup_representation_limit("max_review_comments").ceiling,
+            200,
+        )
+
+        # 2. Individual limit enforcement on finding_lifecycle, trust_enrollment, and comments:
+        for bad_kwargs in (
+            {"finding_lifecycle_bytes": 8_193},
+            {"trust_enrollment_bytes": 8_193},
+            {"published_review_comment_count": 201},
+        ):
+            ev = evaluate_combined_capacity(CombinedComponentFootprint(**bad_kwargs))
+            self.assertFalse(ev.individual_components_fit)
+            self.assertFalse(ev.combined_envelope_fits)
+            self.assertEqual(ev.refusal_code, "individual_component_limit_exceeded")
+
+        # 3. Verify 8,192B future-growth reservation matching session.py:2250-2252
+        #    and part-read + byte decomposition for baseline, queue, lifecycle, trust:
+        fixed_now = datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc)
+        head_sha = "b" * 40
+        trust_doc = {
+            "schema_version": TRUST_DOC_VERSION,
+            "app_id": 999,
+            "generation": 1,
+            "authority": {
+                "version": 4,
+                "purpose": "review",
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "head_sha": head_sha,
+                "run_id": "101",
+                "run_attempt": "1",
+                "job": "review",
+                "job_workflow_ref": "owner/repo/.github/workflows/review.yml@refs/heads/main",
+                "job_workflow_sha": "c" * 40,
+                "issued_at": "2026-11-11T00:00:00Z",
+                "expires_at": "2026-11-11T06:00:00Z",
+                "audience": "reviewsensei",
+                "source": {
+                    "kind": "pull_request",
+                    "id": 1,
+                    "updated_at": "2026-11-11T00:00:00Z",
+                    "body_sha256": "d" * 64,
+                },
+                "actor": None,
+                "current_observation": {
+                    "schema_version": "current-observation-v1",
+                    "repository": {
+                        "id": 123,
+                        "full_name": "owner/repo",
+                        "owner_id": 42,
+                        "owner_login": "owner",
+                        "fork": False,
+                    },
+                    "installation": {
+                        "id": 99,
+                        "repository_selection": "selected",
+                        "repository_access": True,
+                        "permissions": {"metadata": "read", "pull_requests": "write"},
+                    },
+                    "capability": {
+                        "name": "review_session",
+                        "permissions": {"metadata": "read", "pull_requests": "write"},
+                    },
+                    "actor": {
+                        "id": 101,
+                        "login": "alice",
+                        "source_association": "MEMBER",
+                    },
+                },
+            },
+        }
+        import hashlib
+
+        trust_ref = {
+            "schema_version": TRUST_REF_VERSION,
+            "document": trust_doc,
+            "sha256": hashlib.sha256(canonical_bytes(trust_doc)).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                enable_finding_lifecycle_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            op_id = session_reservation_id(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                head_sha=head_sha,
+                kind="publish",
+            )
+            base_rec = ledger.initialize(IDENTITY, now=fixed_now)
+            growth_reserve = estimate_lifecycle_future_growth_bytes(
+                base_rec, include_lifecycle_reserve=True
+            )
+            growth_plain = estimate_lifecycle_future_growth_bytes(base_rec)
+            self.assertGreaterEqual(growth_reserve - growth_plain, 8_192)
+
+            base_bl = varied_baseline(60)
+            baseline = replace(
+                base_bl,
+                cache_key=replace(
+                    base_bl.cache_key,
+                    repository=IDENTITY.repository,
+                    pull_request=IDENTITY.pull_request,
+                    base_sha="a" * 40,
+                    head_sha=head_sha,
+                ),
+                generation=base_rec.generation,
+            )
+            bl_binding = {
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "base_sha": "a" * 40,
+                "head_sha": head_sha,
+                "policy_digest": baseline.policy_digest,
+                "configuration_digest": "d" * 64,
+                "generation": base_rec.generation,
+                "producer": ledger.evidence_producer(),
+                "purpose": "baseline",
+                "schema_version": "1.0",
+            }
+            bl_manifest = baseline_history_document(
+                baseline,
+                max_bytes=2_000,
+                partition_writer=lambda doc, count, lim: ledger.stage_evidence(
+                    IDENTITY,
+                    binding=bl_binding,
+                    document=doc,
+                    item_count=count,
+                    max_manifest_bytes=lim,
+                ),
+            )
+            queue_payload = {
+                "schema_version": "1.0",
+                "queue_pad": "審査🧪" * 1_600,
+            }
+            q_binding = {**bl_binding, "purpose": "queue"}
+            q_manifest = ledger.stage_evidence(
+                IDENTITY,
+                binding=q_binding,
+                document=queue_payload,
+                item_count=1,
+                max_manifest_bytes=2_000,
+            )
+            prepped = ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    generation=r.generation + 1,
+                    reservation_id=op_id,
+                    reserved_slot="initial",
+                    failed_attempts_head_sha=head_sha,
+                    trust_enrollment=trust_ref,
+                    convergence_history={
+                        "state": "completed",
+                        "baseline": bl_manifest,
+                        "progress": [
+                            {"event": "completed", "generation": r.generation}
+                        ],
+                        "provenance": {"ledger_digest": "a" * 64},
+                    },
+                    assessment_queue={
+                        "schema_version": "1.0",
+                        "inventory_digest": "5" * 64,
+                        "inventory_generation": r.generation,
+                        "state_manifest": q_manifest,
+                        "active_operation": None,
+                    },
+                ),
+                now=fixed_now,
+            )
+            lifecycle_ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                enable_finding_lifecycle_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            lifecycle_rec = stage_finding_lifecycle(
+                lifecycle_ledger,
+                prepped,
+                document={"findings_utf8": "審査検証🧪" * 900},
+                operation_id=op_id,
+                base_sha="a" * 40,
+                head_sha=head_sha,
+                policy_digest="c" * 64,
+                configuration_digest="d" * 64,
+                item_count=1,
+            )
+            fp = decompose_session_and_result_footprint(
+                lifecycle_rec,
+                repository_id=123,
+                pull_request=7,
+                include_future_growth=True,
+            )
+            self.assertGreater(fp.finding_lifecycle_bytes, 200)
+            self.assertGreater(fp.trust_enrollment_bytes, 200)
+            self.assertEqual(fp.finding_lifecycle_part_reads, 1)
+            self.assertEqual(fp.convergence_history_baseline_part_reads, 1)
+            self.assertEqual(fp.assessment_queue_part_reads, 1)
+            self.assertGreaterEqual(fp.total_ordinary_part_reads, 3)
+            self.assertGreaterEqual(
+                fp.future_growth_bytes, 8_192 - fp.finding_lifecycle_bytes
+            )
+
+    def test_hosted_simultaneous_multi_component_five_stages_and_negative_controls(
+        self,
+    ) -> None:
+        from dataclasses import replace
+
+        from test_evidence_capacity import varied_baseline
+
+        from review_sensei.baseline import baseline_history_document
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.coverage import CoverageManifest, FileCoverage
+        from review_sensei.disposition import (
+            FindingIdentity,
+            MaintainerCommand,
+            apply_session_command,
+        )
+        from review_sensei.finding_lifecycle_store import stage_finding_lifecycle
+        from review_sensei.session import ReviewTransaction, session_reservation_id
+
+        # 1. Hosted GitHubIssueCommentSessionLedger (512-call) multibyte workflow
+        #    plus negative control: 37-file/38-token witness fails pre-effect,
+        #    and 16.68 MB payload exceeds 8 MiB stored_parts_total_bytes.
+        with tempfile.TemporaryDirectory() as hosted_dir:
+            f = _G34CommandFixture(hosted_dir, limit=512)
+            base_patch = (f.root / "review.patch").read_text(encoding="utf-8")
+            binary_entries = "".join(
+                f"\ndiff --git a/{p} b/{p}\nnew file mode 100644\n"
+                f"index 0000000..1111111\nBinary files /dev/null and b/{p} differ\n"
+                for p in (
+                    f"services_{i:02d}/domain_{i:02d}/"
+                    + _deterministic_valid_path(i, total_len=203)
+                    for i in range(38)
+                )
+            )
+            (f.root / "review.patch").write_text(
+                base_patch + binary_entries, encoding="utf-8", newline="\n"
+            )
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert rec is not None
+            f.SOURCE_ID = 501
+            f.select_command(
+                "@reviewsensei accept-coverage-uncertainty --reason accepted after full manual audit of the PR",
+                new_run=True,
+            )
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            self.assertEqual(f.business_writes, 0)
+            self.assertIn("carrier_inline_bound_exceeded", f.stdout)
+
+        over_mb = evaluate_combined_capacity(
+            CombinedComponentFootprint(
+                stored_parts_count=100,
+                stored_parts_total_bytes=16_680_000,  # 16.68 MB > 8 MiB ceiling
+            )
+        )
+        self.assertFalse(over_mb.combined_envelope_fits)
+        self.assertEqual(over_mb.refusal_code, "combined_stored_parts_exceeded")
+
+        # 2. Simultaneous multi-component multibyte state qualified in a cold subprocess
+        #    across all 5 interruption stages (inline_group_publication, check_publication,
+        #    thread_cleanup, native_approval, terminal_accounting_close).
+        fixed_now = datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc)
+        head_sha = "b" * 40
+        tx_id = ReviewTransaction.derive_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            reservation_id="2" * 64,
+        )
+        tx = ReviewTransaction(
+            transaction_id=tx_id,
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            generation=1,
+            reservation_id="2" * 64,
+            phase="publication_succeeded",
+            result_sha256="f" * 64,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                enable_disposition_snapshot_writes=True,
+                enable_finding_lifecycle_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            op_id = session_reservation_id(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                head_sha=head_sha,
+                kind="publish",
+            )
+            ledger.initialize(IDENTITY, now=fixed_now)
+            reserved_rec = ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    generation=r.generation + 1,
+                    reservation_id=op_id,
+                    reserved_slot="initial",
+                    failed_attempts_head_sha=head_sha,
+                ),
+                now=fixed_now,
+            )
+            lifecycle_ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                enable_finding_lifecycle_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            rec = stage_finding_lifecycle(
+                lifecycle_ledger,
+                reserved_rec,
+                document={"findings_utf8": "審査状態 🧪" * 900},
+                operation_id=op_id,
+                base_sha="a" * 40,
+                head_sha=head_sha,
+                policy_digest="c" * 64,
+                configuration_digest="d" * 64,
+                item_count=1,
+            )
+            rec = ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    completed_initial_reviews=1,
+                    last_committed_reservation_id="2" * 64,
+                    reservation_id=None,
+                    reserved_slot=None,
+                    transaction=tx,
+                ),
+                now=fixed_now,
+            )
+            files_10 = tuple(
+                FileCoverage(
+                    path=f"src/mod_{i:02d}/"
+                    + _deterministic_valid_path(i, total_len=203),
+                    outcome="budget-exhausted",
+                )
+                for i in range(10)
+            )
+            from review_sensei.disposition import incomplete_coverage_from_result
+
+            res_cov = ReviewResult(
+                summary="審査完了 🧪 multibyte hosted review",
+                comments=(),
+                provider="openai:gpt-5",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=files_10,
+                    enumerated_paths=tuple(fc.path for fc in files_10),
+                ),
+            )
+            rec, _ = apply_session_command(
+                ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-coverage-uncertainty",
+                    actor="alice",
+                    reason="審査確認 🧪",
+                    head_sha=head_sha,
+                ),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:10",
+                incomplete_coverage=incomplete_coverage_from_result(res_cov),
+                now=fixed_now,
+            )
+            finding = FindingIdentity(instance="abcdef" + "0" * 58, needs_human=True)
+            rec, _ = apply_session_command(
+                ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="了解 🧪",
+                    head_sha=head_sha,
+                    finding_references=("RS-ABCDEF",),
+                ),
+                finding_inventory=(finding,),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:11",
+                now=fixed_now,
+            )
+            # Trigger disposition_snapshot promotion with a 2nd wide decision:
+            files_37 = tuple(
+                FileCoverage(
+                    path=f"services_{i:02d}/domain_{i:02d}/"
+                    + _deterministic_valid_path(i, total_len=203),
+                    outcome="budget-exhausted",
+                )
+                for i in range(37)
+            )
+            res_37 = ReviewResult(
+                summary="Partial",
+                comments=(),
+                provider="openai:gpt-5",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=files_37,
+                    enumerated_paths=tuple(fc.path for fc in files_37),
+                ),
+            )
+            snap_ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            rec, _ = apply_session_command(
+                snap_ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-coverage-uncertainty",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                ),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:12",
+                incomplete_coverage=incomplete_coverage_from_result(res_37),
+                now=fixed_now,
+            )
+            assert rec.disposition_snapshot is not None
+
+            base_bl = varied_baseline(60)
+            baseline = replace(
+                base_bl,
+                cache_key=replace(
+                    base_bl.cache_key,
+                    repository=IDENTITY.repository,
+                    pull_request=IDENTITY.pull_request,
+                    base_sha="a" * 40,
+                    head_sha=head_sha,
+                ),
+                generation=rec.generation,
+            )
+            bl_binding = {
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "base_sha": "a" * 40,
+                "head_sha": head_sha,
+                "policy_digest": baseline.policy_digest,
+                "configuration_digest": "d" * 64,
+                "generation": rec.generation,
+                "producer": ledger.evidence_producer(),
+                "purpose": "baseline",
+                "schema_version": "1.0",
+            }
+            bl_ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            bl_manifest = baseline_history_document(
+                baseline,
+                max_bytes=2_000,
+                partition_writer=lambda doc, count, lim: bl_ledger.stage_evidence(
+                    IDENTITY,
+                    binding=bl_binding,
+                    document=doc,
+                    item_count=count,
+                    max_manifest_bytes=lim,
+                ),
+            )
+            q_ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_partition_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            q_manifest = q_ledger.stage_evidence(
+                IDENTITY,
+                binding={**bl_binding, "purpose": "queue"},
+                document={"schema_version": "1.0", "items": "検査🧪" * 1_600},
+                item_count=1,
+                max_manifest_bytes=2_000,
+            )
+            rec = ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    generation=r.generation + 1,
+                    convergence_history={
+                        "state": "completed",
+                        "baseline": bl_manifest,
+                        "progress": [
+                            {"event": "completed", "generation": r.generation}
+                        ],
+                        "provenance": {"ledger_digest": "a" * 64},
+                    },
+                    assessment_queue={
+                        "schema_version": "1.0",
+                        "inventory_digest": "5" * 64,
+                        "inventory_generation": r.generation,
+                        "state_manifest": q_manifest,
+                        "active_operation": None,
+                    },
+                ),
+                now=fixed_now,
+            )
+            env = evaluate_live_session_envelope(
+                rec,
+                repository_id=123,
+                pull_request=7,
+                retained_result=res_cov,
+                review_summary_text=res_cov.summary,
+                include_future_growth=True,
+                original_api_limit=512,
+            )
+            self.assertTrue(env.combined_envelope_fits, env.reason)
+            self.assertLessEqual(env.max_intermediate_record_bytes, 32_768)
+            self.assertLessEqual(env.max_intermediate_comment_bytes, 65_536)
+            self.assertLessEqual(env.total_ordinary_part_reads, 60)
+
+            for stage in (
+                "inline_group_publication",
+                "check_publication",
+                "thread_cleanup",
+                "native_approval",
+                "terminal_accounting_close",
+            ):
+                replay = qualify_retained_interruption_replay(
+                    rec,
+                    identity=IDENTITY,
+                    interruption_stage=stage,
+                    interruption_mode="in_flight_stored_response_lost",
+                    retained_result=res_cov,
+                    review_summary_text=res_cov.summary,
+                    include_future_growth=True,
+                    original_api_limit=512,
+                    ledger_directory=Path(tmp),
+                )
+                self.assertEqual(replay.qualification_status, "snapshot_graph_verified")
+                self.assertEqual(
+                    replay.qualified_components,
+                    (
+                        "session_root",
+                        "disposition_snapshot",
+                        "convergence_history_baseline",
+                        "assessment_queue",
+                        "finding_lifecycle",
+                    ),
+                )
+                self.assertIsNotNone(replay.physical_reads)
+                assert replay.physical_reads is not None
+                self.assertLessEqual(replay.physical_reads, 60)
+                unqualified = replay.to_dict()["unqualified_components"]
+                self.assertNotIn("assessment_queue", unqualified)
+                self.assertNotIn("finding_lifecycle", unqualified)
+                self.assertIn("terminal_accounting", unqualified)
+
+            # Removing a finding_lifecycle part must fail closed inside the cold subprocess:
+            assert rec.finding_lifecycle is not None
+            fl_part_id = rec.finding_lifecycle["manifest"]["parts"][0]["storage_id"]
+            fl_part_path = next(Path(tmp).rglob(fl_part_id))
+            fl_bytes = fl_part_path.read_bytes()
+            fl_part_path.unlink()
+            try:
+                with self.assertRaisesRegex(
+                    ReviewInputError, "subprocess authentication failed"
+                ):
+                    qualify_retained_interruption_replay(
+                        rec,
+                        identity=IDENTITY,
+                        interruption_stage="native_approval",
+                        interruption_mode="before_dispatch",
+                        ledger_directory=Path(tmp),
+                    )
+            finally:
+                fl_part_path.write_bytes(fl_bytes)
 
 
 if __name__ == "__main__":

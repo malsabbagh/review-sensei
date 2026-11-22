@@ -1912,6 +1912,95 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
             )
             self.assertTrue(any(r["state"] == "APPROVED" for r in host.reviews))
 
+    def test_unobserved_actor_role_and_unavailable_epoch_contract_from_v1_enrollment(
+        self,
+    ) -> None:
+        enrolled = replace(
+            _enrolled_snapshot(),
+            actor_association="MEMBER",
+            actor_permission=None,
+            permission_epoch=None,
+            continuous_history="unavailable",
+        )
+        self.assertEqual(enrolled.continuous_history, "unavailable")
+        self.assertIsNone(enrolled.permission_epoch)
+        self.assertIsNone(enrolled.actor_permission)
+        self.assertTrue(enrolled.actor_meets_operation("review"))
+        self.assertTrue(enrolled.actor_meets_operation("reply"))
+        self.assertTrue(enrolled.actor_meets_operation("command"))
+        self.assertTrue(enrolled.actor_meets_operation("override"))
+
+        contributor = replace(enrolled, actor_association="CONTRIBUTOR")
+        self.assertTrue(contributor.actor_meets_operation("review"))
+        self.assertFalse(contributor.actor_meets_operation("reply"))
+        self.assertFalse(contributor.actor_meets_operation("command"))
+        self.assertFalse(contributor.actor_meets_operation("override"))
+
+        session = _session_with_charges(enrolled)
+        inventory = _blocking_inventory()
+
+        # Same granted_permissions allows bounded rename migration without inventing epoch.
+        renamed = replace(
+            enrolled,
+            repository_slug="acme/widgets-v2",
+            installation_id=3099,
+            permission_epoch=None,
+        )
+        valid_migration = AuthenticatedTrustMigration(
+            old_snapshot_sha256=enrolled.digest(),
+            new_snapshot_sha256=renamed.digest(),
+            operator_id=enrolled.actor_id,
+            operator_login=enrolled.actor_login,
+            operator_association=enrolled.actor_association,
+            operator_permission=enrolled.actor_permission,
+            reason="Verified repository rename with preserved original permission grant.",
+            operator_attestation_sha256=_sha("rename-no-epoch"),
+        )
+        receipt = verify_and_migrate_trust_boundary(
+            enrolled=enrolled,
+            target=renamed,
+            session_record=session,
+            inventory=inventory,
+            migration=valid_migration,
+        )
+        self.assertEqual(receipt.migrated_session.repository, "acme/widgets-v2")
+        self.assertEqual(
+            receipt.migrated_session.completed_initial_reviews,
+            session.completed_initial_reviews,
+        )
+        self.assertEqual(len(receipt.preserved_inventory.blocking_obligations), 1)
+
+        # Permission grant changes MUST be refused when permission_epoch is None.
+        changed_perms = dict(enrolled.granted_permissions)
+        changed_perms["metadata"] = "write"
+        for target_epoch in (None, 2):
+            changed_target = replace(
+                enrolled,
+                granted_permissions=changed_perms,
+                permission_epoch=target_epoch,
+            )
+            bad_migration = AuthenticatedTrustMigration(
+                old_snapshot_sha256=enrolled.digest(),
+                new_snapshot_sha256=changed_target.digest(),
+                operator_id=enrolled.actor_id,
+                operator_login=enrolled.actor_login,
+                operator_association=enrolled.actor_association,
+                operator_permission=enrolled.actor_permission,
+                reason="Attempted permission grant change without continuous epoch.",
+                operator_attestation_sha256=_sha("perm-change-without-epoch"),
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "permission grant changes require a strictly newer permission_epoch",
+            ):
+                verify_and_migrate_trust_boundary(
+                    enrolled=enrolled,
+                    target=changed_target,
+                    session_record=session,
+                    inventory=inventory,
+                    migration=bad_migration,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

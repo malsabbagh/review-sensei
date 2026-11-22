@@ -32,6 +32,12 @@ from review_sensei.bounded_evidence import (
 from review_sensei.errors import ReviewInputError
 from review_sensei.historical_completion import QUALIFIED_EXECUTORS
 from review_sensei.models import ReviewResult
+from review_sensei.provenance_manifest import (
+    UNKNOWN_PROVENANCE,
+    InvocationProvenanceEvidence,
+    ProvenanceManifest,
+    build_provenance_manifest,
+)
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from .api_run_history import (
@@ -2545,4 +2551,45 @@ def build_live_ledger_attempt_evidence_packet(
         historical_settlement_receipt_supplied=historical_settlement_receipt_supplied,
         diagnostics_available=diagnostics_available,
         diagnostic_cause=diagnostic_cause,
+    )
+
+
+def provenance_manifest_from_attempt_packet(
+    packet: AttemptEvidencePacket,
+) -> ProvenanceManifest:
+    """Convert a historical advisor ``AttemptEvidencePacket`` to a sanitized ``ProvenanceManifest``."""
+
+    if not isinstance(packet, AttemptEvidencePacket):
+        raise ReviewInputError("packet must be an AttemptEvidencePacket")
+    selected_executor = UNKNOWN_PROVENANCE
+    if packet.executor_sha != UNKNOWN_PROVENANCE:
+        selected_executor = f"github-actions:{packet.executor_sha}"
+    elif packet.executor_commit != UNKNOWN_PROVENANCE:
+        selected_executor = f"github-actions:{packet.executor_commit}"
+    return build_provenance_manifest(
+        repository=packet.repository,
+        repository_id=packet.repository_id,
+        pull_request=packet.pull_request,
+        base_sha=packet.base_sha if packet.base_sha is not None else UNKNOWN_PROVENANCE,
+        head_sha=packet.head_sha if packet.head_sha is not None else UNKNOWN_PROVENANCE,
+        reusable_workflow_tag_object=packet.executor_sha,
+        reusable_workflow_peeled_commit=packet.executor_commit,
+        installed_core_version=packet.installed_core_version,
+        installed_hosted_version=packet.installed_hosted_version,
+        selected_executor=selected_executor,
+        frozen_policy_commit=(
+            packet.policy_commit
+            if packet.policy_commit is not None
+            else UNKNOWN_PROVENANCE
+        ),
+        frozen_policy_sha256=(
+            packet.policy_digest
+            if packet.policy_digest is not None
+            else UNKNOWN_PROVENANCE
+        ),
+        invocation_evidence=InvocationProvenanceEvidence(
+            observation_scope="retained_attempt"
+        ),
+        auto_inspect_local_packages=False,
+        inspect_module_origins=False,
     )

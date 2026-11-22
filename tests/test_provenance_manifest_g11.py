@@ -19,6 +19,8 @@ from review_sensei.provenance_manifest import (
     AttemptEvidencePacket,
     CiRunObservation,
     GateObservations,
+    InstalledPackageObservation,
+    InvocationProvenanceEvidence,
     LifecycleReceipts,
     NoDuplicateWorkAssertion,
     OriginalInputBindings,
@@ -1011,6 +1013,123 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
             classify_provenance_compatibility(snapshot, expected_main_sha="unknown")
         with self.assertRaises(ReviewInputError):
             classify_provenance_compatibility(snapshot, expected_release_tag="unknown")
+
+    def test_build_provenance_manifest_inspect_module_origins_opt_in_and_guards(
+        self,
+    ) -> None:
+        baseline = build_provenance_manifest()
+        explicit_off = build_provenance_manifest(inspect_module_origins=False)
+        self.assertEqual(baseline.manifest_sha256, explicit_off.manifest_sha256)
+        self.assertIsNone(explicit_off.invocation_evidence)
+        self.assertEqual(explicit_off.installed_core_version, UNKNOWN_PROVENANCE)
+
+        for bad_flag in (1, "yes"):
+            with self.assertRaises(ReviewInputError):
+                build_provenance_manifest(inspect_module_origins=bad_flag)  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            build_provenance_manifest(
+                inspect_module_origins=True,
+                package_inspector="not-callable",  # type: ignore[arg-type]
+            )
+
+        observed_calls = 0
+
+        def fake_inspector() -> tuple[InstalledPackageObservation, ...]:
+            nonlocal observed_calls
+            observed_calls += 1
+            return (
+                InstalledPackageObservation(
+                    distribution="review-sensei",
+                    version="0.8.21",
+                    module_origin="distribution-owned",
+                    module_file_sha256="a" * 64,
+                ),
+                InstalledPackageObservation(
+                    distribution="review-sensei-github",
+                    version="0.3.27",
+                    module_origin="outside-distribution",
+                    module_file_sha256=UNKNOWN_PROVENANCE,
+                ),
+            )
+
+        inspected = build_provenance_manifest(
+            inspect_module_origins=True,
+            package_inspector=fake_inspector,
+        )
+        self.assertEqual(observed_calls, 1)
+        self.assertFalse(inspected.authority)
+        self.assertEqual(inspected.installed_core_version, "0.8.21")
+        self.assertEqual(inspected.installed_hosted_version, "0.3.27")
+        assert inspected.invocation_evidence is not None
+        self.assertEqual(
+            inspected.invocation_evidence.observation_scope, "current_process"
+        )
+        self.assertEqual(
+            inspected.invocation_evidence.core_module_origin, "distribution-owned"
+        )
+        self.assertEqual(
+            inspected.invocation_evidence.core_module_file_sha256, "a" * 64
+        )
+        self.assertEqual(
+            inspected.invocation_evidence.hosted_module_origin, "outside-distribution"
+        )
+        self.assertEqual(
+            inspected.invocation_evidence.hosted_module_file_sha256, UNKNOWN_PROVENANCE
+        )
+        self.assertEqual(
+            ProvenanceManifest.from_dict(inspected.to_dict(), require_digest=True),
+            inspected,
+        )
+
+        # Caller-supplied explicit versions remain authoritative over local lookup.
+        preserved = build_provenance_manifest(
+            installed_core_version="0.8.18",
+            inspect_module_origins=True,
+            package_inspector=fake_inspector,
+        )
+        self.assertEqual(preserved.installed_core_version, "0.8.18")
+        self.assertEqual(preserved.installed_hosted_version, "0.3.27")
+
+        # Identified or retained manifests MUST refuse before inspecting current process.
+        calls_before_refusals = observed_calls
+        for kwargs in (
+            {"pull_request": 421},
+            {"head_sha": "b" * 40},
+            {
+                "source_event": SourceEventIdentity(
+                    event_kind="pull_request",
+                    source_id=123,
+                    source_revision="c" * 40,
+                    source_digest="1" * 64,
+                )
+            },
+            {
+                "invocation_evidence": InvocationProvenanceEvidence(
+                    observation_scope="retained_attempt"
+                )
+            },
+            {
+                "invocation_evidence": InvocationProvenanceEvidence(
+                    invocation_sha256="2" * 64
+                )
+            },
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "current-process metadata cannot populate an identified or retained attempt",
+            ):
+                build_provenance_manifest(
+                    inspect_module_origins=True,
+                    package_inspector=fake_inspector,
+                    **kwargs,
+                )
+        self.assertEqual(observed_calls, calls_before_refusals)
+
+        # Real unbound process inspection works cleanly without errors.
+        real = build_provenance_manifest(inspect_module_origins=True)
+        assert real.invocation_evidence is not None
+        self.assertEqual(real.invocation_evidence.observation_scope, "current_process")
+        self.assertFalse(real.authority)
 
 
 if __name__ == "__main__":

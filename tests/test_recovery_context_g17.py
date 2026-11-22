@@ -34,6 +34,8 @@ from review_sensei.recovery_context import (
     MAX_RECOVERY_ANCESTOR_DEPTH,
     MAX_RECOVERY_HANDOFF_FILES,
     MAX_RECOVERY_RESULT_PARTS,
+    MAX_SESSION_COMMENT_BYTES,
+    MAX_SESSION_RECORD_BYTES,
     MAX_SESSION_ROOT_BYTES,
     RECOVERY_CONTEXT_SCHEMA_VERSION,
     OriginalRecoveryContextBundle,
@@ -339,10 +341,24 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
         self.assertFalse(too_deep.admitted)
         self.assertEqual(too_deep.refusal_code, "ancestor_depth_exceeded")
 
+        self.assertEqual(MAX_SESSION_RECORD_BYTES, 32_768)
+        self.assertEqual(MAX_SESSION_ROOT_BYTES, MAX_SESSION_RECORD_BYTES)
+        self.assertEqual(MAX_SESSION_COMMENT_BYTES, 65_536)
+
+        comment_boundary_admitted = price_recovery_context_admission(
+            bundle,
+            current_run_id=200,
+            current_root_bytes=MAX_SESSION_RECORD_BYTES,
+            intermediate_root_bytes=MAX_SESSION_RECORD_BYTES,
+            current_comment_bytes=MAX_SESSION_COMMENT_BYTES,
+        )
+        self.assertTrue(comment_boundary_admitted.admitted)
+
         for kwargs in (
             {"result_part_count": MAX_RECOVERY_RESULT_PARTS + 1},
-            {"current_root_bytes": MAX_SESSION_ROOT_BYTES + 1},
-            {"intermediate_root_bytes": MAX_SESSION_ROOT_BYTES + 1},
+            {"current_root_bytes": MAX_SESSION_RECORD_BYTES + 1},
+            {"intermediate_root_bytes": MAX_SESSION_RECORD_BYTES + 1},
+            {"current_comment_bytes": MAX_SESSION_COMMENT_BYTES + 1},
             {"total_decoded_bytes": MAX_DECODED_RESULT_BYTES + 1},
         ):
             exceeded = price_recovery_context_admission(
@@ -1900,6 +1916,72 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
             # Slot capacity is reclaimed for subsequent captures without enlarging the 8-file cap.
             new_path = store.save(_sample_bundle(transaction_id="f" * 64))
             self.assertTrue(new_path.is_file())
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_attempt2_passes_intermediate_root_and_staged_decoded_bytes(
+        self,
+    ) -> None:
+        from review_sensei_github import publication_context_recovery
+        from review_sensei_github.review_run import ReviewRun
+        from test_review_run import EntryFixture
+
+        with tempfile.TemporaryDirectory() as directory:
+            fx = EntryFixture(directory, limit=512)
+            key_file = fx.root / "handoff.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            handoff_dir = fx.root / "handoff"
+            handoff_dir.mkdir()
+            handoff_dir.chmod(0o700)
+            fx.recovery_context_dir = handoff_dir
+            fx.recovery_context_key_file = key_file
+
+            def crash_before_pub() -> None:
+                raise KeyboardInterrupt()
+
+            fx.before_publication = crash_before_pub
+            self.assertEqual(fx.invoke(), 130, fx.error)
+
+            fx.attempt = 2
+            fx.before_publication = None
+            observed: list[dict[str, int]] = []
+            orig_reconstruct = (
+                publication_context_recovery.reconstruct_publication_contexts
+            )
+
+            def spy_reconstruct(**kwargs):  # type: ignore[no-untyped-def]
+                observed.append(
+                    {
+                        "current_root_bytes": kwargs["current_root_bytes"],
+                        "intermediate_root_bytes": kwargs["intermediate_root_bytes"],
+                        "current_comment_bytes": kwargs["current_comment_bytes"],
+                        "total_decoded_bytes": kwargs["total_decoded_bytes"],
+                    }
+                )
+                return orig_reconstruct(**kwargs)
+
+            with patch.object(
+                publication_context_recovery,
+                "reconstruct_publication_contexts",
+                side_effect=spy_reconstruct,
+            ):
+                self.assertEqual(fx.invoke(), 0, fx.error)
+            self.assertEqual(len(observed), 1)
+            metrics = observed[0]
+            self.assertGreater(metrics["current_root_bytes"], 0)
+            self.assertGreater(
+                metrics["intermediate_root_bytes"], metrics["current_root_bytes"]
+            )
+            self.assertLessEqual(
+                metrics["intermediate_root_bytes"], MAX_SESSION_RECORD_BYTES
+            )
+            self.assertGreater(metrics["current_comment_bytes"], 0)
+            self.assertLessEqual(
+                metrics["current_comment_bytes"], MAX_SESSION_COMMENT_BYTES
+            )
+            self.assertNotEqual(metrics["total_decoded_bytes"], 16_384)
+            self.assertGreater(metrics["total_decoded_bytes"], 0)
+            _ = ReviewRun
 
     @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cli_result_retry_does_not_overwrite_handoff_recover_from_rejection_repo_id_none_and_corrupt_accounting(

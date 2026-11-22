@@ -1181,6 +1181,98 @@ class CheckProofHookDiagnosticsTests(unittest.TestCase):
         ):
             self.assertIsNone(current._check_proof_failures())
 
+    def test_emits_bounded_sanitized_runtime_packages_without_local_paths(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        from review_sensei.provenance_manifest import InstalledPackageObservation
+
+        repo_root = str(Path(__file__).resolve().parents[1])
+        stream = io.StringIO()
+        fake_obs = (
+            InstalledPackageObservation(
+                distribution="review-sensei",
+                version="0.8.21",
+                module_origin="distribution-owned",
+                module_file_sha256="a" * 64,
+            ),
+            InstalledPackageObservation(
+                distribution="review-sensei-github",
+                version="0.3.27",
+                module_origin="outside-distribution",
+                module_file_sha256="unknown",
+            ),
+        )
+        with (
+            patch(
+                "review_sensei.provenance_manifest.inspect_current_process_packages",
+                return_value=fake_obs,
+            ),
+            redirect_stderr(stream),
+            diagnostic.lifecycle("review") as current,
+        ):
+            self.assertEqual(current.returned(0), 0)
+        value = outcome(self, stream.getvalue())
+        packages = value["runtime_packages"]
+        self.assertIsInstance(packages, list)
+        self.assertEqual(len(packages), 2)
+        self.assertEqual(
+            [item["distribution"] for item in packages],
+            ["review-sensei", "review-sensei-github"],
+        )
+        for item in packages:
+            self.assertIs(item["authority"], False)
+            self.assertIs(item["is_deployment_proof"], False)
+            self.assertEqual(item["observation_scope"], "current_process")
+            self.assertEqual(item["wheel_sha256"], "unknown")
+        self.assertNotIn(repo_root, stream.getvalue())
+
+        # When payload sits just under 4096 bytes without runtime_packages, dropping
+        # runtime_packages preserves the full diagnostic line instead of truncating.
+        with patch(
+            "review_sensei.provenance_manifest.inspect_current_process_packages",
+            return_value=fake_obs,
+        ):
+            baseline_stream = io.StringIO()
+            with (
+                patch(
+                    "review_sensei.provenance_manifest.inspect_current_process_packages",
+                    side_effect=RuntimeError("skip-for-size-calc"),
+                ),
+                redirect_stderr(baseline_stream),
+                diagnostic.lifecycle("review") as probe,
+            ):
+                probe.scope["filler"] = ""
+                probe.returned(0)
+            baseline_len = len(baseline_stream.getvalue().encode())
+            target_filler = 4096 - baseline_len - 100
+            self.assertGreater(target_filler, 2000)
+
+            bounded_stream = io.StringIO()
+            with redirect_stderr(bounded_stream), diagnostic.lifecycle("review") as cur:
+                cur.scope["filler"] = "x" * target_filler
+                self.assertEqual(cur.returned(0), 0)
+            bounded = outcome(self, bounded_stream.getvalue())
+            self.assertEqual(bounded["reason"], "operation_returned")
+            self.assertEqual(bounded["exit_code"], 0)
+            self.assertIsNone(bounded["runtime_packages"])
+
+        # Probe errors must never mask outcomes or leak raw paths/errors.
+        err_stream = io.StringIO()
+        with (
+            patch(
+                "review_sensei.provenance_manifest.inspect_current_process_packages",
+                side_effect=RuntimeError("private-probe-error-/secret/venv/path"),
+            ),
+            redirect_stderr(err_stream),
+            diagnostic.lifecycle("review") as cur,
+        ):
+            self.assertEqual(cur.returned(0), 0)
+        err_value = outcome(self, err_stream.getvalue())
+        self.assertIsNone(err_value["runtime_packages"])
+        self.assertEqual(err_value["reason"], "operation_returned")
+        self.assertNotIn("private-probe-error", err_stream.getvalue())
+        self.assertNotIn("/secret/venv/path", err_stream.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
