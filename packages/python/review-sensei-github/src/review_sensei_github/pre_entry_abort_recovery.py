@@ -28,6 +28,7 @@ Models the SiteVault `#142` predecessor boundary (`phase=no-transaction` in
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -41,7 +42,9 @@ from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from . import controlled_restart
+from .api_run_owner import _writer_name
 from .errors import GitHubHTTPError
+from .http import GitHubHttp
 from .publication import (
     APPROVAL_MARKER_PREFIX,
     FINDING_MARKER_PREFIX,
@@ -50,7 +53,8 @@ from .publication import (
     REVIEW_MARKER_PREFIX,
     finding_publication_scope,
 )
-from .session_ledger import parse_session_comment
+from .reservation_recovery import _stamp
+from .session_ledger import GitHubIssueCommentSessionLedger, parse_session_comment
 
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
@@ -498,6 +502,8 @@ def qualify_no_transaction_abort(
             missing_corrupt = list(receipt_failures)
             if provider_entry_started is True:
                 missing_corrupt.append("zero_provider_entry")
+            if not owner_ceased:
+                missing_corrupt.append("predecessor_owner_cessation")
             return NoTransactionAbortQualification(
                 state_code="pre_entry_abort_corrupt_receipt",
                 qualifies_rollover=False,
@@ -511,14 +517,26 @@ def qualify_no_transaction_abort(
                 conservative_total_caller_liability=total_liab,
                 conservative_provider_call_hold=1,
                 missing_predicates=tuple(missing_corrupt),
-                primary_route="controlled_serialized_restart",
+                primary_route=(
+                    "controlled_serialized_restart"
+                    if owner_ceased
+                    else "wait_for_owner_cessation_then_recover"
+                ),
                 fallback_routes=(),
                 operator_action=(
                     "Pre-entry `analysis_abort` receipt conflicts with session "
-                    "state or provider entry; isolate via controlled serialized restart."
+                    "state or provider entry; "
+                    + (
+                        "isolate via controlled serialized restart."
+                        if owner_ceased
+                        else "wait for owner cessation before recovery."
+                    )
                 ),
             )
         if not dispatch_clean:
+            missing_dispatch = ["zero_uncertain_caller_mutations"]
+            if not owner_ceased:
+                missing_dispatch.append("predecessor_owner_cessation")
             return NoTransactionAbortQualification(
                 state_code="no_transaction_unknown_dispatch",
                 qualifies_rollover=False,
@@ -531,12 +549,21 @@ def qualify_no_transaction_abort(
                 conservative_nonstartup_caller_liability=nonstartup_liab,
                 conservative_total_caller_liability=total_liab,
                 conservative_provider_call_hold=0,
-                missing_predicates=("zero_uncertain_caller_mutations",),
-                primary_route="controlled_serialized_restart",
+                missing_predicates=tuple(missing_dispatch),
+                primary_route=(
+                    "controlled_serialized_restart"
+                    if owner_ceased
+                    else "wait_for_owner_cessation_then_recover"
+                ),
                 fallback_routes=(),
                 operator_action=(
                     "Caller accounting carries uncertain/unconfirmed mutations; "
-                    "retain conservative caller liability and recover via controlled restart."
+                    "retain conservative caller liability and "
+                    + (
+                        "recover via controlled restart."
+                        if owner_ceased
+                        else "confirm owner cessation before recovery."
+                    )
                 ),
             )
         if not late_effects_absent:
@@ -939,18 +966,36 @@ def _probe_owner_ceased(
                     return False
                 if expected_total != len(all_jobs):
                     return False
-                return all(
-                    j.get("status") == "completed"
-                    and isinstance(j.get("conclusion"), str)
-                    and j["conclusion"] in _TERMINAL_JOB_CONCLUSIONS
-                    for j in all_jobs
-                )
+                for job in all_jobs:
+                    if (
+                        job.get("run_id") != old.identity.run_id
+                        or job.get("run_attempt") != old.owner.run_attempt
+                        or job.get("status") != "completed"
+                    ):
+                        return False
+                    conclusion = job.get("conclusion")
+                    if (
+                        not isinstance(conclusion, str)
+                        or conclusion not in _TERMINAL_JOB_CONCLUSIONS
+                    ):
+                        return False
+                    completed_at = job.get("completed_at")
+                    if not isinstance(completed_at, str):
+                        return False
+                    try:
+                        _stamp(completed_at)
+                    except ReviewInputError:
+                        return False
+                matching = [
+                    j for j in all_jobs if _writer_name(j.get("name"), old.owner.job)
+                ]
+                return len(matching) == 1
         return False
     run_reader = getattr(ledger, "_run_reader", None)
     ceased_fn = getattr(run_reader, "ceased_owner", None)
     if callable(ceased_fn):
         try:
-            ceased_fn(identity, old.identity, old.owner)
+            ceased_fn(identity, old.owner)
             return True
         except ReviewInputError:
             return False
@@ -980,6 +1025,101 @@ _LATE_THREADS_QUERY = (
     "author { login __typename ... on Bot { databaseId } } "
     "} } } } } } }"
 )
+_MAX_ABORT_GRAPHQL_BYTES = 8192
+
+
+def _is_late_abort_effects_query(body: Any) -> bool:
+    if not isinstance(body, dict):
+        return False
+    allowed_keys = {"query", "variables"}
+    if not allowed_keys <= set(body) or not (
+        set(body) <= (allowed_keys | {"operationName"})
+    ):
+        return False
+    if "operationName" in body and body["operationName"] != "LateAbortEffects":
+        return False
+    if body.get("query") != _LATE_THREADS_QUERY:
+        return False
+    variables = body.get("variables")
+    if not isinstance(variables, dict) or set(variables) != {
+        "owner",
+        "name",
+        "number",
+        "first",
+        "after",
+    }:
+        return False
+    owner, name, number, first, after = (
+        variables["owner"],
+        variables["name"],
+        variables["number"],
+        variables["first"],
+        variables["after"],
+    )
+    if (
+        not isinstance(owner, str)
+        or not 1 <= len(owner) <= 39
+        or not isinstance(name, str)
+        or not 1 <= len(name) <= 100
+        or type(first) is not int
+        or not 1 <= first <= _PAGE_SIZE
+    ):
+        return False
+    try:
+        SessionIdentity(f"{owner}/{name}", number)
+    except ReviewInputError:
+        return False
+    return after is None or (
+        isinstance(after, str) and len(after) <= _MAX_ABORT_GRAPHQL_BYTES
+    )
+
+
+class _ReadOnlyNoTransactionHttp(GitHubHttp):
+    """Fail-closed read-only HTTP wrapper allowing only GETs and `LateAbortEffects`."""
+
+    def __init__(self, transport: GitHubHttp) -> None:
+        super().__init__(
+            api_url=transport.api_url,
+            timeout=transport.timeout,
+            evidence_monotonic=getattr(transport, "evidence_monotonic", time.monotonic),
+        )
+        self.transport = transport
+
+    def repository_path(self, repository: str, suffix: str = "") -> str:
+        return self.transport.repository_path(repository, suffix)
+
+    def request(self, method, path, *, token, body=None, timeout_seconds=None):
+        if method != "GET":
+            if method != "POST" or path != "/graphql" or not isinstance(body, dict):
+                raise ReviewInputError(
+                    "no-transaction inspection HTTP transport is strictly read-only"
+                )
+            if not _is_late_abort_effects_query(body):
+                raise ReviewInputError(
+                    "no-transaction inspection HTTP transport is strictly read-only"
+                )
+            try:
+                encoded = json.dumps(body, separators=(",", ":")).encode("utf-8")
+                if len(encoded) > _MAX_ABORT_GRAPHQL_BYTES:
+                    raise ReviewInputError(
+                        "no-transaction inspection HTTP transport is strictly read-only"
+                    )
+                body = json.loads(encoded)
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ReviewInputError(
+                    "no-transaction inspection HTTP transport is strictly read-only"
+                ) from exc
+            if not _is_late_abort_effects_query(body):
+                raise ReviewInputError(
+                    "no-transaction inspection HTTP transport is strictly read-only"
+                )
+        return self.transport.request(
+            method,
+            path,
+            token=token,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _native_login(value: object) -> str | None:
@@ -1779,15 +1919,37 @@ def _load_live_no_transaction_context(
     if http is None or not isinstance(token, str) or not token.strip():
         raise ReviewInputError("live no-transaction inspection requires an HTTP ledger")
 
+    ro_http = _ReadOnlyNoTransactionHttp(http)
+    ro_ledger = GitHubIssueCommentSessionLedger(
+        http=ro_http,
+        token=token,
+        app_slug=getattr(ledger, "app_slug", None),
+        evidence_budget=getattr(ledger, "evidence_budget", None),
+    )
+    auth_app_id = getattr(ledger, "authenticated_app_id", None)
+    if type(auth_app_id) is int and auth_app_id > 0:
+        ro_ledger.authenticated_app_id = auth_app_id
+    evidence_author_id = getattr(ledger, "_evidence_author_id", None)
+    if type(evidence_author_id) is int and evidence_author_id > 0:
+        ro_ledger._evidence_author_id = evidence_author_id
+    run_reader = getattr(ledger, "_run_reader", None)
+    if run_reader is not None:
+        ro_ledger._run_reader = run_reader  # type: ignore[attr-defined]
+
+    expected_issue = (
+        f"{ro_http.api_url.rstrip('/')}/repos/{identity.repository}"
+        f"/issues/{identity.pull_request}"
+    )
+
     matched_comments: list[tuple[dict[str, Any], SessionRecord]] = []
     seen_comment_ids: set[int] = set()
     comments_complete = False
     for page in range(1, MAX_PAGINATION_PAGES + 1):
-        comments_path = http.repository_path(
+        comments_path = ro_http.repository_path(
             identity.repository,
             f"/issues/{identity.pull_request}/comments?per_page={_PAGE_SIZE}&page={page}",
         )
-        status, comments = http.request("GET", comments_path, token=token)
+        status, comments = ro_http.request("GET", comments_path, token=token)
         if (
             status != 200
             or not isinstance(comments, list)
@@ -1797,17 +1959,28 @@ def _load_live_no_transaction_context(
                 "unable to read issue comments for no-transaction inspection"
             )
         for item in comments:
-            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+            if not isinstance(item, dict):
                 continue
             cid = item.get("id")
-            if type(cid) is int and cid > 0:
-                if cid in seen_comment_ids:
-                    continue
-                seen_comment_ids.add(cid)
-            if not _author_matches_configured_bot(item.get("user"), ledger):
+            if type(cid) is not int or cid <= 0:
+                raise ReviewInputError(
+                    "session comment has an invalid numeric identifier"
+                )
+            if cid in seen_comment_ids:
+                raise ReviewInputError(
+                    "duplicate issue comment identifier detected during no-transaction inspection"
+                )
+            seen_comment_ids.add(cid)
+            if not isinstance(item.get("body"), str):
+                continue
+            if not _author_matches_configured_bot(item.get("user"), ro_ledger):
                 continue
             parsed = parse_session_comment(item["body"], identity=identity)
             if parsed is not None:
+                if item.get("issue_url") != expected_issue:
+                    raise ReviewInputError(
+                        "session comment repository/PR issue_url does not match"
+                    )
                 matched_comments.append((item, parsed))
         if len(comments) < _PAGE_SIZE:
             comments_complete = True
@@ -1835,15 +2008,15 @@ def _load_live_no_transaction_context(
     if matched_record.api_run_accounting is None:
         raise ReviewInputError("session comment is not API-accounted")
     old = ApiRunAccounting.from_document(matched_record.api_run_accounting)
-    ceased = _probe_owner_ceased(ledger, identity, old, actions_token)
-    app_slug = getattr(ledger, "app_slug", None)
-    app_user_id = getattr(ledger, "_evidence_author_id", None)
+    ceased = _probe_owner_ceased(ro_ledger, identity, old, actions_token)
+    app_slug = getattr(ro_ledger, "app_slug", None)
+    app_user_id = getattr(ro_ledger, "_evidence_author_id", None)
     if _native_login(app_slug) is not None and app_user_id is None:
         # Only a root already matched to the independently configured App
         # can supply its numeric GitHub identity for the native census.
         app_user_id = matched_comment["user"].get("id")
     late_effects = _detect_late_native_effects(
-        ledger,
+        ro_ledger,
         identity,
         matched_record,
         old,

@@ -528,6 +528,7 @@ class SqliteAuthorityCandidate:
                 and a.native_exclusive,
                 "legacy effects or writer exclusion block native actions",
             )
+            self.host.authorize(a, binding)
             item["phase"] = "forwarded"
             return True
 

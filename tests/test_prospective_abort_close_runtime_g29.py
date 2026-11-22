@@ -18,8 +18,13 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
 from fake_github_http import FakeHTTPResponse, json_response
-from review_sensei_github.api_run_history import RETAINED_CONFIRMATION_TAIL
+from review_sensei_github.api_run_history import (
+    RETAINED_CONFIRMATION_TAIL,
+    action_result_binding,
+)
 from review_sensei_github.api_run_plan import WRITE_CONFIRMATION_TAIL
+from review_sensei_github.finding_lifecycle import _pack_journal, _unpack_journal
+from review_sensei_github.finding_lifecycle_dictionary import pack as pack_lifecycle_v4
 from review_sensei_github.http import MAX_PAGINATION_PAGES, GitHubHttp
 from review_sensei_github.pre_entry_abort_admission import (
     require_pre_entry_abort_admission,
@@ -40,8 +45,19 @@ from review_sensei_github.session_ledger import (
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 from test_review_run import EntryFixture, fixture_process_environment
 
-from review_sensei.api_work import ApiRunAccounting, PendingApiRequest
-from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
+from review_sensei.api_work import (
+    ApiExecutionOwner,
+    ApiRunAccounting,
+    PendingApiRequest,
+)
+from review_sensei.bounded_evidence import (
+    MAX_PARTITION_DECODED_BYTES,
+    EvidenceReadBudget,
+    canonical_bytes,
+    encode_evidence,
+    evidence_manifest,
+    inline_manifest,
+)
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionRecord
@@ -899,6 +915,282 @@ with patch("socket.socket", side_effect=AssertionError("offline fixture")):
                     ReviewInputError, "predecessor caller dispatch remains uncertain"
                 ):
                     require_pre_entry_abort_admission(ledger, IDENTITY, record, old)
+
+    def test_earlier_native_rows_intervening_terminal_command_and_packed_v4(
+        self,
+    ) -> None:
+        from review_sensei_github.api_run_host import review_startup_plan
+        from review_sensei_github.api_run_plan import owner_allocations
+
+        from review_sensei.api_work import (
+            ACTION_NOOP_REASONS,
+            ApiRunIdentity,
+            initial_accounting,
+        )
+        from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
+
+        def clone_rec(base: SessionRecord, **overrides: object) -> SessionRecord:
+            fields = {
+                key: value
+                for key, value in vars(base).items()
+                if key != "record_sha256" and not key.startswith("_")
+            }
+            fields.update(overrides)
+            return SessionRecord._construct(**fields)
+
+        # 1. Produce a real published review on `HEAD` with native review + finding_lifecycle.
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory, limit=560)
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertGreaterEqual(len(f.reviews), 1)
+            pub_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNotNone(pub_rec.transaction)
+            self.assertIsNotNone(pub_rec.finding_lifecycle)
+
+            budget = EvidenceReadBudget()
+            ro_ledger = GitHubIssueCommentSessionLedger(
+                f.http,
+                token="synthetic-token",
+                app_slug="reviewsensei[bot]",
+                evidence_budget=budget,
+            )
+            ro_ledger._evidence_author_id = 999
+            pub_journal = _unpack_journal(
+                _decode_selected_lifecycle(ro_ledger, pub_rec)
+            )
+            self.assertGreaterEqual(len(pub_journal["effects"]), 1)
+
+            # Pack that ancestor's lifecycle using `finding-lifecycle-packed-v4`
+            # referencing an archived base envelope stored in `extra_comments`.
+            fl_ref = pub_rec.finding_lifecycle
+            assert fl_ref is not None
+            base_doc = {
+                "schema_version": "finding-lifecycle-evidence-v2",
+                "lifecycle": _pack_journal(pub_journal),
+            }
+            base_binding = {**fl_ref["manifest"]["binding"]}
+            base_manifest = inline_manifest(
+                base_doc, binding=base_binding, item_count=1
+            )
+            assert base_manifest is not None
+            v4_binding = {
+                **fl_ref["manifest"]["binding"],
+                "generation": fl_ref["manifest"]["binding"]["generation"] + 1,
+            }
+            packed_v4 = pack_lifecycle_v4(
+                pub_journal,
+                base=base_doc,
+                manifest=base_manifest,
+                current_binding=v4_binding,
+            )
+            v4_envelope = {
+                "schema_version": "finding-lifecycle-evidence-v2",
+                "lifecycle": packed_v4,
+            }
+            v4_manifest = inline_manifest(v4_envelope, binding=v4_binding, item_count=1)
+            assert v4_manifest is not None
+            v4_ref = {
+                "schema_version": "finding-lifecycle-reference-v2",
+                "operation_id": fl_ref["operation_id"],
+                "previous_root_sha256": pub_rec.record_sha256,
+                "previous_snapshot_sha256": fl_ref["manifest"]["sha256"],
+                "manifest": v4_manifest,
+                "accepted_semantic_history": fl_ref.get(
+                    "accepted_semantic_history",
+                    {
+                        "schema_version": "accepted-semantic-history-v1",
+                        "qualification": "unavailable",
+                        "reason": "none",
+                    },
+                ),
+            }
+
+            # 2. Construct an intervening settled terminal command (`terminal_transaction=None`)
+            # preserving `pub_rec.transaction` and carrying `v4_ref` (`finding-lifecycle-packed-v4`).
+            pub_acc = ApiRunAccounting.from_document(pub_rec.api_run_accounting)
+            cmd_identity = pub_acc.identity
+            cmd_cfg = pub_acc.configuration
+            cmd_owner = ApiExecutionOwner(1, "command", 0)
+            cmd_plan = review_startup_plan("command")
+            cmd_alloc = owner_allocations(512, cmd_plan.liability)
+            cmd_acc = initial_accounting(
+                cmd_identity,
+                cmd_cfg,
+                cmd_owner,
+                cmd_plan,
+                prior_nonstartup_liability_upper_bound=0,
+            ).reserve("hosted-terminal", cmd_alloc.first_terminal)
+            intent = {
+                "purpose": "command",
+                "source": {
+                    "kind": "issue_comment",
+                    "id": 901,
+                    "updated_at": "2026-11-18T00:00:00Z",
+                    "body_sha256": "5" * 64,
+                },
+                "run_id": cmd_identity.run_id,
+                "owner": {"run_attempt": 1, "job": "command", "generation": 0},
+                "head_sha": HEAD,
+                "configuration_digest": cmd_cfg.digest,
+                "operation_key": "a" * 64,
+                "source_root": "b" * 64,
+            }
+            intent_digest = hashlib.sha256(canonical_bytes(intent)).hexdigest()
+            outcome = {"kind": "applied", "reason": None}
+            cmd_doc = cmd_acc.to_document()
+            for blk in cmd_doc["blocks"]:
+                blk["pending"] = []
+            cmd_doc["terminal_transaction"] = None
+            cmd_doc["action"] = {
+                "phase": "pending",
+                "execution_started": True,
+                "intent": intent,
+                "outcome": None,
+                "result": None,
+            }
+            cmd_state_stub = ApiRunAccounting.from_document(cmd_doc)
+            binding = action_result_binding(IDENTITY, cmd_state_stub, "github-bot:999")
+            envelope = {
+                "schema_version": "caller-action-result-v1",
+                "intent_sha256": intent_digest,
+                "outcome": outcome,
+                "result": {"status": "ok"},
+            }
+            carrier = {
+                "schema_version": "caller-action-result-v1",
+                "payload": encode_evidence(
+                    envelope, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES
+                ),
+            }
+            cmd_doc["action"] = {
+                "phase": "terminal",
+                "execution_started": True,
+                "intent": intent,
+                "outcome": outcome,
+                "result": inline_manifest(carrier, binding=binding, item_count=1),
+            }
+            cmd_rec = clone_rec(
+                pub_rec,
+                generation=pub_rec.generation + 1,
+                finding_lifecycle=v4_ref,
+                api_run_accounting=cmd_doc,
+            )
+
+            # Store archived intervening terminal command using `_prepared_archive`.
+            from review_sensei_github.api_run_history import _prepared_archive
+
+            def archive_into(rec: SessionRecord, storage_id: int) -> dict[str, object]:
+                st, arch_binding, arch_doc, arch_parts, arch_body = _prepared_archive(
+                    ro_ledger, rec, None
+                )
+                f.extra_comments[storage_id] = {
+                    "id": storage_id,
+                    "body": arch_body,
+                    "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                }
+                arch_manifest = evidence_manifest(
+                    arch_doc,
+                    binding=arch_binding,
+                    item_count=1,
+                    parts=arch_parts,
+                    storage_ids=(str(storage_id),),
+                )
+                return {
+                    "run_id": st.identity.run_id,
+                    "root_sha256": rec.record_sha256,
+                    "manifest": arch_manifest,
+                }
+
+            archive_id = 7_000_001
+            archive_ref = archive_into(cmd_rec, archive_id)
+
+            # 3. Current session record is a clean pre-entry abort referencing `archive_ref`
+            #    and carrying `v4_ref`.
+            f.next_run()
+            abort_run_identity = ApiRunIdentity(123, f.run_id)
+            abort_tx = ReviewTransaction.create(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha=BASE,
+                head_sha=HEAD,
+                reservation_id="8" * 64,
+                policy_digest="2" * 64,
+                configuration_digest=cmd_cfg.digest,
+                evidence_digest="3" * 64,
+                generation=cmd_rec.generation + 1,
+            )
+            abort_acc = initial_accounting(
+                abort_run_identity,
+                cmd_cfg,
+                ApiExecutionOwner(1, "hosted", 0),
+                review_startup_plan("hosted"),
+                prior_nonstartup_liability_upper_bound=0,
+            )
+            abort_doc = abort_acc.to_document()
+            for blk in abort_doc["blocks"]:
+                blk["pending"] = []
+            abort_doc["previous_record"] = archive_ref
+            abort_doc["analysis_abort"] = {
+                "source_root": "1" * 64,
+                "cleanup_root": "2" * 64,
+                "transaction": abort_tx.to_dict(),
+                "entry_state": "not_started",
+                "run_id": abort_run_identity.run_id,
+                "owner": {"run_attempt": 1, "job": "hosted", "generation": 0},
+            }
+            current_abort = clone_rec(
+                pub_rec,
+                generation=cmd_rec.generation + 2,
+                transaction=None,
+                reservation_id=None,
+                reserved_slot=None,
+                finding_lifecycle=v4_ref,
+                api_run_accounting=abort_doc,
+            )
+            saved_comment = render_session_comment(
+                repository_id=123, pull_request=7, record=current_abort
+            )
+
+            # Negative control A: unauthenticated/non-terminal intervening record
+            # (`terminal_transaction=None`, `action=None`) fails closed!
+            unclosed_doc = copy.deepcopy(cmd_doc)
+            unclosed_doc["action"] = None
+            unclosed_cmd_rec = clone_rec(cmd_rec, api_run_accounting=unclosed_doc)
+            abort_doc_bad = copy.deepcopy(abort_doc)
+            abort_doc_bad["previous_record"] = archive_into(
+                unclosed_cmd_rec, archive_id
+            )
+            current_bad = clone_rec(current_abort, api_run_accounting=abort_doc_bad)
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=current_bad
+            )
+            f.next_run()
+            self._assert_held(f, "late native effect on the aborted scope")
+
+            # Negative control B: corrupt intervening action result -> fails closed!
+            corrupt_doc = copy.deepcopy(cmd_doc)
+            corrupt_doc["action"]["outcome"] = {
+                "kind": "explicit_noop",
+                "reason": sorted(ACTION_NOOP_REASONS)[0],
+            }
+            corrupt_rec = clone_rec(cmd_rec, api_run_accounting=corrupt_doc)
+            abort_doc_corrupt = copy.deepcopy(abort_doc)
+            abort_doc_corrupt["previous_record"] = archive_into(corrupt_rec, archive_id)
+            current_corrupt = clone_rec(
+                current_abort, api_run_accounting=abort_doc_corrupt
+            )
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=current_corrupt
+            )
+            f.next_run()
+            self._assert_held(f, "earlier native effect evidence is unavailable")
+
+            # Positive: restore authentic command archive + packed-v4 lifecycle -> real rollover succeeds!
+            abort_doc["previous_record"] = archive_into(cmd_rec, archive_id)
+            f.comment["body"] = saved_comment
+            f.next_run()
+            self.assertEqual(f.invoke(), 0, f.error)
 
 
 if __name__ == "__main__":

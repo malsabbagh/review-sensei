@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -45,6 +45,11 @@ from .api_run_history import (
 from .api_run_owner import ApiRunActionsEvidence
 from .checkpoint_result_store import CheckpointResultStore
 from .operation_comments import GitHubIssueCommentOperationPort
+from .pre_entry_abort_recovery import (
+    _detect_late_native_effects,
+    _ReadOnlyNoTransactionHttp,
+    _validate_analysis_abort_receipt,
+)
 from .prior_rescan_publication import admitted_rescan
 from .publication_recovery import _event_key, _payload
 from .session_ledger import GitHubIssueCommentSessionLedger
@@ -168,6 +173,11 @@ REVIEWSENSEI_443_REPOSITORY = "malsabbagh/review-sensei"
 REVIEWSENSEI_443_PULL_REQUEST = 443
 REVIEWSENSEI_443_RUN_ID = 43074015855
 REVIEWSENSEI_443_GENERATION = 11
+REVIEWSENSEI_459_CASE_ID = "reviewsensei-459-run-43321546017-gen-5"
+REVIEWSENSEI_459_REPOSITORY = "malsabbagh/review-sensei"
+REVIEWSENSEI_459_PULL_REQUEST = 459
+REVIEWSENSEI_459_RUN_ID = 43321546017
+REVIEWSENSEI_459_GENERATION = 5
 
 TERMINAL_SETTLEMENT_FORMS: frozenset[str] = frozenset(
     {
@@ -384,7 +394,6 @@ def classify_recovery_state(
 
     try:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
-        old.require_writer_version()
     except ReviewInputError:
         return RecoveryClassification(
             state_code="legacy_or_corrupt_accounting",
@@ -405,6 +414,61 @@ def classify_recovery_state(
                 "designated controlled serialized restart after capability expiry."
             ),
         )
+
+    classification = _classify_accounted_recovery_state(
+        record,
+        old,
+        tx=tx,
+        tx_phase=tx_phase,
+        current_head=current_head,
+        head_relation=head_relation,
+        base_relation=base_relation,
+        executor_status=executor_status,
+        dispatch_status=dispatch_status,
+        coverage_only_partial=coverage_only_partial,
+        explicit_rescan=explicit_rescan,
+        retained_context_available=retained_context_available,
+        native_effects_confirmed=native_effects_confirmed,
+        action_result_authenticated=action_result_authenticated,
+        evidence_producer=evidence_producer,
+    )
+    if old.version == PARTITIONED_ACTION_ACCOUNTING_VERSION and (
+        classification.primary_route != "controlled_serialized_restart"
+        or classification.fallback_routes
+        or classification.automatic_zero_inference
+    ):
+        return replace(
+            classification,
+            automatic_zero_inference=False,
+            primary_route="controlled_serialized_restart",
+            fallback_routes=(),
+            operator_action=(
+                classification.operator_action
+                + " (`caller-requests-v3` is reader-only; recover via "
+                "controlled serialized restart.)"
+            ),
+        )
+    return classification
+
+
+def _classify_accounted_recovery_state(
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    *,
+    tx: Any,
+    tx_phase: str,
+    current_head: str,
+    head_relation: str,
+    base_relation: str,
+    executor_status: str,
+    dispatch_status: str,
+    coverage_only_partial: bool,
+    explicit_rescan: bool | None,
+    retained_context_available: bool,
+    native_effects_confirmed: bool | None,
+    action_result_authenticated: bool | None,
+    evidence_producer: str | None,
+) -> RecoveryClassification:
 
     attempt = old.owner.run_attempt
     action_phase = (
@@ -681,8 +745,15 @@ def classify_recovery_state(
                     "archive via controlled serialized restart after expiry."
                 ),
             )
+        abort_valid, _abort_tx, _abort_failures = _validate_analysis_abort_receipt(
+            record, old
+        )
+        owner_ceased = executor_status in {"ceased", "failed", "qualified_success"}
+        late_effects_clean = native_effects_confirmed is True
         if (
-            old.analysis_abort.get("entry_state") == "not_started"
+            abort_valid
+            and owner_ceased
+            and late_effects_clean
             and old.uncertain == 0
             and dispatch_status == "known_clean"
         ):
@@ -705,6 +776,17 @@ def classify_recovery_state(
                     "is terminal; ordinary rollover proceeds once owner has ceased."
                 ),
             )
+        missing_abort: list[str] = []
+        if not abort_valid:
+            missing_abort.append("confirmed_pre_entry_analysis_abort")
+        if not owner_ceased:
+            missing_abort.append("predecessor_owner_cessation")
+        if (
+            old.uncertain != 0
+            or dispatch_status != "known_clean"
+            or not late_effects_clean
+        ):
+            missing_abort.append("confirmed_pre_entry_non_dispatch")
         return RecoveryClassification(
             state_code="no_transaction_abort_unconfirmed",
             terminal=False,
@@ -716,7 +798,7 @@ def classify_recovery_state(
             transaction_phase="no-transaction",
             action_phase=None,
             dispatch_status=dispatch_status,
-            missing_witnesses=("confirmed_pre_entry_non_dispatch",),
+            missing_witnesses=tuple(missing_abort),
             primary_route="controlled_serialized_restart",
             fallback_routes=(),
             operator_action=(
@@ -1702,15 +1784,23 @@ class AttemptEvidencePacket:
         }
 
 
-def _derive_terminal_settlement_form(classification: RecoveryClassification) -> str:
+def _derive_terminal_settlement_form(
+    classification: RecoveryClassification,
+    *,
+    has_prior_review_transaction: bool | None = None,
+) -> str:
     if classification.state_code == "unenrolled_ready":
         return "unenrolled_session"
     if classification.state_code == "terminal_action_without_review_transaction":
         return "authenticated_terminal_action_null_review_marker"
-    if classification.state_code in {
-        "terminal_action_settled",
-        "terminal_action_operator_paused",
-    }:
+    if classification.state_code == "terminal_action_operator_paused":
+        if has_prior_review_transaction is False or (
+            has_prior_review_transaction is None
+            and classification.transaction_phase == "no-transaction"
+        ):
+            return "authenticated_terminal_action_null_review_marker"
+        return "authenticated_terminal_action_with_prior_review_marker"
+    if classification.state_code == "terminal_action_settled":
         return "authenticated_terminal_action_with_prior_review_marker"
     if classification.state_code == "pre_entry_analysis_abort_settled":
         return "pre_entry_analysis_abort"
@@ -1736,7 +1826,7 @@ def _assemble_attempt_evidence_packet(
     workflow_blob: str = "unknown",
     installed_core_version: str = "unknown",
     installed_hosted_version: str = "unknown",
-    retained_context_available: bool = True,
+    retained_context_available: bool = False,
     explicit_rescan: bool | None = None,
     coverage_only_partial: bool = False,
     action_result_authenticated: bool | None = None,
@@ -1759,9 +1849,7 @@ def _assemble_attempt_evidence_packet(
     old: ApiRunAccounting | None = None
     if record is not None and record.api_run_accounting is not None:
         try:
-            parsed = ApiRunAccounting.from_document(record.api_run_accounting)
-            parsed.require_writer_version()
-            old = parsed
+            old = ApiRunAccounting.from_document(record.api_run_accounting)
         except ReviewInputError:
             old = None
 
@@ -1840,6 +1928,13 @@ def _assemble_attempt_evidence_packet(
             and session_gen == REVIEWSENSEI_443_GENERATION
         ):
             resolved_case_id = REVIEWSENSEI_443_CASE_ID
+        elif (
+            identity.repository.casefold() == REVIEWSENSEI_459_REPOSITORY.casefold()
+            and identity.pull_request == REVIEWSENSEI_459_PULL_REQUEST
+            and run_id == REVIEWSENSEI_459_RUN_ID
+            and session_gen == REVIEWSENSEI_459_GENERATION
+        ):
+            resolved_case_id = REVIEWSENSEI_459_CASE_ID
         else:
             gen_token = str(session_gen) if session_gen is not None else "none"
             run_token = str(run_id) if run_id is not None else "none"
@@ -1848,7 +1943,10 @@ def _assemble_attempt_evidence_packet(
                 f":gen-{gen_token}:run-{run_token}"
             )
 
-    settlement_form = _derive_terminal_settlement_form(classification)
+    settlement_form = _derive_terminal_settlement_form(
+        classification,
+        has_prior_review_transaction=(tx is not None),
+    )
     if diagnostic_cause is not None:
         if not diagnostics_available and diagnostic_cause not in {
             "unknown",
@@ -1988,7 +2086,7 @@ def build_attempt_evidence_packet(
     dispatch_status: str = "known_clean",
     coverage_only_partial: bool = False,
     explicit_rescan: bool | None = None,
-    retained_context_available: bool = True,
+    retained_context_available: bool = False,
     native_effects_confirmed: bool | None = None,
     action_result_authenticated: bool | None = None,
     evidence_producer: str | None = None,
@@ -2316,7 +2414,6 @@ def _inspect_live_ledger_readonly(
 
     try:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
-        old.require_writer_version()
     except ReviewInputError:
         return (
             record,
@@ -2427,6 +2524,28 @@ def _inspect_live_ledger_readonly(
             tx_head_sha=tx.head_sha if tx is not None else None,
         )
 
+    effective_native_effects_confirmed = native_effects_confirmed
+    if (
+        tx is None
+        and old.analysis_abort is not None
+        and effective_native_effects_confirmed is None
+    ):
+        abort_ledger = GitHubIssueCommentSessionLedger(
+            http=_ReadOnlyNoTransactionHttp(ledger.http),
+            token=ledger.token,
+            app_slug=ledger.app_slug,
+            evidence_budget=read_budget,
+        )
+        late_effects = _detect_late_native_effects(
+            abort_ledger,
+            identity,
+            record,
+            old,
+            app_slug=ledger.app_slug,
+            app_user_id=author_id,
+        )
+        effective_native_effects_confirmed = late_effects is False
+
     classification = classify_recovery_state(
         record,
         current_base=current_base,
@@ -2435,7 +2554,7 @@ def _inspect_live_ledger_readonly(
         dispatch_status=dispatch_status,
         coverage_only_partial=coverage_only_partial,
         retained_context_available=retained_ok,
-        native_effects_confirmed=native_effects_confirmed,
+        native_effects_confirmed=effective_native_effects_confirmed,
         action_result_authenticated=action_authenticated,
         evidence_producer=producer,
     )

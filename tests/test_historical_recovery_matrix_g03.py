@@ -55,6 +55,11 @@ from review_sensei_github.recovery_route_advisor import (
     REVIEWSENSEI_443_PULL_REQUEST,
     REVIEWSENSEI_443_REPOSITORY,
     REVIEWSENSEI_443_RUN_ID,
+    REVIEWSENSEI_459_CASE_ID,
+    REVIEWSENSEI_459_GENERATION,
+    REVIEWSENSEI_459_PULL_REQUEST,
+    REVIEWSENSEI_459_REPOSITORY,
+    REVIEWSENSEI_459_RUN_ID,
     SUPPORTED_RECOVERY_ROUTES,
     AttemptEvidencePacket,
     RecoveryClassification,
@@ -211,6 +216,8 @@ def _make_record(
 
 def _diagnostic_ledger(
     fixture: object,
+    *,
+    completed_pre_attempt2_run: bool = False,
 ) -> tuple[GitHubIssueCommentSessionLedger, list[tuple[str, str]]]:
     """Build a pure read-only ledger over `fixture` (never mutating `fixture.trace`)."""
     observed: list[tuple[str, str]] = []
@@ -222,6 +229,23 @@ def _diagnostic_ledger(
         observed.append((method, path))
         if path == "/user" or path.startswith("/users/"):
             return json_response(bot)
+        run_id = getattr(fixture, "run_id", None)
+        if (
+            completed_pre_attempt2_run
+            and method == "GET"
+            and isinstance(run_id, int)
+            and path.endswith(f"/actions/runs/{run_id}")
+        ):
+            return json_response(
+                {
+                    "id": run_id,
+                    "run_attempt": 1,
+                    "repository": {"id": 123, "full_name": "owner/repo"},
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "event": "pull_request",
+                }
+            )
         if path.endswith("/issues/7/comments") and method == "GET":
             query = parse_qs(target.query)
             size = int(query.get("per_page", [100])[0])
@@ -373,9 +397,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     self.assertFalse(packet.classification.terminal)
                     self.assertEqual(packet.terminal_settlement_form, "unsettled")
                     self.assertIn(
-                        "authenticated_api_run_accounting"
-                        if partitioned
-                        else "authenticated_terminal_action_result",
+                        "authenticated_terminal_action_result",
                         packet.missing_proofs,
                     )
                     self.assertFalse(packet.authority)
@@ -922,20 +944,75 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             "owner": {"run_attempt": 1, "job": "hosted", "generation": 0},
         }
         abort_acc = ApiRunAccounting.from_document(abort_doc)
+        abort_rec = _make_record(accounting=abort_acc, transaction=None, generation=2)
         confirmed_abort = classify_recovery_state(
-            _make_record(accounting=abort_acc, transaction=None),
+            abort_rec,
             current_base=BASE_A,
             current_head=HEAD_A,
+            executor_status="ceased",
+            native_effects_confirmed=True,
         )
         self.assertEqual(confirmed_abort.state_code, "pre_entry_analysis_abort_settled")
         self.assertTrue(confirmed_abort.terminal)
         self.assertEqual(confirmed_abort.primary_route, "pre_entry_abort_rollover")
 
-        uncertain_abort = classify_recovery_state(
-            _make_record(accounting=abort_acc, transaction=None),
+        # Negative controls: corrupt receipt / unconfirmed owner / missing or positive late effects fail closed!
+        corrupt_gen_abort = classify_recovery_state(
+            _make_record(accounting=abort_acc, transaction=None, generation=1),
             current_base=BASE_A,
             current_head=HEAD_A,
+            executor_status="ceased",
+            native_effects_confirmed=True,
+        )
+        self.assertEqual(
+            corrupt_gen_abort.state_code, "no_transaction_abort_unconfirmed"
+        )
+        self.assertFalse(corrupt_gen_abort.terminal)
+        self.assertIn(
+            "confirmed_pre_entry_analysis_abort", corrupt_gen_abort.missing_witnesses
+        )
+
+        for unceased_status in ("not_applicable", "active_or_unconfirmed"):
+            with self.subTest(executor_status=unceased_status):
+                active_abort = classify_recovery_state(
+                    abort_rec,
+                    current_base=BASE_A,
+                    current_head=HEAD_A,
+                    executor_status=unceased_status,
+                    native_effects_confirmed=True,
+                )
+                self.assertEqual(
+                    active_abort.state_code, "no_transaction_abort_unconfirmed"
+                )
+                self.assertFalse(active_abort.terminal)
+                self.assertIn(
+                    "predecessor_owner_cessation", active_abort.missing_witnesses
+                )
+
+        for effects_flag in (None, False):
+            with self.subTest(native_effects_confirmed=effects_flag):
+                unproven_abort = classify_recovery_state(
+                    abort_rec,
+                    current_base=BASE_A,
+                    current_head=HEAD_A,
+                    executor_status="ceased",
+                    native_effects_confirmed=effects_flag,
+                )
+                self.assertEqual(
+                    unproven_abort.state_code, "no_transaction_abort_unconfirmed"
+                )
+                self.assertFalse(unproven_abort.terminal)
+                self.assertIn(
+                    "confirmed_pre_entry_non_dispatch", unproven_abort.missing_witnesses
+                )
+
+        uncertain_abort = classify_recovery_state(
+            abort_rec,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            executor_status="ceased",
             dispatch_status="uncertain_terminal_write",
+            native_effects_confirmed=True,
         )
         self.assertEqual(uncertain_abort.state_code, "no_transaction_abort_unconfirmed")
         self.assertFalse(uncertain_abort.terminal)
@@ -1297,7 +1374,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             self.assertEqual(fp.invoke(), 130, fp.error)
             fp.attempt = 2
             fp.before_publication = None
-            pending_ledger, _ = _diagnostic_ledger(fp)
+            pending_ledger, _ = _diagnostic_ledger(fp, completed_pre_attempt2_run=True)
             pending_class = classify_live_ledger_recovery(
                 ledger=pending_ledger,
                 identity=IDENTITY,
@@ -1549,17 +1626,33 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     current_head=ACTION_HEAD,
                 )
                 if partitioned:
-                    # Intentional negative control: `caller-requests-v3` without the
-                    # matching writer version contract is rejected by
-                    # `ApiRunAccounting.require_writer_version()` and fails closed
-                    # to `legacy_or_corrupt_accounting`.
+                    # `caller-requests-v3` reads bound partitioned parts via
+                    # `_read_bound_action_result`, authenticates the terminal action,
+                    # and still enforces reader-only `controlled_serialized_restart`!
                     self.assertEqual(
-                        classified.state_code, "legacy_or_corrupt_accounting"
+                        classified.state_code,
+                        "terminal_action_without_review_transaction",
                     )
-                    self.assertFalse(classified.terminal)
+                    self.assertTrue(classified.terminal)
+                    self.assertFalse(classified.automatic_zero_inference)
                     self.assertEqual(
                         classified.primary_route, "controlled_serialized_restart"
                     )
+                    self.assertEqual(classified.fallback_routes, ())
+                    # Corrupting partitioned evidence part fails closed to unauthenticated!
+                    f.extra_comments[801]["body"] = "corrupted evidence body"
+                    corrupt_ledger, _ = _diagnostic_ledger(f)
+                    corrupt_v3 = classify_live_ledger_recovery(
+                        ledger=corrupt_ledger,
+                        identity=IDENTITY,
+                        current_base=f.requested_base,
+                        current_head=ACTION_HEAD,
+                    )
+                    self.assertEqual(
+                        corrupt_v3.state_code,
+                        "terminal_action_result_unauthenticated",
+                    )
+                    self.assertFalse(corrupt_v3.terminal)
                 else:
                     self.assertEqual(
                         classified.state_code,
@@ -1964,7 +2057,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                 )
 
             fp.attempt = 2
-            ledger_proj, _ = _diagnostic_ledger(fp)
+            ledger_proj, _ = _diagnostic_ledger(fp, completed_pre_attempt2_run=True)
             proj_class = classify_live_ledger_recovery(
                 ledger=ledger_proj,
                 identity=IDENTITY,
@@ -1982,7 +2075,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
 
             # Without `app_id` (`authenticated_app_id=None`), compact checkpoint
             # source authentication fails closed -> `nonterminal_transaction_isolation_required`!
-            ledger_no_app, _ = _diagnostic_ledger(fp)
+            ledger_no_app, _ = _diagnostic_ledger(fp, completed_pre_attempt2_run=True)
             ledger_no_app.authenticated_app_id = None
             no_app_class = classify_live_ledger_recovery(
                 ledger=ledger_no_app,
@@ -2321,9 +2414,14 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
         abort_record = _make_record(
             accounting=ApiRunAccounting.from_document(abort_doc),
             transaction=None,
+            generation=2,
         )
         abort_packet = build_attempt_evidence_packet(
-            abort_record, current_base=BASE_A, current_head=HEAD_A
+            abort_record,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            executor_status="ceased",
+            native_effects_confirmed=True,
         )
         self.assertTrue(abort_packet.classification.terminal)
         self.assertEqual(
@@ -2331,6 +2429,37 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
         )
         self.assertEqual(abort_packet.abort_cleanup_entry_state, "not_started")
         self.assertEqual(abort_packet.abort_cleanup_root_sha256, "7" * 64)
+        self.assertFalse(abort_packet.retained_context_available)
+        self.assertFalse(abort_packet.retained_result_verified)
+
+        # Paused terminal action with null review marker must keep null_review_marker form,
+        # never mislabeling itself as with_prior_review_marker!
+        paused_cmd_no_tx = _make_record(
+            accounting=cmd_acc, transaction=None, operator_paused=True, generation=6
+        )
+        paused_packet_no_tx = build_attempt_evidence_packet(
+            paused_cmd_no_tx,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            evidence_producer=PRODUCER,
+        )
+        self.assertEqual(
+            paused_packet_no_tx.classification.state_code,
+            "terminal_action_operator_paused",
+        )
+        self.assertEqual(
+            paused_packet_no_tx.terminal_settlement_form,
+            "authenticated_terminal_action_null_review_marker",
+        )
+
+        # `build_attempt_evidence_packet` defaults `retained_context_available=False`
+        # so unverified offline packets never claim retained_result_verified=True.
+        self.assertFalse(packet_443_same_head.retained_context_available)
+        self.assertFalse(packet_443_same_head.retained_result_verified)
+        self.assertIn(
+            "retained_review_result_and_context",
+            packet_443_same_head.missing_proofs,
+        )
 
         settled_tx = _make_tx(phase="publication_succeeded", head_sha=HEAD_A)
         settled_doc = _make_accounting().to_document()
@@ -2567,6 +2696,222 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "historical ledger identity"):
             snap_ledger.load(replace(IDENTITY, pull_request=99))
         self.assertEqual(snap_ledger.load(IDENTITY).record, settled_rec)
+
+    def test_reviewsensei_459_run_43321546017_gen5_packet_and_distinctness(
+        self,
+    ) -> None:
+        """G03: Exact `#459` run `43321546017` gen-5 packet stays distinct and offline/read-only."""
+        base_459 = "6a20327cd6b2d5b937e707c0e89257b257a7a8c0"
+        head_459 = "a3094e23e96c9bb0a56460d579206a483ee18f7e"
+        identity_459 = ApiRunIdentity(1336322077, REVIEWSENSEI_459_RUN_ID)
+        config_459 = FrozenApiConfiguration(
+            commit=POLICY_SHA, digest="1" * 64, limit=512
+        )
+        owner_459 = ApiExecutionOwner(1, "hosted", 0)
+        plan_459 = review_startup_plan("hosted")
+        alloc_459 = owner_allocations(512, plan_459.liability)
+        accounting_459 = (
+            initial_accounting(
+                identity_459,
+                config_459,
+                owner_459,
+                plan_459,
+                prior_nonstartup_liability_upper_bound=20,
+            )
+            .reserve("hosted-review", alloc_459.first_work)
+            .reserve("hosted-terminal", alloc_459.first_terminal)
+        )
+        tx_459 = ReviewTransaction.create(
+            repository=REVIEWSENSEI_459_REPOSITORY,
+            pull_request=REVIEWSENSEI_459_PULL_REQUEST,
+            base_sha=base_459,
+            head_sha=head_459,
+            reservation_id="7" * 64,
+            policy_digest="2" * 64,
+            configuration_digest=config_459.digest,
+            evidence_digest="3" * 64,
+            generation=4,
+        )
+        tx_459 = replace(
+            tx_459,
+            phase="publication_succeeded",
+            result_sha256="8" * 64,
+        )
+        rec_459 = SessionRecord._construct(
+            repository=REVIEWSENSEI_459_REPOSITORY,
+            pull_request=REVIEWSENSEI_459_PULL_REQUEST,
+            repository_id=1336322077,
+            completed_initial_reviews=1,
+            completed_verification_rounds=0,
+            failed_attempts=0,
+            generation=REVIEWSENSEI_459_GENERATION,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id=tx_459.reservation_id,
+            created_at="2026-11-12T10:00:00Z",
+            updated_at="2026-11-12T10:05:00Z",
+            expires_at="2026-12-12T10:00:00Z",
+            operator_paused=False,
+            transaction=tx_459,
+            api_run_accounting=accounting_459.to_document(),
+        )
+        original_sha = rec_459.record_sha256
+        pkt_459 = build_attempt_evidence_packet(
+            rec_459,
+            current_base=base_459,
+            current_head=head_459,
+            diagnostics_available=False,
+        )
+        self.assertEqual(rec_459.record_sha256, original_sha)
+        self.assertFalse(pkt_459.authority)
+        self.assertEqual(pkt_459.case_id, REVIEWSENSEI_459_CASE_ID)
+        self.assertNotEqual(pkt_459.case_id, REVIEWSENSEI_443_CASE_ID)
+        self.assertEqual(pkt_459.repository_id, 1336322077)
+        self.assertEqual(pkt_459.pull_request, 459)
+        self.assertEqual(pkt_459.run_id, 43321546017)
+        self.assertEqual(pkt_459.session_generation, 5)
+        self.assertFalse(pkt_459.retained_context_available)
+        self.assertFalse(pkt_459.retained_result_verified)
+        self.assertEqual(pkt_459.terminal_settlement_form, "unsettled")
+        self.assertEqual(pkt_459.inferred_cause, "unknown")
+        self.assertIn("retained_review_result_and_context", pkt_459.missing_proofs)
+
+    def test_live_analysis_abort_late_effects_checked_readonly(self) -> None:
+        """G03: `_inspect_live_ledger_readonly` checks `_detect_late_native_effects` cleanly."""
+        acc = _make_accounting(run_id=9901, job="hosted")
+        tx_analysis = _make_tx(phase="analysis", head_sha=HEAD_A, generation=1)
+        abort_doc = acc.to_document()
+        for blk in abort_doc["blocks"]:
+            blk["pending"] = []
+        abort_doc["analysis_abort"] = {
+            "source_root": "5" * 64,
+            "cleanup_root": "6" * 64,
+            "transaction": tx_analysis.to_dict(),
+            "entry_state": "not_started",
+            "run_id": acc.identity.run_id,
+            "owner": {"run_attempt": 1, "job": "hosted", "generation": 0},
+        }
+        abort_acc = ApiRunAccounting.from_document(abort_doc)
+        abort_rec = _make_record(accounting=abort_acc, transaction=None, generation=2)
+        fx = SimpleNamespace(
+            run_id=9901,
+            comment={
+                "id": 3001,
+                "body": render_session_comment(
+                    repository_id=123, pull_request=7, record=abort_rec
+                ),
+                "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            },
+            extra_comments={},
+        )
+        observed_calls: list[tuple[str, str]] = []
+
+        def build_handler(*, with_late_review: bool):
+            def external(req, _timeout=None):
+                target = urlsplit(req.full_url)
+                path = target.path
+                method = req.get_method()
+                observed_calls.append((method, path))
+                if method == "GET" and path.endswith("/actions/runs/9901"):
+                    return json_response(
+                        {
+                            "id": 9901,
+                            "repository": {"id": 123, "full_name": "owner/repo"},
+                            "status": "completed",
+                            "conclusion": "cancelled",
+                            "run_attempt": 1,
+                        }
+                    )
+                if method == "GET" and path.endswith(
+                    "/actions/runs/9901/attempts/1/jobs"
+                ):
+                    return json_response(
+                        {
+                            "total_count": 1,
+                            "jobs": [
+                                {
+                                    "id": 99,
+                                    "run_id": 9901,
+                                    "run_attempt": 1,
+                                    "name": "ReviewSensei / hosted",
+                                    "status": "completed",
+                                    "conclusion": "cancelled",
+                                    "completed_at": "2026-11-10T12:00:00Z",
+                                }
+                            ],
+                        }
+                    )
+                if method == "GET" and path.endswith("/pulls/7/reviews"):
+                    rows = (
+                        [
+                            {
+                                "id": 5001,
+                                "commit_id": HEAD_A,
+                                "state": "COMMENTED",
+                                "body": "late review",
+                                "user": {
+                                    "type": "Bot",
+                                    "login": "reviewsensei[bot]",
+                                    "id": 999,
+                                },
+                            }
+                        ]
+                        if with_late_review
+                        else []
+                    )
+                    return json_response(rows)
+                if method == "GET" and path.endswith("/pulls/7/comments"):
+                    return json_response([])
+                if method == "POST" and path == "/graphql":
+                    return json_response(
+                        {
+                            "data": {
+                                "repository": {
+                                    "databaseId": 123,
+                                    "pullRequest": {
+                                        "number": 7,
+                                        "reviewThreads": {
+                                            "totalCount": 0,
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                            "nodes": [],
+                                        },
+                                    },
+                                }
+                            }
+                        }
+                    )
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            return external
+
+        fx.external = build_handler(with_late_review=False)
+        clean_ledger, _ = _diagnostic_ledger(fx)
+        clean_res = classify_live_ledger_recovery(
+            ledger=clean_ledger,
+            identity=IDENTITY,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            actions_token="synthetic-actions",
+        )
+        self.assertEqual(clean_res.state_code, "pre_entry_analysis_abort_settled")
+        self.assertTrue(clean_res.terminal)
+
+        fx.external = build_handler(with_late_review=True)
+        dirty_ledger, _ = _diagnostic_ledger(fx)
+        dirty_res = classify_live_ledger_recovery(
+            ledger=dirty_ledger,
+            identity=IDENTITY,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            actions_token="synthetic-actions",
+        )
+        self.assertEqual(dirty_res.state_code, "no_transaction_abort_unconfirmed")
+        self.assertFalse(dirty_res.terminal)
+        self.assertIn("confirmed_pre_entry_non_dispatch", dirty_res.missing_witnesses)
 
 
 if __name__ == "__main__":

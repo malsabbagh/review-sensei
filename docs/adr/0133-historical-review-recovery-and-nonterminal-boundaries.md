@@ -69,8 +69,12 @@ invariant:
      while classifying ReviewSensei `#443` run `43074015855` generation `11`
      (`publication_succeeded` with null terminal/action/abort markers and
      missing close diagnostics) as
-     `state_code="same_head_unclosed_publication_succeeded"` (or
-     `"superseded_head_unclosed_publication_succeeded"` across head advance),
+     `state_code="same_head_unclosed_publication_succeeded"` (or across head
+     advance when ineligible, one of the narrow unclosed publication states
+     such as `"unclosed_publication_failed_executor"`,
+     `"unclosed_publication_unrecognized_executor"`,
+     `"unclosed_publication_owner_active"`, or
+     `"unclosed_publication_missing_historical_evidence"`),
      `terminal_settlement_form="unsettled"`, and `inferred_cause="unknown"`
      with explicit missing-proof holds.
    - Never infer terminal action authentication from absent producer/result

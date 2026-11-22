@@ -33,6 +33,8 @@ from .conversation import (
     ReplyResult,
     reply_marker,
 )
+from .http import GitHubHttp
+from .review_completion_recovery import _ReadOnlyHttp
 
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
@@ -427,19 +429,33 @@ def inspect_durable_pending_receipts(
     source_updated_at: str,
     head_sha: str,
     app_slug: str,
+    app_user_id: int | None = None,
     expected_report_digest: str | None = None,
 ) -> PendingReceiptObservation | None:
     """Scan GitHub comments for durable `pending_reply_pages` receipts.
 
-    Validates Bot authorship, content SHA-256 integrity, page completeness, and
-    absence of duplicate or conflicting report digests/pages for the bound
-    `(source_comment_id, source_updated_at, head_sha)`.
+    Validates Bot authorship (case-insensitive `[bot]` normalization and
+    optional `app_user_id`), read-only `_ReadOnlyHttp` transport enforcement,
+    content SHA-256 integrity, page completeness, and absence of duplicate or
+    conflicting report digests/pages for `(source_comment_id,
+    source_updated_at, head_sha)`.
     """
     if source_kind not in _VALID_SOURCE_KINDS:
         raise ReviewInputError("invalid pending receipt source_kind")
     _require_hex(head_sha, _HEX40, "head_sha")
+    if not isinstance(app_slug, str):
+        raise ReviewInputError("app_slug must be a non-empty string")
+    base_login = app_slug.strip().casefold().removesuffix("[bot]")
+    if not base_login:
+        raise ReviewInputError("app_slug must not be empty")
+    expected_logins = {base_login, f"{base_login}[bot]"}
+    if app_user_id is not None and (type(app_user_id) is not int or app_user_id <= 0):
+        raise ReviewInputError("app_user_id must be a positive integer")
     if expected_report_digest is not None:
         _require_hex(expected_report_digest, _HEX64, "expected_report_digest")
+    if not isinstance(http, GitHubHttp):
+        raise ReviewInputError("pending receipt inspection requires GitHubHttp")
+    ro_http = http if type(http).__name__ == "_ReadOnlyHttp" else _ReadOnlyHttp(http)
 
     updated_digest = _sha256_text(source_updated_at)
     base_marker = (
@@ -454,19 +470,20 @@ def inspect_durable_pending_receipts(
     normalized_kind = (
         "inline" if source_kind in {"inline", "review_comment"} else "issue"
     )
-    path = http.repository_path(
+    path = ro_http.repository_path(
         repository,
         f"/pulls/{pull_request}/comments"
         if normalized_kind == "inline"
         else f"/issues/{pull_request}/comments",
     )
-    comments = http.paginate(
+    comments = ro_http.paginate(
         path=path, token=token, page_sizes=CONVERSATION_COMMENT_PAGE_SIZES
     )
 
     observed_reports: set[str] = set()
     observed_counts: set[int] = set()
     parts_by_index: dict[int, int] = {}
+    seen_comment_ids: set[int] = set()
     duplicate_conflict = False
     digests_valid = True
 
@@ -475,15 +492,21 @@ def inspect_durable_pending_receipts(
             continue
         user = comment.get("user")
         body = comment.get("body")
+        login = user.get("login") if isinstance(user, dict) else None
         if (
             not isinstance(user, dict)
-            or user.get("login") != app_slug
+            or not isinstance(login, str)
+            or login.strip().casefold() not in expected_logins
             or not isinstance(body, str)
             or base_marker not in body
         ):
             continue
         if (
             user.get("type") != "Bot"
+            or (
+                app_user_id is not None
+                and (type(user.get("id")) is not int or user.get("id") != app_user_id)
+            )
             or len(body.encode("utf-8")) > MAX_REPLY_BYTES
             or type(comment.get("id")) is not int
             or comment["id"] < 1
@@ -491,6 +514,12 @@ def inspect_durable_pending_receipts(
             duplicate_conflict = True
             digests_valid = False
             continue
+        cid = comment["id"]
+        if cid in seen_comment_ids:
+            duplicate_conflict = True
+            digests_valid = False
+            continue
+        seen_comment_ids.add(cid)
         content, sep, after_base = body.rpartition("\n\n" + base_marker)
         if not sep or len(after_base) < 70 or not after_base[64:].startswith(" part="):
             duplicate_conflict = True
@@ -711,10 +740,30 @@ def qualify_pending_reassessment(
         raise ReviewInputError("zero-decision attempt bounds must be valid integers")
 
     orig_inv = original_eligibility.human_review
+    latest_base_sha = (
+        latest_eligibility.human_review.base_sha
+        if latest_eligibility is not None
+        and latest_eligibility.human_review is not None
+        else None
+    )
+    orig_base_sha = orig_inv.base_sha
+    eligibility_scope_matches = (
+        latest_eligibility is not None
+        and latest_eligibility.result_digest == original_eligibility.result_digest
+        and latest_eligibility.head_sha == original_eligibility.head_sha
+        and latest_eligibility.head_sha == bound_head_sha
+        and (
+            latest_base_sha is None
+            or orig_base_sha is None
+            or latest_base_sha == orig_base_sha
+        )
+        and (latest_base_sha is None or latest_base_sha == bound_base_sha)
+    )
     effective_inv = (
         latest_eligibility.human_review
         if latest_eligibility is not None
         and latest_eligibility.human_review is not None
+        and eligibility_scope_matches
         else orig_inv
     )
     pending_ids = tuple(item.fingerprint for item in effective_inv.pending)
@@ -727,8 +776,8 @@ def qualify_pending_reassessment(
         for item in orig_inv.pending
         if item.fingerprint not in pending_set
     )
-    eligibility_delta_published = (
-        latest_eligibility is not None and latest_eligibility != original_eligibility
+    eligibility_delta_published = bool(
+        eligibility_scope_matches and latest_eligibility != original_eligibility
     )
     zero_decisions = (
         len(newly_resolved) == 0
@@ -739,9 +788,16 @@ def qualify_pending_reassessment(
 
     predecessor_run_id: int | None = None
     operation_key: str | None = None
+    action_pending = False
+    uncertain_pending = False
+    operator_paused = bool(record.operator_paused) if record is not None else False
     if record is not None and record.api_run_accounting is not None:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
         predecessor_run_id = old.identity.run_id
+        action_pending = (
+            isinstance(old.action, Mapping) and old.action.get("phase") == "pending"
+        )
+        uncertain_pending = old.uncertain > 0
         if isinstance(old.action, Mapping) and isinstance(
             old.action.get("intent"), Mapping
         ):
@@ -909,19 +965,44 @@ def qualify_pending_reassessment(
     #    — including newly resolved items, `override`/`accept-risk` pending-set
     #    reductions, or updated eligibility metadata — or `not orig_inv.pending`)
     #    entered the finalization path!
-    decisions_durably_published = (
-        eligibility_delta_published or len(orig_inv.pending) == 0
+    decisions_durably_published = eligibility_delta_published or (
+        len(orig_inv.pending) == 0
+        and (latest_eligibility is None or eligibility_scope_matches)
     )
 
     if decisions_durably_published:
-        finalizer_confirmed = (
+        ledger_hold = action_pending or uncertain_pending or operator_paused
+        reply_finalized = (
             reply_result is not None
             and reply_result.finalization_completion is not None
             and reply_result.resolution_status not in {"unconfirmed", "failed"}
             and reply_result.approval_status
             not in {None, "unconfirmed", "not-observed", "failed"}
         )
+        finalizer_confirmed = reply_finalized and not ledger_hold
         if not finalizer_confirmed:
+            primary_route = (
+                "controlled_serialized_restart"
+                if ledger_hold and reply_finalized
+                else "resume_exact_head_finalizer"
+            )
+            fallback_routes: tuple[str, ...] = (
+                ()
+                if ledger_hold and reply_finalized
+                else ("controlled_serialized_restart",)
+            )
+            action_note = (
+                "Reassessment decisions/finalization are accompanied by an unclosed "
+                "caller state (`action.phase == 'pending'`, `uncertain > 0`, or "
+                "`operator_paused`); hold terminal settlement and recover via "
+                "controlled serialized restart."
+                if ledger_hold and reply_finalized
+                else "Reassessment decisions are already durably recorded in the "
+                "eligibility review, and the subsequent finalizer (check, "
+                "thread cleanup, or native approval) failed or remained "
+                "unconfirmed. Resume exact-head finalization (`@reviewsensei "
+                "verify` or recorded-decision replay) without re-running model inference."
+            )
             return PendingReassessmentAttribution(
                 classifier_id=PENDING_REASSESSMENT_CLASSIFIER_ID,
                 state_code="failed_finalizer_after_reassessment",
@@ -949,15 +1030,9 @@ def qualify_pending_reassessment(
                 evidence_diagnostic=evidence_diag,
                 predecessor_run_id=predecessor_run_id,
                 operation_key=operation_key,
-                primary_route="resume_exact_head_finalizer",
-                fallback_routes=("controlled_serialized_restart",),
-                operator_action=(
-                    "Reassessment decisions are already durably recorded in the "
-                    "eligibility review, and the subsequent finalizer (check, "
-                    "thread cleanup, or native approval) failed or remained "
-                    "unconfirmed. Resume exact-head finalization (`@reviewsensei "
-                    "verify` or recorded-decision replay) without re-running model inference."
-                ),
+                primary_route=primary_route,
+                fallback_routes=fallback_routes,
+                operator_action=action_note,
             )
         if len(pending_ids) > 0:
             return PendingReassessmentAttribution(
@@ -1417,13 +1492,18 @@ def qualify_offline_pending_continuation(
             raise ReviewInputError(f"{label} must be a non-negative integer")
 
     remaining_caller: int | None = None
+    reader_only_accounting = False
     if record is not None and record.api_run_accounting is not None:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
-        old.require_writer_version()
-        remaining_caller = old.remaining
+        try:
+            old.require_writer_version()
+        except ReviewInputError:
+            reader_only_accounting = True
+        remaining_caller = old.remaining if old.remaining >= 0 else None
 
     funding_ok = (
-        additional_caller_allowance == 0
+        not reader_only_accounting
+        and additional_caller_allowance == 0
         and additional_provider_allowance == 0
         and (
             required_continuation_requests == 0
@@ -1442,6 +1522,8 @@ def qualify_offline_pending_continuation(
     )
 
     reasons: list[str] = []
+    if reader_only_accounting:
+        reasons.append("reader_only_caller_accounting")
     if not retained_result_immutable:
         reasons.append("retained_result_digest_mutated")
     if pr_merged:
@@ -1906,10 +1988,17 @@ def build_pending_reassessment_attempt_packet(
 
     caller_limit: int | None = None
     remaining_caller: int | None = None
+    action_pending_pkt = False
+    uncertain_pending_pkt = False
+    operator_paused_pkt = bool(record.operator_paused) if record is not None else False
     if record is not None and record.api_run_accounting is not None:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
         caller_limit = old.configuration.limit
-        remaining_caller = old.remaining
+        remaining_caller = old.remaining if old.remaining >= 0 else None
+        action_pending_pkt = (
+            isinstance(old.action, Mapping) and old.action.get("phase") == "pending"
+        )
+        uncertain_pending_pkt = old.uncertain > 0
 
     tx_result_sha = (
         record.transaction.result_sha256
@@ -1948,17 +2037,13 @@ def build_pending_reassessment_attempt_packet(
         missing.append("immutable_accepted_result_digest")
         if not historical_settlement_receipt_supplied:
             missing.append("historical_live_settlement_receipt")
+    if action_pending_pkt:
+        missing.append("terminal_action_outcome")
     if not attribution.terminal:
         if attribution.assessment_unfinished:
             missing.append("completed_reassessment_decisions")
         if attribution.finalizer_entered and attribution.finalizer_failed:
             missing.append("confirmed_finalizer_check_thread_approval_settlement")
-        if record is not None and record.api_run_accounting is not None:
-            old_chk = ApiRunAccounting.from_document(record.api_run_accounting)
-            if isinstance(old_chk.action, Mapping) and (
-                old_chk.action.get("phase") == "pending"
-            ):
-                missing.append("terminal_action_outcome")
         if attribution.state_code == "pending_receipt_delivery_incomplete":
             missing.append("complete_durable_pending_receipt")
         if not diagnostics_available:
@@ -1969,11 +2054,15 @@ def build_pending_reassessment_attempt_packet(
             missing.append("historical_live_settlement_receipt")
     elif len(attribution.pending_finding_ids) > 0:
         missing.append("remaining_human_adjudication_decisions")
+    missing = list(dict.fromkeys(missing))
 
     admissible_to_approve = bool(
         is_result_immutable
         and attribution.state_code == "reassessment_completed_settled"
         and attribution.terminal
+        and not action_pending_pkt
+        and not uncertain_pending_pkt
+        and not operator_paused_pkt
         and not pr_merged
     )
 
