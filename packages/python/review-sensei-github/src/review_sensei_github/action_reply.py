@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request
 
-from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.cli import (
     _configured_resource_budget,
     _work_recovery_from_cli,
@@ -224,19 +223,18 @@ def execute_reply(
         raise ReviewInputError("reply arguments conflict with the authenticated source")
     run.ledger.business_guard = authority.fence
     authority.fence()
+    from .accepted_semantic_history import action_operation_key
+
+    assert run.identity.repository_id is not None
     configuration = _configuration(run)
-    key = hashlib.sha256(
-        canonical_bytes(
-            {
-                "purpose": "reply",
-                "repository_id": run.identity.repository_id,
-                "pull_request": run.identity.pull_request,
-                "head_sha": run.head_sha,
-                "source": source,
-                "configuration": run.caller.accounting.configuration.digest,
-            }
-        )
-    ).hexdigest()
+    key = action_operation_key(
+        purpose="reply",
+        repository_id=run.identity.repository_id,
+        pull_request=run.identity.pull_request,
+        head_sha=run.head_sha,
+        source=source,
+        configuration_digest=run.caller.accounting.configuration.digest,
+    )
     caller = run.caller
     intent = caller.admit_action(
         run.ledger,

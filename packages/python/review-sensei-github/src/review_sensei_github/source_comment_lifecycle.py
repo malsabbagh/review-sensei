@@ -53,6 +53,7 @@ from review_sensei.writer_containment import (
 from .accepted_action import observe_selected_action
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_requests import json_copy
+from .run_authority import validate_comment_url_binding
 from .unstarted_action_recovery import (
     NoBusinessDispatchEvidence,
     authenticate_unstarted_cancellation,
@@ -198,6 +199,8 @@ def admit_event_comment_source(
     event_name: str,
     expected_body: str | None = None,
     expected_updated_at: str | None = None,
+    repository: str | None = None,
+    repository_id: int | None = None,
 ) -> dict[str, Any]:
     """Validate an incoming runner/webhook comment event before action admission."""
 
@@ -231,8 +234,30 @@ def admit_event_comment_source(
             "pre-admission source check refused (source_edited/mutated_revision): "
             "comment mutation payload cannot admit an action"
         )
+    if repository_id is not None and (
+        type(repository_id) is not int or repository_id <= 0
+    ):
+        raise ReviewInputError("action source repository_id is invalid")
+    event_repo = event_payload.get("repository")
+    if event_repo is not None:
+        if (
+            not isinstance(event_repo, Mapping)
+            or type(event_repo.get("id")) is not int
+            or event_repo["id"] <= 0
+            or (repository_id is not None and event_repo["id"] != repository_id)
+            or (
+                repository is not None
+                and "full_name" in event_repo
+                and event_repo.get("full_name") != repository
+            )
+        ):
+            raise ReviewInputError("action source repository does not match event")
     comment = event_payload.get("comment")
-    pull = event_payload.get("issue") or event_payload.get("pull_request")
+    pull = (
+        event_payload.get("pull_request")
+        if event_name == "pull_request_review_comment"
+        else event_payload.get("issue")
+    )
     if (
         not isinstance(comment, Mapping)
         or not isinstance(pull, Mapping)
@@ -242,15 +267,36 @@ def admit_event_comment_source(
         or not isinstance(comment.get("updated_at"), str)
     ):
         raise ReviewInputError("action source does not match the original event")
-    if purpose == "command" and comment["body"] != expected_body:
-        raise ReviewInputError("command body differs from the original source")
-    if purpose == "reply" and comment["updated_at"] != expected_updated_at:
-        raise ReviewInputError("reply source version differs from the original event")
+    if event_name == "issue_comment":
+        has_pr_marker = "pull_request" in pull and isinstance(
+            pull.get("pull_request"), Mapping
+        )
+        if "pull_request" in pull and not has_pr_marker:
+            raise ReviewInputError("action source does not match the original event")
+        # Legacy pinned reply fixture omits action and uses {"number": N} on issue.
+        if not has_pr_marker and not (
+            raw_action is None and purpose == "reply" and set(pull) == {"number"}
+        ):
+            raise ReviewInputError(
+                "issue_comment event requires pull_request association"
+            )
     kind = (
         "review_comment"
         if event_name == "pull_request_review_comment"
         else "issue_comment"
     )
+    if not validate_comment_url_binding(
+        comment,
+        kind=kind,
+        pull_request=pull_request,
+        repository=repository,
+        require_url=True,
+    ):
+        raise ReviewInputError("action source does not match the original event")
+    if purpose == "command" and comment["body"] != expected_body:
+        raise ReviewInputError("command body differs from the original source")
+    if purpose == "reply" and comment["updated_at"] != expected_updated_at:
+        raise ReviewInputError("reply source version differs from the original event")
     return build_source_comment_descriptor(
         kind=kind,
         comment_id=comment["id"],
@@ -381,6 +427,10 @@ def observe_live_source_revision(
 
     if phase not in LIFECYCLE_PHASES:
         raise ReviewInputError("source lifecycle phase is unsupported")
+    if type(identity.repository_id) is not int or identity.repository_id <= 0:
+        raise ReviewInputError(
+            "live source lifecycle observation requires positive repository_id"
+        )
     caller.observe_action_transport_state(ledger, identity)
     bound = _validate_source_descriptor(original_source, label="original source")
     if event_delivery is not None:
@@ -408,7 +458,18 @@ def observe_live_source_revision(
         raise ReviewInputError(
             f"live source lifecycle observation failed with HTTP {status}"
         )
-    if not isinstance(payload, dict) or not isinstance(payload.get("body"), str):
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("body"), str)
+        or not validate_comment_url_binding(
+            payload,
+            kind=bound["kind"],
+            pull_request=identity.pull_request,
+            repository=identity.repository,
+            expected_api_url=ledger.http.api_url,
+            require_url=True,
+        )
+    ):
         raise ReviewInputError("live source lifecycle payload is malformed")
     return compare_source_comment_revisions(
         bound,
@@ -734,7 +795,7 @@ def execute_source_lifecycle_route(
     canonical_coordinator: ContainedForwardingCoordinator | None = None,
     canonical_token: IssuedWriterToken | None = None,
     no_business_dispatch_evidence: NoBusinessDispatchEvidence | None = None,
-    require_positive_dispatch_proof: bool = False,
+    require_positive_dispatch_proof: bool = True,
     rollover_configuration: FrozenApiConfiguration | None = None,
     rollover_owner: ApiExecutionOwner | None = None,
 ) -> tuple[SourceLifecycleClassification, SessionRecord | ApiRunAccounting | None]:
@@ -764,6 +825,7 @@ def execute_source_lifecycle_route(
             )
         if (
             actions_evidence is None
+            and no_business_dispatch_evidence is None
             and canonical_coordinator is None
             and canonical_token is None
         ):

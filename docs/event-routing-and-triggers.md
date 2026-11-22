@@ -77,22 +77,37 @@ concurrency group (`reviewsensei-provider-review-<owner>/<repo>-<pr>`,
 `cancel-in-progress: false`) holds at most one active run and one pending run.
 
 The bounded G13 reconciliation model evaluates authenticated current PR state
-(`LivePullRequestTarget`) rather than arrival order. The outcomes below are
-qualified for that model with supplied history, not as an end-to-end ordinary
-runner guarantee. Ordinary review/command/reply runners do not yet durably produce
-the accepted-operation and semantic-progress history or consume the model's
-finite-stop verdict. G13 durable history and finite-stop integration remain open;
-read-time source/session fences and original accounting still apply.
+(`LivePullRequestTarget`) rather than arrival order. For ordinary Actions
+command and mention-reply runners (`command-run` and `reply-run`), durable
+integration in `accepted_semantic_history` now records qualified
+accepted-operation and semantic-progress summaries inside committed action
+results and carried `finding_lifecycle` metadata, and enforces the finite
+no-progress stop (`finite_no_progress_stop` at `LIMIT = 2`) before rollover and
+admission unless semantic progress, an eligible disposition entry, or a pending
+native/staging receipt is observed. Duplicate `attempt=1` deliveries of a
+terminally completed comment preserve terminal state pre-rollover with zero
+rollover and zero replay.
+
+Two boundaries remain explicit:
+- Read-time source/session fences and original caller accounting remain
+  authoritative, and unreviewed discussions/commands with no owned
+  `finding_lifecycle` retain `qualification: "unavailable"` until a complete
+  inventory is established.
+- **Queued-replaced Actions runs (`cancel-in-progress: false`):** Live GitHub
+  Actions queue eviction behavior and automatic pending-slot replacement remain
+  **unverified in live GitHub Actions**; the convergence model and offline tests
+  specify deterministic manual re-issue guidance without background polling.
 
 Model outcomes:
 
 - **Duplicate delivery:** Re-delivering an already completed comment source key
-  or an unchanged `(base_sha, head_sha)` review snapshot reuses the retained
-  snapshot (`duplicate_delivery_reused` / `unchanged_snapshot_reused`) with zero
-  model inference.
+  or an unchanged `(base_sha, head_sha)` review snapshot preserves the retained
+  terminal state pre-rollover (`duplicate_delivery_reused` /
+  `unchanged_snapshot_reused`) with zero rollover and zero model inference.
 - **Retained result with pending publication:** Reconciles native publication
   from the retained result (`retained_result_reused_without_inference`) without
-  re-running inference.
+  re-running inference, while `publication_staging` and active
+  `assessment_queue` receipts take precedence over `finite_no_progress_stop`.
 - **Out-of-order / delayed `synchronize`:** If `synchronize(H2)` has already
   advanced the live PR head to `H2`, a delayed `synchronize(H1)` payload is
   ignored (`delayed_out_of_order_head_superseded`) with zero inference and no
@@ -106,22 +121,23 @@ Model outcomes:
 - **Uncertain in-flight dispatch:** Holds new scheduling
   (`uncertain_dispatch_reconciliation_required`) and directs the operator to
   `@reviewsensei review status` rather than risking duplicate paid work.
-- **Queued-replaced runs in Actions concurrency:** When a third arrival evicts
-  the pending slot in `reviewsensei-provider-review-<repo>-<pr>`, replacement is
-  classified explicitly (`queued_command_replaced`, `queued_reply_replaced`, or
-  `queued_review_superseded`) with the exact recovery command (for example,
-  re-issuing the displaced `@reviewsensei verify` command or `workflow_dispatch`).
-- **Model ownership and finite no-progress stop rule:** Every
+- **Queued-replaced runs in Actions concurrency (unverified in live Actions):**
+  When a third arrival evicts the pending slot in
+  `reviewsensei-provider-review-<repo>-<pr>`, replacement is classified
+  explicitly in the convergence model (`queued_command_replaced`,
+  `queued_reply_replaced`, or `queued_review_superseded`) with the exact recovery
+  command (for example, re-issuing the displaced `@reviewsensei verify` command
+  or `workflow_dispatch`); live GitHub Actions queue eviction remains unverified.
+- **Model ownership and durable finite no-progress stop rule:** Every
   reconciliation verdict assigns an explicit owner from `RECONCILIATION_OWNERS`
   (`caller_workflow_preflight`, `hosted_review_admission`,
   `hosted_command_executor`, `hosted_reply_executor`, or
-  `operator_manual_recovery`). Repeated reconciliation attempts on an identical
-  `(base_sha, head_sha, state_fingerprint, open_finding_ids)` tuple that make
-  no progress halt deterministically at `MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS`
-  (`2`) with `finite_no_progress_stop` (`stopped_no_progress`) in the model,
-  without background reconcilers or paid retries; the model resets the count
-  when PR state or progress advances. This is not a durable ordinary-runner
-  stop guarantee.
+  `operator_manual_recovery`). Repeated non-advancing action attempts halt
+  deterministically at `MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS` (`2`) /
+  `accepted_semantic_history.LIMIT` (`2`) with `finite_no_progress_stop`
+  without background reconcilers or paid retries, carrying prior history across
+  reviews, Attempt-2 resumes, and `G32` `canceled_unstarted` cancellations and
+  resetting when PR state, findings, pending receipts, or trust effects advance.
 
 ## Merge queue (`merge_group`) unsupported boundary (`G07`)
 

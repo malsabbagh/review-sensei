@@ -13,6 +13,7 @@ import os
 import re
 import time
 from typing import Any, Callable, Mapping, cast
+from urllib.parse import urlsplit
 
 from .errors import GitHubBrokerClientError
 
@@ -223,6 +224,52 @@ def request_authority(
     )
 
 
+def validate_comment_url_binding(
+    payload: Mapping[str, Any],
+    *,
+    kind: str,
+    pull_request: int,
+    repository: str | None = None,
+    expected_api_url: str | None = None,
+    require_url: bool = True,
+) -> bool:
+    """Validate GitHub comment ``issue_url`` or ``pull_request_url`` scope."""
+    if kind not in {"issue_comment", "review_comment"}:
+        return False
+    if type(pull_request) is not int or pull_request < 1:
+        return False
+    expected_field = "issue_url" if kind == "issue_comment" else "pull_request_url"
+    wrong_field = "pull_request_url" if kind == "issue_comment" else "issue_url"
+    if wrong_field in payload:
+        return False
+    raw = payload.get(expected_field)
+    if expected_field not in payload:
+        return not require_url
+    if not isinstance(raw, str) or not raw:
+        return False
+    suffix = (
+        f"/issues/{pull_request}"
+        if kind == "issue_comment"
+        else f"/pulls/{pull_request}"
+    )
+    if isinstance(expected_api_url, str) and expected_api_url and repository:
+        return raw == f"{expected_api_url.rstrip('/')}/repos/{repository}{suffix}"
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    if repository:
+        return parsed.path in {
+            f"/repos/{repository}{suffix}",
+            f"/api/v3/repos/{repository}{suffix}",
+        }
+    return parsed.path.endswith(suffix)
+
+
 class VerifiedRunAction:
     """Process-owned current grant bound to one native metered action ledger."""
 
@@ -320,6 +367,14 @@ class VerifiedRunAction:
                 or not isinstance(current.get("body"), str)
                 or hashlib.sha256(current["body"].encode()).hexdigest()
                 != source["body_sha256"]
+                or not validate_comment_url_binding(
+                    current,
+                    kind=source["kind"],
+                    pull_request=document["pull_request"],
+                    repository=document["repository"],
+                    expected_api_url=run.http.api_url,
+                    require_url=True,
+                )
                 or not isinstance(current.get("user"), dict)
                 or current["user"].get("login") != document["actor"]["login"]
                 or current["user"].get("type") != "User"
@@ -341,21 +396,28 @@ class VerifiedRunAction:
                 or pull.get("state") != "open"
             ):
                 raise GitHubBrokerClientError("Current action head changed")
+            base = pull.get("base")
+            repo = base.get("repo") if isinstance(base, dict) else None
+            repo_id = repo.get("id") if isinstance(repo, dict) else None
+            if (
+                not isinstance(base, dict)
+                or not isinstance(repo, dict)
+                or not isinstance(repo_id, int)
+                or isinstance(repo_id, bool)
+                or repo_id <= 0
+                or repo_id != document["repository_id"]
+                or repo.get("full_name") != document["repository"]
+            ):
+                raise GitHubBrokerClientError(
+                    "Current action repository identity changed"
+                )
             if validate_pull is not None:
                 # Add stricter consumer facts to this same fresh observation;
                 # a callback cannot weaken the action's source/head checks.
                 validate_pull(pull)
-            base = pull.get("base")
-            repo = base.get("repo") if isinstance(base, dict) else None
-            base_sha = base.get("sha") if isinstance(base, dict) else None
-            if (
-                isinstance(base, dict)
-                and isinstance(base_sha, str)
-                and re.fullmatch(r"[a-f0-9]{40}", base_sha) is not None
-                and isinstance(repo, dict)
-                and type(repo.get("id")) is int
-                and repo.get("id") == document["repository_id"]
-                and repo.get("full_name") == document["repository"]
+            base_sha = base.get("sha")
+            if isinstance(base_sha, str) and (
+                re.fullmatch(r"[a-f0-9]{40}", base_sha) is not None
             ):
                 self._fenced_pull_identity = (
                     document["repository_id"],

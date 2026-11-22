@@ -16,8 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from review_sensei.api_work import ApiRunAccounting
-from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.convergence import resolve_review_convergence_policy
 from review_sensei.disposition import (
     FindingIdentity,
@@ -213,6 +212,8 @@ def event_source(args: Any, *, purpose: str) -> dict[str, object]:
         event_name=event_name,
         expected_body=getattr(args, "comment_body", None),
         expected_updated_at=getattr(args, "source_updated_at", None),
+        repository=getattr(args, "repository", None),
+        repository_id=getattr(args, "repository_id", None),
     )
 
 
@@ -522,6 +523,14 @@ def cancel_unstarted_after_source_mutation(
         or action["execution_started"]
     ):
         raise fence_error
+    if caller.accounting.owner != ApiExecutionOwner(**intent["owner"]):
+        raise ReviewInputError(
+            "same-run unstarted recovery requires original attempt owner"
+        )
+    if not isinstance(run.actions_token, str) or not run.actions_token.strip():
+        raise ReviewInputError(
+            "same-run unstarted recovery requires authenticated actions_token"
+        )
     loaded = run.ledger.load(run.identity)
     if (
         loaded.status != "ok"
@@ -529,10 +538,6 @@ def cancel_unstarted_after_source_mutation(
         or loaded.record.record_sha256 != caller._root
     ):
         raise ReviewInputError("unstarted cancellation root changed")
-    if not isinstance(run.actions_token, str) or not run.actions_token.strip():
-        raise ReviewInputError(
-            "same-run unstarted recovery requires authenticated actions_token"
-        )
     dispatch_evidence = NoBusinessDispatchEvidence.from_stranded_caller(
         caller,
         identity=run.identity,
@@ -625,18 +630,16 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             raise ReviewInputError(
                 "authenticated command action conflicts with admitted semantic target"
             )
-        key = hashlib.sha256(
-            canonical_bytes(
-                {
-                    "purpose": "command",
-                    "repository_id": run.identity.repository_id,
-                    "pull_request": run.identity.pull_request,
-                    "head_sha": run.head_sha,
-                    "source": source,
-                    "configuration": run.caller.accounting.configuration.digest,
-                }
-            )
-        ).hexdigest()
+        from .accepted_semantic_history import action_operation_key
+
+        key = action_operation_key(
+            purpose="command",
+            repository_id=run.identity.repository_id,
+            pull_request=run.identity.pull_request,
+            head_sha=run.head_sha,
+            source=source,
+            configuration_digest=run.caller.accounting.configuration.digest,
+        )
         caller = run.caller
         intent = caller.admit_action(
             run.ledger,
@@ -908,17 +911,22 @@ def run_action(
     args.rescan = args.review_remaining = False
     if cancel_on_mutation:
         args.cancel_unstarted_on_source_mutation = True
+    from .accepted_semantic_history import DuplicateTerminalDelivery, prepare_action
+
     with _cross_run_unstarted_rollover_guard(unstarted_recovery) as rollover_service:
-        run = bootstrap(
-            args,
-            run_directory=options.run_directory,
-            policy_commit=options.policy_commit,
-            purpose=purpose,
-            source=source,
-            rollover_service=rollover_service,
-            enable_current_trust_enrollment=options.enable_current_trust_enrollment,
-            command_action=command_action,
-        )
+        try:
+            run = bootstrap(
+                args,
+                run_directory=options.run_directory,
+                policy_commit=options.policy_commit,
+                purpose=purpose,
+                source=source,
+                rollover_service=rollover_service,
+                enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+                command_action=command_action,
+            )
+        except DuplicateTerminalDelivery:
+            return 0
     same_run_gate = (
         unstarted_recovery
         if (unstarted_recovery is not None and unstarted_recovery.mode == "same_run")
@@ -951,13 +959,15 @@ def run_action(
         )
     # Ordinary admission consumes authenticated retained semantic history.
     # Supplied convergence records remain model inputs, never its replacement.
-    from .accepted_semantic_history import prepare_action
-
-    prepare_action(
-        run,
-        allow_unqualified=purpose == "reply"
-        or (purpose == "command" and classified_command is not None),
-    )
+    try:
+        prepare_action(
+            run,
+            allow_unqualified=purpose == "reply"
+            or (purpose == "command" and classified_command is not None),
+            allow_missing_predecessor=False,
+        )
+    except DuplicateTerminalDelivery:
+        return 0
     if purpose == "command":
         return execute_command(run, args)
     from .action_reply import execute_reply

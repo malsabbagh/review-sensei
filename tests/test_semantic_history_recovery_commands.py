@@ -50,14 +50,52 @@ class RecoveryEntryFixture(CommandEntryFixture):
         super().__init__(directory, limit=limit)
         self.active_purpose = "command"
 
+    def external(self, request, timeout):
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+
+        path = urlsplit(request.full_url).path
+        method = request.get_method()
+        if (
+            method == "POST"
+            and path.startswith("/repos/owner/repo/pulls/7/comments/")
+            and path.endswith("/replies")
+        ):
+            self._meter(request)
+            payload = json.loads(request.data)
+            created = {
+                "id": 9000 + len(self.inline) + 1,
+                "body": payload["body"],
+                "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
+                "pull_request_url": f"{self.api_url}/repos/owner/repo/pulls/7",
+            }
+            self.inline.append(copy.deepcopy(created))
+            return json_response(created, 201)
+        if path.endswith("/contents/.github/review-sensei/learnings"):
+            self._meter(request)
+            return json_response({}, 404)
+        if "/comments/" in path and (
+            path.endswith("/reactions") or "/reactions/" in path
+        ):
+            self._meter(request)
+            if method == "GET":
+                return json_response([])
+            if method == "POST":
+                return json_response({"id": 701, "content": "eyes"}, status=201)
+            return json_response({}, status=204)
+        return super().external(request, timeout)
+
     def _expected_authority(self):
         authority = super()._expected_authority()
         if self.active_purpose == "reply":
             authority["purpose"] = "reply"
             authority["job"] = "hosted"
+            if self.event_name == "pull_request_review_comment":
+                authority["source"]["kind"] = "review_comment"
         return authority
 
-    def invoke_reply(self, body="@reviewsensei explain this finding"):
+    def invoke_reply(self, body="@reviewsensei explain this finding", *, inline=False):
         self.SOURCE_ID += 1
         self.past_jobs[self.run_id] = self.owner_job
         self.run_id += 1
@@ -67,7 +105,7 @@ class RecoveryEntryFixture(CommandEntryFixture):
         self.command_active = True
         self.active_purpose = "reply"
         self.owner_job = "hosted"
-        self.event_name = "issue_comment"
+        self.event_name = "pull_request_review_comment" if inline else "issue_comment"
         self.command_body = body
         self.source = {
             "id": self.SOURCE_ID,
@@ -76,14 +114,26 @@ class RecoveryEntryFixture(CommandEntryFixture):
             "created_at": self.SOURCE_STAMP,
             "user": {"login": "alice", "type": "User", "id": 42},
             "author_association": "OWNER",
-            "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
         }
-        event = {
-            "issue": {"number": 7},
-            "comment": copy.deepcopy(self.source),
-            "repository": {"id": 123, "full_name": "owner/repo"},
-            "sender": copy.deepcopy(self.source["user"]),
-        }
+        if inline:
+            self.source["pull_request_url"] = f"{self.api_url}/repos/owner/repo/pulls/7"
+            self.inline = [c for c in self.inline if c.get("id") != self.SOURCE_ID] + [
+                copy.deepcopy(self.source)
+            ]
+            event = {
+                "pull_request": {"number": 7},
+                "comment": copy.deepcopy(self.source),
+                "repository": {"id": 123, "full_name": "owner/repo"},
+                "sender": copy.deepcopy(self.source["user"]),
+            }
+        else:
+            self.source["issue_url"] = f"{self.api_url}/repos/owner/repo/issues/7"
+            event = {
+                "issue": {"number": 7},
+                "comment": copy.deepcopy(self.source),
+                "repository": {"id": 123, "full_name": "owner/repo"},
+                "sender": copy.deepcopy(self.source["user"]),
+            }
         event_file = self.root / "reply-event.json"
         event_file.write_text(json.dumps(event))
 
@@ -107,7 +157,7 @@ class RecoveryEntryFixture(CommandEntryFixture):
             **fixture_process_environment(),
             "GITHUB_RUN_ID": str(self.run_id),
             "GITHUB_RUN_ATTEMPT": str(self.attempt),
-            "GITHUB_EVENT_NAME": "issue_comment",
+            "GITHUB_EVENT_NAME": self.event_name,
             "GITHUB_EVENT_PATH": str(event_file),
             "REVIEW_SENSEI_WORKFLOW_REF": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
             "REVIEW_SENSEI_WORKFLOW_SHA": "a" * 40,
@@ -121,6 +171,27 @@ class RecoveryEntryFixture(CommandEntryFixture):
         output, errors = io.StringIO(), io.StringIO()
         previous_directory = Path.cwd()
         self.exception = None
+
+        class _Provider:
+            name = "ollama"
+            model = "deepseek-v4.1-flash:cloud"
+
+            def complete(self_inner, request):
+                self.provider_calls += 1
+                from review_sensei.models import ProviderResponse
+
+                return ProviderResponse(
+                    text=json.dumps({"body": "Explained.", "resolve": False}),
+                    provider=self_inner.name,
+                    model=self_inner.model,
+                )
+
+        class _Registry:
+            def create(self_inner, settings):
+                return _Provider()
+
+        from review_sensei_github import action_reply
+
         try:
             os.chdir(self.root)
             with ExitStack() as stack:
@@ -134,6 +205,9 @@ class RecoveryEntryFixture(CommandEntryFixture):
                         review_run, "BrokerClient", side_effect=broker_factory
                     ),
                     patch.object(review_run, "GitHubHttp", side_effect=http_factory),
+                    patch.object(
+                        action_reply, "default_registry", return_value=_Registry()
+                    ),
                     forbid_replacement_phase_budget(),
                     redirect_stdout(output),
                     redirect_stderr(errors),
@@ -160,7 +234,9 @@ class RecoveryEntryFixture(CommandEntryFixture):
                         "--source-updated-at",
                         self.SOURCE_STAMP,
                         "--source-kind",
-                        "issue",
+                        "inline"
+                        if self.event_name == "pull_request_review_comment"
+                        else "issue",
                         "--allow-write",
                         "--enable-reply",
                         "--generate",
@@ -585,6 +661,282 @@ class SemanticHistoryRecoveryCommandsTests(unittest.TestCase):
                 bounded_root,
             )
             self.assertEqual(len(f.extra_comments), bounded_comments)
+
+    def test_pre_rollover_duplicate_terminal_delivery_zero_rollover_no_replay(self):
+        from test_action_reply_entry import ReplyEntryFixture
+
+        # 1. Seed Review -> Cmd1 (41) -> Cmd2 (42), then redeliver Cmd1 (history["records"])
+        #    on fresh run_id+1, attempt=1 -> exit 0, ZERO rollover, ZERO replay!
+        with tempfile.TemporaryDirectory() as directory:
+            f, record, _ = _seed_two_status_streak(directory)
+            before_sha = record.record_sha256
+            before_writes = f.business_writes
+            before_comments = len(f.extra_comments)
+            f.past_jobs[f.run_id] = f.owner_job
+            f.run_id += 1
+            f.SOURCE_ID = 41
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, (f.error, f.stdout))
+            after_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert after_rec is not None
+            self.assertEqual(after_rec.record_sha256, before_sha)
+            self.assertEqual(f.business_writes, before_writes)
+            self.assertEqual(len(f.extra_comments), before_comments)
+
+        # 2. Immediately preceding terminal reply (old.action["intent"]) for both
+        #    issue_comment and review_comment redelivered on attempt=1 -> exit 0, ZERO rollover!
+        for inline_mode in (False, True):
+            with (
+                self.subTest(inline=inline_mode),
+                tempfile.TemporaryDirectory() as d_rep,
+            ):
+                rf = RecoveryEntryFixture(d_rep, limit=512)
+                self.assertEqual(rf.invoke(human=False), 0, rf.error)
+                self.assertEqual(
+                    rf.invoke_reply(
+                        "@reviewsensei explain this finding", inline=inline_mode
+                    ),
+                    0,
+                    (rf.error, rf.exception),
+                )
+                first_rec = parse_session_comment(rf.comment["body"], identity=IDENTITY)
+                assert first_rec is not None
+                first_sha = first_rec.record_sha256
+                before_calls = rf.provider_calls
+                before_extra = len(rf.extra_comments)
+                # Redeliver the exact same comment id/updated_at/body WITHOUT advancing SOURCE_ID
+                rf.SOURCE_ID -= 1
+                self.assertEqual(
+                    rf.invoke_reply(
+                        "@reviewsensei explain this finding", inline=inline_mode
+                    ),
+                    0,
+                    (rf.error, rf.exception),
+                )
+                dup_rec = parse_session_comment(rf.comment["body"], identity=IDENTITY)
+                assert dup_rec is not None
+                self.assertEqual(dup_rec.record_sha256, first_sha)
+                self.assertEqual(rf.provider_calls, before_calls)
+                self.assertEqual(len(rf.extra_comments), before_extra)
+        self.assertIsNotNone(ReplyEntryFixture)
+
+    def test_pre_rollover_pending_receipt_staging_and_queue_yield_over_stop(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from review_sensei_github.accepted_semantic_history import (
+            guard_carried_successor,
+            prepare_action,
+        )
+        from review_sensei_github.session_ledger import render_session_comment
+        from test_source_comment_lifecycle_g27 import _queue_root_document
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.models import ReviewTransaction
+        from review_sensei.publication_staging import PublicationStaging
+
+        for carrier_kind in ("publication_staging", "assessment_queue"):
+            with (
+                self.subTest(carrier_kind=carrier_kind),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f, record, history = _seed_two_status_streak(directory)
+                old_state = ApiRunAccounting.from_document(record.api_run_accounting)
+                assert old_state.action is not None
+                noop_acc = replace(
+                    old_state,
+                    action={
+                        **old_state.action,
+                        "outcome": {"kind": "explicit_noop", "reason": "status"},
+                    },
+                ).to_document()
+                if carrier_kind == "publication_staging":
+                    tx = replace(
+                        ReviewTransaction.create(
+                            repository=IDENTITY.repository,
+                            pull_request=IDENTITY.pull_request,
+                            base_sha="a" * 40,
+                            head_sha=HEAD,
+                            policy_digest="e" * 64,
+                            configuration_digest="f" * 64,
+                            evidence_digest="a" * 64,
+                            reservation_id="b" * 64,
+                            generation=1,
+                        ),
+                        phase="publication_pending",
+                        result_sha256="c" * 64,
+                    )
+                    staged = PublicationStaging(
+                        transaction_id=tx.transaction_id,
+                        result_sha256="c" * 64,
+                        plan_sha256="9" * 64,
+                        part_count=1,
+                    )
+                    evolved = record.evolve(
+                        api_run_accounting=noop_acc,
+                        transaction=tx,
+                        last_committed_reservation_id="b" * 64,
+                        publication_staging=staged.to_document(),
+                    )
+                else:
+                    qroot = _queue_root_document(
+                        item_count=0, with_active_operation=True
+                    )
+                    from review_sensei.bounded_evidence import inline_manifest
+
+                    qmanifest = inline_manifest(
+                        {"schema_version": "1.0", "pending": 0},
+                        binding=qroot["state_manifest"]["binding"],
+                        item_count=0,
+                    )
+                    assert qmanifest is not None
+                    qroot["state_manifest"] = qmanifest
+                    evolved = record.evolve(
+                        api_run_accounting=noop_acc,
+                        assessment_queue=qroot,
+                    )
+                f.comment["body"] = render_session_comment(
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    record=evolved,
+                )
+                updated_rec = parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                )
+                assert updated_rec is not None
+                f.accounted._accepted_semantic_target = (
+                    "command",
+                    "a" * 40,
+                    HEAD,
+                    "status",
+                    {
+                        "kind": "issue_comment",
+                        "id": 999,
+                        "updated_at": f.SOURCE_STAMP,
+                        "body_sha256": "9" * 64,
+                    },
+                    "op-new-status",
+                )
+                f.accounted._accepted_semantic_predecessor = history
+                f.accounted._root = updated_rec.record_sha256
+                # Neither guard_carried_successor nor prepare_action raises finite_no_progress_stop!
+                guard_carried_successor(
+                    f.accounted, f.selected.ledger, IDENTITY, updated_rec, history
+                )
+                prepare_action(
+                    SimpleNamespace(
+                        caller=f.accounted,
+                        ledger=f.selected.ledger,
+                        identity=IDENTITY,
+                        base_sha="a" * 40,
+                    ),
+                    allow_unqualified=False,
+                    allow_missing_predecessor=False,
+                )
+
+    def test_g32_canceled_unstarted_predecessor_preserves_streak_and_hits_stop(self):
+
+        from review_sensei_github.accepted_semantic_history import (
+            guard_carried_successor,
+        )
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+            authenticate_unstarted_cancellation,
+        )
+        from test_unstarted_action_recovery_g32 import G32CommandEntryFixture
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = G32CommandEntryFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            # Reach streak == 1 via Cmd1.
+            f.SOURCE_ID = 41
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+
+            # Strand Cmd2 before effect due to source mutation and cancel via G32 on Attempt 1.
+            f.SOURCE_ID = 42
+            f.select_command("@reviewsensei review pause", new_run=True)
+            f.source_reads = 0
+
+            def edit_on_fence(current):
+                if current.source_reads == 1:
+                    current.source["body"] = "edited away"
+                    current.source["updated_at"] = "2026-10-26T00:05:00Z"
+
+            f.before_source_read = edit_on_fence
+            self.assertNotEqual(f.invoke_command(), 0)
+            f.before_source_read = None
+
+            stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert stranded is not None
+            ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=stranded
+            )
+            f.past_jobs.pop(f.run_id, None)
+            witness = authenticate_unstarted_cancellation(
+                caller=f.accounted,
+                ledger=f.selected.ledger,
+                identity=IDENTITY,
+                record=stranded,
+                actions_evidence=f.selected.caller.actions_evidence
+                if hasattr(f.selected.caller, "actions_evidence")
+                else __import__(
+                    "review_sensei_github.api_run_owner",
+                    fromlist=["ApiRunActionsEvidence"],
+                ).ApiRunActionsEvidence(
+                    f.http,
+                    token="synthetic-actions",
+                    command_run_id=str(f.run_id),
+                    job="command",
+                ),
+                no_business_dispatch_evidence=ev,
+                mode="same_run",
+            )
+            settled = f.accounted.cancel_unstarted_action(
+                f.selected.ledger, IDENTITY, witness
+            )
+            carried = read_action_result(f.selected.ledger, IDENTITY, settled)[
+                "result"
+            ]["accepted_semantic_history"]
+            # G32 cancellation MUST preserve prior streak=1 (never increment & never mark unavailable).
+            self.assertEqual(carried["streak"], 1)
+            self.assertNotEqual(carried.get("qualification"), "unavailable")
+            self.assertEqual(
+                ApiRunAccounting.from_document(settled.api_run_accounting).action[
+                    "outcome"
+                ],
+                {"kind": "canceled_unstarted", "reason": "source_edited"},
+            )
+
+            # Subsequent status command rolls over cleanly and reaches streak == 2.
+            f.past_jobs[f.run_id] = f.owner_job
+            f.past_run_attempts[f.run_id] = 1
+            f.SOURCE_ID = 43
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
+            after_s2 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert after_s2 is not None
+            h2 = read_action_result(f.selected.ledger, IDENTITY, after_s2)["result"][
+                "accepted_semantic_history"
+            ]
+            self.assertEqual(h2["streak"], 2)
+
+            # Next status command stops cleanly at finite_no_progress_stop (pre-rollover).
+            f.past_jobs[f.run_id] = f.owner_job
+            f.past_run_attempts[f.run_id] = 1
+            f.SOURCE_ID = 44
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 1)
+            self.assertIn("accepted_semantic_history_finite_no_progress_stop", f.error)
+            self.assertEqual(
+                parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                ).record_sha256,
+                after_s2.record_sha256,
+            )
+            self.assertIsNotNone(guard_carried_successor)
 
 
 if __name__ == "__main__":

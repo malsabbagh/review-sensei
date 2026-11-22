@@ -104,6 +104,10 @@ class _PreEffectReplyFixture(ReplyEntryFixture):
 
     def prepare_inline_reply(self, *, source_id: int = 41) -> None:
         self.prepare_reply(source_id=source_id)
+        self.source.pop("issue_url", None)
+        self.source["pull_request_url"] = (
+            "https://api.github.test/repos/owner/repo/pulls/7"
+        )
         self.event_name = "pull_request_review_comment"
         self.source_kind_cli = "inline"
         self.extra_comments.pop(source_id, None)
@@ -1140,6 +1144,559 @@ class G32CliFailClosedCounterexamplesTests(_NetworkGuardMixin):
             self.assertIn("Current action source changed", f.error)
             self.assertIsNone(f.action())
             self.assertEqual(f.provider_calls, 0)
+
+
+class G32GapHardeningTests(_NetworkGuardMixin):
+    def test_cold_attempt2_midflight_edit_refuses_cli_cancel_without_owner_stamping(
+        self,
+    ):
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+        )
+
+        # 1. End-to-end Attempt-2 command retry with mid-flight edit + CLI opt-in refuses
+        #    without canceling Attempt 1's stranded intent (G32-1).
+        with tempfile.TemporaryDirectory() as d:
+            f = _PreEffectCommandFixture(d)
+            f.SOURCE_ID = 601
+            f.select_command("@reviewsensei review pause")
+            orig_source = copy.deepcopy(f.source)
+
+            def edit_on_first_fence(current: _PreEffectCommandFixture) -> None:
+                if current.source_reads == 1:
+                    current.source["body"] = "@reviewsensei review pause edited"
+                    current.source["updated_at"] = "2026-10-26T00:05:00Z"
+
+            f.before_source_read = edit_on_first_fence
+            rc_a1 = f.invoke_command()
+            f.before_source_read = None
+            self.assertNotEqual(rc_a1, 0)
+            a1_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert a1_rec is not None
+            self.assertEqual(a1_rec.api_run_accounting["owner"]["run_attempt"], 1)
+
+            # Retry on cold Attempt 2 with the opt-in CLI flag while live source edits
+            # mid-flight after re-entry -> cancel_unstarted_after_source_mutation MUST refuse!
+            f.attempt = 2
+            f.source = copy.deepcopy(orig_source)
+            f.source_reads = 0
+
+            def edit_midflight_attempt2(current: _PreEffectCommandFixture) -> None:
+                if current.source_reads == 2:
+                    current.source["body"] = "@reviewsensei review pause edited on a2"
+                    current.source["updated_at"] = "2026-10-26T00:06:00Z"
+
+            f.before_source_read = edit_midflight_attempt2
+            rc_a2 = _invoke_command_with_runner_flags(
+                f,
+                runner_flags=("--cancel-unstarted-on-source-mutation",),
+            )
+            f.before_source_read = None
+            self.assertEqual(rc_a2, 1, f.error)
+            self.assertIn(
+                "same-run unstarted recovery requires original attempt owner", f.error
+            )
+            self.assertEqual(f.business_writes, 0)
+            self.assertEqual(f.provider_calls, 0)
+            after_a2 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert after_a2 is not None
+            self.assertEqual(after_a2.api_run_accounting["action"]["phase"], "pending")
+            self.assertIsNone(after_a2.api_run_accounting["action"]["outcome"])
+
+        # 2. Direct owner-mismatch guard on cancel_unstarted_after_source_mutation &
+        #    NoBusinessDispatchEvidence.from_stranded_caller refuses Attempt 2 owner stamping.
+        with tempfile.TemporaryDirectory() as d2:
+            fixture = ReplyFixture(d2)
+            run, _args = fixture.prepare()
+            source = run.session_authority["source"]
+            intent = run.caller.admit_action(
+                run.ledger,
+                run.identity,
+                purpose="reply",
+                source=source,
+                head_sha=run.head_sha,
+                operation_key="1" * 64,
+            )
+            stranded_rec = parse_session_comment(
+                fixture.comment["body"], identity=IDENTITY
+            )
+            assert stranded_rec is not None
+            run.caller._state = run.caller.accounting.claim_startup(
+                ApiExecutionOwner(2, "local", 1)
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "stranded transport source/root/owner binding"
+            ):
+                NoBusinessDispatchEvidence.from_stranded_caller(
+                    run.caller, identity=IDENTITY, record=stranded_rec
+                )
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "same-run unstarted recovery requires original attempt",
+            ):
+                cancel_unstarted_after_source_mutation(
+                    run,
+                    intent=intent,
+                    fence_error=GitHubBrokerClientError(
+                        "Current action source changed"
+                    ),
+                )
+
+    def test_cold_restart_with_only_accepted_observation_and_actions_evidence_refuses(
+        self,
+    ):
+        from review_sensei_github.accepted_action import (
+            AcceptedActionObservation,
+            observe_selected_action,
+        )
+        from review_sensei_github.api_run_owner import ApiRunActionsEvidence
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
+        from review_sensei_github.source_comment_lifecycle import (
+            execute_source_lifecycle_route,
+        )
+        from review_sensei_github.unstarted_action_recovery import (
+            authenticate_unstarted_cancellation,
+        )
+        from test_unstarted_action_recovery_g32 import G32LifecycleFixture
+
+        with tempfile.TemporaryDirectory() as d:
+            f = G32LifecycleFixture(d, limit=1024)
+            native, configuration, _ev, owner = f.prelude()
+            f.accounted.initialize_and_activate(native, IDENTITY, configuration, owner)
+            ledger = ApiRunSessionLedger(native, f.accounted, IDENTITY)
+            f.accounted.admit_action(
+                ledger,
+                IDENTITY,
+                purpose="command",
+                source={
+                    "kind": "issue_comment",
+                    "id": 41,
+                    "updated_at": "2026-10-25T12:00:00Z",
+                    "body_sha256": hashlib.sha256(
+                        b"@reviewsensei review pause"
+                    ).hexdigest(),
+                },
+                head_sha=f.comment["head"] if "head" in f.comment else "b" * 40,
+                operation_key="2" * 64,
+            )
+            native_2 = f.recover_lifecycle()
+            succ = ApiRunSessionLedger(native_2, f.accounted, IDENTITY)
+            stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert stranded is not None
+            obs = observe_selected_action(succ, IDENTITY, stranded)
+            self.assertIsInstance(obs, AcceptedActionObservation)
+            f.source_status = 404
+            f.source_payload = {"message": "Not Found"}
+            actions_ev = ApiRunActionsEvidence(
+                succ.http,
+                token="synthetic-actions",
+                command_run_id="456",
+                job="hosted",
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "requires explicit NoBusinessDispatchEvidence"
+            ):
+                authenticate_unstarted_cancellation(
+                    caller=f.accounted,
+                    ledger=succ,
+                    identity=IDENTITY,
+                    record=stranded,
+                    actions_evidence=actions_ev,
+                    mode="same_run",
+                )
+            with self.assertRaisesRegex(
+                ReviewInputError, "requires explicit NoBusinessDispatchEvidence"
+            ):
+                execute_source_lifecycle_route(
+                    caller=f.accounted,
+                    ledger=succ,
+                    identity=IDENTITY,
+                    record=stranded,
+                    actions_evidence=actions_ev,
+                    mode="same_run",
+                )
+
+    def test_copy_and_deepcopy_of_dispatch_evidence_and_witness_refuse(self):
+        from review_sensei_github.api_run_owner import ApiRunActionsEvidence
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+            authenticate_unstarted_cancellation,
+            require_witness_issued,
+            verify_no_business_dispatch_evidence,
+        )
+        from test_unstarted_action_recovery_g32 import G32LifecycleFixture
+
+        with tempfile.TemporaryDirectory() as d:
+            f = G32LifecycleFixture(d, limit=1024)
+            native, configuration, _ev, owner = f.prelude()
+            f.accounted.initialize_and_activate(native, IDENTITY, configuration, owner)
+            ledger = ApiRunSessionLedger(native, f.accounted, IDENTITY)
+            intent = f.accounted.admit_action(
+                ledger,
+                IDENTITY,
+                purpose="command",
+                source={
+                    "kind": "issue_comment",
+                    "id": 41,
+                    "updated_at": "2026-10-25T12:00:00Z",
+                    "body_sha256": hashlib.sha256(
+                        b"@reviewsensei review pause"
+                    ).hexdigest(),
+                },
+                head_sha="b" * 40,
+                operation_key="3" * 64,
+            )
+            rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert rec is not None
+            dispatch_ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=rec
+            )
+            f.source_status = 404
+            f.source_payload = {"message": "Not Found"}
+            actions_ev = ApiRunActionsEvidence(
+                ledger.http,
+                token="synthetic-actions",
+                command_run_id="456",
+                job="hosted",
+            )
+            state = ApiRunAccounting.from_document(rec.api_run_accounting)
+            intent_sha = dispatch_ev.intent_sha256
+            for clone in (copy.copy(dispatch_ev), copy.deepcopy(dispatch_ev)):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unchanged process-issued transport capture"
+                ):
+                    verify_no_business_dispatch_evidence(
+                        caller=f.accounted,
+                        ledger=ledger,
+                        identity=IDENTITY,
+                        state=state,
+                        intent=intent,
+                        intent_sha256=intent_sha,
+                        evidence=clone,
+                    )
+            witness = authenticate_unstarted_cancellation(
+                caller=f.accounted,
+                ledger=ledger,
+                identity=IDENTITY,
+                record=rec,
+                actions_evidence=actions_ev,
+                no_business_dispatch_evidence=dispatch_ev,
+                mode="same_run",
+            )
+            for cloned_witness in (copy.copy(witness), copy.deepcopy(witness)):
+                with self.assertRaisesRegex(ReviewInputError, "process-issued witness"):
+                    require_witness_issued(cloned_witness)
+                with self.assertRaisesRegex(ReviewInputError, "process-issued witness"):
+                    f.accounted.cancel_unstarted_action(
+                        ledger, IDENTITY, cloned_witness
+                    )
+
+    def test_two_successor_cas_and_canonical_coordinator_races(self):
+        from review_sensei_github.api_run_history import read_previous_run
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+        from review_sensei_github.unstarted_action_recovery import (
+            authenticate_unstarted_cancellation,
+        )
+        from test_unstarted_action_recovery_g32 import (
+            G32LifecycleFixture,
+            _make_canonical_coordinator,
+        )
+
+        from review_sensei.api_work import ApiRunIdentity
+        from review_sensei.recovery_authority import AuthorityRefusal
+
+        with tempfile.TemporaryDirectory() as d:
+            f = G32LifecycleFixture(d, limit=1024)
+            native, configuration, _ev, owner = f.prelude()
+            f.accounted.initialize_and_activate(native, IDENTITY, configuration, owner)
+            ledger = ApiRunSessionLedger(native, f.accounted, IDENTITY)
+            f.accounted.admit_action(
+                ledger,
+                IDENTITY,
+                purpose="command",
+                source={
+                    "kind": "issue_comment",
+                    "id": 41,
+                    "updated_at": "2026-10-25T12:00:00Z",
+                    "body_sha256": hashlib.sha256(
+                        b"@reviewsensei review pause"
+                    ).hexdigest(),
+                },
+                head_sha="b" * 40,
+                operation_key="4" * 64,
+            )
+            f.recover_lifecycle()
+            stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert stranded is not None
+            f.source_status = 404
+            f.source_payload = {"message": "Not Found"}
+            f.past_runs[456] = (2, "hosted", "completed")
+            f.past_runs[457] = (1, "hosted", "in_progress")
+            f.past_runs[458] = (1, "hosted", "in_progress")
+
+            coord, tok_1 = _make_canonical_coordinator(Path(d) / "coord", epoch=1)
+            acc_1 = coord.authenticate(tok_1)  # type: ignore[arg-type]
+            tok_2, _snap2 = coord.advance_epoch(
+                predecessor_token=tok_1,  # type: ignore[arg-type]
+                successor_access=replace(
+                    acc_1,
+                    store_id=tok_1.base_store_id,  # type: ignore[attr-defined]
+                    caller_sha256="9" * 64,
+                ),
+                writer_route="actions_hosted",
+                predecessor_ceased=True,
+            )
+            # Competing advance using stale tok_1 or predecessor_ceased=False refuses!
+            with self.assertRaises(AuthorityRefusal):
+                coord.advance_epoch(
+                    predecessor_token=tok_1,  # type: ignore[arg-type]
+                    successor_access=replace(acc_1, caller_sha256="8" * 64),
+                    writer_route="actions_hosted",
+                    predecessor_ceased=True,
+                )
+            with self.assertRaises(AuthorityRefusal):
+                coord.advance_epoch(
+                    predecessor_token=tok_2,  # type: ignore[arg-type]
+                    successor_access=replace(acc_1, caller_sha256="7" * 64),
+                    writer_route="actions_hosted",
+                    predecessor_ceased=False,
+                )
+
+            def make_cross_caller(run_no: int):
+                f.run_id = run_no
+                f.attempt = 1
+                f.trace = []
+                rdir = Path(d) / f"run{run_no}"
+                rdir.mkdir()
+                caller = ApiRunRequestTransport(
+                    directory=rdir,
+                    run=ApiRunIdentity(123, run_no),
+                    plan=f.plan,
+                    attempt=1,
+                    opener=f._external_open,
+                )
+                f.accounted = caller
+                http_c = GitHubHttp(
+                    api_url="https://api.github.test", opener=caller.open
+                )
+                nat_c = GitHubIssueCommentSessionLedger(
+                    http_c, token="synthetic", app_slug="reviewsensei[bot]"
+                )
+                nat_c.load(IDENTITY)
+                return caller, nat_c
+
+            # Both successors read stranded R0; winner 457 settles cleanly, loser 458 fails CAS.
+            caller_457, nat_457 = make_cross_caller(457)
+            caller_457.rollover_unstarted_and_activate(
+                nat_457,
+                IDENTITY,
+                configuration,
+                ApiExecutionOwner(1, "hosted", 0),
+                stranded,
+                lambda rec: authenticate_unstarted_cancellation(
+                    caller=caller_457,
+                    ledger=nat_457,
+                    identity=IDENTITY,
+                    record=rec,
+                    canonical_coordinator=coord,
+                    canonical_token=tok_2,  # type: ignore[arg-type]
+                    mode="cross_run",
+                ),
+            )
+            winner_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert winner_rec is not None
+            prev_rec = read_previous_run(
+                nat_457, IDENTITY, caller_457.accounting.previous_record
+            )
+            self.assertEqual(
+                prev_rec.api_run_accounting["action"]["outcome"],  # type: ignore[index]
+                {"kind": "canceled_unstarted", "reason": "source_deleted"},
+            )
+            caller_458, nat_458 = make_cross_caller(458)
+            with self.assertRaises(ReviewInputError):
+                caller_458.rollover_unstarted_and_activate(
+                    nat_458,
+                    IDENTITY,
+                    configuration,
+                    ApiExecutionOwner(1, "hosted", 0),
+                    stranded,
+                    lambda rec: authenticate_unstarted_cancellation(
+                        caller=caller_458,
+                        ledger=nat_458,
+                        identity=IDENTITY,
+                        record=rec,
+                        canonical_coordinator=coord,
+                        canonical_token=tok_2,  # type: ignore[arg-type]
+                        mode="cross_run",
+                    ),
+                )
+            # Winner's archived predecessor and active root remain untouched.
+            after_race_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert after_race_rec is not None
+            self.assertEqual(after_race_rec.record_sha256, winner_rec.record_sha256)
+
+    def test_g27_3_url_repo_id_and_issue_pr_binding_refusals(self):
+        from review_sensei_github.run_authority import VerifiedRunAction
+        from review_sensei_github.source_comment_lifecycle import (
+            admit_event_comment_source,
+            observe_live_source_revision,
+        )
+        from review_sensei_github.unstarted_action_recovery import (
+            _observe_mutated_source,
+        )
+
+        from review_sensei.session import SessionIdentity
+
+        body = "@reviewsensei explain this finding"
+        updated = "2026-10-25T12:00:00Z"
+        source_doc = {
+            "kind": "issue_comment",
+            "id": 41,
+            "updated_at": updated,
+            "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        }
+
+        # 1. admit_event_comment_source repo ID, issue.pull_request, and URL checks
+        with self.assertRaisesRegex(
+            ReviewInputError, "action source repository does not match event"
+        ):
+            admit_event_comment_source(
+                event_name="issue_comment",
+                event_payload={
+                    "action": "created",
+                    "repository": {"id": 999, "full_name": "owner/repo"},
+                    "issue": {"number": 7, "pull_request": {}},
+                    "comment": {
+                        "id": 41,
+                        "body": body,
+                        "updated_at": updated,
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                    },
+                },
+                purpose="command",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                source_comment_id=41,
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "issue_comment event requires pull_request association"
+        ):
+            admit_event_comment_source(
+                event_name="issue_comment",
+                event_payload={
+                    "action": "created",
+                    "issue": {"number": 7},  # missing pull_request on issue_comment!
+                    "comment": {
+                        "id": 41,
+                        "body": body,
+                        "updated_at": updated,
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                    },
+                },
+                purpose="command",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                source_comment_id=41,
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "action source does not match the original event"
+        ):
+            admit_event_comment_source(
+                event_name="issue_comment",
+                event_payload={
+                    "action": "created",
+                    "issue": {"number": 7, "pull_request": {}},
+                    "comment": {
+                        "id": 41,
+                        "body": body,
+                        "updated_at": updated,
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7?bad=1",
+                    },
+                },
+                purpose="command",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                source_comment_id=41,
+            )
+
+        # 2. VerifiedRunAction.fence() refuses repo ID mismatch and invalid/swapped comment URLs
+        for fault in ("repo_id", "swapped_url", "query_url"):
+            with (
+                self.subTest(fault=fault),
+                tempfile.TemporaryDirectory() as d,
+            ):
+                fixture = ReplyFixture(d)
+                run, _args = fixture.prepare()
+                fixture.source.pop("issue_url", None)
+                if fault == "swapped_url":
+                    fixture.source["pull_request_url"] = (
+                        "https://api.github.test/repos/owner/repo/pulls/7"
+                    )
+                elif fault == "query_url":
+                    fixture.source["issue_url"] = (
+                        "https://api.github.test/repos/owner/repo/issues/7?extra=1"
+                    )
+                else:
+                    fixture.source["issue_url"] = (
+                        "https://api.github.test/repos/owner/repo/issues/7"
+                    )
+                orig_ext = fixture.accounted._opener
+                pr_repo_id = 999 if fault == "repo_id" else 123
+
+                def patched_ext(req, timeout, *, orig=orig_ext, rid=pr_repo_id):
+                    resp = orig(req, timeout)
+                    p = urlsplit(req.full_url).path
+                    if req.get_method() == "GET" and p == "/repos/owner/repo/pulls/7":
+                        data = json.loads(resp.read(524288))
+                        data["base"]["repo"] = {
+                            "id": rid,
+                            "full_name": "owner/repo",
+                        }
+                        return json_response(data)
+                    return resp
+
+                with patch.object(
+                    fixture.accounted, "_opener", side_effect=patched_ext
+                ):
+                    verified = VerifiedRunAction(run)
+                    with self.assertRaises(GitHubBrokerClientError):
+                        verified.fence()
+
+        # 3. observe_live_source_revision & _observe_mutated_source reject non-positive repo_id & bad URL
+        with tempfile.TemporaryDirectory() as d:
+            fixture = ReplyFixture(d)
+            run, _args = fixture.prepare()
+            bad_id = SessionIdentity("owner/repo", 7, repository_id=None)
+            with self.assertRaisesRegex(ReviewInputError, "positive repository_id"):
+                observe_live_source_revision(
+                    caller=run.caller,
+                    ledger=run.ledger,
+                    identity=bad_id,
+                    original_source=source_doc,
+                    phase="unstarted_intent",
+                )
+            with self.assertRaisesRegex(ReviewInputError, "positive repository_id"):
+                _observe_mutated_source(
+                    caller=run.caller,
+                    ledger=run.ledger,
+                    identity=bad_id,
+                    source=source_doc,
+                )
+            fixture.source["issue_url"] = (
+                "https://api.github.test/repos/other/repo/issues/7"
+            )
+            with self.assertRaisesRegex(ReviewInputError, "malformed"):
+                _observe_mutated_source(
+                    caller=run.caller,
+                    ledger=run.ledger,
+                    identity=IDENTITY,
+                    source=source_doc,
+                )
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ FIELDS = (
     "owner_job",
     "past_jobs",
     "provider_calls",
+    "source",
+    "SOURCE_ID",
 )
 
 
@@ -50,6 +52,14 @@ def phase(root, number):
 
             response = super().external(request, timeout)
             path = urlsplit(request.full_url).path
+            if (
+                (root / "attempt2-resume").exists()
+                and self.run_id > 457
+                and path == "/repos/owner/repo/actions/runs/457"
+            ):
+                value = json.loads(response.read(512 * 1024 + 1))
+                value["run_attempt"] = 2
+                return json_response(value)
             if (
                 not self.command_active
                 and "/actions/runs/" in path
@@ -77,6 +87,30 @@ def phase(root, number):
             f.run_id += 1
             f.owner_job = "hosted"
             code = f.invoke()
+        elif number == 1 and (root / "two-reviews").exists():
+            f.past_jobs[f.run_id] = f.owner_job
+            f.run_id += 1
+            f.owner_job = "hosted"
+            code = f.invoke()
+        elif (root / "attempt2-resume").exists() and number == 1:
+            # Admit Cmd1 on attempt=1 then simulate hard crash before close.
+            f.SOURCE_ID = 41
+            f.select_command("@reviewsensei review status", new_run=True)
+
+            def crash_after_admit(current):
+                if current.source_reads == 1:
+                    (root / "native.json").write_text(
+                        json.dumps({key: getattr(current, key) for key in FIELDS})
+                    )
+                    os._exit(77)
+
+            f.before_source_read = crash_after_admit
+            code = f.invoke_command()
+        elif (root / "attempt2-resume").exists() and number == 2:
+            # Resume exact same Cmd1 on attempt=2 of the stranded run.
+            f.attempt = 2
+            f.select_command("@reviewsensei review status", new_run=False)
+            code = f.invoke_command()
         else:
             f.SOURCE_ID = 40 + number
             f.select_command("@reviewsensei review status", new_run=True)
@@ -96,6 +130,7 @@ def phase(root, number):
         number
         and code == 0
         and not (number == 2 and (root / "intervening-review").exists())
+        and not (number == 1 and (root / "two-reviews").exists())
     ):
         value["history"] = read_action_result(f.selected.ledger, IDENTITY, record)[
             "result"
@@ -666,6 +701,159 @@ class AcceptedSemanticHistoryTests(unittest.TestCase):
             self.assertEqual(progressed["streak"], 0)
             with self.assertRaises(ReviewInputError):
                 validate_history({**history, "streak": 0}, restart.IDENTITY)
+
+    def test_review1_review2_cmd1_cmd2_stop_never_marks_history_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "two-reviews").touch()
+            results = []
+            for number in range(5):
+                env = dict(
+                    os.environ,
+                    PYTHONDONTWRITEBYTECODE="1",
+                    PYTHONPATH=str(Path.cwd())
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
+                    GIT_AUTHOR_DATE="2026-11-13T00:00:00Z",
+                    GIT_COMMITTER_DATE="2026-11-13T00:00:00Z",
+                )
+                call = subprocess.run(
+                    [sys.executable, __file__, str(root), str(number)],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(call.returncode, 0, call.stderr)
+                results.append(json.loads((root / (str(number) + ".json")).read_text()))
+            self.assertEqual(
+                [r["exit"] for r in results],
+                [0, 0, 0, 0, 1],
+                [r["error"][-1500:] for r in results],
+            )
+            self.assertEqual(results[2]["history"]["streak"], 1)
+            self.assertEqual(results[3]["history"]["streak"], 2)
+            self.assertIn("finite_no_progress_stop", results[4]["error"])
+            self.assertEqual(results[3]["root_sha256"], results[4]["root_sha256"])
+
+    def test_attempt2_resume_of_first_command_after_review_preserves_qualified_history(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "attempt2-resume").touch()
+            env = dict(
+                os.environ,
+                PYTHONDONTWRITEBYTECODE="1",
+                PYTHONPATH=str(Path.cwd())
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+                GIT_AUTHOR_DATE="2026-11-13T00:00:00Z",
+                GIT_COMMITTER_DATE="2026-11-13T00:00:00Z",
+            )
+            # 0: initial review; 1: Cmd1 crash (exit 77); 2: Attempt-2 resume; 3: Cmd2; 4: Stop
+            r0 = subprocess.run(
+                [sys.executable, __file__, str(root), "0"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(r0.returncode, 0, r0.stderr)
+            r1 = subprocess.run(
+                [sys.executable, __file__, str(root), "1"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(r1.returncode, 77, r1.stderr)
+            later = []
+            for number in (2, 3, 4):
+                call = subprocess.run(
+                    [sys.executable, __file__, str(root), str(number)],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(call.returncode, 0, call.stderr)
+                later.append(json.loads((root / (str(number) + ".json")).read_text()))
+            self.assertEqual(
+                [r["exit"] for r in later],
+                [0, 0, 1],
+                [r["error"][-1500:] for r in later],
+            )
+            self.assertEqual(later[0]["history"]["streak"], 1)
+            self.assertNotEqual(later[0]["history"].get("qualification"), "unavailable")
+            self.assertEqual(later[1]["history"]["streak"], 2)
+            self.assertIn("finite_no_progress_stop", later[2]["error"])
+            self.assertEqual(later[1]["root_sha256"], later[2]["root_sha256"])
+
+    def test_finding_lifecycle_store_forbids_downgrading_qualified_history(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY
+
+        from review_sensei.finding_lifecycle_store import (
+            reference_with_terminal_action_history,
+            require_terminal_history_amendment,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Run initial review + first command so a qualified history exists.
+            from test_action_run import CommandEntryFixture
+
+            cmd_dir = root / "cmd"
+            cmd_dir.mkdir()
+            f = CommandEntryFixture(cmd_dir, limit=512)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.SOURCE_ID = 41
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert record is not None and record.finding_lifecycle is not None
+            current_ref = record.finding_lifecycle
+            self.assertIsNotNone(current_ref.get("accepted_semantic_history"))
+            from review_sensei.finding_lifecycle_store import (
+                _require_no_history_downgrade,
+                reference_with_terminal_action_history,
+                require_terminal_history_amendment,
+            )
+
+            downgrade = {
+                "schema_version": "accepted-semantic-history-v1",
+                "qualification": "unavailable",
+                "reason": "forced_downgrade",
+            }
+            with self.assertRaisesRegex(
+                ReviewInputError, "differs from terminal result"
+            ):
+                require_terminal_history_amendment(
+                    record,
+                    record.evolve(
+                        finding_lifecycle={
+                            **current_ref,
+                            "accepted_semantic_history": downgrade,
+                        }
+                    ),
+                )
+            with self.assertRaises(ReviewInputError):
+                reference_with_terminal_action_history(
+                    record, candidate_history=downgrade
+                )
+            with self.assertRaisesRegex(ReviewInputError, "downgrade"):
+                _require_no_history_downgrade(
+                    current_ref["accepted_semantic_history"], downgrade
+                )
+            # Preserving prior in unavailable wrapper is allowed cleanly.
+            _require_no_history_downgrade(
+                current_ref["accepted_semantic_history"],
+                {
+                    **downgrade,
+                    "prior": current_ref["accepted_semantic_history"],
+                },
+            )
 
 
 if __name__ == "__main__" and len(sys.argv) == 3:

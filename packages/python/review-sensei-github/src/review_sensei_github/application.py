@@ -133,6 +133,15 @@ class _ConversationBaseBinding(TypedDict, total=False):
     context_base_ref: str | None
 
 
+class _ConversationSourceBinding(TypedDict, total=False):
+    source_body_sha256: str | None
+    repository_id: int | None
+
+
+class _ConversationPrepareFlags(TypedDict, total=False):
+    defer_evidence: bool
+
+
 @dataclass(frozen=True)
 class GitHubWriteOptions:
     """GitHub publication switches with default-on approval safety gates.
@@ -4089,6 +4098,19 @@ class GitHubApplication:
             and operation_entry == "enabled"
             and operation_store is not None
         ):
+            from .run_authority import VerifiedRunAction
+
+            verify_source_kind = (
+                current_action.document["source"]["kind"]
+                if isinstance(current_action, VerifiedRunAction)
+                and isinstance(current_action.document.get("source"), Mapping)
+                else "issue_comment"
+            )
+            verify_body_sha256 = sha256(body.encode("utf-8")).hexdigest()
+            verify_delivery_id = (
+                f"verify-v2:{verify_source_kind}:{source_comment_id or 0}:"
+                f"{verify_body_sha256}:{head_sha}"
+            )
             produced = self._through_operation(
                 operation_entry=operation_entry,
                 operation_store=operation_store,
@@ -4099,9 +4121,12 @@ class GitHubApplication:
                 run_id=run_id,
                 run_attempt=run_attempt,
                 trigger="verify",
-                delivery_id=f"verify:{source_comment_id or 0}:{head_sha}",
-                grant=f"verify:{source_comment_id or 0}:{head_sha}",
-                reservation_id=f"verify:{repository_id}:{pull_request}:{head_sha}",
+                delivery_id=verify_delivery_id,
+                grant=verify_delivery_id,
+                reservation_id=(
+                    f"verify-v2:{repository_id}:{pull_request}:"
+                    f"{verify_source_kind}:{source_comment_id or 0}:{head_sha}"
+                ),
                 attestation_digest=sha256(
                     f"{repository_id}:{pull_request}:{head_sha}".encode()
                 ).hexdigest(),
@@ -4736,9 +4761,28 @@ class GitHubApplication:
         app_slug: str,
         root_comment_id: int,
         source_kind: str = "inline",
+        repository_id: int | None = None,
     ) -> ReplyResult:
         if not options.github_writes or not options.mention_replies:
             return ReplyResult(status="disabled")
+        if (
+            isinstance(self.reviewer, ReviewPublisher)
+            and type(repository_id) is int
+            and repository_id > 0
+        ):
+            reply_trust = self.reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation="reply",
+                repository_slug=repository,
+                head_sha=head_sha,
+                has_prior_charges=bool(self.session_ledger is not None),
+            )
+            if reply_trust is not None and not reply_trust.allowed:
+                raise GitHubPublicationError(
+                    f"repository trust transition refused ({reply_trust.phase}): {reply_trust.reason_code}"
+                )
         capability = "inline_reply" if source_kind == "inline" else "issue_reply"
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
@@ -4749,6 +4793,7 @@ class GitHubApplication:
                 self.replier.finalizer,
                 options=options,
                 repository=repository,
+                repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
                 app_slug=app_slug,
@@ -4756,6 +4801,12 @@ class GitHubApplication:
                 evidence_budget=getattr(self.session_ledger, "evidence_budget", None),
             )
         publish = getattr(self.replier, "publish_current", self.replier.publish)
+        publisher_args: _ConversationSourceBinding = {}
+        if (
+            isinstance(self.replier, ConversationPublisher)
+            and repository_id is not None
+        ):
+            publisher_args["repository_id"] = repository_id
         return publish(
             token=token,
             repository=repository,
@@ -4767,6 +4818,7 @@ class GitHubApplication:
             app_slug=app_slug,
             root_comment_id=root_comment_id,
             source_kind=source_kind,
+            **publisher_args,
         )
 
     def _through_operation(
@@ -5543,6 +5595,7 @@ class GitHubApplication:
                 raise GitHubPublicationError(
                     f"repository trust transition refused ({reply_trust.phase}): {reply_trust.reason_code}"
                 )
+        bound_source_sha256: str | None = None
         if current_action is not None:
             from .run_authority import VerifiedRunAction
 
@@ -5563,6 +5616,7 @@ class GitHubApplication:
             ):
                 raise ReviewInputError("current reply purpose or source conflicts")
             current_action.fence()
+            bound_source_sha256 = document["source"]["body_sha256"]
         if (
             work_recovery is not None
             and work_recovery.enabled
@@ -5617,8 +5671,17 @@ class GitHubApplication:
         defer_generic_evidence = (
             isinstance(replier, ConversationPublisher) and operation_entry == "enabled"
         )
+        defer_flags: _ConversationPrepareFlags = (
+            {"defer_evidence": True} if defer_generic_evidence else {}
+        )
+        source_binding_args: _ConversationSourceBinding = {}
+        if isinstance(replier, ConversationPublisher):
+            if bound_source_sha256 is not None:
+                source_binding_args["source_body_sha256"] = bound_source_sha256
+            if repository_id is not None:
+                source_binding_args["repository_id"] = repository_id
         prepared = replier.prepare_context(
-            **({"defer_evidence": True} if defer_generic_evidence else {}),
+            **defer_flags,
             token=read_token,
             repository=repository,
             pull_request=pull_request,
@@ -5628,6 +5691,7 @@ class GitHubApplication:
             root_comment_id=root_comment_id,
             source_kind=source_kind,
             expected_head_sha=expected_head_sha,
+            **source_binding_args,
         )
         if not isinstance(prepared, PreparedConversation):
             return prepared
@@ -5704,6 +5768,7 @@ class GitHubApplication:
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
                 **context_binding,
+                **source_binding_args,
             )
         capability_token = broker.exchange(
             oidc_token or broker.request_oidc_token(),
@@ -5754,6 +5819,7 @@ class GitHubApplication:
                 root_comment_id=root_comment_id,
                 source_kind=source_kind,
                 expected_head_sha=expected_head_sha,
+                **source_binding_args,
             )
             if not isinstance(full_context, PreparedConversation):
                 return full_context
@@ -5799,6 +5865,14 @@ class GitHubApplication:
                         inventory.pending or operation_entry == "enabled"
                     ):
                         evidence_bundle = human.evidence_bundle
+                        human_body_sha256 = sha256(
+                            human.source_body.encode("utf-8")
+                        ).hexdigest()
+                        reassess_key = (
+                            f"reassessment-v2:{prepared.source_kind}:"
+                            f"{prepared.source_comment_id}:{prepared.source_updated_at}:"
+                            f"{human_body_sha256}"
+                        )
                         produced = operation_owner._through_operation(
                             operation_entry=operation_entry,
                             operation_store=operation_store,
@@ -5809,17 +5883,11 @@ class GitHubApplication:
                             run_id=run_id,
                             run_attempt=run_attempt,
                             trigger="reassessment",
-                            delivery_id=(
-                                f"reassessment:{prepared.source_comment_id}:"
-                                f"{prepared.source_updated_at}"
-                            ),
-                            grant=(
-                                f"reassessment:{prepared.source_comment_id}:"
-                                f"{prepared.source_updated_at}"
-                            ),
+                            delivery_id=reassess_key,
+                            grant=reassess_key,
                             reservation_id=(
-                                f"reassessment:{repository_id}:{pull_request}:"
-                                f"{prepared.source_comment_id}"
+                                f"reassessment-v2:{repository_id}:{pull_request}:"
+                                f"{prepared.source_kind}:{prepared.source_comment_id}"
                             ),
                             attestation_digest=sha256(
                                 f"{repository_id}:{pull_request}:{prepared.head_sha}".encode()
@@ -5854,6 +5922,14 @@ class GitHubApplication:
                                 "operation entry refused: result_missing"
                             )
                     elif inventory.pending:
+                        human_body_sha256 = sha256(
+                            human.source_body.encode("utf-8")
+                        ).hexdigest()
+                        reassess_reply_key = (
+                            f"reassessment-reply-v2:{prepared.source_kind}:"
+                            f"{prepared.source_comment_id}:{prepared.source_updated_at}:"
+                            f"{human_body_sha256}"
+                        )
                         produced_reply = operation_owner._through_operation(
                             operation_entry=operation_entry,
                             operation_store=operation_store,
@@ -5864,17 +5940,11 @@ class GitHubApplication:
                             run_id=run_id,
                             run_attempt=run_attempt,
                             trigger="reassessment",
-                            delivery_id=(
-                                f"reassessment-reply:{prepared.source_comment_id}:"
-                                f"{prepared.source_updated_at}"
-                            ),
-                            grant=(
-                                f"reassessment-reply:{prepared.source_comment_id}:"
-                                f"{prepared.source_updated_at}"
-                            ),
+                            delivery_id=reassess_reply_key,
+                            grant=reassess_reply_key,
                             reservation_id=(
-                                f"reassessment-reply:{repository_id}:{pull_request}:"
-                                f"{prepared.source_comment_id}"
+                                f"reassessment-reply-v2:{repository_id}:{pull_request}:"
+                                f"{prepared.source_kind}:{prepared.source_comment_id}"
                             ),
                             attestation_digest=sha256(
                                 f"{repository_id}:{pull_request}:{prepared.head_sha}".encode()
@@ -6055,6 +6125,11 @@ class GitHubApplication:
                             completed_reply, finalization_completion=completion
                         )
                     return reply_outcome
+            reply_body_sha256 = sha256(source_body.encode("utf-8")).hexdigest()
+            reply_key = (
+                f"reply-v2:{prepared.source_kind}:{prepared.source_comment_id}:"
+                f"{prepared.source_updated_at}:{reply_body_sha256}"
+            )
             reply = operation_owner._through_operation(
                 operation_entry=operation_entry,
                 operation_store=operation_store,
@@ -6065,14 +6140,11 @@ class GitHubApplication:
                 run_id=run_id,
                 run_attempt=run_attempt,
                 trigger="reply",
-                delivery_id=(
-                    f"reply:{prepared.source_comment_id}:{prepared.source_updated_at}"
-                ),
-                grant=(
-                    f"reply:{prepared.source_comment_id}:{prepared.source_updated_at}"
-                ),
+                delivery_id=reply_key,
+                grant=reply_key,
                 reservation_id=(
-                    f"reply:{repository_id}:{pull_request}:{prepared.source_comment_id}"
+                    f"reply-v2:{repository_id}:{pull_request}:"
+                    f"{prepared.source_kind}:{prepared.source_comment_id}"
                 ),
                 attestation_digest=sha256(
                     json.dumps(
@@ -6123,6 +6195,7 @@ class GitHubApplication:
                     root_comment_id=prepared.root_comment_id,
                     source_kind=prepared.source_kind,
                     **context_binding,
+                    **source_binding_args,
                 )
             try:
                 resolution_token = broker.exchange(
@@ -6146,6 +6219,7 @@ class GitHubApplication:
                 resolution_evidence=resolution_evidence,
                 resolution_base_sha=prepared.context.base_sha,
                 **context_binding,
+                **source_binding_args,
             )
         finally:
             if reaction is not None:

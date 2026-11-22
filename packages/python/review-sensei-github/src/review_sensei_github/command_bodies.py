@@ -1600,6 +1600,11 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         if not args.enable_reply:
             print("disabled")
             return 0
+        repository_id = getattr(args, "repository_id", None)
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError(
+                "reply with --allow-write requires a positive integer --repository-id"
+            )
         read_token = os.getenv(args.github_token_env)
         if not read_token:
             raise ReviewInputError(
@@ -1719,6 +1724,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         raise ReviewInputError(
             "publishing a reply requires --reply and --head-sha unless --generate is used"
         )
+    if args.enable_reply:
+        repository_id = getattr(args, "repository_id", None)
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError(
+                "reply with --allow-write requires a positive integer --repository-id"
+            )
     reply = ConversationReply.from_dict(
         json.loads(
             engine_cli.read_bounded_utf8(args.reply, maximum=16 * 1024, label="reply")
@@ -1739,6 +1750,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         app_slug=args.app_slug,
         root_comment_id=args.root_comment_id,
         source_kind=args.source_kind,
+        repository_id=getattr(args, "repository_id", None),
     )
     print(reply_outcome.status)
     return 0

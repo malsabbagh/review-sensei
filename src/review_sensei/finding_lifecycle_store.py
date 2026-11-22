@@ -2816,16 +2816,57 @@ def inline_terminal_action_history(record, *, accounting=None, candidate_history
     return document["result"].get("accepted_semantic_history")
 
 
+def _has_qualified_or_preserved_history(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("qualification") != "unavailable":
+        return True
+    return isinstance(value.get("prior"), Mapping)
+
+
+def _require_no_history_downgrade(
+    existing_history: object, candidate_history: object
+) -> None:
+    if not _has_qualified_or_preserved_history(existing_history):
+        return
+    assert isinstance(existing_history, Mapping)
+    if not isinstance(candidate_history, Mapping):
+        raise ReviewInputError(
+            "accepted history amendment cannot drop qualified history"
+        )
+    if candidate_history.get("qualification") == "unavailable":
+        expected_prior = (
+            existing_history["prior"]
+            if existing_history.get("qualification") == "unavailable"
+            else existing_history
+        )
+        prior = candidate_history.get("prior")
+        if not isinstance(prior, Mapping) or (
+            canonical_bytes(prior) != canonical_bytes(expected_prior)
+        ):
+            raise ReviewInputError(
+                "accepted history amendment cannot downgrade qualified history "
+                "to unavailable without preserving prior"
+            )
+
+
 def reference_with_terminal_action_history(
     record, *, accounting=None, candidate_history=None
 ):
     if record.finding_lifecycle is None:
         return None
+    existing = normalize_reference(record.finding_lifecycle)
+    existing_history = (
+        existing.get("accepted_semantic_history")
+        if isinstance(existing, Mapping)
+        else None
+    )
     history = inline_terminal_action_history(
         record, accounting=accounting, candidate_history=candidate_history
     )
     if history is None:
         return record.finding_lifecycle
+    _require_no_history_downgrade(existing_history, history)
     return normalize_reference(
         {
             **record.finding_lifecycle,
@@ -2869,6 +2910,8 @@ def require_terminal_history_amendment(before, after) -> None:
         raise ReviewInputError(
             "accepted history amendment differs from terminal result"
         )
+    old_history = None if old is None else old.get("accepted_semantic_history")
+    _require_no_history_downgrade(old_history, new.get("accepted_semantic_history"))
 
 
 def _validate_accepted_history_metadata(value, binding, *, depth=0):

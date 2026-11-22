@@ -62,6 +62,9 @@ from review_sensei_github.source_comment_lifecycle import (
     execute_source_lifecycle_route,
     observe_live_source_revision,
 )
+from review_sensei_github.unstarted_action_recovery import (
+    NoBusinessDispatchEvidence,
+)
 from test_action_run import CommandEntryFixture
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 from test_unstarted_action_recovery_g32 import (
@@ -107,6 +110,7 @@ class G27LifecycleFixture(G32LifecycleFixture):
             "id": SOURCE_ID,
             "updated_at": SOURCE_STAMP,
             "body": INITIAL_BODY,
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
         }
 
     def _external_open(self, request, timeout):
@@ -132,6 +136,13 @@ def _prepare_fixture(
 ):
     """Set up a fixture with an admitted action for lifecycle testing."""
     f = G27LifecycleFixture(directory, limit=limit)
+    if kind == "review_comment":
+        f.source_payload = {
+            "id": SOURCE_ID,
+            "updated_at": SOURCE_STAMP,
+            "body": INITIAL_BODY,
+            "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/7",
+        }
     native, configuration, evidence, owner = f.prelude()
     f.accounted.initialize_and_activate(native, IDENTITY, configuration, owner)
     ledger = ApiRunSessionLedger(native, f.accounted, IDENTITY)
@@ -354,12 +365,14 @@ class ObserveLiveSourceRevisionTests(unittest.TestCase):
             "id": SOURCE_ID,
             "updated_at": "2026-10-30T09:00:00Z",
             "body": "@reviewsensei review status",
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
         }
         edited_sha = hashlib.sha256(b"@reviewsensei review status").hexdigest()
         restored_payload = {
             "id": SOURCE_ID,
             "updated_at": "2026-10-30T10:00:00Z",
             "body": INITIAL_BODY,
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
         }
         with tempfile.TemporaryDirectory() as d:
             obs_ed = self._observe(str(Path(d) / "ed"), source_payload=edited_payload)
@@ -557,6 +570,7 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-30T09:00:00Z",
                         "body": "@reviewsensei review status",
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     },
                     "source_edited",
                 ),
@@ -565,6 +579,7 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-30T10:00:00Z",
                         "body": INITIAL_BODY,
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     },
                     "edit_restored_body",
                 ),
@@ -698,6 +713,7 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-30T09:00:00Z",
                         "body": "@reviewsensei review status",
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     },
                     "source_edited",
                 ),
@@ -706,6 +722,7 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-30T10:00:00Z",
                         "body": INITIAL_BODY,
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     },
                     "edit_restored_body",
                 ),
@@ -742,11 +759,13 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                     "id": SOURCE_ID,
                     "updated_at": "2026-10-30T09:00:00Z",
                     "body": "edited",
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                 },
                 {
                     "id": SOURCE_ID,
                     "updated_at": "2026-10-30T10:00:00Z",
                     "body": INITIAL_BODY,
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                 },
                 "delete",
             ):
@@ -941,6 +960,7 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-30T09:00:00Z",
                         "body": "edited after terminal",
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     },
                     "source_edited",
                     "mutated_revision",
@@ -950,6 +970,7 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-30T10:00:00Z",
                         "body": INITIAL_BODY,
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     },
                     "edit_restored_body",
                     "mutated_revision",
@@ -1068,32 +1089,37 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
                     record=record,
                 )
 
-        # 2. Same-run edit_restored_body cancellation via Actions cessation
+        # 2. Same-run edit_restored_body cancellation: Attempt-1 active caller succeeds
+        #    with explicit NoBusinessDispatchEvidence, whereas cold Attempt-2 restart without
+        #    canonical epoch containment refuses and Attempt-2 with epoch>=2 succeeds.
         with tempfile.TemporaryDirectory() as d:
-            f, _, _ledger, _, _cfg, _intent, _rec = _prepare_fixture(d)
+            f, _, ledger, _, _cfg, _intent, _rec = _prepare_fixture(d)
             f.source_payload = {
                 "id": SOURCE_ID,
                 "updated_at": "2026-10-30T10:00:00Z",
                 "body": INITIAL_BODY,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
-            native_2 = f.recover_lifecycle()
-            successor = ApiRunSessionLedger(native_2, f.accounted, IDENTITY)
-            ev_2 = ApiRunActionsEvidence(
-                successor.http,
+            current = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert current is not None
+            ev_1 = ApiRunActionsEvidence(
+                ledger.http,
                 token="synthetic-actions",
                 command_run_id="456",
                 job="hosted",
             )
-            current = parse_session_comment(f.comment["body"], identity=IDENTITY)
-            assert current is not None
+            ev_dispatch = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=current
+            )
 
             with self.assertRaisesRegex(ReviewInputError, "mode is unsupported"):
                 execute_source_lifecycle_route(
                     caller=f.accounted,
-                    ledger=successor,
+                    ledger=ledger,
                     identity=IDENTITY,
                     record=current,
-                    actions_evidence=ev_2,
+                    actions_evidence=ev_1,
+                    no_business_dispatch_evidence=ev_dispatch,
                     mode="invalid",
                 )
             with self.assertRaisesRegex(
@@ -1101,19 +1127,21 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
             ):
                 execute_source_lifecycle_route(
                     caller=f.accounted,
-                    ledger=successor,
+                    ledger=ledger,
                     identity=IDENTITY,
                     record=current,
-                    actions_evidence=ev_2,
+                    actions_evidence=ev_1,
+                    no_business_dispatch_evidence=ev_dispatch,
                     mode="cross_run",
                 )
 
             cls, settled = execute_source_lifecycle_route(
                 caller=f.accounted,
-                ledger=successor,
+                ledger=ledger,
                 identity=IDENTITY,
                 record=current,
-                actions_evidence=ev_2,
+                actions_evidence=ev_1,
+                no_business_dispatch_evidence=ev_dispatch,
                 mode="same_run",
             )
             self.assertEqual(cls.observation.mutation_state, "edit_restored_body")
@@ -1126,18 +1154,79 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
                 {"kind": "canceled_unstarted", "reason": "source_edited"},
             )
 
-        # 3. Cross-run cancellation via both Actions evidence and canonical epoch fence
-        for auth_kind in ("actions", "canonical"):
+        with tempfile.TemporaryDirectory() as d_a2:
+            f_a2, _, _, _, _cfg_a2, _intent_a2, rec_a1 = _prepare_fixture(d_a2)
+            f_a2.source_payload = {
+                "id": SOURCE_ID,
+                "updated_at": "2026-10-30T10:00:00Z",
+                "body": INITIAL_BODY,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            }
+            ev_a1_dispatch = NoBusinessDispatchEvidence.from_stranded_caller(
+                f_a2.accounted, identity=IDENTITY, record=rec_a1
+            )
+            native_2 = f_a2.recover_lifecycle()
+            successor = ApiRunSessionLedger(native_2, f_a2.accounted, IDENTITY)
+            ev_2 = ApiRunActionsEvidence(
+                successor.http,
+                token="synthetic-actions",
+                command_run_id="456",
+                job="hosted",
+            )
+            current_a2 = parse_session_comment(f_a2.comment["body"], identity=IDENTITY)
+            assert current_a2 is not None
+            with self.assertRaisesRegex(
+                ReviewInputError, "owner, run, or intent binding conflicts"
+            ):
+                execute_source_lifecycle_route(
+                    caller=f_a2.accounted,
+                    ledger=successor,
+                    identity=IDENTITY,
+                    record=current_a2,
+                    actions_evidence=ev_2,
+                    no_business_dispatch_evidence=ev_a1_dispatch,
+                    mode="same_run",
+                )
+            coord_a2, tok_a2 = _make_canonical_coordinator(
+                Path(d_a2) / "coord", epoch=2
+            )
+            cls_a2, settled_a2 = execute_source_lifecycle_route(
+                caller=f_a2.accounted,
+                ledger=successor,
+                identity=IDENTITY,
+                record=current_a2,
+                canonical_coordinator=coord_a2,
+                canonical_token=tok_a2,  # type: ignore[arg-type]
+                mode="same_run",
+            )
+            self.assertEqual(cls_a2.route, "g32_unstarted_cancellation")
+            assert isinstance(settled_a2, type(current_a2))
+            self.assertEqual(
+                ApiRunAccounting.from_document(settled_a2.api_run_accounting).action[
+                    "outcome"
+                ],
+                {"kind": "canceled_unstarted", "reason": "source_edited"},
+            )
+
+        # 3. Cross-run cancellation via Attempt-1 Actions evidence (succeeds), Attempt-2
+        #    exhausted non-canonical Actions (refuses), and canonical epoch fence (succeeds).
+        for auth_kind in ("actions_attempt1", "actions_exhausted", "canonical"):
             with (
                 self.subTest(auth_kind=auth_kind),
                 tempfile.TemporaryDirectory() as d,
             ):
-                f, _, _ledger, _, config, _intent, _ = _prepare_fixture(d)
-                f.recover_lifecycle()
+                f, _, _ledger, _, config, _intent, rec_stranded = _prepare_fixture(d)
+                ev_a1 = NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted, identity=IDENTITY, record=rec_stranded
+                )
+                if auth_kind in ("actions_exhausted", "canonical"):
+                    f.recover_lifecycle()
+                    f.past_runs[456] = (2, "hosted", "completed")
+                else:
+                    f.past_runs[456] = (1, "hosted", "completed")
                 stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 assert stranded is not None
                 f.source_status = 404
-                f.past_runs[456] = (2, "hosted", "completed")
                 f.past_runs[457] = (1, "hosted", "in_progress")
                 f.run_id = 457
                 f.attempt = 1
@@ -1172,15 +1261,34 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
                         command_run_id="457",
                         job="hosted",
                     )
-                    if auth_kind == "actions"
+                    if auth_kind != "canonical"
                     else None
                 )
+                if auth_kind == "actions_exhausted":
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "owner, run, or intent binding conflicts"
+                    ):
+                        execute_source_lifecycle_route(
+                            caller=caller_457,
+                            ledger=native_457,
+                            identity=IDENTITY,
+                            record=stranded,
+                            actions_evidence=ev_457,
+                            no_business_dispatch_evidence=ev_a1,
+                            mode="cross_run",
+                            rollover_configuration=config,
+                            rollover_owner=ApiExecutionOwner(1, "hosted", 0),
+                        )
+                    continue
                 cls, activated = execute_source_lifecycle_route(
                     caller=caller_457,
                     ledger=native_457,
                     identity=IDENTITY,
                     record=stranded,
                     actions_evidence=ev_457,
+                    no_business_dispatch_evidence=(
+                        ev_a1 if auth_kind == "actions_attempt1" else None
+                    ),
                     canonical_coordinator=coord,
                     canonical_token=tok,  # type: ignore[arg-type]
                     mode="cross_run",
@@ -1230,6 +1338,9 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
 
             stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
             assert stranded is not None
+            ev_stranded = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=stranded
+            )
             self.assertEqual(
                 stranded.api_run_accounting["action"]["phase"],  # type: ignore[index]
                 "pending",
@@ -1240,8 +1351,9 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
             # Pause was NEVER applied — edit_restored_body did NOT replay T1!
             self.assertFalse(stranded.operator_paused)
 
-            # 3. Recover on attempt 2 via execute_source_lifecycle_route -> classifies
-            #    edit_restored_body and settles T1 to canceled_unstarted(source_edited).
+            # 3. Cold attempt 2 without canonical epoch containment refuses fail-closed;
+            #    attempt 2 with canonical epoch >= 2 classifies edit_restored_body and
+            #    settles T1 to canceled_unstarted(source_edited).
             stranded_run_id = f.run_id
             restored_source_401 = copy.deepcopy(f.source)
             f.past_jobs.pop(stranded_run_id, None)
@@ -1309,12 +1421,29 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
             active_record = parse_session_comment(f.comment["body"], identity=IDENTITY)
             assert active_record is not None
 
+            with self.assertRaisesRegex(
+                ReviewInputError, "owner, run, or intent binding conflicts"
+            ):
+                execute_source_lifecycle_route(
+                    caller=caller_rec,
+                    ledger=ledger_rec,
+                    identity=IDENTITY,
+                    record=active_record,
+                    actions_evidence=ev_rec,
+                    no_business_dispatch_evidence=ev_stranded,
+                    mode="same_run",
+                )
+
+            coord, tok_2 = _make_canonical_coordinator(
+                Path(directory) / "coord_g27_a2", epoch=2
+            )
             cls, settled_root = execute_source_lifecycle_route(
                 caller=caller_rec,
                 ledger=ledger_rec,
                 identity=IDENTITY,
                 record=active_record,
-                actions_evidence=ev_rec,
+                canonical_coordinator=coord,
+                canonical_token=tok_2,  # type: ignore[arg-type]
                 mode="same_run",
             )
             self.assertEqual(cls.phase, "unstarted_intent")
@@ -1416,6 +1545,9 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
                     identity=IDENTITY,
                     record=record2,
                     actions_evidence=ev2,
+                    no_business_dispatch_evidence=NoBusinessDispatchEvidence.from_stranded_caller(
+                        f2.accounted, identity=IDENTITY, record=record2
+                    ),
                     mode="same_run",
                 )
             after_rec = parse_session_comment(f2.comment["body"], identity=IDENTITY)
@@ -1882,6 +2014,12 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
                     )
 
             # Review comment webhook also validates and classifies cleanly.
+            f.source_payload = {
+                "id": SOURCE_ID,
+                "updated_at": SOURCE_STAMP,
+                "body": INITIAL_BODY,
+                "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/7",
+            }
             rc_body, rc_sig = self._sign_webhook(
                 comment_payload("created", event_kind="pull_request_review_comment")
             )
@@ -1981,6 +2119,7 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
                 "id": SOURCE_ID,
                 "updated_at": "2026-10-30T09:00:00Z",
                 "body": "@reviewsensei review status",
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
             ed_body, ed_sig = self._sign_webhook(
                 comment_payload(
@@ -2179,6 +2318,7 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
                     "id": f_un.SOURCE_ID,
                     "body": "@reviewsensei review pause",
                     "updated_at": f_un.SOURCE_STAMP,
+                    "issue_url": f"{f_un.api_url}/repos/owner/repo/issues/7",
                 },
             }
             self.assertNotEqual(f_un.invoke_command(event_override=event_a2), 0)
@@ -2251,6 +2391,7 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
                             "id": f_term.SOURCE_ID,
                             "body": "@reviewsensei review pause",
                             "updated_at": f_term.SOURCE_STAMP,
+                            "issue_url": f"{f_term.api_url}/repos/owner/repo/issues/7",
                         },
                     }
                 ),

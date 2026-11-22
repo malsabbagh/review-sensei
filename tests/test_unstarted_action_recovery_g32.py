@@ -48,11 +48,13 @@ from review_sensei_github.session_ledger import (
     parse_session_comment,
 )
 from review_sensei_github.unstarted_action_recovery import (
+    NoBusinessDispatchEvidence,
     UnstartedCancellationWitness,
     authenticate_unstarted_cancellation,
     require_witness_issued,
     settle_unstarted_accounting,
     settle_unstarted_record,
+    verify_no_business_dispatch_evidence,
 )
 from test_action_run import CommandEntryFixture
 from test_api_work_lifecycle import LifecycleFixture
@@ -95,6 +97,7 @@ class G32LifecycleFixture(LifecycleFixture):
             "id": SOURCE_ID,
             "updated_at": SOURCE_STAMP,
             "body": INITIAL_BODY,
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
         }
         self.past_runs: dict[int, tuple[int, str, str]] = {}
 
@@ -276,6 +279,16 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             )
             record = parse_session_comment(f.comment["body"], identity=IDENTITY)
             with self.assertRaisesRegex(
+                ReviewInputError, "requires explicit NoBusinessDispatchEvidence"
+            ):
+                authenticate_unstarted_cancellation(
+                    caller=f.accounted,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    record=record,
+                    actions_evidence=evidence,
+                )
+            with self.assertRaisesRegex(
                 ReviewInputError, "same-source succession must execute normally"
             ):
                 authenticate_unstarted_cancellation(
@@ -284,6 +297,9 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     identity=IDENTITY,
                     record=record,
                     actions_evidence=evidence,
+                    no_business_dispatch_evidence=NoBusinessDispatchEvidence.from_stranded_caller(
+                        f.accounted, identity=IDENTITY, record=record
+                    ),
                 )
             old_blocks = ApiRunAccounting.from_document(
                 record.api_run_accounting
@@ -327,6 +343,7 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                 "id": SOURCE_ID,
                 "updated_at": "2026-10-25T12:01:00Z",
                 "body": INITIAL_BODY + " edited",
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
             with self.assertRaisesRegex(
                 ReviewInputError, "source or operation conflicts"
@@ -391,6 +408,7 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                         "id": SOURCE_ID,
                         "updated_at": "2026-10-25T12:02:00Z",
                         "body": "@reviewsensei review status",
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                     }
                     expected_reason = "source_edited"
                 else:
@@ -404,33 +422,28 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     ).api_run_accounting
                 ).blocks
                 before_confirmed = f.accounted.accounting.confirmed
-                # Exercise attempt-2 same-run successor recovery with predecessor cessation.
-                native_2 = f.recover_lifecycle()
-                successor = ApiRunSessionLedger(native_2, f.accounted, IDENTITY)
-                ev_2 = ApiRunActionsEvidence(
-                    successor.http,
-                    token="synthetic-actions",
-                    command_run_id="456",
-                    job="hosted",
-                )
+                # Same-run active owner cancellation on attempt 1 with explicit NoBusinessDispatchEvidence.
                 current_record = parse_session_comment(
                     f.comment["body"], identity=IDENTITY
                 )
+                assert current_record is not None
+                dispatch_ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted, identity=IDENTITY, record=current_record
+                )
                 witness = authenticate_unstarted_cancellation(
                     caller=f.accounted,
-                    ledger=successor,
+                    ledger=ledger,
                     identity=IDENTITY,
                     record=current_record,
-                    actions_evidence=ev_2,
+                    actions_evidence=_evidence,
+                    no_business_dispatch_evidence=dispatch_ev,
                     expected_intent=intent,
                     mode="same_run",
                 )
                 self.assertEqual(witness.reason, expected_reason)
-                self.assertEqual(witness.authority_mode, "same_run_ceased_predecessor")
+                self.assertEqual(witness.authority_mode, "same_owner_active")
 
-                settled = f.accounted.cancel_unstarted_action(
-                    successor, IDENTITY, witness
-                )
+                settled = f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness)
                 settled_state = ApiRunAccounting.from_document(
                     settled.api_run_accounting
                 )
@@ -441,9 +454,17 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     {"kind": "canceled_unstarted", "reason": expected_reason},
                 )
                 self.assertGreaterEqual(settled_state.confirmed, before_confirmed)
+                settled_by_id = {
+                    (block.block_id, block.issued_by): block
+                    for block in settled_state.blocks
+                }
                 for block in before_blocks:
-                    self.assertIn(block, settled_state.blocks)
-                decoded = read_action_result(successor, IDENTITY, settled)
+                    key = (block.block_id, block.issued_by)
+                    self.assertIn(key, settled_by_id)
+                    self.assertLessEqual(
+                        settled_by_id[key].undispatched, block.undispatched
+                    )
+                decoded = read_action_result(ledger, IDENTITY, settled)
                 self.assertEqual(
                     decoded["outcome"],
                     {"kind": "canceled_unstarted", "reason": expected_reason},
@@ -451,16 +472,14 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
 
                 # Idempotent re-call with the same witness performs zero extra PATCHes.
                 patches_before = sum(m == "PATCH" for _, m, _ in f.trace)
-                again = f.accounted.cancel_unstarted_action(
-                    successor, IDENTITY, witness
-                )
+                again = f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness)
                 self.assertEqual(again.record_sha256, settled.record_sha256)
                 self.assertEqual(
                     sum(m == "PATCH" for _, m, _ in f.trace), patches_before
                 )
 
                 # Now an ordinary new caller run rolls over and archives cleanly!
-                f.past_runs[456] = (2, "hosted", "completed")
+                f.past_runs[456] = (1, "hosted", "completed")
                 f.attempt = 1
                 f.trace = []
                 next_dir = Path(directory) / "run457"
@@ -505,26 +524,40 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
     def test_cross_run_rollover_recovers_after_two_attempt_exhaustion_and_canonical_epoch_fence(
         self,
     ) -> None:
-        for auth_kind in ("actions", "canonical"):
+        for auth_kind in ("actions_attempt1", "actions", "canonical"):
             with (
                 self.subTest(auth_kind=auth_kind),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 f, _native, _ledger, _ev, config, intent = self._prepare(directory)
-                # Exhaust attempt 2 on run 456 while leaving action pending & unstarted.
-                f.recover_lifecycle()
+                stranded_a1 = parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                )
+                assert stranded_a1 is not None
+                ev_a1 = NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted, identity=IDENTITY, record=stranded_a1
+                )
+                if auth_kind in ("actions", "canonical"):
+                    # Exhaust attempt 2 on run 456 while leaving action pending & unstarted.
+                    f.recover_lifecycle()
+                    f.past_runs[456] = (2, "hosted", "completed")
+                else:
+                    f.past_runs[456] = (1, "hosted", "completed")
                 stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                assert stranded is not None
                 stranded_state = ApiRunAccounting.from_document(
                     stranded.api_run_accounting
                 )
-                self.assertEqual(stranded_state.owner.run_attempt, 2)
+                self.assertEqual(
+                    stranded_state.owner.run_attempt,
+                    1 if auth_kind == "actions_attempt1" else 2,
+                )
                 self.assertEqual(stranded_state.action["phase"], "pending")
                 self.assertFalse(stranded_state.action["execution_started"])
 
-                # Source comment deleted after attempt 2 ceased.
+                # Source comment deleted after prior run ceased.
                 f.source_status = 404
                 f.source_payload = {"message": "Not Found"}
-                f.past_runs[456] = (2, "hosted", "completed")
                 f.past_runs[457] = (1, "hosted", "in_progress")
                 f.run_id = 457
                 f.attempt = 1
@@ -560,9 +593,33 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                         command_run_id="457",
                         job="hosted",
                     )
-                    if auth_kind == "actions"
+                    if auth_kind != "canonical"
                     else None
                 )
+                if auth_kind == "actions":
+                    # Cold recovery after 2-attempt exhaustion without canonical epoch fence
+                    # refuses fail-closed (even with Attempt-1 NoBusinessDispatchEvidence).
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "owner, run, or intent binding conflicts"
+                    ):
+                        caller_457.rollover_unstarted_and_activate(
+                            native_457,
+                            IDENTITY,
+                            config,
+                            ApiExecutionOwner(1, "hosted", 0),
+                            stranded,
+                            lambda rec: authenticate_unstarted_cancellation(
+                                caller=caller_457,
+                                ledger=native_457,
+                                identity=IDENTITY,
+                                record=rec,
+                                actions_evidence=ev_457,
+                                no_business_dispatch_evidence=ev_a1,
+                                expected_intent=intent,
+                                mode="cross_run",
+                            ),
+                        )
+                    continue
 
                 caller_457.rollover_unstarted_and_activate(
                     native_457,
@@ -576,6 +633,9 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                         identity=IDENTITY,
                         record=rec,
                         actions_evidence=ev_457,
+                        no_business_dispatch_evidence=(
+                            ev_a1 if auth_kind == "actions_attempt1" else None
+                        ),
                         canonical_coordinator=coordinator,
                         canonical_token=epoch_token,  # type: ignore[arg-type]
                         expected_intent=intent,
@@ -637,6 +697,9 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             f.before_source_read = None
 
             stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            ev_stranded = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=stranded
+            )
             self.assertEqual(stranded.api_run_accounting["action"]["phase"], "pending")
             self.assertFalse(stranded.api_run_accounting["action"]["execution_started"])
             self.assertFalse(stranded.operator_paused)
@@ -649,8 +712,9 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             self.assertNotEqual(f.invoke_command(), 0)
             self.assertIn("previous caller run is not terminal", f.error)
 
-            # Authenticate narrow unstarted cancellation on same-run attempt 2 of stranded_run_id,
-            # then prove BOTH a subsequent command AND a subsequent PR review succeed cleanly!
+            # On same-run attempt 2 of stranded_run_id: cold non-canonical Actions cessation
+            # alone refuses fail-closed, whereas canonical epoch >= 2 fence authenticates
+            # cancellation cleanly and BOTH a subsequent command & PR review succeed!
             f.past_jobs.pop(stranded_run_id, None)
             f.run_id = stranded_run_id
             f.attempt = 2
@@ -712,12 +776,28 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             caller_rec.bind_terminal_reservation("command-terminal-2")
             ledger_rec = ApiRunSessionLedger(native_rec, caller_rec, IDENTITY)
             active_record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            with self.assertRaisesRegex(
+                ReviewInputError, "owner, run, or intent binding conflicts"
+            ):
+                authenticate_unstarted_cancellation(
+                    caller=caller_rec,
+                    ledger=ledger_rec,
+                    identity=IDENTITY,
+                    record=active_record,
+                    actions_evidence=ev_rec,
+                    no_business_dispatch_evidence=ev_stranded,
+                    mode="same_run",
+                )
+            coord, tok_2 = _make_canonical_coordinator(
+                Path(directory) / "coord_e2e_a2", epoch=2
+            )
             witness = authenticate_unstarted_cancellation(
                 caller=caller_rec,
                 ledger=ledger_rec,
                 identity=IDENTITY,
                 record=active_record,
-                actions_evidence=ev_rec,
+                canonical_coordinator=coord,
+                canonical_token=tok_2,  # type: ignore[arg-type]
                 mode="same_run",
             )
             settled_root = caller_rec.cancel_unstarted_action(
@@ -760,12 +840,16 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             f.source_status = 404
             f.source_payload = {"message": "Not Found"}
             record_before = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert record_before is not None
             witness_before = authenticate_unstarted_cancellation(
                 caller=f.accounted,
                 ledger=ledger,
                 identity=IDENTITY,
                 record=record_before,
                 actions_evidence=evidence,
+                no_business_dispatch_evidence=NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted, identity=IDENTITY, record=record_before
+                ),
             )
             boundary = f.accounted.begin_action_effect(ledger, IDENTITY, intent)
             started_record = parse_session_comment(f.comment["body"], identity=IDENTITY)
@@ -939,6 +1023,9 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                 )
 
             # HTTP 500 on live source read
+            ev_dispatch_neg = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=cur
+            )
             f.source_status = 500
             with self.assertRaisesRegex(
                 ReviewInputError, "observation failed with HTTP 500"
@@ -949,6 +1036,7 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     identity=IDENTITY,
                     record=cur,
                     actions_evidence=evidence,
+                    no_business_dispatch_evidence=ev_dispatch_neg,
                 )
 
             # Malformed 200 payload on live source read
@@ -967,6 +1055,7 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     identity=IDENTITY,
                     record=cur,
                     actions_evidence=evidence,
+                    no_business_dispatch_evidence=ev_dispatch_neg,
                 )
 
             # Forged (unissued) witness object
@@ -977,6 +1066,7 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                 identity=IDENTITY,
                 record=cur,
                 actions_evidence=evidence,
+                no_business_dispatch_evidence=ev_dispatch_neg,
             )
             forged = UnstartedCancellationWitness(
                 identity=valid_witness.identity,
@@ -1130,12 +1220,16 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             f.source_status = 404
             f.source_payload = {"message": "Not Found"}
             r0 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert r0 is not None
             witness_r0 = authenticate_unstarted_cancellation(
                 caller=f.accounted,
                 ledger=ledger,
                 identity=IDENTITY,
                 record=r0,
                 actions_evidence=evidence,
+                no_business_dispatch_evidence=NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted, identity=IDENTITY, record=r0
+                ),
             )
             # Advance root generation (R0 -> R0b) while keeping the same pending unstarted intent.
             r0b = ledger.replace(
@@ -1147,12 +1241,16 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             ):
                 f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness_r0)
 
+            coord_r0b, tok_r0b = _make_canonical_coordinator(
+                Path(directory) / "coord_r0b", epoch=2
+            )
             witness_r0b = authenticate_unstarted_cancellation(
                 caller=f.accounted,
                 ledger=ledger,
                 identity=IDENTITY,
                 record=r0b,
-                actions_evidence=evidence,
+                canonical_coordinator=coord_r0b,
+                canonical_token=tok_r0b,  # type: ignore[arg-type]
             )
             settled = f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness_r0b)
             # Same witness succeeds idempotently; stale witness_r0 from R0 is rejected!
@@ -1247,12 +1345,9 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             self.assertIsNone(caller_457._producer)
             self.assertIsNone(native_457.evidence_budget)
 
-            # Subsequent valid rollover on the clean transport succeeds!
-            ev_457 = ApiRunActionsEvidence(
-                http_457,
-                token="synthetic-actions",
-                command_run_id="457",
-                job="hosted",
+            # Subsequent valid rollover on the clean transport succeeds via canonical fence!
+            coord_457, tok_457 = _make_canonical_coordinator(
+                Path(directory) / "coord_457", epoch=2
             )
             activated = caller_457.rollover_unstarted_and_activate(
                 native_457,
@@ -1265,7 +1360,8 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     ledger=native_457,
                     identity=IDENTITY,
                     record=current,
-                    actions_evidence=ev_457,
+                    canonical_coordinator=coord_457,
+                    canonical_token=tok_457,  # type: ignore[arg-type]
                     mode="cross_run",
                 ),
             )
@@ -1278,7 +1374,6 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
     def test_physical_business_mutation_within_old_count_is_not_admission_proof(self):
         from review_sensei_github.unstarted_action_recovery import (
             NoBusinessDispatchEvidence,
-            verify_no_business_dispatch_evidence,
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1545,7 +1640,6 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
         from review_sensei_github.action_run import UnstartedCallerRecoveryGate
         from review_sensei_github.unstarted_action_recovery import (
             NoBusinessDispatchEvidence,
-            verify_no_business_dispatch_evidence,
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1719,14 +1813,28 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                         caller=f.selected.caller,
                         ledger=f.selected.ledger,
                         identity=IDENTITY,
-                        state=ApiRunAccounting.from_document(
-                            after_a2_rec.api_run_accounting
-                        ),
+                        state=stranded_state,
                         intent=stranded_state.action["intent"],
                         intent_sha256=valid_dispatch_ev.intent_sha256,
                         evidence=bad_ev,
                     )
             self.assertIsNotNone(gate_empty_obs)
+
+            # Attempt-2 cold state (owner=(2, ...)) with Attempt-1 dispatch evidence MUST refuse!
+            with self.assertRaisesRegex(
+                ReviewInputError, "owner, run, or intent binding conflicts"
+            ):
+                verify_no_business_dispatch_evidence(
+                    caller=f.selected.caller,
+                    ledger=f.selected.ledger,
+                    identity=IDENTITY,
+                    state=ApiRunAccounting.from_document(
+                        after_a2_rec.api_run_accounting
+                    ),
+                    intent=stranded_state.action["intent"],
+                    intent_sha256=valid_dispatch_ev.intent_sha256,
+                    evidence=valid_dispatch_ev,
+                )
 
             # 4. Spoofed human comment with command-receipt HTML marker does NOT block,
             #    whereas an App-owned Bot receipt/operation comment DOES block!
@@ -1746,7 +1854,7 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                 caller=f.selected.caller,
                 ledger=f.selected.ledger,
                 identity=IDENTITY,
-                state=ApiRunAccounting.from_document(after_a2_rec.api_run_accounting),
+                state=stranded_state,
                 intent=stranded_state.action["intent"],
                 intent_sha256=valid_dispatch_ev.intent_sha256,
                 evidence=valid_dispatch_ev,
@@ -1759,9 +1867,7 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                         caller=f.selected.caller,
                         ledger=f.selected.ledger,
                         identity=IDENTITY,
-                        state=ApiRunAccounting.from_document(
-                            after_a2_rec.api_run_accounting
-                        ),
+                        state=stranded_state,
                         intent=stranded_state.action["intent"],
                         intent_sha256=valid_dispatch_ev.intent_sha256,
                         evidence=valid_dispatch_ev,
@@ -1785,9 +1891,7 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                     caller=f.selected.caller,
                     ledger=f.selected.ledger,
                     identity=IDENTITY,
-                    state=ApiRunAccounting.from_document(
-                        after_a2_rec.api_run_accounting
-                    ),
+                    state=stranded_state,
                     intent=stranded_state.action["intent"],
                     intent_sha256=valid_dispatch_ev.intent_sha256,
                     evidence=valid_dispatch_ev,
@@ -1916,6 +2020,8 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
             dispatch_ev = NoBusinessDispatchEvidence.from_stranded_caller(
                 f.accounted, identity=IDENTITY, record=stranded_rec
             )
+            # 1. Same-run (attempt == 2): ordinary non-canonical gate refuses cold
+            #    cross-process recovery, whereas canonical epoch >= 2 settles cleanly!
             f.attempt = 2
             same_gate = UnstartedCallerRecoveryGate(
                 target_run_id=f.run_id,
@@ -1923,7 +2029,7 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                 mode="same_run",
                 use_actions_evidence=True,
             )
-            self.assertEqual(
+            self.assertNotEqual(
                 self._invoke_with_gate(
                     f,
                     event_override=t1_ev,
@@ -1931,8 +2037,39 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                     unstarted_recovery=same_gate,
                 ),
                 0,
-                f.error,
             )
+            self.assertIn("owner, run, or intent binding conflicts", f.error)
+            held_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert held_rec is not None
+            self.assertEqual(
+                ApiRunAccounting.from_document(held_rec.api_run_accounting).action[
+                    "phase"
+                ],
+                "pending",
+            )
+            self.assertFalse(held_rec.operator_paused)
+
+            # Canonical epoch >= 2 on that exact Attempt-2 state recovers cleanly without G02 bypass.
+            from review_sensei_github.source_comment_lifecycle import (
+                execute_source_lifecycle_route,
+            )
+
+            coord_same, tok_same = _make_canonical_coordinator(
+                Path(d_same) / "coord_same", epoch=2
+            )
+            settled_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert settled_rec is not None
+            _, settled_canonical = execute_source_lifecycle_route(
+                caller=f.accounted,
+                ledger=f.selected.ledger,
+                identity=IDENTITY,
+                record=settled_rec,
+                canonical_coordinator=coord_same,
+                canonical_token=tok_same,  # type: ignore[arg-type]
+                mode="same_run",
+            )
+            assert settled_canonical is not None
+            f.accounted = f.selected.caller  # keep attribute sync
             settled_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
             assert settled_rec is not None
             settled_state = ApiRunAccounting.from_document(
@@ -2054,7 +2191,6 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
         )
         from review_sensei_github.unstarted_action_recovery import (
             NoBusinessDispatchEvidence,
-            verify_no_business_dispatch_evidence,
         )
 
         with tempfile.TemporaryDirectory() as d:

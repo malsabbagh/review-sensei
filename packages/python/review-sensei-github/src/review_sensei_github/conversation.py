@@ -465,6 +465,47 @@ class ConversationPublisher:
         if comment.get(field) != expected:
             raise GitHubConversationError("reply source association was invalid")
 
+    @staticmethod
+    def _validate_optional_source_binding(
+        *,
+        source_body_sha256: str | None = None,
+        repository_id: int | None = None,
+    ) -> None:
+        if source_body_sha256 is not None and (
+            not isinstance(source_body_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", source_body_sha256) is None
+        ):
+            raise GitHubConversationError("reply source digest is invalid")
+        if repository_id is not None and (
+            type(repository_id) is not int or repository_id < 1
+        ):
+            raise GitHubConversationError("reply repository id is invalid")
+
+    @staticmethod
+    def _check_source_revision_and_auth(
+        *,
+        source: dict[str, Any],
+        source_updated_at: str,
+        source_body_sha256: str | None,
+        app_slug: str,
+    ) -> str | None:
+        current_updated_at = source.get("updated_at")
+        body = source.get("body")
+        if (
+            not isinstance(current_updated_at, str)
+            or _digest(current_updated_at) != _digest(source_updated_at)
+            or (
+                source_body_sha256 is not None
+                and (not isinstance(body, str) or _digest(body) != source_body_sha256)
+            )
+        ):
+            return "skipped_edited_source"
+        if not has_standalone_sensei_mention(body):
+            return "skipped_no_mention"
+        if not authorized_human_comment(source, app_slug=app_slug):
+            return "skipped_unauthorized"
+        return None
+
     def prepare_context(
         self,
         *,
@@ -478,6 +519,8 @@ class ConversationPublisher:
         source_kind: str = "inline",
         expected_head_sha: str | None = None,
         defer_evidence: bool = False,
+        source_body_sha256: str | None = None,
+        repository_id: int | None = None,
     ) -> PreparedConversation | ReplyResult:
         """Authorize and bound a mention before any provider invocation."""
         return self._prepare_context(
@@ -491,6 +534,8 @@ class ConversationPublisher:
             source_kind=source_kind,
             expected_head_sha=expected_head_sha,
             defer_evidence=defer_evidence,
+            source_body_sha256=source_body_sha256,
+            repository_id=repository_id,
         )
 
     def prepare_selected_assessment_context(
@@ -539,6 +584,8 @@ class ConversationPublisher:
         expected_head_sha: str | None = None,
         assessment_selector: FeedbackSelector | None = None,
         defer_evidence: bool = False,
+        source_body_sha256: str | None = None,
+        repository_id: int | None = None,
     ) -> PreparedConversation | ReplyResult:
         """Authorize a mention, optionally deferring generic context evidence.
 
@@ -547,6 +594,10 @@ class ConversationPublisher:
         Source, live PR and inline-root association checks always run.
         """
 
+        self._validate_optional_source_binding(
+            source_body_sha256=source_body_sha256,
+            repository_id=repository_id,
+        )
         if not isinstance(defer_evidence, bool):
             raise GitHubConversationError(
                 "deferred conversation evidence gate is invalid"
@@ -593,15 +644,14 @@ class ConversationPublisher:
             pull_request=pull_request,
             source_kind=source_kind,
         )
-        if not has_standalone_sensei_mention(source.get("body")):
-            return ReplyResult(status="skipped_no_mention")
-        if not authorized_human_comment(source, app_slug=app_slug):
-            return ReplyResult(status="skipped_unauthorized")
-        current_updated_at = source.get("updated_at")
-        if not isinstance(current_updated_at, str) or _digest(
-            current_updated_at
-        ) != _digest(source_updated_at):
-            return ReplyResult(status="skipped_edited_source")
+        skip_status = self._check_source_revision_and_auth(
+            source=source,
+            source_updated_at=source_updated_at,
+            source_body_sha256=source_body_sha256,
+            app_slug=app_slug,
+        )
+        if skip_status is not None:
+            return ReplyResult(status=skip_status)
 
         status, pr = self.http.request(
             "GET",
@@ -638,6 +688,10 @@ class ConversationPublisher:
             or base_repo.get("full_name") != repository
         ):
             return ReplyResult(status="skipped_fork")
+        if repository_id is not None and (
+            type(base_repo.get("id")) is not int or base_repo["id"] != repository_id
+        ):
+            raise GitHubConversationError("reply preflight repository id mismatched")
 
         resolved_root = source_comment_id
         if source_kind == "inline":
@@ -774,7 +828,7 @@ class ConversationPublisher:
             context=context,
             source_kind=source_kind,
             source_comment_id=source_comment_id,
-            source_updated_at=current_updated_at,
+            source_updated_at=source["updated_at"],
             head_sha=head_sha,
             root_comment_id=resolved_root,
         )
@@ -1362,6 +1416,8 @@ class ConversationPublisher:
         _pending_stage: _PendingPageStage | None = None,
         context_base_sha: str | None = None,
         context_base_ref: str | None = None,
+        source_body_sha256: str | None = None,
+        repository_id: int | None = None,
     ) -> ReplyResult:
         return self._publish(
             token=token,
@@ -1381,6 +1437,8 @@ class ConversationPublisher:
             _pending_stage=_pending_stage,
             context_base_sha=context_base_sha,
             context_base_ref=context_base_ref,
+            source_body_sha256=source_body_sha256,
+            repository_id=repository_id,
         )
 
     def _publish(
@@ -1404,7 +1462,13 @@ class ConversationPublisher:
         _pending_stage: _PendingPageStage | None = None,
         context_base_sha: str | None = None,
         context_base_ref: str | None = None,
+        source_body_sha256: str | None = None,
+        repository_id: int | None = None,
     ) -> ReplyResult:
+        self._validate_optional_source_binding(
+            source_body_sha256=source_body_sha256,
+            repository_id=repository_id,
+        )
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
         if not isinstance(reply, ConversationReply):
@@ -1478,15 +1542,14 @@ class ConversationPublisher:
             pull_request=pull_request,
             source_kind=source_kind,
         )
-        if not has_standalone_sensei_mention(source.get("body")):
-            return ReplyResult(status="skipped_no_mention")
-        if not authorized_human_comment(source, app_slug=app_slug):
-            return ReplyResult(status="skipped_unauthorized")
-        updated_at = source.get("updated_at")
-        if not isinstance(updated_at, str) or _digest(updated_at) != _digest(
-            source_updated_at
-        ):
-            return ReplyResult(status="skipped_edited_source")
+        skip_status = self._check_source_revision_and_auth(
+            source=source,
+            source_updated_at=source_updated_at,
+            source_body_sha256=source_body_sha256,
+            app_slug=app_slug,
+        )
+        if skip_status is not None:
+            return ReplyResult(status=skip_status)
         in_reply_to = source.get("in_reply_to_id")
         if source_kind == "issue":
             resolved_root = None
@@ -1628,6 +1691,10 @@ class ConversationPublisher:
             or base_repo.get("full_name") != repository
         ):
             return ReplyResult(status="skipped_fork")
+        if repository_id is not None and (
+            type(base_repo.get("id")) is not int or base_repo["id"] != repository_id
+        ):
+            raise GitHubConversationError("reply preflight repository id mismatched")
 
         if (
             context_base is not None
@@ -2191,6 +2258,12 @@ class ConversationPublisher:
     @bounded_reply_publication
     def publish_current(self, **arguments) -> ReplyResult:
         """Ordinary replies also show trusted current-head pending state."""
+        source_body_sha256 = arguments.get("source_body_sha256")
+        repository_id = arguments.get("repository_id")
+        self._validate_optional_source_binding(
+            source_body_sha256=source_body_sha256,
+            repository_id=repository_id,
+        )
         eligibility = self.finalizer.load_eligibility(
             token=arguments["token"],
             repository=arguments["repository"],
@@ -2223,12 +2296,14 @@ class ConversationPublisher:
                 pull_request=arguments["pull_request"],
                 source_kind=source_kind,
             )
-            if not authorized_human_comment(source, app_slug=arguments["app_slug"]):
-                return "skipped_unauthorized"
-            if not has_standalone_sensei_mention(source.get("body")):
-                return "skipped_no_mention"
-            if source.get("updated_at") != arguments["source_updated_at"]:
-                return "skipped_edited_source"
+            skip_status = self._check_source_revision_and_auth(
+                source=source,
+                source_updated_at=arguments["source_updated_at"],
+                source_body_sha256=source_body_sha256,
+                app_slug=arguments["app_slug"],
+            )
+            if skip_status is not None:
+                return skip_status
             current = self.finalizer.load_eligibility(
                 token=arguments["token"],
                 repository=arguments["repository"],
@@ -2247,6 +2322,10 @@ class ConversationPublisher:
             )
             if preflight.result is not None:
                 return preflight.result.status
+            if repository_id is not None and preflight.repository_id != repository_id:
+                raise GitHubConversationError(
+                    "reply preflight repository id mismatched"
+                )
             if (
                 arguments.get("context_base_sha") is not None
                 or arguments.get("context_base_ref") is not None

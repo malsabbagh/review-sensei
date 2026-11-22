@@ -1052,9 +1052,13 @@ class ConversationPublisherTests(unittest.TestCase):
 
     def test_source_gone_no_mention_and_unauthorized_do_not_write(self):
         for source, expected in (
-            ({"pull_request_url": INLINE_URL}, "skipped_no_mention"),
+            (
+                {"updated_at": "updated", "pull_request_url": INLINE_URL},
+                "skipped_no_mention",
+            ),
             (
                 {
+                    "updated_at": "updated",
                     "body": "@sensei help",
                     "pull_request_url": INLINE_URL,
                     "user": {"login": "alice", "type": "User"},
@@ -1489,6 +1493,129 @@ class ConversationPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "skipped_fork")
         self.assertEqual(len(calls), 3)
+
+    def test_edited_source_removing_mention_skips_as_edited_and_checks_repo_id(self):
+        import hashlib
+
+        updated = "2026-08-19T00:00:00Z"
+        orig_body = "@sensei please explain"
+        orig_sha = hashlib.sha256(orig_body.encode("utf-8")).hexdigest()
+
+        # Edited comment removes mention & changes association; updated_at or body_sha256 check
+        # MUST trigger "skipped_edited_source" BEFORE skipped_no_mention/skipped_unauthorized!
+        for case_name, live_comment, use_sha in (
+            (
+                "updated_at_changed",
+                {
+                    "id": 10,
+                    "pull_request_url": INLINE_URL,
+                    "body": "mention removed completely",
+                    "user": {"login": "alice", "type": "User"},
+                    "author_association": "CONTRIBUTOR",
+                    "updated_at": "2026-08-19T00:05:00Z",
+                },
+                None,
+            ),
+            (
+                "same_updated_at_body_sha_changed",
+                {
+                    "id": 10,
+                    "pull_request_url": INLINE_URL,
+                    "body": "mention removed completely",
+                    "user": {"login": "alice", "type": "User"},
+                    "author_association": "CONTRIBUTOR",
+                    "updated_at": updated,
+                },
+                orig_sha,
+            ),
+        ):
+            with self.subTest(case=case_name):
+                http_p, calls_p = make_http(json_response(live_comment))
+                out_prep = ConversationPublisher(http=http_p).prepare_context(
+                    token="token",
+                    repository="owner/repo",
+                    pull_request=1,
+                    source_comment_id=10,
+                    source_updated_at=updated,
+                    app_slug="review-sensei[bot]",
+                    root_comment_id=10,
+                    source_body_sha256=use_sha,
+                    repository_id=1,
+                )
+                self.assertEqual(out_prep.status, "skipped_edited_source")
+                self.assertEqual(len(calls_p), 1)
+
+                http_pub, calls_pub = make_http(json_response(live_comment))
+                out_pub = ConversationPublisher(http=http_pub).publish(
+                    token="token",
+                    repository="owner/repo",
+                    pull_request=1,
+                    source_comment_id=10,
+                    source_updated_at=updated,
+                    head_sha="b" * 40,
+                    reply=ConversationReply.from_dict({"body": "Thanks."}),
+                    app_slug="review-sensei[bot]",
+                    root_comment_id=10,
+                    source_body_sha256=use_sha,
+                    repository_id=1,
+                )
+                self.assertEqual(out_pub.status, "skipped_edited_source")
+                self.assertEqual(len(calls_pub), 1)
+
+        # Numeric base.repo.id mismatch on live PR raises GitHubConversationError fail-closed.
+        unchanged = {
+            "id": 10,
+            "issue_url": ISSUE_URL,
+            "body": orig_body,
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+        }
+        wrong_pr = pr_payload("b" * 40)
+        wrong_pr["base"]["repo"]["id"] = 999
+        for mode in ("prepare", "publish"):
+            with self.subTest(mode=mode):
+                responses = (
+                    [json_response(unchanged), json_response(wrong_pr)]
+                    if mode == "prepare"
+                    else [
+                        json_response(unchanged),
+                        json_response([]),
+                        json_response(wrong_pr),
+                    ]
+                )
+                http, _ = make_http(responses)
+                pub = ConversationPublisher(http=http)
+                with self.assertRaisesRegex(
+                    GitHubConversationError, "repository id mismatched"
+                ):
+                    if mode == "prepare":
+                        pub.prepare_context(
+                            token="token",
+                            repository="owner/repo",
+                            pull_request=1,
+                            source_comment_id=10,
+                            source_updated_at=updated,
+                            app_slug="review-sensei[bot]",
+                            source_kind="issue",
+                            source_body_sha256=orig_sha,
+                            repository_id=1,
+                        )
+                    else:
+                        pub.publish(
+                            token="token",
+                            repository="owner/repo",
+                            pull_request=1,
+                            source_comment_id=10,
+                            source_updated_at=updated,
+                            head_sha="b" * 40,
+                            reply=ConversationReply.from_dict({"body": "Thanks."}),
+                            app_slug="review-sensei[bot]",
+                            root_comment_id=10,
+                            source_kind="issue",
+                            source_body_sha256=orig_sha,
+                            repository_id=1,
+                        )
 
 
 if __name__ == "__main__":

@@ -1707,10 +1707,24 @@ def bootstrap(
     ):
         raise ReviewInputError("live reviewed base or head conflicts")
     if purpose in {"command", "reply"}:
+        from .accepted_semantic_history import action_operation_key
+
+        op_key = (
+            None
+            if source is None
+            else action_operation_key(
+                purpose=purpose,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+                source=source,
+                configuration_digest=frozen.digest,
+            )
+        )
         setattr(
             caller,
             "_accepted_semantic_target",
-            (purpose, args.base_sha, args.head_sha, command_action),
+            (purpose, args.base_sha, args.head_sha, command_action, source, op_key),
         )
     title = pull.get("title", "")
     if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
