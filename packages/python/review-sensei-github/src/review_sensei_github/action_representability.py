@@ -82,6 +82,159 @@ def _command_target_count(command: MaintainerCommand) -> int:
     return 0
 
 
+def _plain_lifecycle_pages(
+    ledger: Any,
+    identity: SessionIdentity,
+    *,
+    lifecycle_parts_count: int,
+) -> int:
+    if (
+        getattr(ledger, "_quarantine_required", False)
+        or not getattr(ledger, "_inventory_complete", False)
+        or not callable(getattr(ledger, "_cached_comments", None))
+        or type(lifecycle_parts_count) is not int
+        or lifecycle_parts_count < 0
+    ):
+        return 1
+    items = ledger._cached_comments()
+    if not isinstance(items, (list, tuple)) or any(
+        not isinstance(item, dict)
+        or type(item.get("id")) is not int
+        or item["id"] <= 0
+        or not isinstance(item.get("body"), str)
+        for item in items
+    ):
+        return 1
+    if len({item["id"] for item in items}) != len(items):
+        return 1
+
+    from review_sensei.bounded_evidence import MAX_PART_BYTES, canonical_bytes
+    from review_sensei.session import MAX_SESSION_RECORD_BYTES
+
+    from .action_receipt import _RECEIPT_PAGE_SIZES
+    from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_PAGES
+    from .session_ledger import parse_session_comment, plain_session_comment_json_bound
+
+    root_indices = [
+        idx
+        for idx, item in enumerate(items)
+        if parse_session_comment(item["body"], identity=identity) is not None
+    ]
+    if len(root_indices) != 1:
+        return 1
+    root_index = root_indices[0]
+    root_wire = 6 * MAX_SESSION_RECORD_BYTES
+    if getattr(ledger, "_controlled_restart", None) is None:
+        grants = set(getattr(ledger, "_observed_consumed_grants", ()) or ())
+        accepted = getattr(ledger, "_accepted_consumed_grant", None)
+        if accepted is not None:
+            grants.add(accepted)
+        root_wire = plain_session_comment_json_bound(
+            consumed_grants=grants,
+            repository_id=identity.repository_id,
+            pull_request=identity.pull_request,
+        )
+    replaced_body = len(canonical_bytes(items[root_index]["body"]))
+    wire = (
+        len(canonical_bytes(items))
+        - replaced_body
+        + max(replaced_body, root_wire)
+        + 4096
+        + lifecycle_parts_count * (MAX_PART_BYTES + 512 + 4096)
+    )
+    if len(items) + lifecycle_parts_count < 100 and wire < MAX_GITHUB_RESPONSE_BYTES:
+        return 1
+    bounds = [len(canonical_bytes(item)) for item in items]
+    bounds[root_index] += max(0, root_wire - replaced_body) + 4096
+    bounds.extend([MAX_PART_BYTES + 512 + 4096] * lifecycle_parts_count)
+    pages = 0
+    offset = 0
+    while offset <= len(bounds):
+        for size in _RECEIPT_PAGE_SIZES:
+            if offset % size:
+                continue
+            members = bounds[offset : offset + size]
+            bound = 2 + sum(members) + max(0, len(members) - 1)
+            if bound < MAX_GITHUB_RESPONSE_BYTES:
+                pages += 1
+                offset += size
+                break
+        else:
+            return MAX_PAGINATION_PAGES
+        if pages > MAX_PAGINATION_PAGES:
+            return MAX_PAGINATION_PAGES
+    return max(1, pages)
+
+
+def _plain_multipage_counts(
+    ledger: Any,
+    identity: SessionIdentity,
+    *,
+    current_record: SessionRecord | None,
+    action: str,
+    writes_enabled: bool,
+    staged_parts_count: int = 0,
+) -> tuple[int, int]:
+    if (
+        not writes_enabled
+        or action == "status"
+        or getattr(ledger, "_quarantine_required", False)
+        or not getattr(ledger, "_inventory_complete", False)
+        or not callable(getattr(ledger, "_cached_comments", None))
+        or (
+            current_record is not None and current_record.quarantine_lineage is not None
+        )
+    ):
+        return 1, 1
+    lifecycle_parts_count = 0
+    if (
+        action
+        in {
+            "accept-risk",
+            "dismiss",
+            "defer",
+            "accept-coverage-uncertainty",
+            "verify",
+        }
+        and current_record is not None
+        and isinstance(current_record.finding_lifecycle, Mapping)
+    ):
+        manifest = current_record.finding_lifecycle.get("manifest")
+        if (
+            isinstance(manifest, Mapping)
+            and manifest.get("encoding") == "partitioned-json-v1"
+        ):
+            parts = manifest.get("parts")
+            if isinstance(parts, (list, tuple)):
+                lifecycle_parts_count = len(parts)
+    receipt_pages = 1
+    if action != "verify":
+        from .action_receipt import plan_plain_receipt_pages
+
+        planned = plan_plain_receipt_pages(
+            ledger,
+            identity,
+            staged_parts_count=max(0, staged_parts_count),
+            lifecycle_parts_count=lifecycle_parts_count,
+        )
+        if planned is not None:
+            receipt_pages = max(1, len(planned[1]))
+    lifecycle_pages = 1
+    if action in {
+        "accept-risk",
+        "dismiss",
+        "defer",
+        "accept-coverage-uncertainty",
+        "verify",
+    }:
+        lifecycle_pages = _plain_lifecycle_pages(
+            ledger,
+            identity,
+            lifecycle_parts_count=lifecycle_parts_count,
+        )
+    return receipt_pages, lifecycle_pages
+
+
 def _command_pricing(
     caller: Any,
     *,
@@ -90,7 +243,18 @@ def _command_pricing(
     ledger: Any = None,
     current_record: SessionRecord | None = None,
     finding_count: int = 0,
+    receipt_pages: int = 1,
+    lifecycle_pages: int = 1,
 ) -> ActionSettlementPricing:
+    if (
+        isinstance(receipt_pages, bool)
+        or not isinstance(receipt_pages, int)
+        or receipt_pages < 1
+        or isinstance(lifecycle_pages, bool)
+        or not isinstance(lifecycle_pages, int)
+        or lifecycle_pages < 1
+    ):
+        raise ReviewInputError("command pricing page counts must be positive integers")
     accounting = caller.accounting
     limit = int(accounting.configuration.limit)
     usable_work = int(getattr(caller, "usable", 0))
@@ -102,33 +266,36 @@ def _command_pricing(
     available_total = usable_work + terminal_undispatched
     committed_effective = max(0, limit - available_total)
 
+    lifecycle_overhead = 2 * (lifecycle_pages - 1)
     if not writes_enabled or action == "status":
         business_reqs = 0
         refinalize_reqs = 0
         receipt_reqs = 0
     elif action in {"accept-risk", "dismiss", "defer"}:
         if finding_count > 0:
-            # Align batch pricing with PR #481 preflight_command_finalization math:
-            # 7 lifecycle calls/finding, 4 + 5*K thread cleanup, and 8 receipt calls.
-            business_reqs = 3 + 7 * finding_count
+            # Align batch pricing with PR #481 preflight_command_finalization math
+            # and PR #488 multi-page overhead:
+            # 7 lifecycle calls/finding (+ 2*(lifecycle_pages-1)),
+            # 4 + 5*K thread cleanup, and 6 + 2*receipt_pages receipt calls.
+            business_reqs = 3 + 7 * finding_count + lifecycle_overhead
             refinalize_reqs = 3 + 4 + 5 * finding_count
-            receipt_reqs = 8
+            receipt_reqs = 6 + 2 * receipt_pages
         else:
-            business_reqs = 3
+            business_reqs = 3 + lifecycle_overhead
             refinalize_reqs = 3
-            receipt_reqs = 2
+            receipt_reqs = 6 + 2 * receipt_pages if receipt_pages > 1 else 2
     elif action == "accept-coverage-uncertainty":
-        business_reqs = 3
+        business_reqs = 3 + lifecycle_overhead
         refinalize_reqs = 3
-        receipt_reqs = 2
+        receipt_reqs = 6 + 2 * receipt_pages if receipt_pages > 1 else 2
     elif action == "verify":
-        business_reqs = 3
+        business_reqs = 3 + lifecycle_overhead
         refinalize_reqs = 3
         receipt_reqs = 0
     else:
-        business_reqs = 3
+        business_reqs = 3 + lifecycle_overhead
         refinalize_reqs = 0
-        receipt_reqs = 2
+        receipt_reqs = 6 + 2 * receipt_pages if receipt_pages > 1 else 2
 
     cold_snapshot_reads = _unlisted_snapshot_part_reads(
         ledger,
@@ -263,6 +430,13 @@ def guard_current_command_representability(
                     "snapshot preview hydration capability is unavailable"
                 )
     consumed_grants = tuple(getattr(ledger, "_consumed_grants", ()) or ())
+    receipt_pages, lifecycle_pages = _plain_multipage_counts(
+        ledger,
+        identity,
+        current_record=current_record,
+        action=command.action,
+        writes_enabled=writes_enabled,
+    )
     pricing = _command_pricing(
         caller,
         action=command.action,
@@ -270,6 +444,8 @@ def guard_current_command_representability(
         ledger=ledger,
         current_record=current_record,
         finding_count=_command_target_count(command),
+        receipt_pages=receipt_pages,
+        lifecycle_pages=lifecycle_pages,
     )
     admitted_action = caller.accounting.action
     if (
@@ -283,45 +459,79 @@ def guard_current_command_representability(
         else None
     )
     details: dict[str, object] = {}
-    _preview_res, _preview_rec, report = preview_session_command_representability(
-        identity=identity,
-        capacity_details=details,
-        now=now,
-        current_record=current_record,
-        command=command,
-        intent_sha256=intent_digest,
-        binding=binding,
-        finding_fingerprints=finding_fingerprints,
-        finding_inventory=finding_inventory,
-        prior_inventories=prior_inventories,
-        actor_role=actor_role,
-        policy_digest=policy_digest,
-        provenance=provenance,
-        incomplete_coverage=incomplete_coverage,
-        enable_disposition_snapshot_writes=bool(
-            getattr(ledger, "enable_disposition_snapshot_writes", False)
-        ),
-        supports_paged_disposition_snapshot_writes=bool(
-            getattr(ledger, "supports_paged_disposition_snapshot_writes", False)
-        ),
-        evidence_budget=(
-            getattr(ledger, "evidence_budget", None)
-            or getattr(caller, "budget_view", None)
-        ),
-        source_ledger=ledger,
-        accounting_version=str(caller.accounting.version),
-        pricing=pricing,
-        consumed_grants=consumed_grants,
-        allow_v3_writer=False,
-        result_metadata={"accepted_semantic_history": history}
-        if history is not None
-        else None,
-        future_reserve_bytes=(
-            preflight_history_capacity(caller, identity, admitted_action["intent"])
-            if admitted_action is not None
-            else 0
-        ),
-    )
+
+    def _run_preview(active_pricing: ActionSettlementPricing):
+        return preview_session_command_representability(
+            identity=identity,
+            capacity_details=details,
+            now=now,
+            current_record=current_record,
+            command=command,
+            intent_sha256=intent_digest,
+            binding=binding,
+            finding_fingerprints=finding_fingerprints,
+            finding_inventory=finding_inventory,
+            prior_inventories=prior_inventories,
+            actor_role=actor_role,
+            policy_digest=policy_digest,
+            provenance=provenance,
+            incomplete_coverage=incomplete_coverage,
+            enable_disposition_snapshot_writes=bool(
+                getattr(ledger, "enable_disposition_snapshot_writes", False)
+            ),
+            supports_paged_disposition_snapshot_writes=bool(
+                getattr(ledger, "supports_paged_disposition_snapshot_writes", False)
+            ),
+            evidence_budget=(
+                getattr(ledger, "evidence_budget", None)
+                or getattr(caller, "budget_view", None)
+            ),
+            source_ledger=ledger,
+            accounting_version=str(caller.accounting.version),
+            pricing=active_pricing,
+            consumed_grants=consumed_grants,
+            allow_v3_writer=False,
+            result_metadata={"accepted_semantic_history": history}
+            if history is not None
+            else None,
+            future_reserve_bytes=(
+                preflight_history_capacity(caller, identity, admitted_action["intent"])
+                if admitted_action is not None
+                else 0
+            ),
+        )
+
+    _preview_res, _preview_rec, report = _run_preview(pricing)
+    if report.representable and writes_enabled and command.action != "status":
+        staged_parts = details.get("staged_parts")
+        staged_count = (
+            len(staged_parts) if isinstance(staged_parts, (tuple, list)) else 0
+        )
+        if staged_count > 0:
+            staged_receipt_pages, staged_lifecycle_pages = _plain_multipage_counts(
+                ledger,
+                identity,
+                current_record=current_record,
+                action=command.action,
+                writes_enabled=writes_enabled,
+                staged_parts_count=staged_count,
+            )
+            if (
+                staged_receipt_pages > receipt_pages
+                or staged_lifecycle_pages > lifecycle_pages
+            ):
+                details.clear()
+                pricing = _command_pricing(
+                    caller,
+                    action=command.action,
+                    writes_enabled=writes_enabled,
+                    ledger=ledger,
+                    current_record=current_record,
+                    finding_count=_command_target_count(command),
+                    receipt_pages=staged_receipt_pages,
+                    lifecycle_pages=staged_lifecycle_pages,
+                )
+                _preview_res, _preview_rec, report = _run_preview(pricing)
     if report.representable:
         if capacity_preview is not None:
             # Sizing data only. The preview record may contain synthetic part
@@ -405,8 +615,21 @@ def require_action_settlement_representable(
         if block.block_id != getattr(caller, "_block", None)
     )
     committed_effective = max(0, limit - (usable_work + terminal_undispatched))
+    receipt_reqs = max(0, int(extra_work_requests))
+    if receipt_reqs > 0:
+        receipt_pages, _ = _plain_multipage_counts(
+            ledger,
+            identity,
+            current_record=current_record
+            if isinstance(current_record, SessionRecord)
+            else None,
+            action=action_name or "command",
+            writes_enabled=True,
+        )
+        if receipt_pages > 1:
+            receipt_reqs = max(receipt_reqs, 6 + 2 * receipt_pages)
     pricing = ActionSettlementPricing(
-        receipt_publication_requests=max(0, int(extra_work_requests)),
+        receipt_publication_requests=receipt_reqs,
         terminal_close_requests=1,
         committed_requests=committed_effective,
         original_api_limit=max(1, limit),

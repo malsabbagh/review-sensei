@@ -2446,7 +2446,7 @@ class LateNativeEffectsEvidenceTests(unittest.TestCase):
 class OwnerCessationEvidenceTests(unittest.TestCase):
     """Malformed Actions evidence must never release a predecessor hold."""
 
-    def probe(self, run_changes=None, page_changes=None):
+    def probe(self, run_changes=None, page_changes=None, attempt2_page=None):
         from review_sensei_github.pre_entry_abort_recovery import _probe_owner_ceased
 
         run = {
@@ -2470,8 +2470,32 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
                 }
             ],
         }
+        default_attempt2 = {
+            "total_count": 1,
+            "jobs": [
+                {
+                    "id": 20,
+                    "run_id": 1001,
+                    "run_attempt": 2,
+                    "name": "ReviewSensei / hosted",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "completed_at": "2026-11-10T12:05:00Z",
+                    "steps": [
+                        {
+                            "name": "Prepare hosted review",
+                            "status": "completed",
+                            "conclusion": "failure",
+                        }
+                    ],
+                }
+            ],
+        }
         run.update(run_changes or {})
         page.update(page_changes or {})
+        attempt2 = copy.deepcopy(
+            attempt2_page if attempt2_page is not None else default_attempt2
+        )
         requests = []
 
         def opener(request, timeout=None):
@@ -2479,6 +2503,11 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
             requests.append(path)
             if path.endswith("/actions/runs/1001"):
                 return json_response(run)
+            if (
+                path.endswith("/actions/runs/1001/attempts/2/jobs")
+                and run.get("run_attempt") == 2
+            ):
+                return json_response(attempt2)
             self.assertTrue(path.endswith("/actions/runs/1001/attempts/1/jobs"))
             return json_response(page)
 
@@ -2490,7 +2519,8 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
             _base_accounting(),
             "synthetic-token",
         )
-        self.assertLessEqual(len(requests), 2)
+        expected_max_requests = 3 if run.get("run_attempt") == 2 else 2
+        self.assertLessEqual(len(requests), expected_max_requests)
         return result
 
     def test_terminal_failure_and_cancellation_are_cessation_only(self):
