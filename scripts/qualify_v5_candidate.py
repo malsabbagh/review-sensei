@@ -57,8 +57,25 @@ def installed_run(run_id, hosted):
         "identical",
     }:
         raise ValueError("installed qualifier is outside reviewed main")
+    upstream = docs.channel_run("release-github.yml", hosted["tag"], hosted["source"])
+    if (
+        upstream["id"] != hosted["run_id"]
+        or upstream["run_attempt"] != hosted["run_attempt"]
+        or upstream.get("status") != "completed"
+        or upstream.get("conclusion") != "success"
+        or datetime.fromisoformat(upstream["created_at"])
+        > datetime.fromisoformat(run["created_at"])
+    ):
+        raise ValueError(
+            "installed qualification trigger differs from the hosted publication"
+        )
+    # Look from the trigger onward. A later duplicate cannot hide the first run.
     query = urlencode(
-        {"event": "workflow_run", "branch": "main", "created": ">=" + run["created_at"]}
+        {
+            "event": "workflow_run",
+            "branch": "main",
+            "created": ">=" + upstream["created_at"],
+        }
     )
     runs = docs.api_pages(
         f"actions/workflows/published-cli.yml/runs?{query}", "workflow_runs"

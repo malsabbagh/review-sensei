@@ -790,6 +790,62 @@ def unused(version: str) -> None:
     absent_registry(f"https://pypi.org/pypi/review-sensei/{version}/json")
 
 
+def ci_jobs_ready(run: dict[str, Any], *, npm: bool, active: bool) -> bool:
+    """Require the newest execution of every job belonging to this admission."""
+    attempt = run["run_attempt"]
+    jobs = docs.api_pages(f"actions/runs/{run['id']}/jobs?filter=all", "jobs")
+    if attempt > 1 and not any(job.get("run_attempt") == attempt for job in jobs):
+        if active:
+            return False
+        raise ValueError("current CI attempt has no job evidence")
+    names = {job["name"] for job in jobs}
+    combined = NPM_CI_JOBS | {"Required checks"}
+    required = CI_JOBS | combined if npm else CI_JOBS
+    if not required.issubset(names):
+        if active:
+            return False
+        raise ValueError("exact-head CI is missing required jobs")
+    # Unknown jobs remain blocking. Only explicitly enumerated npm jobs and
+    # their combined branch aggregate are independent of a Python release.
+    selected = names if npm else names - combined
+    for name in selected:
+        matches = [job for job in jobs if job["name"] == name]
+        attempts = [job.get("run_attempt") for job in matches]
+        if any(type(n) is not int or not 1 <= n <= attempt for n in attempts):
+            raise ValueError("CI job attempt identity is invalid")
+        latest = [job for job in matches if job["run_attempt"] == max(attempts)]
+        if len(latest) != 1:
+            raise ValueError("latest exact-head CI job identity is ambiguous")
+        job = latest[0]
+        if active and job.get("status") != "completed":
+            return False
+        if job.get("status") != "completed" or job.get("conclusion") != "success":
+            raise ValueError(f"latest required CI job did not succeed: {name}")
+    if active and attempt > 1:
+        # An all-jobs retry can expose prior successes before replacement
+        # executions have materialized. Use GitHub's current execution view
+        # before admitting an in-flight retry.
+        effective = docs.api_pages(
+            f"actions/runs/{run['id']}/jobs?filter=latest", "jobs"
+        )
+        effective_names = [
+            job["name"]
+            for job in effective
+            if job["name"] in selected
+            and type(job.get("run_attempt")) is int
+            and 1 <= job["run_attempt"] <= attempt
+            and job.get("status") == "completed"
+            and job.get("conclusion") == "success"
+        ]
+        if (
+            not any(j.get("run_attempt") == attempt for j in effective)
+            or len(effective_names) != len(selected)
+            or set(effective_names) != selected
+        ):
+            return False
+    return True
+
+
 def ci_once(sha: str, *, npm: bool = False) -> dict[str, Any] | None:
     if not docs.SHA.fullmatch(sha):
         raise ValueError("CI requires exact source SHA")
@@ -830,58 +886,9 @@ def ci_once(sha: str, *, npm: bool = False) -> dict[str, Any] | None:
     ):
         raise ValueError("exact-head CI failed; repair/retry CI without tagging")
 
-    jobs = docs.api_pages(f"actions/runs/{run['id']}/jobs?filter=all", "jobs")
-    if attempt > 1 and not any(job.get("run_attempt") == attempt for job in jobs):
-        if active:
-            return None
-        raise ValueError("current CI attempt has no job evidence")
-    names = {job["name"] for job in jobs}
-    combined = NPM_CI_JOBS | {"Required checks"}
-    required = CI_JOBS | combined if npm else CI_JOBS
-    if not required.issubset(names):
-        if active:
-            return None
-        raise ValueError("exact-head CI is missing required jobs")
-    # Unknown jobs remain blocking. Only explicitly enumerated npm jobs and
-    # their combined branch aggregate are independent of a Python release.
-    selected = names if npm else names - combined
-    for name in selected:
-        matches = [job for job in jobs if job["name"] == name]
-        attempts = [job.get("run_attempt") for job in matches]
-        if any(type(n) is not int or not 1 <= n <= attempt for n in attempts):
-            raise ValueError("CI job attempt identity is invalid")
-        latest = [job for job in matches if job["run_attempt"] == max(attempts)]
-        if len(latest) != 1:
-            raise ValueError("latest exact-head CI job identity is ambiguous")
-        job = latest[0]
-        if active and job.get("status") != "completed":
-            return None
-        if job.get("status") != "completed" or job.get("conclusion") != "success":
-            raise ValueError(f"latest required CI job did not succeed: {name}")
-    if active and attempt > 1:
-        # An all-jobs retry can expose prior successes before replacement
-        # executions have materialized. Use GitHub's current execution view
-        # before admitting an in-flight retry.
-        effective = docs.api_pages(
-            f"actions/runs/{run['id']}/jobs?filter=latest", "jobs"
-        )
-        effective_names = [
-            job["name"]
-            for job in effective
-            if job["name"] in selected
-            and type(job.get("run_attempt")) is int
-            and 1 <= job["run_attempt"] <= attempt
-            and job.get("status") == "completed"
-            and job.get("conclusion") == "success"
-        ]
-        if (
-            not any(j.get("run_attempt") == attempt for j in effective)
-            or len(effective_names) != len(selected)
-            or set(effective_names) != selected
-        ):
-            return None
+    if not ci_jobs_ready(run, npm=npm, active=active):
+        return None
     fresh = docs.api(f"actions/runs/{run['id']}")
-    latest_runs = docs.api_pages(query, "workflow_runs")
     # An independent npm job may finish between reads on the same attempt.
     finished = (
         active
@@ -889,28 +896,31 @@ def ci_once(sha: str, *, npm: bool = False) -> dict[str, Any] | None:
         and fresh.get("conclusion") in {"success", "failure"}
     )
     if (
-        not latest_runs
-        or max(r["id"] for r in latest_runs) != run["id"]
-        or (
-            not finished
-            and (fresh.get("status"), fresh.get("conclusion"))
-            != (run.get("status"), run.get("conclusion"))
-        )
-        or any(
-            fresh.get(key) != run.get(key)
-            for key in (
-                "id",
-                "head_sha",
-                "head_branch",
-                "path",
-                "event",
-                "repository",
-                "head_repository",
-                "pull_requests",
-                "run_attempt",
-            )
+        not finished
+        and (fresh.get("status"), fresh.get("conclusion"))
+        != (run.get("status"), run.get("conclusion"))
+    ) or any(
+        fresh.get(key) != run.get(key)
+        for key in (
+            "id",
+            "head_sha",
+            "head_branch",
+            "path",
+            "event",
+            "repository",
+            "head_repository",
+            "pull_requests",
+            "run_attempt",
         )
     ):
+        raise ValueError("CI advanced during qualification; retry the check")
+    if finished:
+        # The terminal inventory can include jobs created after our active read.
+        # Reapply the same positive contract before accepting its conclusion.
+        ci_jobs_ready(fresh, npm=npm, active=False)
+    latest_runs = docs.api_pages(query, "workflow_runs")
+    latest = max(latest_runs, key=lambda item: item["id"], default={})
+    if (latest.get("id"), latest.get("run_attempt")) != (run["id"], attempt):
         raise ValueError("CI advanced during qualification; retry the check")
     return fresh
 

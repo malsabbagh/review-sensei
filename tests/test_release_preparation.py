@@ -1103,6 +1103,28 @@ class PreparationQualificationTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         self.qualify([job], jobs, npm=True)
 
+    def test_ci_finishing_during_admission_rechecks_terminal_jobs(self):
+        active = ci_run(status="in_progress", conclusion=None)
+        finished = ci_run(conclusion="failure")
+        first = ci_jobs()
+        for name in ("New required admission check", *sorted(PREP.NPM_CI_JOBS)[:1]):
+            jobs = [*first, {**first[0], "name": name, "conclusion": "failure"}]
+            inventories = iter([first, jobs])
+
+            def pages(path, key):
+                return [active] if key == "workflow_runs" else next(inventories)
+
+            with (
+                self.subTest(name=name),
+                patch.object(PREP.docs, "api_pages", side_effect=pages),
+                patch.object(PREP.docs, "api", return_value=finished),
+            ):
+                if name in PREP.NPM_CI_JOBS:
+                    self.assertEqual(PREP.ci_once(SHA), finished)
+                else:
+                    with self.assertRaisesRegex(ValueError, "did not succeed"):
+                        PREP.ci_once(SHA)
+
     def test_full_npm_ci_requires_all_five_native_candidates_and_consumers(self):
         jobs = ci_jobs()
         jobs.extend(

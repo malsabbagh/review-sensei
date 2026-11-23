@@ -310,7 +310,7 @@ def channel_run(workflow: str, tag: str, source: str) -> dict[str, Any]:
     query = urlencode({"event": "push", "branch": tag})
     runs = api_pages(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs")
     if len(runs) != 1:
-        raise ValueError("Pages requires one original run for each release channel")
+        raise ValueError("one original run is required for each release channel")
     run = runs[0]
     if (
         run.get("path") != f".github/workflows/{workflow}"
@@ -325,7 +325,7 @@ def channel_run(workflow: str, tag: str, source: str) -> dict[str, Any]:
         or run["id"] < 1
         or run["run_attempt"] < 1
     ):
-        raise ValueError("Pages channel version/source identity differs")
+        raise ValueError("release channel version/source identity differs")
     return run
 
 

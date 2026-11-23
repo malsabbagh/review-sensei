@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -69,6 +70,19 @@ class CandidateTests(unittest.TestCase):
                     "review-sensei-github": self.hosted,
                 }
             },
+        }
+        self.trigger = {
+            "id": 20,
+            "run_attempt": 1,
+            "created_at": "2025-12-31T23:58:00Z",
+            "head_sha": SOURCE,
+            "head_branch": self.hosted["tag"],
+            "path": ".github/workflows/release-github.yml",
+            "event": "push",
+            "repository": self.run["repository"],
+            "head_repository": self.run["head_repository"],
+            "status": "completed",
+            "conclusion": "success",
         }
         self.files = {
             "published-cli-publication-gate": {
@@ -180,8 +194,11 @@ class CandidateTests(unittest.TestCase):
             return [self.ci_run]
         if path == "actions/runs/40/jobs?filter=all":
             return self.ci_jobs
+        if path.startswith("actions/workflows/release-github.yml/runs?"):
+            return [self.trigger]
         if path.startswith("actions/workflows/published-cli.yml/runs?"):
-            return self.runs
+            start = parse_qs(path.split("?", 1)[1])["created"][0].removeprefix(">=")
+            return [r for r in self.runs if r["created_at"] >= start]
         if path == "actions/runs/30/jobs?filter=all":
             return self.jobs
         self.assertEqual(path, "actions/runs/30/artifacts")
@@ -335,6 +352,25 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             self.qualify()
         self.assertFalse((self.root / "v5-candidate.json").exists())
+
+    def test_selecting_later_duplicate_cannot_hide_earlier_automatic_run(self):
+        self.runs.append({**self.run, "id": 29, "created_at": "2025-12-31T23:59:00Z"})
+        with self.assertRaisesRegex(ValueError, "stale or ambiguous"):
+            self.qualify()
+
+    def test_installed_qualification_rechecks_upstream_identity_and_time(self):
+        for changes in [
+            {"id": 22},
+            {"run_attempt": 2},
+            {"status": "in_progress", "conclusion": None},
+            {"created_at": "2026-01-02T00:00:00Z"},
+        ]:
+            with (
+                self.subTest(changes=changes),
+                patch.dict(self.trigger, changes),
+                self.assertRaisesRegex(ValueError, "trigger differs"),
+            ):
+                self.qualify()
 
     def test_installed_retry_and_changed_lease_cannot_reuse_old_evidence(self):
         self.runs.append({**self.run, "id": 31})
