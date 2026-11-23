@@ -236,7 +236,7 @@ def qualify(source, old_object, run_id, output):
         installed["harness_sha"],
     ):
         raise ValueError("installed Python qualification changed before promotion")
-    gate.assert_current(receipt)
+    gate.assert_current(receipt, before_move=True)
     (output / "v5-candidate.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
 

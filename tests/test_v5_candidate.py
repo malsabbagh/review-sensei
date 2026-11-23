@@ -245,6 +245,7 @@ class CandidateTests(unittest.TestCase):
                 )
                 self.assertTrue((self.root / "v5-candidate.json").is_file())
         self.assertEqual(self.current.call_count, 3)
+        self.current.assert_called_with(self.receipt, before_move=True)
 
     def test_current_publication_and_all_installed_lanes_required(self):
         lane = self.jobs[-1]

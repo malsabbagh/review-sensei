@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from qualify_published_cli import HOSTED_MANIFEST, exact_version, hosted_version
+from wait_for_publication import combined_core_publication
 
 
 def github_read(repository, path):
@@ -80,11 +81,14 @@ def recheck(report, peer, get, repository):
         ),
     ):
         run = get(f"actions/runs/{run_id}")
+        ready = run.get("status") == "completed" and run.get("conclusion") == "success"
+        if workflow == "release.yml" and peer.get("mode") == "combined-core-python":
+            proof = combined_core_publication(tag, source)
+            ready = bool(proof) and all(peer.get(k) == v for k, v in proof.items())
         if (
             run.get("id") != run_id
             or run.get("run_attempt") != attempt
-            or run.get("status") != "completed"
-            or run.get("conclusion") != "success"
+            or not ready
             or run.get("head_sha") != source
             or run.get("head_branch") != tag
             or run.get("path") != ".github/workflows/" + workflow

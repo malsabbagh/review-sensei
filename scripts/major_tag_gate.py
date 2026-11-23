@@ -311,10 +311,18 @@ def verify_wheel(asset, binding, version, output):
     return digest
 
 
-def assert_current(receipt):
+def assert_current(receipt, *, before_move=False):
+    if (
+        (receipt.get("mode") == "v5-candidate") != before_move
+        or ("previous_source_sha" in receipt) != before_move
+        or (before_move and receipt["channel"] != "v5")
+    ):
+        raise ValueError(
+            "pre-move and promoted-channel receipts cannot be interchanged"
+        )
     if signed_major(receipt["channel"]) != (
         receipt["tag_object"],
-        receipt.get("previous_source_sha", receipt["source_sha"]),
+        receipt["previous_source_sha"] if before_move else receipt["source_sha"],
     ):
         raise ValueError(
             "major tag changed during validation; no current-channel qualification"
@@ -427,11 +435,13 @@ def qualify(selection, output, *, reserved=False):
     }
     if surface["status"] != "PASS":
         receipt["error"] = surface["error"]
-    assert_current(receipt)
+    assert_current(receipt, before_move=selected["mode"] == "v5-candidate")
     return receipt
 
 
 def workflow_outputs(receipt):
+    if receipt.get("mode") == "v5-candidate" or "previous_source_sha" in receipt:
+        raise ValueError("pre-move evidence cannot emit promoted-channel outputs")
     values = {"eligible": str(receipt["status"] == "PASS").lower()}
     if receipt["status"] == "PASS":
         values.update(

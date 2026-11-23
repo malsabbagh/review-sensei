@@ -1214,7 +1214,38 @@ class FullGateTests(unittest.TestCase):
             patch.object(gate, "signed_major", return_value=(OBJECT, "d" * 40)),
             self.assertRaisesRegex(ValueError, "changed"),
         ):
-            gate.assert_current(receipt)
+            gate.assert_current(receipt, before_move=True)
+
+    def test_post_move_recheck_rejects_a_passing_candidate_receipt(self):
+        previous = "e" * 40
+        selected = {
+            "mode": "v5-candidate",
+            "channel": "v5",
+            "tag_object": OBJECT,
+            "source_sha": SOURCE,
+        }
+        with patch.object(gate, "signed_major", return_value=(OBJECT, previous)):
+            receipt = gate.qualify(selected, self.root / "candidate-data")
+            evidence = self.root / "v5-candidate.json"
+            evidence.write_text(json.dumps(receipt))
+            final = self.root / "post-move"
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    ["gate", "--recheck", str(evidence), "--output", str(final)],
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(gate.main(), 1)
+            self.assertEqual(
+                json.loads((final / "gate.json").read_text())["status"], "ERROR"
+            )
+            with self.assertRaisesRegex(ValueError, "pre-move"):
+                gate.assert_current({**receipt, "mode": "push"})
+            with self.assertRaisesRegex(ValueError, "pre-move"):
+                gate.workflow_outputs(receipt)
 
     def test_hosted_manifest_must_pin_the_exact_engine_before_wheel(self):
         original = (ROOT / installer.HOSTED_MANIFEST).read_text()

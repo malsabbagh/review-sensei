@@ -646,7 +646,7 @@ class BootstrapContracts(unittest.TestCase):
         core, hosted = "b" * 40, "a" * 40
         report = {
             "mode": "confirmed-hosted-pypi-publish",
-            "version": "0.8.11",
+            "version": "0.8.6",
             "github_version": "0.3.12",
             "core_tag_object": "c" * 40,
             "github_tag_object": "d" * 40,
@@ -658,7 +658,7 @@ class BootstrapContracts(unittest.TestCase):
         peer = {
             "status": "PASS",
             "workflow": "release.yml",
-            "tag": "v0.8.11",
+            "tag": "v0.8.6",
             "source": core,
             "run_id": 41,
             "run_attempt": 2,
@@ -673,7 +673,7 @@ class BootstrapContracts(unittest.TestCase):
                 "conclusion": "success",
                 "event": "push",
                 "head_sha": core if is_core else hosted,
-                "head_branch": "v0.8.11" if is_core else "github-v0.3.12",
+                "head_branch": "v0.8.6" if is_core else "github-v0.3.12",
                 "path": ".github/workflows/"
                 + ("release.yml" if is_core else "release-github.yml"),
                 "repository": {"full_name": "owner/repo"},
@@ -684,10 +684,41 @@ class BootstrapContracts(unittest.TestCase):
             return original(int(path.rsplit("/", 1)[-1]))
 
         def identity(get, tag):
-            return ("c" * 40, core) if tag == "v0.8.11" else ("d" * 40, hosted)
+            return ("c" * 40, core) if tag == "v0.8.6" else ("d" * 40, hosted)
 
         with patch("published_cli_release_gate.signed_identity", side_effect=identity):
             recheck(report, peer, get, "owner/repo")
+            proof = {
+                "run_id": 41,
+                "run_attempt": 2,
+                "mode": "combined-core-python",
+                "workflow": "release.yml",
+                "publication_job_id": 100,
+                "publication_attempt": 1,
+            }
+            combined = {**peer, **proof}
+
+            def failed_run(path):
+                return {**get(path), "status": "completed", "conclusion": "failure"}
+
+            def failed_core(path):
+                return failed_run(path) if path.endswith("/41") else get(path)
+
+            with patch(
+                "published_cli_release_gate.combined_core_publication",
+                return_value=proof,
+            ) as verify:
+                recheck(report, combined, failed_core, "owner/repo")
+                verify.assert_called_once_with("v0.8.6", core)
+                for receipt, read in [
+                    (combined, failed_run),
+                    ({**combined, "publication_job_id": 1}, failed_core),
+                ]:
+                    with self.assertRaisesRegex(ValueError, "changed"):
+                        recheck(report, receipt, read, "owner/repo")
+                verify.return_value = None
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    recheck(report, combined, failed_core, "owner/repo")
             for identifier in (41, 42):
 
                 def changed(path):
@@ -700,7 +731,7 @@ class BootstrapContracts(unittest.TestCase):
 
                 with self.subTest(run=identifier), self.assertRaises(ValueError):
                     recheck(report, peer, changed, "owner/repo")
-        for changed_tag in ("v0.8.11", "github-v0.3.12"):
+        for changed_tag in ("v0.8.6", "github-v0.3.12"):
 
             def moved(get, tag):
                 obj, source = identity(get, tag)
