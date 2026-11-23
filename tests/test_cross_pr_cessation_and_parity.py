@@ -23,7 +23,11 @@ from review_sensei_github.action_representability import (
 )
 from review_sensei_github.action_run import UnstartedCallerRecoveryGate
 from review_sensei_github.api_run_owner import ApiRunActionsEvidence
-from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
+from review_sensei_github.application import (
+    GitHubApplication,
+    GitHubWriteOptions,
+    _RecordedHumanAssessmentReply,
+)
 from review_sensei_github.conversation import (
     ConversationPublisher,
     PreparedConversation,
@@ -367,20 +371,9 @@ class PreEntryAbortCessationAndPagingTests(unittest.TestCase):
         self.assertEqual(comment_sizes, [100, 20, 10, 10])
         self.assertEqual(review_sizes, [100, 20, 10, 10])
 
-        # Also test full step-down 100 -> 20 -> 10 -> 5 -> 1 when single items are ~120 KiB.
-        huge_pad = "y" * 120_000
-        huge_reviews = [
-            {
-                "id": 300 + i,
-                "body": f"big {i} {huge_pad}",
-                "commit_id": HEAD,
-                "user": {"type": "User", "id": 111, "login": "human"},
-            }
-            for i in range(5)
-        ]
-        # 5 items * 120KB = 600KB (>512KiB) -> 100,20,10,5 all fail >512KiB, 1 succeeds!
-        # Wait: 6 requests (100,20,10,5,1 + 5 items + EOF = 10 requests? 4 retries + 6 pages = 10!).
-        # With 4 items * 140KB = 560KB (>512KiB) on page=1 (size 5 fails too), 1 succeeds in 4+5=9 <= 10!
+        # Also exercise full step-down 100 -> 20 -> 10 -> 5 -> 1:
+        # 4 items * 140 KB = 560 KB (>512 KiB) so per_page 100, 20, 10, 5 fail on page=1,
+        # and per_page=1 succeeds in 4 retries + 5 page reads (4 items + EOF) = 9 <= 10.
         huge_pad_140 = "y" * 140_000
         huge_reviews = [
             {
@@ -989,32 +982,44 @@ class ActionRepresentabilityMultiPagePricingTests(unittest.TestCase):
 
 
 class ReassessmentSameSecondKeyParityTests(unittest.TestCase):
-    """Task 4: `reassessment-v2` and `reassessment-reply-v2` keys include source_body SHA-256."""
+    """Task 4: `reassessment-v2` and `reassessment-reply-v2` preserve same-second keys and replay-authority guards."""
 
     def _run_reassessment_for_body(
         self,
         *,
         source_body: str,
         with_bundle: bool,
-    ) -> str:
+        recorded_replay_context: str | None = None,
+        publish_log: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
         captured_keys: list[str] = []
-        fixture_reply = HumanAssessmentReply(
-            body="Reassessed",
-            decisions=(
-                HumanAssessmentDecision(
-                    fingerprint="f" * 64,
-                    decision="dismissed",
-                    rationale="Checked",
-                    human_evidence="Explained",
-                    diff_evidence="Verified",
-                ),
+        publish_calls = publish_log if publish_log is not None else []
+        decisions = (
+            HumanAssessmentDecision(
+                fingerprint="f" * 64,
+                decision="dismissed",
+                rationale="Checked",
+                human_evidence="Explained",
+                diff_evidence="Verified",
             ),
         )
+        returned_reply: HumanAssessmentReply
+        if recorded_replay_context is not None:
+            returned_reply = _RecordedHumanAssessmentReply(
+                body="Reassessed",
+                decisions=decisions,
+                replay_context=recorded_replay_context,
+            )
+        else:
+            returned_reply = HumanAssessmentReply(
+                body="Reassessed",
+                decisions=decisions,
+            )
 
         def fake_through_operation(_self, **kwargs):
             captured_keys.append(str(kwargs["delivery_id"]))
             self.assertEqual(kwargs["delivery_id"], kwargs["grant"])
-            return fixture_reply
+            return returned_reply
 
         finding = HumanReviewFinding(
             fingerprint="f" * 64,
@@ -1074,7 +1079,8 @@ class ReassessmentSameSecondKeyParityTests(unittest.TestCase):
             def prepare(self, **_kwargs):
                 return human
 
-            def publish(self, **_kwargs):
+            def publish(self, **kwargs):
+                publish_calls.append(kwargs)
                 return ReplyResult(status="replied", comment_id=900)
 
         class _FakeConversationPublisher(ConversationPublisher):
@@ -1138,34 +1144,42 @@ class ReassessmentSameSecondKeyParityTests(unittest.TestCase):
                 run_attempt="1",
             )
         self.assertEqual(len(captured_keys), 1)
-        return captured_keys[0]
+        return captured_keys[0], publish_calls
 
-    def test_reassessment_and_reassessment_reply_keys_change_on_same_second_edit(
+    def test_reassessment_and_reassessment_reply_keys_preserve_same_second_key_and_reject_mismatched_replay_context(
         self,
     ) -> None:
         body_a = "@reviewsensei fixed in commit A"
         body_b = "@reviewsensei fixed in commit B"
-        hash_a = hashlib.sha256(body_a.encode("utf-8")).hexdigest()
-        hash_b = hashlib.sha256(body_b.encode("utf-8")).hexdigest()
 
         for with_bundle, prefix in (
             (True, "reassessment-v2"),
             (False, "reassessment-reply-v2"),
         ):
             with self.subTest(prefix=prefix):
-                key_a = self._run_reassessment_for_body(
+                key_a, calls_a = self._run_reassessment_for_body(
                     source_body=body_a, with_bundle=with_bundle
                 )
-                key_b = self._run_reassessment_for_body(
+                key_b, calls_b = self._run_reassessment_for_body(
                     source_body=body_b, with_bundle=with_bundle
                 )
-                self.assertEqual(
-                    key_a, f"{prefix}:issue:41:2026-10-26T00:00:00Z:{hash_a}"
-                )
-                self.assertEqual(
-                    key_b, f"{prefix}:issue:41:2026-10-26T00:00:00Z:{hash_b}"
-                )
-                self.assertNotEqual(key_a, key_b)
+                expected_key = f"{prefix}:issue:41:2026-10-26T00:00:00Z"
+                self.assertEqual(key_a, expected_key)
+                self.assertEqual(key_b, expected_key)
+                self.assertEqual(len(calls_a), 1)
+                self.assertEqual(len(calls_b), 1)
+
+                rejected_calls: list[dict] = []
+                with self.assertRaisesRegex(
+                    ReviewInputError, "human assessment replay authority changed"
+                ):
+                    self._run_reassessment_for_body(
+                        source_body=body_b,
+                        with_bundle=with_bundle,
+                        recorded_replay_context="c" * 64,
+                        publish_log=rejected_calls,
+                    )
+                self.assertEqual(rejected_calls, [])
 
 
 if __name__ == "__main__":
