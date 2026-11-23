@@ -35,10 +35,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/release_channels.py qualify --channel python --root "$GITHUB_WORKSPACE"
-      - name: Require unchanged Mo approval gates before release builds
+      - name: Require Mo’s PyPI publication approval policy
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/sign_release.py --check-publication-gates
+        run: python scripts/sign_release.py --check-publication-gates pypi
 
   docs-build:
     name: Build release documentation

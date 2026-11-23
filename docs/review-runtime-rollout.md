@@ -23,8 +23,11 @@ request before using this admission result for a different source identity.
 
 For the next release, [ADR 0095](adr/0095-pypi-qualified-major-channel.md) and
 [the PyPI promotion runbook](releasing.md#pypi-publication-and-v5-promotion)
-replace this dated plan's npm-completion and aggregate Release/Pages
-prerequisites for v5. Both engine and hosted Python wheel/sdist pairs require
+supersede this dated plan’s all-channel prerequisites. For current preparation,
+signing and Python publication, apply the Python/platform CI and registry
+checks in the release runbook. Native builds, npm registry inspection and
+publication run in their own lane. For v5 the owner also runs the pre-move
+installed-Python verifier against the old signed object. Both engine and hosted Python wheel/sdist pairs require
 verified PyPI publication and signed source binding. npm remains an independent
 native-binary distribution; its incomplete publication keeps its actual status.
 The five-lane compatibility manifest remains a complete-distribution record,

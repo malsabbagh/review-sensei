@@ -212,7 +212,7 @@ class ReleaseChannelTests(unittest.TestCase):
                         "version": VERSION,
                     },
                 )
-                self.prepared.assert_called_with(root, TAG)
+                self.prepared.assert_called_with(root, TAG, npm=False)
         for expected in ("", "c" * 40):
             output.write_text("")
             with (
@@ -343,12 +343,14 @@ class ReleaseChannelTests(unittest.TestCase):
             metadata = json.loads(original_manifest)
             metadata["version"] = OTHER_VERSION
             manifest.write_text(json.dumps(metadata))
+            with patch.dict(os.environ, self.environment(), clear=True):
+                self.assertEqual(channels.qualify("python", self.root)["tag"], TAG)
             with (
                 self.subTest(manifest=manifest.relative_to(self.root)),
-                patch.dict(os.environ, self.environment(), clear=True),
+                patch.dict(os.environ, self.environment("npm"), clear=True),
                 self.assertRaisesRegex(ValueError, "version"),
             ):
-                channels.qualify("python", self.root)
+                channels.qualify("npm", self.root)
             manifest.write_text(original_manifest)
 
     def test_drift_between_contract_reads_is_refused(self):

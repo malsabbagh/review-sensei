@@ -1034,8 +1034,10 @@ def ci_jobs(attempt=1):
 
 
 class PreparationQualificationTests(unittest.TestCase):
-    def qualify(self, runs, jobs, fresh=None):
+    def qualify(self, runs, jobs, fresh=None, *, npm=False, effective=None):
         def pages(path, key):
+            if effective is not None and "filter=latest" in path:
+                return effective
             return runs if key == "workflow_runs" else jobs
 
         with (
@@ -1044,7 +1046,7 @@ class PreparationQualificationTests(unittest.TestCase):
                 PREP.docs, "api", return_value=fresh or (runs[-1] if runs else {})
             ),
         ):
-            return PREP.ci_once(SHA)
+            return PREP.ci_once(SHA, npm=npm)
 
     def test_exact_ci_all_jobs_and_failed_only_retry_acceptance(self):
         self.assertEqual(self.qualify([ci_run()], ci_jobs())["id"], 42)
@@ -1057,7 +1059,7 @@ class PreparationQualificationTests(unittest.TestCase):
 
     def test_latest_run_and_each_latest_attempt_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "CI failed"):
-            self.qualify([ci_run(), ci_run(43, conclusion="failure")], ci_jobs())
+            self.qualify([ci_run(), ci_run(43, conclusion="cancelled")], ci_jobs())
         for change in ("missing", "skipped", "failure", "duplicate", "invalid-attempt"):
             jobs = ci_jobs()
             if change == "missing":
@@ -1074,6 +1076,99 @@ class PreparationQualificationTests(unittest.TestCase):
         self.assertIsNone(
             self.qualify([ci_run(status="in_progress", conclusion=None)], [])
         )
+
+    def test_python_admission_with_absent_pending_or_failed_npm_and_aggregate(self):
+        python_jobs = ci_jobs()
+        for status, conclusion, state in [
+            ("completed", "success", "absent"),
+            ("in_progress", None, "pending"),
+            ("completed", "failure", "failure"),
+        ]:
+            job = ci_run(status=status, conclusion=conclusion)
+            jobs = python_jobs + [
+                {
+                    **python_jobs[0],
+                    "name": name,
+                    "status": "queued" if state == "pending" else "completed",
+                    "conclusion": None if state == "pending" else state,
+                }
+                for name in PREP.NPM_CI_JOBS | {"Required checks"}
+                if state != "absent"
+            ]
+            with self.subTest(state=state):
+                self.assertEqual(self.qualify([job], jobs), job)
+                if state == "pending":
+                    self.assertIsNone(self.qualify([job], jobs, npm=True))
+                else:
+                    with self.assertRaises(ValueError):
+                        self.qualify([job], jobs, npm=True)
+
+    def test_full_npm_ci_requires_all_five_native_candidates_and_consumers(self):
+        jobs = ci_jobs()
+        jobs.extend(
+            {**jobs[0], "name": name} for name in PREP.NPM_CI_JOBS | {"Required checks"}
+        )
+        self.assertEqual(self.qualify([ci_run()], jobs, npm=True)["id"], 42)
+        for name in PREP.NPM_CI_JOBS:
+            with (
+                self.subTest(missing=name),
+                self.assertRaisesRegex(ValueError, "missing"),
+            ):
+                self.qualify(
+                    [ci_run()], [j for j in jobs if j["name"] != name], npm=True
+                )
+
+    def test_current_python_job_and_every_platform_shard_remain_mandatory(self):
+        run = ci_run(attempt=2, status="in_progress", conclusion=None)
+        old = ci_jobs()
+        scheduled = {
+            **old[0],
+            "name": "Required checks",
+            "status": "in_progress",
+            "conclusion": None,
+            "run_attempt": 2,
+        }
+        self.assertIsNone(self.qualify([run], old))
+        self.assertEqual(
+            self.qualify([run], [*old, scheduled], effective=[*old, scheduled]), run
+        )
+        for stale in ("queued", "completed"):
+            new = {
+                **old[0],
+                "run_attempt": 2,
+                "status": stale,
+                "conclusion": None if stale == "queued" else "failure",
+            }
+            if stale == "queued":
+                self.assertIsNone(self.qualify([run], [*old, new]))
+            else:
+                with self.assertRaises(ValueError):
+                    self.qualify([run], [*old, new])
+        for required in PREP.CI_JOBS:
+            with self.subTest(required=required), self.assertRaises(ValueError):
+                self.qualify([ci_run()], [j for j in old if j["name"] != required])
+        unexpected = {
+            **old[0],
+            "name": "New required admission check",
+            "conclusion": "failure",
+        }
+        with self.assertRaises(ValueError):
+            self.qualify([ci_run()], [*old, unexpected])
+
+    def test_preparation_absence_probes_only_selected_python_registry(self):
+        with (
+            patch.object(PREP, "absent_github"),
+            patch.object(PREP, "absent_registry") as registry,
+        ):
+            PREP.unused(VERSION)
+            registry.assert_called_once_with(
+                f"https://pypi.org/pypi/review-sensei/{VERSION}/json"
+            )
+            registry.reset_mock()
+            PREP.unused_github(VERSION)
+            registry.assert_called_once_with(
+                f"https://pypi.org/pypi/review-sensei-github/{VERSION}/json"
+            )
 
     def test_wrong_run_identity_and_racing_ci_retry_are_rejected(self):
         for field, value in (
@@ -1283,8 +1378,56 @@ class PreparationQualificationTests(unittest.TestCase):
         ):
             PREP.qualify_tag(ROOT, "v" + VERSION)
 
+    def test_npm_waits_for_independent_candidate_after_the_tag_arrives(self):
+        tag = "v" + VERSION
+        identity = ("b" * 40, SHA)
+        with (
+            patch.dict(os.environ, {"GITHUB_SHA": SHA}),
+            patch.object(PREP.docs, "tag_identity", return_value=identity),
+            patch.object(PREP, "git", side_effect=[SHA, identity[0]]),
+            patch.object(PREP, "verify_commit", return_value={"tag": tag}),
+            patch.object(PREP.docs, "api", return_value={"status": "ahead"}),
+            patch.object(PREP, "ci_once", side_effect=[None, ci_run()]) as ci,
+            patch.object(PREP.time, "sleep") as sleep,
+        ):
+            PREP.qualify_tag(ROOT, tag, npm=True)
+        sleep.assert_called_once()
+        self.assertEqual(
+            [call.kwargs for call in ci.call_args_list], [{"npm": True}, {"npm": True}]
+        )
+
 
 class PreparationWorkflowTests(unittest.TestCase):
+    def test_branch_protection_keeps_full_python_and_npm_candidate_graph(self):
+        import yaml
+
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+        aggregate = jobs["required-checks"]
+        families = {
+            "compatibility",
+            "compatibility-shard",
+            "quality",
+            "static-quality",
+            "coverage-shard",
+            "schemas",
+            "package",
+            "package-build",
+            "package-verify",
+            "installed-shard",
+            "workers",
+            "codeql",
+            "npm",
+            "linux-standalone",
+            "intel-standalone",
+            "native-candidate",
+            "candidate-npm",
+            "candidate-consumer",
+        }
+        self.assertEqual(set(jobs), families | {"required-checks"})
+        self.assertEqual(set(aggregate["needs"]), families)
+        for family in families:
+            self.assertIn("needs." + family + ".result", aggregate["steps"][0]["run"])
+
     def test_preparation_is_manual_owner_main_and_uses_only_existing_narrow_token(self):
         text = (ROOT / ".github/workflows/prepare-release.yml").read_text()
         self.assertIn("workflow_dispatch:", text)

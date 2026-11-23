@@ -50,17 +50,8 @@ def project_version(root: Path) -> str:
 
 
 def validate_npm_manifests(root: Path, expected_version: str) -> None:
-    """Validate npm manifests when the optional npm source tree exists.
-
-    Small temporary roots used by release-version unit tests intentionally do
-    not contain packages/npm and continue to exercise only Python metadata.
-    Once the tree is present, however, every target and exact dependency is
-    required so a tag can never publish a partial or mixed-version set.
-    """
-
+    """Require all six npm source manifests for the npm publisher."""
     npm_root = root / "packages" / "npm"
-    if not npm_root.exists():
-        return
     launcher_path = npm_root / "cli" / "package.json"
     target_paths = {
         name: npm_root / "platforms" / name.split("/cli-", 1)[1] / "package.json"
@@ -186,7 +177,6 @@ def validate_release_tag(tag: str, root: Path = Path(".")) -> str:
     expected_version = tag[1:]
     if project_version(root) != expected_version:
         raise ReleaseVersionError("release tag does not match project metadata")
-    validate_npm_manifests(root, expected_version)
 
     try:
         changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -209,7 +199,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=Path("."), help="repository root")
     parser.add_argument(
         "--package",
-        choices=("engine", "github"),
+        choices=("engine", "github", "npm"),
         default="engine",
         help="distribution the tag publishes",
     )
@@ -224,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
             version = validate_github_release_tag(args.tag, root)
         else:
             version = validate_release_tag(args.tag, root)
+            if args.package == "npm":
+                validate_npm_manifests(root, version)
     except ReleaseVersionError as exc:
         print(f"release version check failed: {exc}", file=sys.stderr)
         return 1

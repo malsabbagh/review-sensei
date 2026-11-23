@@ -1,4 +1,5 @@
 name: Qualify published CLI
+run-name: Qualify published CLI ${{ github.event_name == 'workflow_run' && format('after {0}/{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) || format('manual {0}/{1}', inputs.version, inputs.github_version) }}
 
 on:
   workflow_run:

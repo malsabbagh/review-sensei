@@ -90,11 +90,16 @@ class SigningAuthorityTests(unittest.TestCase):
             ):
                 SIGN.registered_identity(FINGERPRINT, EMAIL)
 
-    def test_publication_gate_requires_mo_as_only_reviewer_in_both_environments(self):
+    def test_publication_gate_checks_only_its_channel_and_requires_mo_as_only_reviewer(
+        self,
+    ):
         with patch.object(
             SIGN.docs, "api", side_effect=lambda path: environment(path.split("/")[-1])
-        ):
-            SIGN.publication_gates()
+        ) as lookup:
+            for channel in ("pypi", "pypi-github", "npm"):
+                SIGN.publication_gates(channel)
+                lookup.assert_called_once_with(f"environments/{channel}")
+                lookup.reset_mock()
         for mutation in ("missing", "wrong_owner", "extra_reviewer", "wrong_name"):
             invalid = environment("npm")
             if mutation == "missing":
@@ -109,7 +114,7 @@ class SigningAuthorityTests(unittest.TestCase):
                 patch.object(SIGN.docs, "api", return_value=invalid),
                 self.assertRaises(ValueError),
             ):
-                SIGN.publication_gates()
+                SIGN.publication_gates("npm")
 
     def test_qualification_stops_stale_head_failed_ci_or_changed_receipt(self):
         for main, ci, version in (
@@ -545,8 +550,16 @@ class UserSetupTests(unittest.TestCase):
                 }
             return environment(path.rsplit("/", 1)[-1])
 
-        with patch.object(SETUP, "api", side_effect=response):
+        with patch.object(SETUP, "api", side_effect=response) as lookup:
             SETUP.check_gates()
+            self.assertFalse(
+                any(call.args[0].endswith("/npm") for call in lookup.call_args_list)
+            )
+            lookup.reset_mock()
+            SETUP.check_gates(setup=True)
+            self.assertTrue(
+                any(call.args[0].endswith("/npm") for call in lookup.call_args_list)
+            )
         for policy in (
             {"name": "*", "type": "branch"},
             {"name": "main", "type": "tag"},

@@ -1180,7 +1180,8 @@ class FullGateTests(unittest.TestCase):
         self.assertEqual(receipt["github_wheel_sha256"], "e" * 64)
         self.assertEqual(receipt["pypi_publication"], self.publication)
         self.assertTrue(receipt["surface"]["data_only"])
-        self.assertEqual(len(receipt["source_data_sha256"]), 11)
+        self.assertEqual(len(receipt["source_data_sha256"]), 5)
+        self.assertFalse(any("packages/npm/" in path for path in self.reads))
         manifest = (ROOT / installer.HOSTED_MANIFEST).read_bytes()
         self.assertEqual(
             receipt["source_data_sha256"][installer.HOSTED_MANIFEST],
@@ -1189,6 +1190,31 @@ class FullGateTests(unittest.TestCase):
         hosted = tomllib.loads(manifest.decode())
         self.assertEqual(receipt["github_version"], hosted["project"]["version"])
         self.wheel.assert_called_once()
+
+    def test_pre_move_binds_old_signed_object_to_new_published_source(self):
+        previous = "e" * 40
+        selected = {
+            "channel": "v5",
+            "mode": "v5-candidate",
+            "tag_object": OBJECT,
+            "source_sha": SOURCE,
+        }
+        with patch.object(gate, "signed_major", return_value=(OBJECT, previous)):
+            receipt = gate.qualify(selected, self.root / "before-move")
+        self.assertEqual(
+            (receipt["status"], receipt["previous_source_sha"], receipt["source_sha"]),
+            ("PASS", previous, SOURCE),
+        )
+        with (
+            patch.object(gate, "signed_major", return_value=("f" * 40, previous)),
+            self.assertRaisesRegex(ValueError, "lease"),
+        ):
+            gate.qualify(selected, self.root / "old-lease")
+        with (
+            patch.object(gate, "signed_major", return_value=(OBJECT, "d" * 40)),
+            self.assertRaisesRegex(ValueError, "changed"),
+        ):
+            gate.assert_current(receipt)
 
     def test_hosted_manifest_must_pin_the_exact_engine_before_wheel(self):
         original = (ROOT / installer.HOSTED_MANIFEST).read_text()

@@ -43,6 +43,11 @@ jobs:
       - name: Check tag and version consistency
         run: python scripts/check_release_version.py --package github --tag "$GITHUB_REF_NAME"
 
+      - name: Recheck protected hosted PyPI publication policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/sign_release.py --check-publication-gates pypi-github
+
       - name: Build the hosted distribution
         run: |
           python -m pip install --disable-pip-version-check build

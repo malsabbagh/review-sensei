@@ -117,9 +117,10 @@ def event_contract(channel: str) -> dict:
 
 def qualify(channel: str, root: Path) -> dict:
     contract = event_contract(channel)
-    prepare.qualify_tag(root, contract["tag"])
-    # All six npm manifests and the core PyPI project must share one version.
-    versions.validate_release_tag(contract["tag"], root)
+    prepare.qualify_tag(root, contract["tag"], npm=channel == "npm")
+    version = versions.validate_release_tag(contract["tag"], root)
+    if channel == "npm":
+        versions.validate_npm_manifests(root, version)
     if event_contract(channel) != contract:
         raise ValueError("channel contract changed during qualification")
     return contract

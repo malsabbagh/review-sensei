@@ -132,6 +132,11 @@ workflow lint, full checkout tests, source typing and package build remain gates
 
 ## Rollout and rollback
 
+The historical first-activation account-inspection hold below is superseded for
+ordinary releases by [ADR 0143](0143-asynchronous-npm-release.md).
+Publisher-identity migrations and retirement remain separately owner-gated;
+current Actions OIDC and registry authorization checks remain in force.
+
 Keep the focused PR unmerged until release-owner coordination. Before any
 future activation, the owner must verify all six existing `@reviewsensei/cli*`
 npm Trusted Publishers bind `malsabbagh/review-sensei`, `publish-npm.yml`,

@@ -105,14 +105,17 @@ class ReleaseVersionTests(unittest.TestCase):
             with self.assertRaises(VERSION_CHECK.ReleaseVersionError):
                 VERSION_CHECK.validate_release_tag("v0.1.0", root)
 
-    def test_npm_manifests_are_checked_when_tree_exists(self):
+    def test_npm_lane_requires_complete_consistent_source_manifests(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copy(ROOT / "pyproject.toml", root / "pyproject.toml")
             (root / "CHANGELOG.md").write_text(
                 f"## {PROJECT_VERSION} - 2026-10-06\n", encoding="utf-8"
             )
+            with self.assertRaises(VERSION_CHECK.ReleaseVersionError):
+                VERSION_CHECK.validate_npm_manifests(root, PROJECT_VERSION)
             shutil.copytree(ROOT / "packages/npm", root / "packages/npm")
+            VERSION_CHECK.validate_npm_manifests(root, PROJECT_VERSION)
             self.assertEqual(
                 VERSION_CHECK.validate_release_tag("v" + PROJECT_VERSION, root),
                 PROJECT_VERSION,
@@ -122,12 +125,14 @@ class ReleaseVersionTests(unittest.TestCase):
             value["optionalDependencies"]["@reviewsensei/cli-linux-x64-gnu"] = "9.9.9"
             launcher.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaises(VERSION_CHECK.ReleaseVersionError):
-                VERSION_CHECK.validate_release_tag("v0.1.0", root)
-            value["optionalDependencies"]["@reviewsensei/cli-linux-x64-gnu"] = "0.1.0"
+                VERSION_CHECK.validate_npm_manifests(root, PROJECT_VERSION)
+            value["optionalDependencies"]["@reviewsensei/cli-linux-x64-gnu"] = (
+                PROJECT_VERSION
+            )
             value["repository"] = {"url": "https://example.invalid/repo"}
             launcher.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaises(VERSION_CHECK.ReleaseVersionError):
-                VERSION_CHECK.validate_release_tag("v0.1.0", root)
+                VERSION_CHECK.validate_npm_manifests(root, PROJECT_VERSION)
 
 
 def _add_tar_file(archive: tarfile.TarFile, name: str, content: bytes = b"x") -> None:

@@ -47,6 +47,10 @@ class PublishError(RuntimeError):
     """Raised when npm publication or readback verification fails."""
 
 
+class AmbiguousPublishError(PublishError):
+    """The registry may have committed the upload before the transport failed."""
+
+
 class RegistryTransportError(PublishError):
     """Raised when the npm registry cannot be reached over the network."""
 
@@ -737,18 +741,41 @@ def publish_tarball(
                 "--access",
                 "public",
                 "--provenance",
+                "--json",
             ],
             check=True,
             timeout=timeout_seconds,
+            capture_output=True,
         )
     except subprocess.TimeoutExpired as exc:
-        raise PublishError(
+        raise AmbiguousPublishError(
             f"npm publish timed out after {timeout_seconds:.0f}s for {tarball.name}"
         ) from exc
     except subprocess.CalledProcessError as exc:
+        # npm --json exposes the error code without putting registry or OIDC
+        # diagnostics in a receipt. A denial or unknown exit holds the lane.
+        try:
+            response = json.loads(exc.stdout or b"{}")
+        except (ValueError, UnicodeError):
+            response = {}
+        details = response.get("error") if isinstance(response, dict) else None
+        code = details.get("code") if isinstance(details, dict) else None
+        if isinstance(code, str) and code in {
+            "ECONNRESET",
+            "EPIPE",
+            "ETIMEDOUT",
+            "ESOCKETTIMEDOUT",
+            "E500",
+            "E502",
+            "E503",
+            "E504",
+        }:
+            raise AmbiguousPublishError(
+                f"npm publish transport failed for {tarball.name}"
+            ) from None
         raise PublishError(
-            f"npm publish failed with exit code {exc.returncode} for {tarball.name}"
-        ) from exc
+            f"npm publish refused or failed for {tarball.name} (exit {exc.returncode})"
+        ) from None
 
 
 def publish_package(
@@ -780,7 +807,7 @@ def publish_package(
     print(f"Publishing {package}@{version} from {tarball.name}")
     try:
         publish_tarball(tarball)
-    except PublishError as exc:
+    except AmbiguousPublishError as exc:
         try:
             read_back_with_retry(
                 package,

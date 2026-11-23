@@ -518,9 +518,11 @@ compatibility matrix.
 Release Marshal is the existing preparation workflow and dedicated signer,
 not a new service or dispatcher. Its App-token signed `vX.Y.Z` push fans out
 `release.yml` (Python) and `publish-npm.yml` (npm), each at the immutable signed
-source. Both independently verify the preparation receipt, exact source/CI,
-core/npm manifest version and unique original run. Separate workflow lifecycles
-allow Python finalizer retry while npm is waiting or reading registry state.
+source. Both verify their preparation receipt, exact source and unique original run.
+Marshal and Python require all exact-main Python/platform CI jobs. The npm lane
+requires full CI, including native and installed launcher checks, and validates
+its six source manifests and public registry receipts. The owner’s pre-move v5
+gate checks both PyPI publications and the four installed Python receipts.
 The default-branch manual npm publisher is retired for future releases.
 
 npm keeps native builds/smoke tests, exact same-run artifact ID/digest,
@@ -531,9 +533,13 @@ matching reviewed public Python release through authenticated metadata. Artifact
 binds the original run. Both channels record separate authenticated job/artifact
 result receipts. The Python publisher and build-attestation workflow identity
 remain `release.yml`; hosted identity/versioning remain independent. Moving
-npm publication to `publish-npm.yml` requires owner verification of all six
-Trusted Publishers before activation; this implementation changes no persistent
-trust, credentials or environment policy. Old immutable sources keep their
+npm publication to a different publisher identity requires separately authorized
+owner verification of the affected Trusted Publishers before migration. Normal
+releases keep the established repository/workflow/environment policy and require
+no local npm account login or registration lookup; actual Actions OIDC publication
+still requires registry authorization. Optional account audits are explicitly
+requested operations outside Marshal. This policy changes no persistent trust,
+credentials or environment policy (ADR 0143). Old immutable sources keep their
 original workflow. npm publication follows successful Python finalization;
 the two build graphs and run/retry lifecycles stay independent. An early npm
 publisher holds until the public release is ready, then uses its original

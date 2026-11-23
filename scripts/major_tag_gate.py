@@ -16,7 +16,6 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 
-import check_release_version as versions
 import pypi_channel_publication as pypi
 import release_docs as docs
 from qualify_published_cli import HOSTED_MANIFEST, hosted_version
@@ -102,6 +101,16 @@ def signed_major(tag):
 
 
 def bind_event(selection, tag_object, source):
+    if selection["mode"] == "v5-candidate":
+        if selection["channel"] != "v5" or sha(selection["tag_object"]) != tag_object:
+            raise ValueError("reviewed v5 lease changed before candidate qualification")
+        return {
+            **selection,
+            "source_sha": sha(selection["source_sha"]),
+            "previous_source_sha": source,
+            "event_binding": "tag-object",
+            "event_object_bound": True,
+        }
     if selection["mode"] == "push":
         # GitHub may expose a peeled commit in the push/context SHA. When it
         # exposes the tag object, bind that too; never resolve a different head.
@@ -305,7 +314,7 @@ def verify_wheel(asset, binding, version, output):
 def assert_current(receipt):
     if signed_major(receipt["channel"]) != (
         receipt["tag_object"],
-        receipt["source_sha"],
+        receipt.get("previous_source_sha", receipt["source_sha"]),
     ):
         raise ValueError(
             "major tag changed during validation; no current-channel qualification"
@@ -349,11 +358,6 @@ def qualify(selection, output, *, reserved=False):
         "docs/site/data/site-manifest.json",
         ".github/workflows/review-sensei-run.yml",
         ".github/workflows/review-sensei-review.yml",
-        "packages/npm/cli/package.json",
-        *[
-            f"packages/npm/platforms/{name.split('/cli-', 1)[1]}/package.json"
-            for name in versions.NPM_TARGETS
-        ],
     ]
     hashes = {}
     for relative in relatives:
@@ -373,7 +377,6 @@ def qualify(selection, output, *, reserved=False):
     ]
     if (facts["version"], facts["tag"]) != (version, "v" + version):
         raise ValueError("site/package release manifests differ")
-    versions.validate_npm_manifests(snapshot, version)
     immutable_object, immutable_source = docs.tag_identity("v" + version)
     release = docs.api(f"releases/tags/v{version}")
     binding = release_binding(release, version, immutable_object, immutable_source)

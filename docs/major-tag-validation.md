@@ -2,7 +2,9 @@
 
 `major-tag-validation.yml` validates a public workflow channel without moving
 tags, publishing packages, invoking providers or writing to PRs. It reuses the
-exact installed-PyPI qualifier from `published-cli.yml`.
+exact installed-PyPI qualifier from `published-cli.yml`. Before a future v5
+move, the owner runs the [candidate gate](releasing.md#verify-the-candidate-before-an-authorized-move)
+against the recorded old object and the automatic installed-Python receipts.
 
 ## Admission and integrity
 
@@ -14,7 +16,7 @@ time: GitHub can omit events for pushes containing more than three tags.
 
 The gate uses the existing `release_docs.py` GitHub-verified annotated-signature
 policy. Lightweight and nested tags fail. The major object's peeled source
-must match the event. Its exact stable immutable release tag, package/site/npm
+must match the event. Its exact stable immutable release tag, Python and site
 manifests, published GitHub release, authoritative release binding, asset
 digests and successful source-bound Python release jobs must agree. Overall
 Release success and npm assembly/publication are not admission requirements. Channel numbers

@@ -14,6 +14,7 @@ jobs:
   qualify-source:
     name: Qualify signed prepared source and exact-head CI
     runs-on: ubuntu-latest
+    timeout-minutes: 65
     permissions:
       contents: read
       actions: read
@@ -37,10 +38,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/release_channels.py qualify --channel npm --root "$GITHUB_WORKSPACE"
-      - name: Require unchanged Mo approval gates before release builds
+      - name: Require Mo’s npm publication approval policy
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/sign_release.py --check-publication-gates
+        run: python scripts/sign_release.py --check-publication-gates npm
 
   native-build:
     name: Native standalone (${{ matrix.target }})
@@ -176,7 +177,7 @@ jobs:
             --bundle linux-x64-gnu=dist/native/review-sensei-standalone-linux-x64-gnu \
             --bundle win32-x64=dist/native/review-sensei-standalone-win32-x64
           python scripts/validate_npm_package.py dist/npm --expected-version "${GITHUB_REF_NAME#v}"
-          python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+          python scripts/check_release_version.py --package npm --tag "$GITHUB_REF_NAME"
       - name: Install standalone smoke oracle
         # The oracle runs the checkout source's `python -m review_sensei`; this
         # job validates the packaged launcher, so the installed distribution is
@@ -199,7 +200,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+          python scripts/check_release_version.py --package npm --tag "$GITHUB_REF_NAME"
           mkdir -p release/npm
           packages=(cli darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64)
           : > release/npm/SHA256SUMS
@@ -350,6 +351,10 @@ jobs:
 
       - name: Install pinned manifest validator
         run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Recheck protected npm publication policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python source/scripts/sign_release.py --check-publication-gates npm
       - name: Requalify signed contract, exact artifact, provenance and published Python release
         env:
           EXPECTED_TAG_OBJECT: ${{ needs.qualify-source.outputs.tag_object }}

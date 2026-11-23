@@ -94,25 +94,23 @@ def registered_identity(fingerprint: str, email: str) -> None:
         )
 
 
-def publication_gates(*, hosted: bool = False) -> None:
+def publication_gates(name: str) -> None:
     """Require Mo as the sole reviewer; never create or relax environments."""
-    names = ("npm", "pypi", "pypi-github") if hosted else ("npm", "pypi")
-    for name in names:
-        environment = docs.api(f"environments/{name}")
-        rules = [
-            rule
-            for rule in environment.get("protection_rules", [])
-            if rule.get("type") == "required_reviewers"
-        ]
-        if environment.get("name") != name or len(rules) != 1:
-            raise ValueError("publication requires the existing owner approval gates")
-        reviewers = rules[0].get("reviewers", [])
-        if len(reviewers) != 1 or (
-            reviewers[0].get("type") != "User"
-            or reviewers[0].get("reviewer", {}).get("id") != OWNER_ID
-            or reviewers[0].get("reviewer", {}).get("login") != "malsabbagh"
-        ):
-            raise ValueError("npm/PyPI publication must await Mo's approval")
+    environment = docs.api(f"environments/{name}")
+    rules = [
+        rule
+        for rule in environment.get("protection_rules", [])
+        if rule.get("type") == "required_reviewers"
+    ]
+    if environment.get("name") != name or len(rules) != 1:
+        raise ValueError("publication requires the existing owner approval gates")
+    reviewers = rules[0].get("reviewers", [])
+    if len(reviewers) != 1 or (
+        reviewers[0].get("type") != "User"
+        or reviewers[0].get("reviewer", {}).get("id") != OWNER_ID
+        or reviewers[0].get("reviewer", {}).get("login") != "malsabbagh"
+    ):
+        raise ValueError(f"{name} publication must await Mo's approval")
 
 
 def qualify(root: Path, sha: str, version: str, date: str) -> dict[str, Any]:
@@ -124,7 +122,7 @@ def qualify(root: Path, sha: str, version: str, date: str) -> dict[str, Any]:
         raise ValueError("signed release intent differs from the prepared receipt")
     if prep.ci_once(sha) is None:
         raise ValueError("prepared source CI is not terminal success")
-    publication_gates()
+    publication_gates("pypi")
     return receipt
 
 
@@ -195,7 +193,7 @@ def sign(
                     f"review-sensei-github {receipt['github_version']}",
                 )
             )
-            publication_gates(hosted=True)
+            publication_gates("pypi-github")
         if not selected:
             raise ValueError("prepared release has no tag")
     # Deliberately refuse even a same-version existing tag. Publication retry
@@ -317,7 +315,7 @@ def sign(
                 else:
                     prep.unused(tag.removeprefix("v"))
             if any(tag.startswith("github-v") for tag, _message in selected):
-                publication_gates(hosted=True)
+                publication_gates("pypi-github")
             bot.check(
                 os.environ["RELEASE_DOCS_APP_ID"], os.environ["RELEASE_DOCS_APP_SLUG"]
             )
@@ -394,7 +392,12 @@ def sign(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check-publication-gates", action="store_true")
+    parser.add_argument(
+        "--check-publication-gates",
+        nargs="?",
+        const="pypi",
+        choices=("pypi", "pypi-github", "npm"),
+    )
     parser.add_argument("--root", type=Path)
     parser.add_argument("--sha")
     parser.add_argument("--version")
@@ -403,8 +406,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.check_publication_gates:
-            publication_gates()
-            print("npm/PyPI retain Mo's required-reviewer gates")
+            publication_gates(args.check_publication_gates)
+            print(f"{args.check_publication_gates} retains Mo's required-reviewer gate")
             return 0
         if any(
             value is None for value in (args.root, args.sha, args.version, args.date)
