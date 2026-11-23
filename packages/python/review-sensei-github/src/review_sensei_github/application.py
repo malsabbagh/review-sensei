@@ -5964,9 +5964,13 @@ class GitHubApplication:
                         inventory.pending or operation_entry == "enabled"
                     ):
                         evidence_bundle = human.evidence_bundle
+                        reassess_body_sha256 = sha256(
+                            human.source_body.encode("utf-8")
+                        ).hexdigest()
                         reassess_key = (
                             f"reassessment-v2:{prepared.source_kind}:"
-                            f"{prepared.source_comment_id}:{prepared.source_updated_at}"
+                            f"{prepared.source_comment_id}:{prepared.source_updated_at}:"
+                            f"{reassess_body_sha256}"
                         )
                         produced = operation_owner._through_operation(
                             operation_entry=operation_entry,
@@ -6017,9 +6021,13 @@ class GitHubApplication:
                                 "operation entry refused: result_missing"
                             )
                     elif inventory.pending:
+                        reassess_reply_body_sha256 = sha256(
+                            human.source_body.encode("utf-8")
+                        ).hexdigest()
                         reassess_reply_key = (
                             f"reassessment-reply-v2:{prepared.source_kind}:"
-                            f"{prepared.source_comment_id}:{prepared.source_updated_at}"
+                            f"{prepared.source_comment_id}:{prepared.source_updated_at}:"
+                            f"{reassess_reply_body_sha256}"
                         )
                         produced_reply = operation_owner._through_operation(
                             operation_entry=operation_entry,

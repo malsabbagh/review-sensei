@@ -21,11 +21,14 @@ Every transition requires:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
+import threading
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -86,6 +89,121 @@ CROSS_RUN_AUTHORITY_MODES: Final[frozenset[str]] = frozenset(
 _ISSUED_WITNESSES: weakref.WeakSet[UnstartedCancellationWitness] = weakref.WeakSet()
 # Process-local capture provenance, never a persisted/cross-process recovery grant.
 _ISSUED_DISPATCH_EVIDENCE: dict[int, tuple[Any, ...]] = {}
+# Single-rollover cessation verification hooks keyed per freshly created evidence instance.
+_ROLLOVER_CESSATION_HOOKS: weakref.WeakKeyDictionary[
+    ApiRunActionsEvidence, Callable[[], None]
+] = weakref.WeakKeyDictionary()
+
+
+@contextmanager
+def _scoped_rollover_cessation(
+    actions_evidence: ApiRunActionsEvidence | None,
+    require_cessation: Callable[[], None],
+) -> Iterator[None]:
+    if actions_evidence is None:
+        yield
+        return
+    _ROLLOVER_CESSATION_HOOKS[actions_evidence] = require_cessation
+    try:
+        yield
+    finally:
+        _ROLLOVER_CESSATION_HOOKS.pop(actions_evidence, None)
+
+
+def _verify_cross_run_cessation_once(
+    actions_evidence: ApiRunActionsEvidence,
+    *,
+    identity: SessionIdentity,
+    run_id: int,
+    owner: ApiExecutionOwner,
+    require_cessation: Callable[[], None] | None,
+) -> tuple[object, ...]:
+    """Verify complete-inventory cessation once and share its fresh payloads with ``require_cessation``."""
+    if require_cessation is None:
+        return actions_evidence.ceased_run_owner(
+            identity,
+            run_id,
+            owner,
+            complete_terminal_inventory=True,
+        )
+    http = getattr(actions_evidence, "http", None)
+    http_dict = getattr(http, "__dict__", None)
+    orig_bound = getattr(http, "request", None)
+    if (
+        http is None
+        or not isinstance(http_dict, dict)
+        or not callable(orig_bound)
+        or not callable(getattr(http, "repository_path", None))
+    ):
+        ceased_run = actions_evidence.ceased_run_owner(
+            identity,
+            run_id,
+            owner,
+            complete_terminal_inventory=True,
+        )
+        require_cessation()
+        return ceased_run
+
+    had_own_request = "request" in http_dict
+    prior_own_request = http_dict.get("request")
+    owner_thread = threading.get_ident()
+    captured: dict[tuple[str, str], tuple[int, Any]] = {}
+    replay_only = False
+    actions_prefix = http.repository_path(
+        identity.repository, f"/actions/runs/{run_id}"
+    )
+
+    def scoped_request(
+        method: str,
+        path: str,
+        *,
+        token: str,
+        body: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, Any]:
+        if threading.get_ident() == owner_thread and method == "GET":
+            key = (path, token)
+            if replay_only:
+                cached = captured.get(key)
+                if cached is not None:
+                    return cached[0], copy.deepcopy(cached[1])
+            elif token == actions_evidence.token and (
+                path == actions_prefix or path.startswith(actions_prefix + "/")
+            ):
+                status, payload = orig_bound(
+                    method,
+                    path,
+                    token=token,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+                if status == 200 and isinstance(payload, dict):
+                    captured[key] = (status, copy.deepcopy(payload))
+                return status, payload
+        return orig_bound(
+            method,
+            path,
+            token=token,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+    http_dict["request"] = scoped_request
+    try:
+        ceased_run = actions_evidence.ceased_run_owner(
+            identity,
+            run_id,
+            owner,
+            complete_terminal_inventory=True,
+        )
+        replay_only = True
+        require_cessation()
+        return ceased_run
+    finally:
+        if had_own_request:
+            http_dict["request"] = prior_own_request
+        else:
+            http_dict.pop("request", None)
 
 
 @dataclass(frozen=True)
@@ -384,8 +502,15 @@ def _authenticate_authority_proof(
                     attempt=caller.attempt,
                     generation=0,
                 )
-                ceased_run = actions_evidence.ceased_run_owner(
-                    identity, state.identity.run_id, state.owner
+                require_cessation = _ROLLOVER_CESSATION_HOOKS.pop(
+                    actions_evidence, None
+                )
+                ceased_run = _verify_cross_run_cessation_once(
+                    actions_evidence,
+                    identity=identity,
+                    run_id=state.identity.run_id,
+                    owner=state.owner,
+                    require_cessation=require_cessation,
                 )
                 selected_mode = "cross_run_ceased_predecessor"
                 proof_payload["ceased_run_owner"] = list(ceased_run)

@@ -28,10 +28,11 @@ Models the SiteVault `#142` predecessor boundary (`phase=no-transaction` in
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -42,9 +43,15 @@ from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from . import controlled_restart
-from .api_run_owner import ApiRunActionsEvidence, _writer_name
-from .errors import GitHubHTTPError
-from .http import GitHubHttp
+from .api_run_owner import (
+    MAX_LATER_ATTEMPT_INSPECTION,
+    ApiRunActionsEvidence,
+    _writer_name,
+    is_terminal_job,
+    later_attempt_proved_no_business_entry,
+)
+from .errors import GitHubHTTPError, GitHubHTTPResponseTooLargeError
+from .http import MAX_PAGINATION_ITEMS, GitHubHttp
 from .publication import (
     APPROVAL_MARKER_PREFIX,
     FINDING_MARKER_PREFIX,
@@ -59,6 +66,7 @@ from .session_ledger import GitHubIssueCommentSessionLedger, parse_session_comme
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
 _PAGE_SIZE = 100
+_STEP_DOWN_PAGE_SIZES = (100, 20, 10, 5, 1)
 _MAX_LATE_EFFECTS_WALL_SECONDS = 30.0
 _TERMINAL_JOB_CONCLUSIONS = frozenset(
     {
@@ -885,6 +893,76 @@ def build_no_transaction_recovery_descriptor(
     )
 
 
+def _fetch_attempt_jobs(
+    http: Any,
+    identity: SessionIdentity,
+    *,
+    run_id: int,
+    attempt: int,
+    token: str,
+    require_completed_at: bool,
+) -> list[dict[str, Any]] | None:
+    """Paginate and validate complete terminal job inventory for one Actions attempt."""
+    all_jobs: list[dict[str, Any]] = []
+    seen_job_ids: set[int] = set()
+    expected_total: int | None = None
+    reached_end = False
+    for page in range(1, MAX_PAGINATION_PAGES + 1):
+        jobs_path = http.repository_path(
+            identity.repository,
+            f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page={_PAGE_SIZE}&page={page}",
+        )
+        j_status, j_payload = http.request("GET", jobs_path, token=token)
+        if j_status != 200 or not isinstance(j_payload, dict):
+            return None
+        page_jobs = j_payload.get("jobs")
+        total_count = j_payload.get("total_count")
+        if not isinstance(page_jobs, list) or len(page_jobs) > _PAGE_SIZE:
+            return None
+        if (
+            type(total_count) is not int
+            or total_count <= 0
+            or (expected_total is not None and total_count != expected_total)
+        ):
+            return None
+        expected_total = total_count
+        for job in page_jobs:
+            if not isinstance(job, dict):
+                return None
+            jid = job.get("id")
+            if type(jid) is not int or jid <= 0 or jid in seen_job_ids:
+                return None
+            seen_job_ids.add(jid)
+            all_jobs.append(job)
+        if len(page_jobs) < _PAGE_SIZE:
+            reached_end = True
+            break
+    if not reached_end or expected_total != len(all_jobs):
+        return None
+    for job in all_jobs:
+        if (
+            job.get("run_id") != run_id
+            or job.get("run_attempt") != attempt
+            or job.get("status") != "completed"
+        ):
+            return None
+        conclusion = job.get("conclusion")
+        if (
+            not isinstance(conclusion, str)
+            or conclusion not in _TERMINAL_JOB_CONCLUSIONS
+        ):
+            return None
+        if require_completed_at:
+            completed_at = job.get("completed_at")
+            if not isinstance(completed_at, str):
+                return None
+            try:
+                _stamp(completed_at)
+            except ReviewInputError:
+                return None
+    return all_jobs
+
+
 def _probe_owner_ceased(
     ledger: Any,
     identity: SessionIdentity,
@@ -899,8 +977,10 @@ def _probe_owner_ceased(
     recognized terminal conclusion (`_TERMINAL_JOB_CONCLUSIONS`) paired with
     `status == "completed"` across every paginated job in the target attempt
     proves runner execution has ceased; empty, incomplete, truncated, or
-    unrecognized job pages fail closed (`False`). A retained caller necessarily
-    ran a job, so an empty listing cannot witness its owner's cessation.
+    unrecognized job pages fail closed (`False`). Later attempts up to
+    `MAX_LATER_ATTEMPT_INSPECTION` are accepted only when every job is
+    terminal and `later_attempt_proved_no_business_entry` positively proves
+    no writer entered business code.
     """
     http = getattr(ledger, "http", None)
     token = actions_token or getattr(ledger, "token", None)
@@ -923,73 +1003,40 @@ def _probe_owner_ceased(
                 and run_conclusion in _TERMINAL_JOB_CONCLUSIONS
                 and isinstance(attempt, int)
                 and not isinstance(attempt, bool)
-                and attempt == old.owner.run_attempt
+                and attempt >= old.owner.run_attempt
+                and attempt - old.owner.run_attempt <= MAX_LATER_ATTEMPT_INSPECTION
             ):
-                all_jobs: list[dict[str, Any]] = []
-                seen_job_ids: set[int] = set()
-                expected_total: int | None = None
-                reached_end = False
-                for page in range(1, MAX_PAGINATION_PAGES + 1):
-                    jobs_path = http.repository_path(
-                        identity.repository,
-                        f"/actions/runs/{old.identity.run_id}/attempts/"
-                        f"{old.owner.run_attempt}/jobs?per_page={_PAGE_SIZE}&page={page}",
-                    )
-                    j_status, j_payload = http.request("GET", jobs_path, token=token)
-                    if j_status != 200 or not isinstance(j_payload, dict):
-                        return False
-                    page_jobs = j_payload.get("jobs")
-                    total_count = j_payload.get("total_count")
-                    if not isinstance(page_jobs, list) or len(page_jobs) > _PAGE_SIZE:
-                        return False
-                    if (
-                        type(total_count) is not int
-                        or total_count <= 0
-                        or (
-                            expected_total is not None and total_count != expected_total
-                        )
-                    ):
-                        return False
-                    expected_total = total_count
-                    for job in page_jobs:
-                        if not isinstance(job, dict):
-                            return False
-                        jid = job.get("id")
-                        if type(jid) is not int or jid <= 0 or jid in seen_job_ids:
-                            return False
-                        seen_job_ids.add(jid)
-                        all_jobs.append(job)
-                    if len(page_jobs) < _PAGE_SIZE:
-                        reached_end = True
-                        break
-                if not reached_end:
+                old_jobs = _fetch_attempt_jobs(
+                    http,
+                    identity,
+                    run_id=old.identity.run_id,
+                    attempt=old.owner.run_attempt,
+                    token=token,
+                    require_completed_at=True,
+                )
+                if old_jobs is None:
                     return False
-                if expected_total != len(all_jobs):
-                    return False
-                for job in all_jobs:
-                    if (
-                        job.get("run_id") != old.identity.run_id
-                        or job.get("run_attempt") != old.owner.run_attempt
-                        or job.get("status") != "completed"
-                    ):
-                        return False
-                    conclusion = job.get("conclusion")
-                    if (
-                        not isinstance(conclusion, str)
-                        or conclusion not in _TERMINAL_JOB_CONCLUSIONS
-                    ):
-                        return False
-                    completed_at = job.get("completed_at")
-                    if not isinstance(completed_at, str):
-                        return False
-                    try:
-                        _stamp(completed_at)
-                    except ReviewInputError:
-                        return False
                 matching = [
-                    j for j in all_jobs if _writer_name(j.get("name"), old.owner.job)
+                    j for j in old_jobs if _writer_name(j.get("name"), old.owner.job)
                 ]
-                return len(matching) == 1
+                if len(matching) != 1:
+                    return False
+                for later_attempt in range(old.owner.run_attempt + 1, attempt + 1):
+                    later_jobs = _fetch_attempt_jobs(
+                        http,
+                        identity,
+                        run_id=old.identity.run_id,
+                        attempt=later_attempt,
+                        token=token,
+                        require_completed_at=False,
+                    )
+                    if later_jobs is None:
+                        return False
+                    if any(not is_terminal_job(j) for j in later_jobs):
+                        return False
+                    if not later_attempt_proved_no_business_entry(later_jobs):
+                        return False
+                return True
         return False
     run_reader = getattr(ledger, "_run_reader", None)
     if isinstance(run_reader, ApiRunActionsEvidence):
@@ -1008,10 +1055,31 @@ def _probe_owner_ceased(
             return True
         except ReviewInputError:
             return False
+    ceased_run_fn = getattr(run_reader, "ceased_run_owner", None)
     ceased_fn = getattr(run_reader, "ceased_owner", None)
+    command_run_id = getattr(run_reader, "command_run_id", None)
+    if callable(ceased_run_fn) and command_run_id != str(old.identity.run_id):
+        try:
+            ceased_run_fn(
+                identity,
+                old.identity.run_id,
+                old.owner,
+                complete_terminal_inventory=True,
+            )
+            return True
+        except ReviewInputError:
+            return False
     if callable(ceased_fn):
         try:
-            ceased_fn(identity, old.owner)
+            sig = inspect.signature(ceased_fn)
+            accepts_complete = "complete_terminal_inventory" in sig.parameters or any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in sig.parameters.values()
+            )
+            if accepts_complete:
+                ceased_fn(identity, old.owner, complete_terminal_inventory=True)
+            else:
+                ceased_fn(identity, old.owner)
             return True
         except ReviewInputError:
             return False
@@ -1270,6 +1338,80 @@ def classify_abort_inline_effect(
     return False if head_sha not in (native_head, current_head) else None
 
 
+def _paginate_step_down(
+    *,
+    http: Any,
+    hint_path: str,
+    fetch_page: Callable[[int, int], tuple[Any, Any]],
+    on_page: Callable[[list[Any]], Any],
+) -> tuple[str, Any]:
+    """Read aligned REST list pages stepping down 100->20->10->5->1 on oversized pages.
+
+    Returns ``(status, early_result)`` where ``status`` is one of ``"complete"``,
+    ``"invalid"``, ``"too_large"``, or ``"budget_exceeded"``.
+    """
+    offset = 0
+    page_size_index = 0
+    requests_used = 0
+    hint_fn = getattr(http, "pagination_page_size", None)
+    while requests_used < MAX_PAGINATION_PAGES and offset <= MAX_PAGINATION_ITEMS:
+        if callable(hint_fn):
+            hint = hint_fn(hint_path, offset)
+            if type(hint) is int and 1 <= hint <= _PAGE_SIZE:
+                page_size_index = next(
+                    (
+                        idx
+                        for idx in range(page_size_index, len(_STEP_DOWN_PAGE_SIZES))
+                        if _STEP_DOWN_PAGE_SIZES[idx] <= hint
+                        and offset % _STEP_DOWN_PAGE_SIZES[idx] == 0
+                    ),
+                    page_size_index,
+                )
+        aligned_index = next(
+            (
+                idx
+                for idx in range(page_size_index, len(_STEP_DOWN_PAGE_SIZES))
+                if offset % _STEP_DOWN_PAGE_SIZES[idx] == 0
+            ),
+            None,
+        )
+        if aligned_index is None:
+            return "invalid", None
+        page_size_index = aligned_index
+        page_size = _STEP_DOWN_PAGE_SIZES[page_size_index]
+        page = offset // page_size + 1
+        requests_used += 1
+        try:
+            status, items = fetch_page(page_size, page)
+        except GitHubHTTPResponseTooLargeError:
+            next_index = next(
+                (
+                    idx
+                    for idx in range(page_size_index + 1, len(_STEP_DOWN_PAGE_SIZES))
+                    if offset % _STEP_DOWN_PAGE_SIZES[idx] == 0
+                ),
+                None,
+            )
+            if next_index is None:
+                return "too_large", None
+            page_size_index = next_index
+            continue
+        if status != 200 or not isinstance(items, list) or len(items) > page_size:
+            return "invalid", None
+        early = on_page(items)
+        if early is not None:
+            return "complete", early
+        offset += len(items)
+        if len(items) < page_size:
+            return "complete", None
+        if offset >= MAX_PAGINATION_ITEMS:
+            return "budget_exceeded", None
+        page_size_index = next(
+            idx for idx, size in enumerate(_STEP_DOWN_PAGE_SIZES) if offset % size == 0
+        )
+    return "budget_exceeded", None
+
+
 def _detect_late_native_effects(
     ledger: Any,
     identity: SessionIdentity,
@@ -1328,16 +1470,24 @@ def _detect_late_native_effects(
             return None, None
         return result if time.monotonic() < deadline else (None, None)
 
-    incomplete = False
-    seen_reviews: set[int] = set()
-    for page in range(1, MAX_PAGINATION_PAGES + 1):
+    def fetch_review_page(page_size: int, page: int) -> tuple[Any, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, None
         reviews_path = http.repository_path(
             identity.repository,
-            f"/pulls/{identity.pull_request}/reviews?per_page={_PAGE_SIZE}&page={page}",
+            f"/pulls/{identity.pull_request}/reviews?per_page={page_size}&page={page}",
         )
-        status, reviews = request("GET", reviews_path)
-        if status != 200 or not isinstance(reviews, list) or len(reviews) > _PAGE_SIZE:
-            return None
+        result = http.request(
+            "GET", reviews_path, token=token, timeout_seconds=remaining
+        )
+        return result if time.monotonic() < deadline else (None, None)
+
+    incomplete = False
+    seen_reviews: set[int] = set()
+
+    def handle_review_page(reviews: list[Any]) -> bool | None:
+        nonlocal incomplete
         for review in reviews:
             review_id = review.get("id") if isinstance(review, dict) else None
             if (
@@ -1358,9 +1508,22 @@ def _detect_late_native_effects(
             if effect is True:
                 return True
             incomplete |= effect is None
-        if len(reviews) < _PAGE_SIZE:
-            break
-    else:
+        return None
+
+    try:
+        walk_status, early = _paginate_step_down(
+            http=http,
+            hint_path=http.repository_path(
+                identity.repository, f"/pulls/{identity.pull_request}/reviews"
+            ),
+            fetch_page=fetch_review_page,
+            on_page=handle_review_page,
+        )
+    except GitHubHTTPError:
+        return None
+    if early is True:
+        return True
+    if walk_status != "complete":
         return None
 
     owner, _, name = identity.repository.partition("/")
@@ -1956,21 +2119,15 @@ def _load_live_no_transaction_context(
 
     matched_comments: list[tuple[dict[str, Any], SessionRecord]] = []
     seen_comment_ids: set[int] = set()
-    comments_complete = False
-    for page in range(1, MAX_PAGINATION_PAGES + 1):
+
+    def fetch_comment_page(page_size: int, page: int) -> tuple[Any, Any]:
         comments_path = ro_http.repository_path(
             identity.repository,
-            f"/issues/{identity.pull_request}/comments?per_page={_PAGE_SIZE}&page={page}",
+            f"/issues/{identity.pull_request}/comments?per_page={page_size}&page={page}",
         )
-        status, comments = ro_http.request("GET", comments_path, token=token)
-        if (
-            status != 200
-            or not isinstance(comments, list)
-            or len(comments) > _PAGE_SIZE
-        ):
-            raise ReviewInputError(
-                "unable to read issue comments for no-transaction inspection"
-            )
+        return ro_http.request("GET", comments_path, token=token)
+
+    def handle_comment_page(comments: list[Any]) -> None:
         for item in comments:
             if not isinstance(item, dict):
                 continue
@@ -1995,10 +2152,20 @@ def _load_live_no_transaction_context(
                         "session comment repository/PR issue_url does not match"
                     )
                 matched_comments.append((item, parsed))
-        if len(comments) < _PAGE_SIZE:
-            comments_complete = True
-            break
-    if not comments_complete:
+
+    comments_status, _ = _paginate_step_down(
+        http=ro_http,
+        hint_path=ro_http.repository_path(
+            identity.repository, f"/issues/{identity.pull_request}/comments"
+        ),
+        fetch_page=fetch_comment_page,
+        on_page=handle_comment_page,
+    )
+    if comments_status in {"invalid", "too_large"}:
+        raise ReviewInputError(
+            "unable to read issue comments for no-transaction inspection"
+        )
+    if comments_status != "complete":
         raise ReviewInputError(
             "issue comment pagination exceeded safety bound during no-transaction inspection"
         )

@@ -53,7 +53,10 @@ from .source_comment_lifecycle import (
     admit_event_comment_source,
     execute_source_lifecycle_route,
 )
-from .unstarted_action_recovery import NoBusinessDispatchEvidence
+from .unstarted_action_recovery import (
+    NoBusinessDispatchEvidence,
+    _scoped_rollover_cessation,
+)
 
 
 @dataclass(frozen=True)
@@ -161,22 +164,24 @@ def _cross_run_unstarted_rollover_guard(
                 command_run_id=str(self.run.run_id),
                 job=self.job,
             )
-        require_cessation()
-        classification, activated = execute_source_lifecycle_route(
-            caller=self,
-            ledger=native,
-            identity=identity,
-            record=previous_root,
-            candidate_source=None,
-            mode="cross_run",
-            actions_evidence=actions_ev,
-            canonical_coordinator=gate.canonical_coordinator,
-            canonical_token=gate.canonical_token,
-            no_business_dispatch_evidence=evidence_obj,
-            require_positive_dispatch_proof=True,
-            rollover_configuration=frozen,
-            rollover_owner=owner,
-        )
+        else:
+            require_cessation()
+        with _scoped_rollover_cessation(actions_ev, require_cessation):
+            classification, activated = execute_source_lifecycle_route(
+                caller=self,
+                ledger=native,
+                identity=identity,
+                record=previous_root,
+                candidate_source=None,
+                mode="cross_run",
+                actions_evidence=actions_ev,
+                canonical_coordinator=gate.canonical_coordinator,
+                canonical_token=gate.canonical_token,
+                no_business_dispatch_evidence=evidence_obj,
+                require_positive_dispatch_proof=True,
+                rollover_configuration=frozen,
+                rollover_owner=owner,
+            )
         if classification.route != "g32_unstarted_cancellation":
             raise ReviewInputError(
                 f"cross-run unstarted recovery refused on route {classification.route!r}"
