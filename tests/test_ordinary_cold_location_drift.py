@@ -53,7 +53,7 @@ f.root=Path(p['root']);f.policy=f.policy_ref=p['policy'];f.config_bytes=bytes.fr
 for k,v in p['remote'].items():
     if k=='extra_comments':v={int(a):b for a,b in v.items()}
     setattr(f,k,copy.deepcopy(v))
-f.next_run();f.active_finding_cap=1
+f.next_run();f.active_finding_cap=p.get('cap',1)
 f.run_id=p.get('run_id',f.run_id)
 f.live_head=f.requested_head=p.get('head',f.live_head)
 (f.root/'review.patch').write_bytes(p['diff'].encode('utf-8'))

@@ -10,6 +10,7 @@ from review_sensei.finding_drift import reconcile_uncertain_drift_thread
 
 from .finding_lifecycle_consumers import finding_lifecycle_consumer
 from .publication import NativeFindingReceipt
+from .thread_resolution import graphql_app_author
 
 
 def reconcile_finding_lifecycle(
@@ -151,8 +152,8 @@ def reconcile_finding_lifecycle(
             and root.get("commit") == {"oid": r["native_head_sha"]}
             and isinstance(author, dict)
             and author.get("databaseId") == r["producer_id"]
-            and author.get("login") == app_slug
             and author.get("__typename") == "Bot"
+            and graphql_app_author(author, app_slug)
         )
     ]
     if len(matching) != 1:

@@ -2481,6 +2481,367 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             with self.assertRaises(ReviewInputError):
                 replace(pkt_exh, **bad_pkt)
 
+    def test_g30_security_gates_readonly_bot_scope_ledger_and_accounting_versions(
+        self,
+    ) -> None:
+        from review_sensei_github.api_run_history import action_result_binding
+
+        from review_sensei.api_work import (
+            PARTITIONED_ACTION_ACCOUNTING_VERSION,
+            ApiRunAccounting,
+            PendingApiRequest,
+        )
+        from review_sensei.bounded_evidence import (
+            MAX_PARTITION_DECODED_BYTES,
+            canonical_bytes,
+            encode_evidence,
+            inline_manifest,
+        )
+
+        # 1. inspect_durable_pending_receipts: _ReadOnlyHttp, case-insensitive [bot], app_user_id:
+        report_digest = "d" * 64
+        content = "Pending assessment page 1 content."
+        marker = (
+            reply_marker(
+                source_comment_id=10,
+                source_updated_digest=_sha256("updated"),
+                pull_request=1,
+                head_sha=HEAD,
+            )[:-4]
+            + f" report={report_digest} part=1/1 content={_sha256(content)} -->"
+        )
+        body_text = content + "\n\n" + marker
+
+        class _MutatingCheckHttp(GitHubHttp):
+            def __init__(self, comments_payload: list[dict[str, Any]]) -> None:
+                super().__init__(api_url="https://api.github.test", opener=self._open)
+                self.comments_payload = comments_payload
+                self.methods: list[str] = []
+
+            def _open(self, request: Any, timeout: float) -> Any:
+                self.methods.append(request.get_method())
+                return json_response(self.comments_payload)
+
+            def request(
+                self,
+                method: str,
+                path: str,
+                *,
+                token: str,
+                body: Any = None,
+                timeout_seconds: float | None = None,
+            ) -> tuple[int, Any]:
+                self.methods.append(method)
+                return 200, self.comments_payload
+
+        ok_http = _MutatingCheckHttp(
+            [
+                {
+                    "id": 901,
+                    "body": body_text,
+                    "user": {"type": "Bot", "login": "ReviewSensei", "id": 777},
+                }
+            ]
+        )
+        obs_norm = inspect_durable_pending_receipts(
+            http=ok_http,
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            source_kind="issue",
+            source_comment_id=10,
+            source_updated_at="updated",
+            head_sha=HEAD,
+            app_slug="reviewsensei[bot]",
+            app_user_id=777,
+        )
+        assert obs_norm is not None
+        self.assertTrue(obs_norm.complete)
+        self.assertEqual(obs_norm.terminal_comment_id, 901)
+        self.assertEqual(ok_http.methods, ["GET"])
+
+        # Mismatched app_user_id fails closed as duplicate_conflict / invalid!
+        obs_bad_uid = inspect_durable_pending_receipts(
+            http=ok_http,
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            source_kind="issue",
+            source_comment_id=10,
+            source_updated_at="updated",
+            head_sha=HEAD,
+            app_slug="reviewsensei[bot]",
+            app_user_id=888,
+        )
+        assert obs_bad_uid is not None
+        self.assertFalse(obs_bad_uid.complete)
+        self.assertTrue(obs_bad_uid.duplicate_conflict)
+        self.assertFalse(obs_bad_uid.content_digests_valid)
+
+        with self.assertRaisesRegex(ReviewInputError, "app_user_id"):
+            inspect_durable_pending_receipts(
+                http=ok_http,
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                source_kind="issue",
+                source_comment_id=10,
+                source_updated_at="updated",
+                head_sha=HEAD,
+                app_slug="reviewsensei[bot]",
+                app_user_id=0,
+            )
+
+        from review_sensei_github import pending_reassessment_recovery as _prr
+        from review_sensei_github.review_completion_recovery import _ReadOnlyHttp
+
+        with patch.object(_prr, "_ReadOnlyHttp", wraps=_ReadOnlyHttp) as ro_spy:
+            inspect_durable_pending_receipts(
+                http=ok_http,
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                source_kind="issue",
+                source_comment_id=10,
+                source_updated_at="updated",
+                head_sha=HEAD,
+                app_slug="reviewsensei[bot]",
+            )
+            self.assertEqual(ro_spy.call_count, 1)
+        with self.assertRaisesRegex(ReviewInputError, "read-only"):
+            _ReadOnlyHttp(ok_http).request(
+                "POST", "/repos/o/r/issues/1/comments", token="t"
+            )
+        with self.assertRaisesRegex(ReviewInputError, "GitHubHttp"):
+            inspect_durable_pending_receipts(
+                http=object(),
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                source_kind="issue",
+                source_comment_id=10,
+                source_updated_at="updated",
+                head_sha=HEAD,
+                app_slug="reviewsensei[bot]",
+            )
+
+        # 2. Scope match gating on latest_eligibility: mismatched head/base/digest never marks decisions_durably_published=True:
+        id_77 = SessionIdentity(
+            repository="owner/repo", pull_request=77, repository_id=123
+        )
+        orig_elig = prior()
+        assert orig_elig.human_review is not None
+        resolved_inv = replace(
+            orig_elig.human_review,
+            resolved=(orig_elig.human_review.findings[0].fingerprint,),
+        )
+        resolved_elig = replace(orig_elig, human_review=resolved_inv)
+        settled_reply = ReplyResult(
+            status="replied",
+            comment_id=501,
+            finalization_completion=object(),  # type: ignore[arg-type]
+            resolution_status="resolved",
+            approval_status="approved",
+        )
+        source_sha = _sha256(HUMAN)
+        for bad_latest in (
+            replace(resolved_elig, result_digest="9" * 64),
+            replace(resolved_elig, head_sha="c" * 40),
+            replace(
+                resolved_elig,
+                human_review=replace(resolved_inv, base_sha="c" * 40),
+            ),
+        ):
+            attr_bad = qualify_pending_reassessment(
+                original_eligibility=orig_elig,
+                latest_eligibility=bad_latest,
+                bound_source_comment_id=40810,
+                bound_source_updated_at="2026-10-15T14:22:00Z",
+                bound_source_body_sha256=source_sha,
+                bound_source_kind="issue",
+                bound_base_sha=BASE,
+                bound_head_sha=HEAD,
+                current_base_sha=BASE,
+                current_head_sha=HEAD,
+                reply_result=settled_reply,
+            )
+            self.assertFalse(attr_bad.terminal)
+            self.assertNotEqual(attr_bad.state_code, "reassessment_completed_settled")
+
+        # 3. action.phase == "pending", uncertain > 0, and operator_paused block terminal=True & admissible_to_approve=True:
+        pending_rec = self._make_pending_reply_record(
+            repository="owner/repo",
+            pull_request=77,
+            repository_id=123,
+            run_id=7710,
+            source_body_sha256=source_sha,
+        )
+        pkt_pending_block = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            record=pending_rec,
+            reply_result=settled_reply,
+        )
+        self.assertFalse(pkt_pending_block.attribution.terminal)
+        self.assertFalse(pkt_pending_block.admissible_to_approve)
+        self.assertIn("terminal_action_outcome", pkt_pending_block.missing_proofs)
+
+        # Build an authentic settled action record (`action.phase == "terminal"`):
+        settled_doc = copy.deepcopy(pending_rec.api_run_accounting)
+        assert settled_doc is not None
+        for blk in settled_doc["blocks"]:
+            blk["pending"] = []
+        intent_obj = settled_doc["action"]["intent"]
+        intent_digest = hashlib.sha256(canonical_bytes(intent_obj)).hexdigest()
+        outcome_obj = {"kind": "applied", "reason": None}
+        binding = action_result_binding(
+            id_77, ApiRunAccounting.from_document(settled_doc), "github-bot:999"
+        )
+        env = {
+            "schema_version": "caller-action-result-v1",
+            "intent_sha256": intent_digest,
+            "outcome": outcome_obj,
+            "result": {"status": "ok"},
+        }
+        carrier = {
+            "schema_version": "caller-action-result-v1",
+            "payload": encode_evidence(
+                env, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES
+            ),
+        }
+        settled_doc["action"] = {
+            "phase": "terminal",
+            "execution_started": True,
+            "intent": intent_obj,
+            "outcome": outcome_obj,
+            "result": inline_manifest(carrier, binding=binding, item_count=1),
+        }
+        settled_rec = pending_rec.evolve(
+            api_run_accounting=ApiRunAccounting.from_document(settled_doc).to_document()
+        )
+        pkt_ok = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            record=settled_rec,
+            reply_result=settled_reply,
+        )
+        self.assertTrue(pkt_ok.attribution.terminal)
+        self.assertTrue(pkt_ok.admissible_to_approve)
+
+        paused_rec = settled_rec.evolve(operator_paused=True)
+        pkt_paused = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            record=paused_rec,
+            reply_result=settled_reply,
+        )
+        self.assertFalse(pkt_paused.attribution.terminal)
+        self.assertFalse(pkt_paused.admissible_to_approve)
+
+        uncertain_doc = copy.deepcopy(settled_doc)
+        uncertain_doc["blocks"][0]["pending"] = [
+            {"request_id": "req-u-1", "deadline_unix_ms": 1_900_000_000_000}
+        ]
+        uncertain_acc = ApiRunAccounting.from_document(uncertain_doc)
+        self.assertGreater(uncertain_acc.uncertain, 0)
+        uncertain_rec = settled_rec.evolve(
+            api_run_accounting=uncertain_acc.to_document()
+        )
+        pkt_uncertain = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            record=uncertain_rec,
+            reply_result=settled_reply,
+        )
+        self.assertFalse(pkt_uncertain.attribution.terminal)
+        self.assertFalse(pkt_uncertain.admissible_to_approve)
+
+        # 4. qualify_offline_pending_continuation handles legacy v1 and caller-requests-v3 cleanly:
+        incomplete_attr = qualify_pending_reassessment(
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+        )
+        v3_doc = copy.deepcopy(settled_doc)
+        v3_doc["version"] = PARTITIONED_ACTION_ACCOUNTING_VERSION
+        v3_acc = ApiRunAccounting.from_document(v3_doc)
+        base_fields = {
+            key: value
+            for key, value in vars(settled_rec).items()
+            if key != "record_sha256" and not key.startswith("_")
+        }
+        v3_rec = SessionRecord._construct(
+            **{**base_fields, "api_run_accounting": v3_acc.to_document()}
+        )
+        v3_cont = qualify_offline_pending_continuation(
+            incomplete_attr,
+            record=v3_rec,
+            durable_operation_journal_present=True,
+            required_continuation_requests=2,
+        )
+        self.assertEqual(v3_cont.remaining_caller_allowance, v3_acc.remaining)
+        self.assertFalse(v3_cont.qualifies_zero_inference_continuation)
+        self.assertIn("reader_only_caller_accounting", v3_cont.disqualifying_reasons)
+
+        v1_doc = copy.deepcopy(settled_doc)
+        v1_doc["version"] = "caller-requests-v1"
+        v1_doc["completed"] = [PendingApiRequest("c-1", 1_900_000_000_000).__dict__]
+        v1_acc = ApiRunAccounting.from_document(v1_doc)
+        v1_rec = SessionRecord._construct(
+            **{**base_fields, "api_run_accounting": v1_acc.to_document()}
+        )
+        v1_cont = qualify_offline_pending_continuation(
+            incomplete_attr,
+            record=v1_rec,
+            durable_operation_journal_present=True,
+            required_continuation_requests=2,
+        )
+        self.assertEqual(v1_cont.remaining_caller_allowance, v1_acc.remaining)
+        self.assertTrue(v1_cont.qualifies_zero_inference_continuation)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,8 @@ from review_sensei.finding_lifecycle import (
 from review_sensei.finding_lifecycle_store import _sizing_producer
 from review_sensei.session import SessionIdentity
 
+from .thread_resolution import graphql_app_author
+
 VERSION = "finding-lifecycle-journal-v1"
 CURRENT_VERSION = "finding-lifecycle-journal-v2"
 MAX_EFFECTS = 32
@@ -3861,7 +3863,10 @@ class FindingLifecycleJournal:
             or not isinstance(capacity_details.get("staged_parts"), tuple)
         ):
             raise ReviewInputError("command finalization disposition preview changed")
-        from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
+        from review_sensei.finding_lifecycle_store import (
+            estimate_lifecycle_branch_parts,
+            preflight_finding_lifecycle,
+        )
 
         from .api_run_requests import ApiRunSessionLedger
         from .review_run import ActionRunLedger
@@ -3979,6 +3984,7 @@ class FindingLifecycleJournal:
         from . import action_receipt
         from .api_run_plan import (
             COMMAND_RECEIPT_CONFIRMATION_REQUESTS,
+            READ_OPERATION_REQUESTS,
             owner_allocations,
         )
         from .trust_effects import verification_profile
@@ -4020,24 +4026,34 @@ class FindingLifecycleJournal:
             and verification_profile(caller) is None
             and payload.get("read_contract") == "closed-plain-single-complete-page-v1"
         )
-        cached_count = (
-            len(self.ledger._cached_comments())
-            if getattr(self.ledger, "_inventory_complete", False)
-            else None
-        )
-        plain_single_page_receipt = bool(
-            is_plain_action_command
-            and cached_count is not None
-            and cached_count
-            + len(capacity_details["staged_parts"])
-            + len(documents)
-            + 1
-            < 100
-        )
-        if plain_single_page_receipt:
-            receipt_calls = 8
+        plain_receipt_plan = None
+        if is_plain_action_command and getattr(
+            self.ledger, "_inventory_complete", False
+        ):
+            lifecycle_parts = estimate_lifecycle_branch_parts(
+                self.ledger,
+                self._record,
+                alternatives=alternatives,
+                operation_id=self.operation_id,
+                base_sha=self.base_sha,
+                head_sha=self.head_sha,
+                policy_digest=self.policy_digest,
+                configuration_digest=self.configuration_digest,
+                item_count=item_count,
+                projected_record=preview_record,
+            )
+            plain_receipt_plan = action_receipt.plan_plain_receipt_pages(
+                self.ledger,
+                self.identity,
+                staged_parts_count=len(capacity_details["staged_parts"]),
+                lifecycle_parts_count=lifecycle_parts,
+            )
+        if plain_receipt_plan is not None:
+            receipt_calls = 6 + 2 * len(plain_receipt_plan[1])
         elif is_plain_action_command:
-            receipt_calls = 4 + 1 + COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+            receipt_calls = (
+                4 + READ_OPERATION_REQUESTS + COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+            )
         else:
             receipt_calls = 6
         acct = caller.accounting
@@ -4092,12 +4108,17 @@ class FindingLifecycleJournal:
             raise
         self.last_capacity_breakdown = result.get("reserved_cost_breakdown")
         self.preflight_native_tail(calls=native_calls)
-        if plain_single_page_receipt:
+        if plain_receipt_plan is not None:
+            inv_ids, page_requests, page_bounds, max_items = plain_receipt_plan
             action_receipt._bind_plain_single_page_receipt(
                 self.ledger,
                 caller,
                 self.identity,
                 operation_id=self.operation_id,
+                page_requests=page_requests,
+                page_bounds=page_bounds,
+                inventory_ids=inv_ids,
+                maximum_items=max_items,
             )
         plan.bind_preview_capacity(
             preview_record, capacity_details, pending_documents=pending_commitments
@@ -6505,10 +6526,13 @@ class FindingLifecycleJournal:
             or not isinstance(comment.get("body"), str)
             or hashlib.sha256(comment["body"].encode()).hexdigest()
             != receipt["body_sha256"]
+            or comment.get("edited_by_human") is True
+            or comment.get("pullRequestReview") != {"databaseId": receipt["review_id"]}
+            or comment.get("commit") != {"oid": receipt["native_head_sha"]}
             or not isinstance(author, dict)
             or author.get("databaseId") != receipt["producer_id"]
             or author.get("__typename") != "Bot"
-            or author.get("login") != self.app_slug
+            or not graphql_app_author(author, self.app_slug)
         ):
             return None
         return 200, {

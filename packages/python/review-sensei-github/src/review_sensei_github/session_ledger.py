@@ -104,7 +104,7 @@ from .errors import (
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
-from .http import MAX_PAGINATION_ITEMS, GitHubHttp
+from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_ITEMS, GitHubHttp
 
 _COMMENT_PAGE_SIZES = (100, 20, 10, 5, 1)
 _FENCE_PAGE_SIZE = 100
@@ -1497,6 +1497,65 @@ class GitHubIssueCommentSessionLedger:
             path += f"&since={quote(anchor, safe='')}"
         return path
 
+    def _safe_fence_page_size(
+        self,
+        identity: SessionIdentity,
+        *,
+        comment_id: int,
+        draft: SessionRecord,
+    ) -> int:
+        """Select a safe page size for post-write fence scans within MAX_GITHUB_RESPONSE_BYTES."""
+        anchor = (
+            self._fence_anchor
+            if isinstance(self._fence_anchor, str) and self._fence_anchor
+            else None
+        )
+        new_body = self._render_comment(
+            repository_id=self._require_identity(identity),
+            pull_request=identity.pull_request,
+            record=draft,
+        )
+        new_body_wire = len(canonical_bytes(new_body))
+        item_bounds: list[int] = []
+        for item in self._cached_comments():
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            stamp = item.get("updated_at")
+            if (
+                anchor is not None
+                and item_id != comment_id
+                and isinstance(stamp, str)
+                and _UPDATED_AT.fullmatch(stamp) is not None
+                and stamp < anchor
+            ):
+                continue
+            item_wire = len(canonical_bytes(item))
+            if item_id == comment_id:
+                body = item.get("body")
+                old_body_wire = (
+                    len(canonical_bytes(body)) if isinstance(body, str) else 0
+                )
+                item_wire = max(
+                    item_wire,
+                    item_wire - old_body_wire + new_body_wire + 4096 + 1024,
+                )
+            item_bounds.append(item_wire)
+        if not item_bounds:
+            return self._fence_page_size
+        for size in _COMMENT_PAGE_SIZES:
+            if size > self._fence_page_size:
+                continue
+            if all(
+                2
+                + sum(item_bounds[i : i + size])
+                + max(0, len(item_bounds[i : i + size]) - 1)
+                < MAX_GITHUB_RESPONSE_BYTES
+                for i in range(0, len(item_bounds), size)
+            ):
+                return size
+        return 1
+
     def _fencing(self) -> bool:
         return self._activation_ticket is not None and self._tail_phase in {
             "reload",
@@ -1718,6 +1777,7 @@ class GitHubIssueCommentSessionLedger:
         if len(items) >= size:
             return None
         found = []
+        root_body: str | None = None
         for item in items:
             if not isinstance(item, dict):
                 return None
@@ -1736,7 +1796,25 @@ class GitHubIssueCommentSessionLedger:
             if selected is None:
                 return None
             found.append(selected.record_sha256)
-        if found != [record.record_sha256]:
+            root_body = body
+        if found != [record.record_sha256] or root_body is None:
+            return None
+        grants = set(self._observed_consumed_grants)
+        if self._accepted_consumed_grant is not None:
+            grants.add(self._accepted_consumed_grant)
+        root_wire = plain_session_comment_json_bound(
+            consumed_grants=grants,
+            repository_id=record.repository_id,
+            pull_request=record.pull_request,
+        )
+        replaced_body = len(canonical_bytes(root_body))
+        wire = (
+            len(canonical_bytes(items))
+            - replaced_body
+            + max(replaced_body, root_wire)
+            + 4096
+        )
+        if wire >= MAX_GITHUB_RESPONSE_BYTES:
             return None
         return {
             "conditional_calls": 4,
@@ -2396,6 +2474,7 @@ class GitHubIssueCommentSessionLedger:
         _history_legacy_write_guard(self, record)
         from .publication_failure_recovery import (
             clear_admitted_prior_record,
+            consume_admitted_prior_chain,
             consume_admitted_prior_record,
         )
 
@@ -2404,12 +2483,18 @@ class GitHubIssueCommentSessionLedger:
             updated = mutate(record)
             # admit_publication_failure_recovery stashes the prior record only while
             # _mutation_active is True inside mutate(); finally clears on failure.
-            admitted_prior = consume_admitted_prior_record(self, record)
             if record.quarantine_lineage is not None:
                 from .quarantine_action import require_native_decision
 
                 require_native_decision(self, record, updated)
-            _validate_queue_retention(record, updated, prior_record=admitted_prior)
+            admitted_prior = consume_admitted_prior_record(self, record)
+            admitted_chain = consume_admitted_prior_chain(self, record)
+            _validate_queue_retention(
+                record,
+                updated,
+                prior_record=admitted_prior,
+                skipped_failed_ancestors=admitted_chain,
+            )
             read_session_baseline(self, updated)
             read_session_dispositions(self, updated)
             read_session_assessment_queue(self, updated)
@@ -2904,6 +2989,12 @@ class GitHubIssueCommentSessionLedger:
                 )
 
             self._fence_anchor = self._list_anchor
+            self._fence_page_size = min(
+                self._fence_page_size,
+                self._safe_fence_page_size(
+                    identity, comment_id=comment_id, draft=draft
+                ),
+            )
 
             def scan_steps() -> tuple[TailDispatch, ...]:
                 return tuple(

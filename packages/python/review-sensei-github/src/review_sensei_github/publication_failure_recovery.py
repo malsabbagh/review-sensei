@@ -677,6 +677,10 @@ _NO_EARLIER_EFFECTS = _EarlierSettledEffects(frozenset(), frozenset(), frozenset
 _ADMITTED_PRIOR_RECORDS: WeakKeyDictionary[Any, tuple[str, SessionRecord | None]] = (
     WeakKeyDictionary()
 )
+_ADMITTED_PRIOR_CHAINS: WeakKeyDictionary[
+    Any, tuple[str, tuple[SessionRecord, ...]]
+] = WeakKeyDictionary()
+_MAX_PRIOR_ANCESTOR_HOPS = 8
 
 
 def consume_admitted_prior_record(
@@ -692,9 +696,60 @@ def consume_admitted_prior_record(
     return prior_record
 
 
+def peek_admitted_prior_chain(
+    ledger: Any, before_record: SessionRecord
+) -> tuple[SessionRecord, ...]:
+    """Return the authenticated skipped-failed ancestor chain without clearing it."""
+    entry = _ADMITTED_PRIOR_CHAINS.get(ledger)
+    if entry is None:
+        return ()
+    root_sha256, chain = entry
+    if root_sha256 != before_record.record_sha256:
+        return ()
+    return chain
+
+
+def consume_admitted_prior_chain(
+    ledger: Any, before_record: SessionRecord
+) -> tuple[SessionRecord, ...]:
+    """Return and clear the skipped-failed ancestor chain for this rollover root."""
+    entry = _ADMITTED_PRIOR_CHAINS.pop(ledger, None)
+    if entry is None:
+        return ()
+    root_sha256, chain = entry
+    if root_sha256 != before_record.record_sha256:
+        return ()
+    return chain
+
+
 def clear_admitted_prior_record(ledger: Any) -> None:
-    """Drop any unclaimed admitted prior record on cleanup."""
+    """Drop any unclaimed admitted prior record and chain on cleanup."""
     _ADMITTED_PRIOR_RECORDS.pop(ledger, None)
+    _ADMITTED_PRIOR_CHAINS.pop(ledger, None)
+
+
+def _archive_part_count(archive_ref: Mapping[str, object]) -> int:
+    manifest = archive_ref.get("manifest")
+    parts = (
+        manifest.get("parts", ())
+        if isinstance(manifest, Mapping) and isinstance(manifest.get("parts"), list)
+        else ()
+    )
+    return max(1, len(parts))
+
+
+def _same_lifecycle_envelope(
+    prior_ref: Mapping[str, object] | None, current_ref: Mapping[str, object]
+) -> bool:
+    if prior_ref == current_ref:
+        return True
+    if not isinstance(prior_ref, Mapping):
+        return False
+    left, right = dict(prior_ref), dict(current_ref)
+    for item in (left, right):
+        item.pop("schema_version", None)
+        item.pop("accepted_semantic_history", None)
+    return left == right
 
 
 def _earlier_settled_effects(
@@ -707,6 +762,7 @@ def _earlier_settled_effects(
     budget: EvidenceReadBudget,
     *,
     prior_record: SessionRecord | None = None,
+    prior_archive_ref: dict[str, Any] | None = None,
 ) -> _EarlierSettledEffects:
     """Explain only exact visible bytes/IDs proved by the settled ancestor run."""
     from review_sensei.bounded_evidence import read_inline_evidence
@@ -739,30 +795,74 @@ def _earlier_settled_effects(
         or binding.get("head_sha") != head_sha
     ):
         return _NO_EARLIER_EFFECTS
+    expected_archive = prior_archive_ref if prior_archive_ref is not None else archive
     need_prior_read = prior_record is None
     _protect_tail(
         budget,
-        int(need_prior_read) + len(manifest.get("parts", ())),
+        (_archive_part_count(expected_archive) if need_prior_read else 0)
+        + len(manifest.get("parts", ())),
         record=current,
     )
     try:
-        prior = (
+        candidate = (
             prior_record
             if prior_record is not None
-            else read_previous_run(ledger, identity, archive)
+            else read_previous_run(ledger, identity, expected_archive)
         )
-        prior_caller = ApiRunAccounting.from_document(prior.api_run_accounting)
-        tx = prior.transaction
+        candidate_caller = ApiRunAccounting.from_document(candidate.api_run_accounting)
         if (
-            prior.identity() != identity
-            or prior.record_sha256 != archive.get("root_sha256")
-            or prior_caller.identity.run_id != archive.get("run_id")
-            or prior_caller.identity.repository_id != identity.repository_id
-            or tx is None
-            or tx.phase != "publication_succeeded"
-            or prior_caller.terminal_transaction != tx.transaction_id
+            candidate.identity() != identity
+            or candidate.record_sha256 != expected_archive.get("root_sha256")
+            or candidate_caller.identity.run_id != expected_archive.get("run_id")
+            or candidate_caller.identity.repository_id != identity.repository_id
+            or candidate.generation >= current.generation
+        ):
+            return _NO_EARLIER_EFFECTS
+        prior: SessionRecord | None = None
+        prior_caller: ApiRunAccounting | None = None
+        for _ in range(_MAX_PRIOR_ANCESTOR_HOPS + 1):
+            tx_cand = candidate.transaction
+            if (
+                tx_cand is not None
+                and tx_cand.phase == "publication_succeeded"
+                and tx_cand.transaction_id == reference.get("operation_id")
+            ):
+                prior = candidate
+                prior_caller = candidate_caller
+                break
+            next_ref = candidate_caller.previous_record
+            if not isinstance(next_ref, dict):
+                return _NO_EARLIER_EFFECTS
+            _protect_tail(budget, _archive_part_count(next_ref), record=current)
+            next_cand = read_previous_run(ledger, identity, next_ref)
+            next_caller = ApiRunAccounting.from_document(next_cand.api_run_accounting)
+            if (
+                next_cand.identity() != identity
+                or next_cand.record_sha256 != next_ref.get("root_sha256")
+                or next_caller.identity.run_id != next_ref.get("run_id")
+                or next_caller.identity.repository_id != identity.repository_id
+                or next_cand.generation >= candidate.generation
+            ):
+                return _NO_EARLIER_EFFECTS
+            candidate, candidate_caller = next_cand, next_caller
+        if prior is None or prior_caller is None:
+            return _NO_EARLIER_EFFECTS
+        tx = prior.transaction
+        assert tx is not None
+        terminal_review = (
+            prior_caller.action is None
+            and prior_caller.terminal_transaction == tx.transaction_id
+        )
+        terminal_command = (
+            prior_caller.action is not None
+            and prior_caller.action.get("phase") == "terminal"
+            and prior_caller.terminal_transaction is None
+        )
+        if (
+            tx.phase != "publication_succeeded"
+            or (not terminal_review and not terminal_command)
             or prior.reservation_id is not None
-            or prior.finding_lifecycle != reference
+            or not _same_lifecycle_envelope(prior.finding_lifecycle, reference)
             or not tx.generation <= binding["generation"] <= prior.generation
             or prior.generation >= current.generation
             or reference["operation_id"] != tx.transaction_id
@@ -974,25 +1074,68 @@ def admit_publication_failure_recovery(
     head_sha = witness.head_sha
 
     prior_record: SessionRecord | None = None
+    prior_archive_ref: dict[str, Any] | None = None
+    skipped_failed_ancestors: list[SessionRecord] = []
     if record.transaction is not None and old.previous_record is not None:
-        prev_manifest = old.previous_record.get("manifest")
-        prev_parts = (
-            prev_manifest.get("parts", ())
-            if isinstance(prev_manifest, dict)
-            and isinstance(prev_manifest.get("parts"), list)
-            else ()
-        )
-        _protect_tail(budget, max(1, len(prev_parts)), record=record)
-        try:
-            prior_record = read_previous_run(ledger, identity, old.previous_record)
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        cursor_ref: Any = old.previous_record
+        child_record = record
+        for _ in range(_MAX_PRIOR_ANCESTOR_HOPS):
+            if not isinstance(cursor_ref, dict):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            _protect_tail(budget, _archive_part_count(cursor_ref), record=record)
+            try:
+                candidate = read_previous_run(ledger, identity, cursor_ref)
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+                raise _hold(
+                    "prior settled session root is unavailable", record=record
+                ) from None
+            if (
+                candidate.identity() != identity
+                or candidate.record_sha256 != cursor_ref.get("root_sha256")
+                or candidate.generation >= child_record.generation
+                or candidate.api_run_accounting is None
+            ):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            candidate_acc = ApiRunAccounting.from_document(candidate.api_run_accounting)
+            if candidate_acc.identity.run_id != cursor_ref.get("run_id"):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            if (
+                candidate.transaction is not None
+                and candidate.transaction.phase == "publication_failed"
+            ):
+                skipped_failed_ancestors.append(candidate)
+                child_record = candidate
+                cursor_ref = candidate_acc.previous_record
+                if cursor_ref is None:
+                    break
+                continue
+            prior_record = candidate
+            prior_archive_ref = cursor_ref
+            break
+        else:
             raise _hold(
-                "prior settled session root is unavailable", record=record
-            ) from None
-        if (
-            prior_record.identity() != identity
-            or prior_record.record_sha256 != old.previous_record.get("root_sha256")
-            or prior_record.generation >= record.generation
+                "prior settled session root exceeds archive walk bound",
+                record=record,
+            )
+        # Every speculative publication_failed descendant started from prior_record's
+        # settled counters and can only keep them equal or speculatively increment
+        # them (a later failed partial run may legitimately have lower speculative
+        # counters than an earlier failed complete run, but never below prior_record).
+        if prior_record is not None and any(
+            prior_record.completed_initial_reviews
+            > descendant.completed_initial_reviews
+            or prior_record.completed_verification_rounds
+            > descendant.completed_verification_rounds
+            for descendant in (record, *skipped_failed_ancestors)
         ):
             raise _hold(
                 "prior settled session root conflicts with predecessor",
@@ -1014,6 +1157,7 @@ def admit_publication_failure_recovery(
                 producer_id,
                 budget,
                 prior_record=prior_record,
+                prior_archive_ref=prior_archive_ref,
             )
         return earlier
 
@@ -1200,8 +1344,14 @@ def admit_publication_failure_recovery(
     inspect_pr_surface("reviews", classify_review)
     inspect_pr_surface("comments", classify_inline, inline=True)
     inspect_check_runs()
-    if prior_record is not None and ledger._mutation_active:
-        _ADMITTED_PRIOR_RECORDS[ledger] = (record.record_sha256, prior_record)
+    if ledger._mutation_active:
+        if prior_record is not None:
+            _ADMITTED_PRIOR_RECORDS[ledger] = (record.record_sha256, prior_record)
+        if skipped_failed_ancestors:
+            _ADMITTED_PRIOR_CHAINS[ledger] = (
+                record.record_sha256,
+                tuple(skipped_failed_ancestors),
+            )
     return witness, prior_record
 
 
@@ -1223,10 +1373,12 @@ __all__ = [
     "SETTLEMENT_WITNESS_SCHEMA",
     "admit_publication_failure_recovery",
     "clear_admitted_prior_record",
+    "consume_admitted_prior_chain",
     "consume_admitted_prior_record",
     "emit_pre_external_write_settlement",
     "find_authenticated_settlement_witness",
     "parse_settlement_witness_comment",
+    "peek_admitted_prior_chain",
     "render_settlement_witness_comment",
     "require_publication_failure_admission",
 ]

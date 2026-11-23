@@ -2839,7 +2839,10 @@ def build_provenance_manifest(
     ci_observations: Sequence[CiRunObservation] = (),
     invocation_evidence: InvocationProvenanceEvidence | None = None,
     auto_inspect_local_packages: bool = False,
+    inspect_module_origins: bool = False,
     version_lookup: Callable[[str], str] | None = None,
+    package_inspector: Callable[[], Sequence[InstalledPackageObservation]]
+    | None = None,
     require_distinct_annotated_tag: bool = False,
 ) -> ProvenanceManifest:
     """Build a sanitized ``ProvenanceManifest`` without probing or inferring deployment.
@@ -2849,14 +2852,18 @@ def build_provenance_manifest(
     ``installed_hosted_version``, ``selected_executor``, ``broker_revision``, or
     ``reusable_workflow_peeled_commit``. Absent runtime/deployed telemetry
     remains ``"unknown"`` unless explicitly supplied. Automatic local version
-    inspection is limited to unbound current-process snapshots; it refuses an
-    identified PR/head/event or retained invocation before lookup. An identified
-    invocation requires its own explicitly supplied original observations, not
-    metadata borrowed from the process constructing this diagnostic document.
+    and module-origin inspection is limited to unbound current-process snapshots;
+    it refuses an identified PR/head/event or retained invocation before lookup.
+    An identified invocation requires its own explicitly supplied original
+    observations, not metadata borrowed from the process constructing this
+    diagnostic document.
     """
 
     _exact_bool(auto_inspect_local_packages, field="auto_inspect_local_packages")
+    _exact_bool(inspect_module_origins, field="inspect_module_origins")
     _exact_bool(require_distinct_annotated_tag, field="require_distinct_annotated_tag")
+    if package_inspector is not None and not callable(package_inspector):
+        raise ReviewInputError("package_inspector must be callable")
     if (
         invocation_evidence is not None
         and type(invocation_evidence) is not InvocationProvenanceEvidence
@@ -2864,7 +2871,7 @@ def build_provenance_manifest(
         raise ReviewInputError(
             "invocation_evidence must be InvocationProvenanceEvidence"
         )
-    if auto_inspect_local_packages and (
+    if (auto_inspect_local_packages or inspect_module_origins) and (
         (source_event is not None and source_event != SourceEventIdentity())
         or pull_request not in (None, UNKNOWN_PROVENANCE)
         or head_sha not in (None, UNKNOWN_PROVENANCE)
@@ -2879,12 +2886,14 @@ def build_provenance_manifest(
         raise ReviewInputError(
             "current-process metadata cannot populate an identified or retained attempt"
         )
-    if auto_inspect_local_packages and invocation_evidence is None:
+    if (auto_inspect_local_packages or inspect_module_origins) and (
+        invocation_evidence is None
+    ):
         invocation_evidence = InvocationProvenanceEvidence(
             observation_scope="current_process"
         )
     elif (
-        auto_inspect_local_packages
+        (auto_inspect_local_packages or inspect_module_origins)
         and invocation_evidence is not None
         and invocation_evidence.observation_scope == UNKNOWN_PROVENANCE
     ):
@@ -2893,6 +2902,61 @@ def build_provenance_manifest(
         )
     eff_core = installed_core_version
     eff_hosted = installed_hosted_version
+    if inspect_module_origins:
+        assert invocation_evidence is not None
+        raw_observations = (
+            inspect_current_process_packages()
+            if package_inspector is None
+            else package_inspector()
+        )
+        if isinstance(raw_observations, (str, bytes)) or not isinstance(
+            raw_observations, Sequence
+        ):
+            raise ReviewInputError(
+                "package_inspector must return a sequence of InstalledPackageObservation"
+            )
+        by_dist: dict[str, InstalledPackageObservation] = {}
+        for item in raw_observations:
+            if type(item) is not InstalledPackageObservation:
+                raise ReviewInputError(
+                    "package_inspector items must be InstalledPackageObservation"
+                )
+            if item.distribution in by_dist:
+                raise ReviewInputError(
+                    "duplicate distribution observation from package_inspector"
+                )
+            by_dist[item.distribution] = item
+        core_obs = by_dist.get("review-sensei")
+        hosted_obs = by_dist.get("review-sensei-github")
+        updates: dict[str, str] = {}
+        if core_obs is not None:
+            if (
+                eff_core == UNKNOWN_PROVENANCE
+                and core_obs.version != UNKNOWN_PROVENANCE
+            ):
+                eff_core = core_obs.version
+            if invocation_evidence.core_module_origin == UNKNOWN_PROVENANCE:
+                updates["core_module_origin"] = core_obs.module_origin
+            if (
+                invocation_evidence.core_module_file_sha256 == UNKNOWN_PROVENANCE
+                and core_obs.module_file_sha256 != UNKNOWN_PROVENANCE
+            ):
+                updates["core_module_file_sha256"] = core_obs.module_file_sha256
+        if hosted_obs is not None:
+            if (
+                eff_hosted == UNKNOWN_PROVENANCE
+                and hosted_obs.version != UNKNOWN_PROVENANCE
+            ):
+                eff_hosted = hosted_obs.version
+            if invocation_evidence.hosted_module_origin == UNKNOWN_PROVENANCE:
+                updates["hosted_module_origin"] = hosted_obs.module_origin
+            if (
+                invocation_evidence.hosted_module_file_sha256 == UNKNOWN_PROVENANCE
+                and hosted_obs.module_file_sha256 != UNKNOWN_PROVENANCE
+            ):
+                updates["hosted_module_file_sha256"] = hosted_obs.module_file_sha256
+        if updates:
+            invocation_evidence = replace(invocation_evidence, **updates)
     if auto_inspect_local_packages and (
         eff_core == UNKNOWN_PROVENANCE or eff_hosted == UNKNOWN_PROVENANCE
     ):

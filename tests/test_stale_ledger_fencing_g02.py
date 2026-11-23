@@ -44,6 +44,7 @@ from review_sensei.writer_containment import (
     IssuedWriterToken,
     WireDispatchOutcome,
     WriterContainmentPosture,
+    derive_epoch_store_id,
     evaluate_physical_budget_guarantees,
     evaluate_side_coordinator_fencing_proof,
     extract_unsettled_dispatches,
@@ -653,6 +654,15 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
             AuthorityRefusal, "stale writer epoch fenced before physical dispatch"
         ):
             coordinator.candidate.forward(token1, prepared1, req1)
+        snap1 = coordinator.candidate.snapshot(token1)
+        self.assertEqual(snap1, prepared1)
+        self.assertEqual(snap1.document()["revision"], 1)
+        self.assertEqual(
+            snap1.document()["dispatches"][req1.dispatch_id]["phase"], "prepared"
+        )
+        self.assertEqual(
+            coordinator.frontier(coordinator.authenticate(token1).key), prepared1
+        )
         self.assertEqual(server.patch_history, [])
 
     def test_external_floor_reads_one_database_snapshot(self) -> None:
@@ -1332,7 +1342,7 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
             writer_route="actions_hosted",
             predecessor_ceased=True,
         )
-        self.assertEqual(tok2.epoch, 2)
+        self.assertEqual(tok2.epoch, 3)
 
         # 2. RS-936BBC: concurrent duplicate dispatch_id on forward permits at most 1 wire call.
         wire_entered = threading.Event()
@@ -2017,6 +2027,277 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
                 ApiExecutionOwner(1, "hosted", 0),
                 head_sha="0" * 40,  # Mismatched/unknown head_sha
             )
+
+    def test_fenced_epoch_reconcile_refuses_and_preserves_observations(self) -> None:
+        coord = ContainedForwardingCoordinator(
+            self.dir / "fenced-reconcile",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(
+                504,
+                b"",
+                response_complete=False,
+                effect_confirmed=True,
+                usage_calls=None,
+            ),
+            synthetic_qualification=True,
+        )
+        token1, root1 = coord.enroll_initial_writer(
+            base_access=_make_access(run_id=41, caller_tag="1"),
+            writer_route="actions_hosted",
+        )
+        req1 = Dispatch(
+            dispatch_id="reconcile-fence-1",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            body=canonical_bytes({"body": "incomplete"}),
+            effect_sha256="1" * 64,
+            reservation_sha256="2" * 64,
+            liability_calls=4,
+            deadline_ms=90000,
+        )
+        prepared1 = coord.candidate.prepare(token1, root1, req1)
+        forwarded1 = coord.candidate.forward(token1, prepared1, req1)
+        self.assertEqual(
+            forwarded1.document()["dispatches"][req1.dispatch_id]["observations"], 0
+        )
+
+        epoch2_store_id = derive_epoch_store_id("a" * 64, 123, 7, 2)
+        with closing(coord._connect_frontier()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE scope_epochs SET active_epoch=2, allocated_epoch=2, "
+                "active_epoch_store_id=? WHERE repository_id=? AND pull_request=?",
+                (epoch2_store_id, 123, 7),
+            )
+            db.commit()
+
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "stale writer epoch fenced before frontier mutation"
+        ):
+            coord.candidate.reconcile(token1, forwarded1, req1.dispatch_id)
+
+        after = coord.candidate.snapshot(token1)
+        self.assertEqual(after, forwarded1)
+        self.assertEqual(
+            after.document()["revision"], forwarded1.document()["revision"]
+        )
+        self.assertEqual(
+            after.document()["dispatches"][req1.dispatch_id]["observations"], 0
+        )
+        self.assertEqual(coord.frontier(coord.authenticate(token1).key), forwarded1)
+
+    def test_dispatch_tracking_isolated_across_prs_and_epochs_with_binding_check(
+        self,
+    ) -> None:
+        from dataclasses import replace
+
+        effects: list[tuple[str, bytes]] = []
+
+        def wire(_method, target, body, _binding):
+            effects.append((target, body))
+            return WireDispatchOutcome(200, b"{}")
+
+        coord = ContainedForwardingCoordinator(
+            self.dir / "cross-scope-dispatch",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=wire,
+            synthetic_qualification=True,
+        )
+        access_pr7 = _make_access(run_id=71, caller_tag="7")
+        access_pr8 = replace(_make_access(run_id=81, caller_tag="8"), pull_request=8)
+        tok_pr7, _ = coord.enroll_initial_writer(
+            base_access=access_pr7, writer_route="actions_hosted"
+        )
+        tok_pr8, _ = coord.enroll_initial_writer(
+            base_access=access_pr8, writer_route="actions_hosted"
+        )
+
+        _out7, settled7 = coord.fenced_http_mutation(
+            tok_pr7,
+            dispatch_id="shared-id",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            payload={"body": "pr7"},
+            reservation_sha256="1" * 64,
+        )
+        _out8, settled8 = coord.fenced_http_mutation(
+            tok_pr8,
+            dispatch_id="shared-id",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/8/comments",
+            payload={"body": "pr8"},
+            reservation_sha256="2" * 64,
+        )
+        self.assertEqual(len(effects), 2)
+        self.assertEqual(
+            settled7.document()["dispatches"]["shared-id"]["phase"], "settled"
+        )
+        self.assertEqual(
+            settled8.document()["dispatches"]["shared-id"]["phase"], "settled"
+        )
+
+        # Verify observe rejects binding hash mismatch even for an active PR key.
+        tampered_binding = dict(
+            settled7.document()["dispatches"]["shared-id"]["binding"]
+        )
+        tampered_binding["body"] = {"body": "tampered"}
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "wire dispatch binding conflicts with recorded outcome"
+        ):
+            coord.observe(coord.authenticate(tok_pr7), tampered_binding)
+
+        # Cross-epoch isolation: advancing PR 7 to epoch 2 permits reusing "shared-id".
+        tok_pr7_ep2, _ = coord.advance_epoch(
+            predecessor_token=tok_pr7,
+            successor_access=_make_access(run_id=72, caller_tag="9"),
+            writer_route="actions_hosted",
+            predecessor_ceased=True,
+        )
+        _out7_ep2, settled7_ep2 = coord.fenced_http_mutation(
+            tok_pr7_ep2,
+            dispatch_id="shared-id",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            payload={"body": "pr7-ep2"},
+            reservation_sha256="3" * 64,
+        )
+        self.assertEqual(len(effects), 3)
+        self.assertEqual(
+            settled7_ep2.document()["dispatches"]["shared-id"]["phase"], "settled"
+        )
+
+    def test_settled_retry_after_cutover_preflight_invalidation_advances_epoch(
+        self,
+    ) -> None:
+        wire_calls = 0
+
+        def ok_wire(*_args):
+            nonlocal wire_calls
+            wire_calls += 1
+            return WireDispatchOutcome(200, b'{"id": 1}', usage_calls=3)
+
+        state_dir = self.dir / "retry-after-preflight-invalidation"
+        coord = ContainedForwardingCoordinator(
+            state_dir,
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=ok_wire,
+            synthetic_qualification=True,
+        )
+        access = _make_access(run_id=101, caller_tag="1")
+        token1, root1 = coord.enroll_initial_writer(
+            base_access=access, writer_route="actions_hosted"
+        )
+        req1 = Dispatch(
+            dispatch_id="preflight-race",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            body=canonical_bytes({"body": "race"}),
+            effect_sha256="5" * 64,
+            reservation_sha256="6" * 64,
+            liability_calls=9,
+            deadline_ms=90000,
+        )
+        coord.candidate.prepare(token1, root1, req1)
+
+        initialize = coord.candidate.initialize
+
+        def interleave_forward(*args, **kwargs):
+            snap2 = initialize(*args, **kwargs)
+            coord.candidate.forward(token1, coord.candidate.snapshot(token1), req1)
+            return snap2
+
+        with patch.object(coord.candidate, "initialize", interleave_forward):
+            with self.assertRaisesRegex(
+                AuthorityRefusal, "predecessor frontier changed during cutover"
+            ):
+                coord.advance_epoch(
+                    predecessor_token=token1,
+                    successor_access=_make_access(run_id=102, caller_tag="2"),
+                    writer_route="actions_hosted",
+                    predecessor_ceased=True,
+                )
+
+        self.assertEqual(
+            coord.active_epoch(
+                base_store_id=access.store_id, repository_id=123, pull_request=7
+            ),
+            1,
+        )
+        epoch2_key = f"{derive_epoch_store_id(access.store_id, 123, 7, 2)}:123:7"
+        self.assertIsNotNone(coord.frontier(epoch2_key))
+
+        # Settle epoch 1 dispatch cleanly, then retry advance_epoch -> advances to epoch 3.
+        coord.candidate.reconcile(
+            token1, coord.candidate.snapshot(token1), req1.dispatch_id
+        )
+        token3, _root3 = coord.advance_epoch(
+            predecessor_token=token1,
+            successor_access=_make_access(run_id=102, caller_tag="2"),
+            writer_route="actions_hosted",
+            predecessor_ceased=True,
+        )
+        self.assertEqual(token3.epoch, 3)
+        self.assertEqual(
+            coord.active_epoch(
+                base_store_id=access.store_id, repository_id=123, pull_request=7
+            ),
+            3,
+        )
+        self.assertIsNotNone(coord.frontier(epoch2_key))
+        _, settled3 = coord.fenced_http_mutation(
+            token3,
+            dispatch_id="ep3-after-retry",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            payload={"body": "ep3"},
+            reservation_sha256="7" * 64,
+        )
+        self.assertEqual(wire_calls, 2)
+        self.assertEqual(
+            settled3.document()["dispatches"]["ep3-after-retry"]["phase"], "settled"
+        )
+
+    def test_reattach_failed_retry_preserves_prior_live_token_grant(self) -> None:
+        coord = ContainedForwardingCoordinator(
+            self.dir / "reattach-grant-isolation",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(200, b"{}"),
+            synthetic_qualification=True,
+        )
+        access = _make_access()
+        coord.enroll_initial_writer(base_access=access, writer_route="actions_hosted")
+        live_token = coord.reattach_active_writer(
+            base_access=access, writer_route="actions_hosted"
+        )
+        with patch.object(
+            coord.candidate,
+            "snapshot",
+            side_effect=AuthorityRefusal("simulated transient snapshot failure"),
+        ):
+            with self.assertRaisesRegex(
+                AuthorityRefusal, "simulated transient snapshot failure"
+            ):
+                coord.reattach_active_writer(
+                    base_access=access, writer_route="actions_hosted"
+                )
+        _, settled = coord.fenced_http_mutation(
+            live_token,
+            dispatch_id="still-valid",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            payload={"body": "alive"},
+            reservation_sha256="8" * 64,
+        )
+        self.assertEqual(
+            settled.document()["dispatches"]["still-valid"]["phase"], "settled"
+        )
 
 
 if __name__ == "__main__":

@@ -1624,8 +1624,8 @@ class G32GapHardeningTests(_NetworkGuardMixin):
                 source_comment_id=41,
             )
 
-        # 2. VerifiedRunAction.fence() refuses repo ID mismatch and invalid/swapped comment URLs
-        for fault in ("repo_id", "swapped_url", "query_url"):
+        # 2. VerifiedRunAction.fence() refuses missing base, repo ID mismatch, and invalid/swapped comment URLs
+        for fault in ("repo_id", "missing_base", "swapped_url", "query_url"):
             with (
                 self.subTest(fault=fault),
                 tempfile.TemporaryDirectory() as d,
@@ -1648,15 +1648,25 @@ class G32GapHardeningTests(_NetworkGuardMixin):
                 orig_ext = fixture.accounted._opener
                 pr_repo_id = 999 if fault == "repo_id" else 123
 
-                def patched_ext(req, timeout, *, orig=orig_ext, rid=pr_repo_id):
+                def patched_ext(
+                    req,
+                    timeout,
+                    *,
+                    orig=orig_ext,
+                    rid=pr_repo_id,
+                    drop_base=(fault == "missing_base"),
+                ):
                     resp = orig(req, timeout)
                     p = urlsplit(req.full_url).path
                     if req.get_method() == "GET" and p == "/repos/owner/repo/pulls/7":
                         data = json.loads(resp.read(524288))
-                        data["base"]["repo"] = {
-                            "id": rid,
-                            "full_name": "owner/repo",
-                        }
+                        if drop_base:
+                            data.pop("base", None)
+                        else:
+                            data["base"]["repo"] = {
+                                "id": rid,
+                                "full_name": "owner/repo",
+                            }
                         return json_response(data)
                     return resp
 

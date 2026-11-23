@@ -7,13 +7,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from review_sensei.api_work import ApiRunAccounting
+from review_sensei.api_work import (
+    PARTITIONED_ACTION_ACCOUNTING_VERSION,
+    ApiRunAccounting,
+)
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
-from .api_run_history import RETAINED_CONFIRMATION_TAIL, read_previous_run
+from .api_run_history import (
+    RETAINED_CONFIRMATION_TAIL,
+    _read_bound_action_result,
+    read_previous_run,
+)
 from .errors import GitHubHTTPError, GitHubPublicationError
 from .http import MAX_PAGINATION_PAGES
 from .session_ledger import GitHubIssueCommentSessionLedger
@@ -122,7 +129,6 @@ def _earlier_native_rows(
         if (
             tx is None
             or tx.phase != "publication_succeeded"
-            or prior_caller.terminal_transaction != tx.transaction_id
             or prior.reservation_id is not None
             or prior.finding_lifecycle != reference
             or not tx.generation <= binding["generation"] <= prior.generation
@@ -137,16 +143,62 @@ def _earlier_native_rows(
             != (tx.base_sha, tx.head_sha, tx.policy_digest, tx.configuration_digest)
         ):
             return _NO_EARLIER_ROWS
+        if prior_caller.terminal_transaction != tx.transaction_id:
+            if (
+                prior_caller.terminal_transaction is not None
+                or not isinstance(prior_caller.action, dict)
+                or prior_caller.action.get("phase") != "terminal"
+            ):
+                return _NO_EARLIER_ROWS
+            if prior_caller.version == PARTITIONED_ACTION_ACCOUNTING_VERSION:
+                result_manifest = prior_caller.action.get("result")
+                part_count = (
+                    len(result_manifest.get("parts", ()))
+                    if isinstance(result_manifest, dict)
+                    and result_manifest.get("encoding") != "inline-json-v1"
+                    else 0
+                )
+                if part_count:
+                    _protect_tail(budget, part_count)
+            _read_bound_action_result(ledger, identity, prior, budget=budget)
         # The closing predecessor CAS already discovered this exact current
-        # root. Decode only its selected authenticated parts; that read path
-        # enforces their digest, producer and repository/PR bindings.
+        # root. Decode only its selected authenticated parts (including packed-v4
+        # dictionary carriers); that read path enforces digest, producer and PR
+        # bindings under existing original-domain budget.
         stored = _decode_selected_lifecycle(ledger, current)
-        # Only the already priced selected manifest is in scope. A different
-        # history codec or absent carrier is not a reason to widen this read.
-        if stored is None or is_dictionary(stored):
+        if stored is None:
             return _NO_EARLIER_ROWS
-        journal = _validate(_unpack_journal(stored))
-    except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        if is_dictionary(stored):
+            from review_sensei.bounded_evidence import (
+                INLINE_ENCODING,
+                read_inline_evidence,
+            )
+
+            from .finding_lifecycle_dictionary import _manifest, _shape, unpack
+
+            _shape(stored)
+            current_binding = manifest["binding"]
+            dict_manifest = stored["dictionary_manifest"]
+            base_binding = _manifest(dict_manifest, current_binding)
+            if dict_manifest.get("encoding") == INLINE_ENCODING:
+                base = read_inline_evidence(
+                    dict_manifest, expected_binding=base_binding
+                )
+            else:
+                _protect_tail(budget, len(dict_manifest.get("parts", ())))
+                base = ledger.read_evidence(
+                    identity, dict_manifest, expected_binding=base_binding
+                )
+            journal = unpack(stored, base=base, current_binding=current_binding)
+        else:
+            journal = _validate(_unpack_journal(stored))
+    except EvidenceBudgetExhausted:
+        raise _hold("native effect census is unfunded in caller startup") from None
+    except ReviewInputError as exc:
+        if "census is unfunded in caller startup" in str(exc):
+            raise
+        raise _hold("earlier native effect evidence is unavailable") from None
+    except (GitHubHTTPError, GitHubPublicationError):
         raise _hold("earlier native effect evidence is unavailable") from None
     if journal["unknown_trust_effect"]:
         return _NO_EARLIER_ROWS

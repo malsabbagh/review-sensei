@@ -1562,7 +1562,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 self.assertEqual(out_pub.status, "skipped_edited_source")
                 self.assertEqual(len(calls_pub), 1)
 
-        # Numeric base.repo.id mismatch on live PR raises GitHubConversationError fail-closed.
+        # Numeric base.repo.id mismatch or omitted base.repo.id raises fail-closed.
         unchanged = {
             "id": 10,
             "issue_url": ISSUE_URL,
@@ -1573,49 +1573,55 @@ class ConversationPublisherTests(unittest.TestCase):
         }
         wrong_pr = pr_payload("b" * 40)
         wrong_pr["base"]["repo"]["id"] = 999
-        for mode in ("prepare", "publish"):
-            with self.subTest(mode=mode):
-                responses = (
-                    [json_response(unchanged), json_response(wrong_pr)]
-                    if mode == "prepare"
-                    else [
-                        json_response(unchanged),
-                        json_response([]),
-                        json_response(wrong_pr),
-                    ]
-                )
-                http, _ = make_http(responses)
-                pub = ConversationPublisher(http=http)
-                with self.assertRaisesRegex(
-                    GitHubConversationError, "repository id mismatched"
-                ):
-                    if mode == "prepare":
-                        pub.prepare_context(
-                            token="token",
-                            repository="owner/repo",
-                            pull_request=1,
-                            source_comment_id=10,
-                            source_updated_at=updated,
-                            app_slug="review-sensei[bot]",
-                            source_kind="issue",
-                            source_body_sha256=orig_sha,
-                            repository_id=1,
-                        )
-                    else:
-                        pub.publish(
-                            token="token",
-                            repository="owner/repo",
-                            pull_request=1,
-                            source_comment_id=10,
-                            source_updated_at=updated,
-                            head_sha="b" * 40,
-                            reply=ConversationReply.from_dict({"body": "Thanks."}),
-                            app_slug="review-sensei[bot]",
-                            root_comment_id=10,
-                            source_kind="issue",
-                            source_body_sha256=orig_sha,
-                            repository_id=1,
-                        )
+        missing_id_pr = pr_payload("b" * 40)
+        missing_id_pr["base"]["repo"].pop("id", None)
+        for repo_fault, fault_pr in (
+            ("mismatch", wrong_pr),
+            ("missing_id", missing_id_pr),
+        ):
+            for mode in ("prepare", "publish"):
+                with self.subTest(repo_fault=repo_fault, mode=mode):
+                    responses = (
+                        [json_response(unchanged), json_response(fault_pr)]
+                        if mode == "prepare"
+                        else [
+                            json_response(unchanged),
+                            json_response([]),
+                            json_response(fault_pr),
+                        ]
+                    )
+                    http, _ = make_http(responses)
+                    pub = ConversationPublisher(http=http)
+                    with self.assertRaisesRegex(
+                        GitHubConversationError, "repository id mismatched"
+                    ):
+                        if mode == "prepare":
+                            pub.prepare_context(
+                                token="token",
+                                repository="owner/repo",
+                                pull_request=1,
+                                source_comment_id=10,
+                                source_updated_at=updated,
+                                app_slug="review-sensei[bot]",
+                                source_kind="issue",
+                                source_body_sha256=orig_sha,
+                                repository_id=1,
+                            )
+                        else:
+                            pub.publish(
+                                token="token",
+                                repository="owner/repo",
+                                pull_request=1,
+                                source_comment_id=10,
+                                source_updated_at=updated,
+                                head_sha="b" * 40,
+                                reply=ConversationReply.from_dict({"body": "Thanks."}),
+                                app_slug="review-sensei[bot]",
+                                root_comment_id=10,
+                                source_kind="issue",
+                                source_body_sha256=orig_sha,
+                                repository_id=1,
+                            )
 
 
 if __name__ == "__main__":

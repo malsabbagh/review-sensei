@@ -2748,6 +2748,59 @@ def preflight_finding_lifecycle(
     }
 
 
+def estimate_lifecycle_branch_parts(
+    ledger: Any,
+    record: Any,
+    *,
+    alternatives: Sequence[tuple[Sequence[Mapping[str, object]], frozenset[int]]],
+    operation_id: str,
+    base_sha: str,
+    head_sha: str,
+    policy_digest: str,
+    configuration_digest: str,
+    item_count: int,
+    projected_record: Any | None = None,
+) -> int:
+    """Compute conservative worst-branch lifecycle part count without I/O."""
+    from .bounded_evidence import PACKED_CHUNK_BYTES
+
+    worst_parts = 0
+    start_record = projected_record if projected_record is not None else record
+    for branch_docs, _ in alternatives:
+        current = start_record
+        branch_parts = 0
+        for value in branch_docs:
+            _, envelope, _, _, candidate = _prepare_lifecycle(
+                ledger,
+                current,
+                document=value,
+                operation_id=operation_id,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                policy_digest=policy_digest,
+                configuration_digest=configuration_digest,
+                item_count=item_count,
+                reserved_tail_calls=0,
+            )
+            selected = candidate.finding_lifecycle["manifest"]
+            if selected["encoding"] != INLINE_ENCODING:
+                envelope_bytes = len(canonical_bytes(envelope))
+                packed_bound = (
+                    envelope_bytes
+                    + (envelope_bytes >> 12)
+                    + (envelope_bytes >> 14)
+                    + (envelope_bytes >> 25)
+                    + 13
+                )
+                branch_parts += (
+                    packed_bound + PACKED_CHUNK_BYTES - 1
+                ) // PACKED_CHUNK_BYTES
+            current = candidate
+        if branch_parts > worst_parts:
+            worst_parts = branch_parts
+    return worst_parts
+
+
 def is_history_metadata_amendment(before, after) -> bool:
     if (
         not isinstance(before, Mapping)

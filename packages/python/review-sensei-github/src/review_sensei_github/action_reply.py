@@ -236,6 +236,15 @@ def execute_reply(
         configuration_digest=run.caller.accounting.configuration.digest,
     )
     caller = run.caller
+    effect_record = caller._effect_record
+    if run.finding_inventory_migration_required() and (
+        effect_record is None
+        or (
+            effect_record.historical_assessments is None
+            and effect_record.quarantine_lineage is None
+        )
+    ):
+        raise ReviewInputError("durable_finding_inventory_recovery_required")
     intent = caller.admit_action(
         run.ledger,
         run.identity,
@@ -289,6 +298,9 @@ def execute_reply(
         # Broader reassessment may call this same application's publish_review;
         # its prior budget must already be this run's original caller facade.
         app.reviewer.finalizer.evidence_budget = caller.budget_view
+        from .trust_enrollment import enroll_application_trust_snapshot
+
+        observed_trust = enroll_application_trust_snapshot(app, run)
         result = app.generate_and_publish_reply(
             options=GitHubWriteOptions(
                 github_writes=True,
@@ -325,6 +337,7 @@ def execute_reply(
             operation_parts=parts,
             evidence_budget=caller.budget_view,
             current_action=authority,
+            observed_trust=observed_trust,
         )
     if not isinstance(result, ReplyResult):
         raise ReviewInputError("reply result is not a confirmed current outcome")

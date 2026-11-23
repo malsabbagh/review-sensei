@@ -6,7 +6,7 @@ import json
 import math
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -44,8 +44,25 @@ def _unique_json_object(pairs):
     return value
 
 
+def _header_value(headers: Any, name: str) -> str | None:
+    """Read a header case-insensitively from plain Mappings or .get()-style header objects."""
+    if headers is None:
+        return None
+    if isinstance(headers, Mapping):
+        target = name.casefold()
+        for key, value in headers.items():
+            if isinstance(key, str) and key.casefold() == target:
+                return value if isinstance(value, str) else None
+        return None
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        return value if isinstance(value, str) else None
+    return None
+
+
 def _is_rate_limited_403(headers: Any, error_body: str) -> bool:
-    retry_after = headers.get("Retry-After") if headers is not None else None
+    retry_after = _header_value(headers, "Retry-After")
     if isinstance(retry_after, str):
         stripped_retry = retry_after.strip()
         if stripped_retry:
@@ -59,7 +76,7 @@ def _is_rate_limited_403(headers: Any, error_body: str) -> bool:
                     pass
                 else:
                     return True
-    remaining = headers.get("X-RateLimit-Remaining") if headers is not None else None
+    remaining = _header_value(headers, "X-RateLimit-Remaining")
     stripped_remaining = remaining.strip() if isinstance(remaining, str) else ""
     if stripped_remaining == "0":
         return True

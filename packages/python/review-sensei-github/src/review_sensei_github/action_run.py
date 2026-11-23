@@ -14,7 +14,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.convergence import resolve_review_convergence_policy
@@ -680,6 +680,11 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 repository=run.identity.repository,
                 actor=actor["login"],
             )
+        from .trust_enrollment import enroll_application_trust_snapshot
+
+        observed_trust = enroll_application_trust_snapshot(
+            app, run, actor_permission=permission
+        )
         quarantine_refusal = None
         historical_refusal = None
         try:
@@ -792,6 +797,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 convergence_policy=resolve_review_convergence_policy(
                     mode=explicit_mode, quality=run.plan.policy.review_quality
                 ),
+                observed_trust=observed_trust,
             )
         if result.evaluation_failed:
             raise ReviewInputError(
@@ -864,6 +870,12 @@ def run_action(
         help="Observe original enrollment with a compatible v4 broker; not continuous trust or effect authorization.",
     )
     parser.add_argument(
+        "--observe-original-actor-role",
+        action="store_true",
+        default=False,
+        help="Opt in to observing the original actor role via v4 broker (requires --enable-current-trust-enrollment); default-off.",
+    )
+    parser.add_argument(
         "--verify-source-before-intent",
         action="store_true",
         default=False,
@@ -931,6 +943,15 @@ def run_action(
     from .accepted_semantic_history import DuplicateTerminalDelivery, prepare_action
 
     with _cross_run_unstarted_rollover_guard(unstarted_recovery) as rollover_service:
+
+        class _ActorRoleKwargs(TypedDict, total=False):
+            observe_original_actor_role: bool
+
+        actor_role_kwargs: _ActorRoleKwargs = (
+            {"observe_original_actor_role": True}
+            if options.observe_original_actor_role
+            else {}
+        )
         try:
             run = bootstrap(
                 args,
@@ -940,6 +961,7 @@ def run_action(
                 source=source,
                 rollover_service=rollover_service,
                 enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+                **actor_role_kwargs,
                 command_action=command_action,
                 allow_duplicate_terminal=allow_duplicate_terminal,
             )
@@ -979,17 +1001,12 @@ def run_action(
         )
     # Ordinary admission consumes authenticated retained semantic history.
     # Supplied convergence records remain model inputs, never its replacement.
-    try:
-        prepare_action(
-            run,
-            allow_unqualified=purpose == "reply"
-            or (purpose == "command" and classified_command is not None),
-            allow_missing_predecessor=False,
-        )
-    except DuplicateTerminalDelivery:
-        if not allow_duplicate_terminal:
-            raise
-        return 0
+    prepare_action(
+        run,
+        allow_unqualified=purpose == "reply"
+        or (purpose == "command" and classified_command is not None),
+        allow_missing_predecessor=False,
+    )
     if purpose == "command":
         return execute_command(run, args)
     from .action_reply import execute_reply

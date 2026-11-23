@@ -828,10 +828,50 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     self.assertIn("--repository-id", stderr.getvalue())
                     self.assertEqual(publish_calls, [])
 
+                for env_var in (
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL",
+                ):
+                    with patch.dict("os.environ", {env_var: "synthetic-actions-env"}):
+                        stderr = io.StringIO()
+                        with redirect_stderr(stderr):
+                            status = github_main(
+                                [
+                                    "reply",
+                                    "--reply",
+                                    str(reply_path),
+                                    "--repository",
+                                    "owner/repo",
+                                    "--pull-request",
+                                    "2",
+                                    "--source-comment-id",
+                                    "10",
+                                    "--source-updated-at",
+                                    "2026-08-19T00:00:00Z",
+                                    "--head-sha",
+                                    "a" * 40,
+                                    "--allow-write",
+                                    "--enable-reply",
+                                ]
+                            )
+                        self.assertNotEqual(status, 0)
+                        self.assertIn("--repository-id", stderr.getvalue())
+                        self.assertEqual(publish_calls, [])
+
                 # Standalone local reply without --repository-id and without --oidc-token remains allowed.
                 stdout = io.StringIO()
                 stderr = io.StringIO()
-                with redirect_stdout(stdout), redirect_stderr(stderr):
+                with (
+                    patch.dict(
+                        "os.environ",
+                        {
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "",
+                        },
+                    ),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
                     status = github_main(
                         [
                             "reply",

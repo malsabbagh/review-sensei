@@ -442,6 +442,7 @@ from .recovery_route_advisor import (  # noqa: E402
     build_live_ledger_attempt_evidence_packet,
     classify_live_ledger_recovery,
     classify_recovery_state,
+    provenance_manifest_from_attempt_packet,
 )
 
 __all__ = [
@@ -456,4 +457,5 @@ __all__ = [
     "build_live_ledger_attempt_evidence_packet",
     "classify_live_ledger_recovery",
     "classify_recovery_state",
+    "provenance_manifest_from_attempt_packet",
 ]

@@ -128,10 +128,12 @@ class AuthenticatedTrustSnapshot:
     actor_id: int
     actor_login: str
     actor_association: str
-    actor_permission: str
+    actor_permission: str | None
     pull_request: int
     head_sha: str
-    permission_epoch: int = 1
+    permission_epoch: int | None = 1
+    continuous_history: str = "unavailable"
+    required_permissions: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         _require_positive_int(self.repository_id, label="repository_id")
@@ -180,11 +182,33 @@ class AuthenticatedTrustSnapshot:
             "NONE",
         }:
             raise ReviewInputError("actor_association is invalid")
-        if self.actor_permission not in PERMISSION_RANKS:
+        if (
+            self.actor_permission is not None
+            and self.actor_permission not in PERMISSION_RANKS
+        ):
             raise ReviewInputError("actor_permission is invalid")
         _require_positive_int(self.pull_request, label="pull_request")
         _require_commit_sha(self.head_sha, label="head_sha")
-        _require_positive_int(self.permission_epoch, label="permission_epoch")
+        if self.permission_epoch is not None:
+            _require_positive_int(self.permission_epoch, label="permission_epoch")
+        if self.continuous_history not in {"unavailable", "available"}:
+            raise ReviewInputError("continuous_history is invalid")
+        if self.required_permissions is not None:
+            if (
+                not isinstance(self.required_permissions, Mapping)
+                or not self.required_permissions
+            ):
+                raise ReviewInputError(
+                    "required_permissions must be a non-empty mapping"
+                )
+            normalized_required: dict[str, str] = {}
+            for scope, level in self.required_permissions.items():
+                if not isinstance(scope, str) or not scope.strip():
+                    raise ReviewInputError("required permission scope is invalid")
+                if not isinstance(level, str) or level not in PERMISSION_RANKS:
+                    raise ReviewInputError("required permission level is invalid")
+                normalized_required[scope] = level
+            object.__setattr__(self, "required_permissions", normalized_required)
 
     def to_session_identity(self) -> SessionIdentity:
         """Return ledger-addressing key ``(repository, pull_request, repository_id)``.
@@ -219,33 +243,47 @@ class AuthenticatedTrustSnapshot:
                 association=self.actor_association,
                 permission=self.actor_permission,
             )
+        if self.actor_permission is None:
+            if operation == "review":
+                return True
+            return self.actor_association in {"OWNER", "MEMBER", "COLLABORATOR"}
         min_perm = OPERATION_MIN_ACTOR_PERMISSION[operation]
         return PERMISSION_RANKS[self.actor_permission] >= PERMISSION_RANKS[min_perm]
 
     def digest(self) -> str:
-        return hashlib.sha256(
-            canonical_bytes(
-                {
-                    "repository_id": self.repository_id,
-                    "owner_id": self.owner_id,
-                    "owner_login": self.owner_login,
-                    "repository_slug": self.repository_slug,
-                    "is_fork": self.is_fork,
-                    "installation_id": self.installation_id,
-                    "repository_selected": self.repository_selected,
-                    "granted_permissions": dict(
-                        sorted(self.granted_permissions.items())
-                    ),
-                    "actor_id": self.actor_id,
-                    "actor_login": self.actor_login,
-                    "actor_association": self.actor_association,
-                    "actor_permission": self.actor_permission,
-                    "pull_request": self.pull_request,
-                    "head_sha": self.head_sha,
-                    "permission_epoch": self.permission_epoch,
-                }
+        payload: dict[str, object] = {
+            "repository_id": self.repository_id,
+            "owner_id": self.owner_id,
+            "owner_login": self.owner_login,
+            "repository_slug": self.repository_slug,
+            "is_fork": self.is_fork,
+            "installation_id": self.installation_id,
+            "repository_selected": self.repository_selected,
+            "granted_permissions": dict(sorted(self.granted_permissions.items())),
+            "actor_id": self.actor_id,
+            "actor_login": self.actor_login,
+            "actor_association": self.actor_association,
+            "actor_permission": self.actor_permission,
+            "pull_request": self.pull_request,
+            "head_sha": self.head_sha,
+            "permission_epoch": self.permission_epoch,
+        }
+        if self.required_permissions is not None:
+            payload["required_permissions"] = dict(
+                sorted(self.required_permissions.items())
             )
-        ).hexdigest()
+        return hashlib.sha256(canonical_bytes(payload)).hexdigest()
+
+
+def _resolve_required_permissions(
+    enrolled: AuthenticatedTrustSnapshot,
+    required_permissions: Mapping[str, str] | None,
+) -> Mapping[str, str]:
+    if required_permissions is not None:
+        return required_permissions
+    if enrolled.required_permissions is not None:
+        return enrolled.required_permissions
+    return DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS
 
 
 def detect_trust_transitions(
@@ -253,7 +291,7 @@ def detect_trust_transitions(
     observed: AuthenticatedTrustSnapshot,
     *,
     operation: str = "review",
-    required_permissions: Mapping[str, str] = DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS,
+    required_permissions: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Detect all active trust transitions between ``enrolled`` and ``observed``.
 
@@ -269,6 +307,7 @@ def detect_trust_transitions(
     if operation not in OPERATION_MIN_ACTOR_PERMISSION:
         raise ReviewInputError("unknown trust operation")
 
+    effective_required = _resolve_required_permissions(enrolled, required_permissions)
     detected: list[str] = []
 
     owner_changed = (
@@ -292,28 +331,39 @@ def detect_trust_transitions(
     ):
         detected.append("repository_selection_change")
 
+    epoch_changed = (
+        enrolled.permission_epoch is not None
+        and observed.permission_epoch is not None
+        and enrolled.permission_epoch != observed.permission_epoch
+    )
     perms_changed = (
         dict(enrolled.granted_permissions) != dict(observed.granted_permissions)
-        or enrolled.permission_epoch != observed.permission_epoch
-        or not observed.has_required_permissions(required_permissions)
+        or epoch_changed
+        or not observed.has_required_permissions(effective_required)
     )
     if perms_changed:
         detected.append("permission_revoke_or_restore")
 
-    same_actor_downgraded = observed.actor_id == enrolled.actor_id and (
-        PERMISSION_RANKS[observed.actor_permission]
-        < PERMISSION_RANKS[enrolled.actor_permission]
-        or (
-            authorized_override(
-                association=enrolled.actor_association,
-                permission=enrolled.actor_permission,
+    same_actor_downgraded = False
+    if observed.actor_id == enrolled.actor_id:
+        if enrolled.actor_permission is not None and observed.actor_permission is None:
+            same_actor_downgraded = True
+        elif (
+            enrolled.actor_permission is not None
+            and observed.actor_permission is not None
+        ):
+            same_actor_downgraded = PERMISSION_RANKS[
+                observed.actor_permission
+            ] < PERMISSION_RANKS[enrolled.actor_permission] or (
+                authorized_override(
+                    association=enrolled.actor_association,
+                    permission=enrolled.actor_permission,
+                )
+                and not authorized_override(
+                    association=observed.actor_association,
+                    permission=observed.actor_permission,
+                )
             )
-            and not authorized_override(
-                association=observed.actor_association,
-                permission=observed.actor_permission,
-            )
-        )
-    )
     actor_downgraded = same_actor_downgraded or not observed.actor_meets_operation(
         operation
     )
@@ -389,7 +439,7 @@ def evaluate_trust_boundary(
     operation: str = "review",
     has_prior_charges: bool = False,
     has_unknown_effect: bool = False,
-    required_permissions: Mapping[str, str] = DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS,
+    required_permissions: Mapping[str, str] | None = None,
 ) -> TrustTransitionDecision:
     """Evaluate repository & privilege trust at a specific execution phase."""
 
@@ -406,6 +456,7 @@ def evaluate_trust_boundary(
         operation=operation,
         required_permissions=required_permissions,
     )
+    effective_required = _resolve_required_permissions(enrolled, required_permissions)
     cross_repo_risk = (
         enrolled.repository_id != observed.repository_id
         or enrolled.owner_id != observed.owner_id
@@ -444,7 +495,11 @@ def evaluate_trust_boundary(
     primary = transitions[0] if transitions else "cross_pull_request_mismatch"
     charges_held = has_prior_charges or has_unknown_effect
     fork_blocked = enrolled.is_fork or observed.is_fork
-    epoch_regressed = observed.permission_epoch < enrolled.permission_epoch
+    epoch_regressed = (
+        enrolled.permission_epoch is not None
+        and observed.permission_epoch is not None
+        and observed.permission_epoch < enrolled.permission_epoch
+    )
 
     # Determine explicit bounded recovery routes per transition class!
     routes: list[str] = []
@@ -459,7 +514,7 @@ def evaluate_trust_boundary(
     ):
         routes.append("restore-repository-selection")
     if "permission_revoke_or_restore" in transitions and not (
-        observed.has_required_permissions(required_permissions)
+        observed.has_required_permissions(effective_required)
     ):
         routes.append("restore-app-permissions")
     if epoch_regressed:
@@ -611,7 +666,7 @@ def verify_and_migrate_trust_boundary(
     inventory: AuthoritativeDecisionInventory,
     migration: AuthenticatedTrustMigration,
     has_unknown_effect: bool = False,
-    required_permissions: Mapping[str, str] = DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS,
+    required_permissions: Mapping[str, str] | None = None,
     expected_transfer_attestation_sha256: str | None = None,
 ) -> TrustMigrationReceipt:
     """Authenticate and execute a bounded trust migration without resetting history.
@@ -666,7 +721,10 @@ def verify_and_migrate_trust_boundary(
         raise ReviewInputError(
             "fork repositories and fork-origin transitions cannot acquire hosted write authority via migration"
         )
-    if target.permission_epoch < enrolled.permission_epoch:
+    if enrolled.permission_epoch is not None and (
+        target.permission_epoch is None
+        or target.permission_epoch < enrolled.permission_epoch
+    ):
         raise ReviewInputError(
             "target permission_epoch cannot regress below enrolled permission_epoch"
         )
@@ -674,13 +732,15 @@ def verify_and_migrate_trust_boundary(
         raise ReviewInputError(
             "target repository is not selected on the GitHub App installation"
         )
-    if not target.has_required_permissions(required_permissions):
+    effective_required = _resolve_required_permissions(enrolled, required_permissions)
+    if not target.has_required_permissions(effective_required):
         raise ReviewInputError(
             "target installation lacks required permissions for migration"
         )
-    if (
-        dict(enrolled.granted_permissions) != dict(target.granted_permissions)
-        and target.permission_epoch <= enrolled.permission_epoch
+    if dict(enrolled.granted_permissions) != dict(target.granted_permissions) and (
+        enrolled.permission_epoch is None
+        or target.permission_epoch is None
+        or target.permission_epoch <= enrolled.permission_epoch
     ):
         raise ReviewInputError(
             "permission grant changes require a strictly newer permission_epoch"
@@ -704,7 +764,7 @@ def verify_and_migrate_trust_boundary(
         enrolled,
         target,
         operation="command",
-        required_permissions=required_permissions,
+        required_permissions=effective_required,
     )
     if not transitions:
         raise ReviewInputError("no trust transition requires migration")

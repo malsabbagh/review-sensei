@@ -31,11 +31,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from review_sensei.active_finding_window import AuthoritativeDecisionInventory
-from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.active_finding_window import (
+    ActiveWindowRoundState,
+    AuthoritativeDecisionInventory,
+)
+from review_sensei.api_work import ApiRunAccounting
+from review_sensei.bounded_evidence import canonical_bytes, read_inline_evidence
 from review_sensei.disposition import _require_reason, authorized_override
 from review_sensei.errors import ReviewInputError
-from review_sensei.finding_drift import DriftInventory
+from review_sensei.finding_drift import DriftEvaluationResult, DriftInventory
+from review_sensei.finding_lifecycle import decode_lifecycle_state
+from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
 from review_sensei.session import SessionIdentity, SessionLoadError, SessionRecord
 
 from .session_ledger import (
@@ -774,6 +780,112 @@ class OperatorReenrollReceipt:
     audit_sha256: str
 
 
+def _inspect_record_finding_lifecycle(
+    ledger: GitHubIssueCommentSessionLedger,
+    record: SessionRecord,
+    *,
+    loaded_status: str,
+) -> tuple[int, bool]:
+    """Return (active_blocking_count, uncertain_or_unverified) for a session record."""
+    if record.finding_lifecycle is None:
+        return 0, False
+    from .errors import GitHubPublicationError
+    from .finding_lifecycle import _require_effect_scope, _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import (
+        _manifest,
+        _shape,
+        is_dictionary,
+        resolve_stored,
+        restore_cost,
+        unpack,
+    )
+
+    try:
+        stored = _decode_selected_lifecycle(ledger, record)
+        if stored is None:
+            return 0, True
+        reference = record.finding_lifecycle
+        if not isinstance(reference, Mapping):
+            return 0, True
+        manifest_obj = reference.get("manifest")
+        if not isinstance(manifest_obj, Mapping):
+            return 0, True
+        binding = manifest_obj["binding"]
+        if is_dictionary(stored):
+            if loaded_status in {"ok", "migrated"}:
+                stored = resolve_stored(ledger, record, stored)
+            else:
+                _shape(stored)
+                manifest = stored.get("dictionary_manifest")
+                if not isinstance(manifest, dict):
+                    return 0, True
+                base_binding = _manifest(manifest, binding)
+                budget = getattr(ledger, "evidence_budget", None)
+                if budget is not None:
+                    budget.preflight(restore_cost(ledger, stored, record=record))
+                    budget.check()
+                base = (
+                    read_inline_evidence(manifest, expected_binding=base_binding)
+                    if manifest.get("encoding") == "inline-json-v1"
+                    else ledger.read_evidence(
+                        record.identity(),
+                        manifest,
+                        expected_binding=base_binding,
+                    )
+                )
+                if budget is not None:
+                    budget.check()
+                stored = unpack(stored, base=base, current_binding=binding)
+        document = _validate(_unpack_journal(stored))
+        restored = decode_lifecycle_state(document["lifecycle"])
+        state = restored.state
+        if (
+            state.head_sha != binding["head_sha"]
+            or state.base_sha != binding["base_sha"]
+        ):
+            return 0, True
+        _require_effect_scope(document, record.identity(), binding["head_sha"])
+        key = (record.repository_id, record.pull_request)
+        expected_producer = binding["producer"]
+        for receipt in document["native_receipts"]:
+            if (receipt["repository_id"], receipt["pull_request"]) != key or (
+                expected_producer.startswith("github-bot:")
+                and str(receipt["producer_id"]) != expected_producer.split(":", 1)[1]
+            ):
+                return 0, True
+        has_uncertain = bool(document.get("unknown_trust_effect")) or any(
+            not isinstance(eff, Mapping)
+            or eff.get("status") not in {"confirmed", "rejected"}
+            for eff in document.get("effects", ())
+        )
+        blocking = 0
+        if isinstance(state, ActiveWindowRoundState):
+            if state.display_active_findings.has_uncertain_slots or any(
+                ob.native_target is not None and ob.target_state == "uncertain"
+                for ob in state.authoritative_decision_inventory.obligations
+            ):
+                has_uncertain = True
+            blocking = len(state.authoritative_decision_inventory.blocking_obligations)
+        elif isinstance(state, DriftEvaluationResult):
+            if any(s.state == "uncertain" for s in state.slots) or any(
+                ob.thread_binding is not None
+                and ob.thread_binding.slot_state == "uncertain"
+                for ob in state.inventory.obligations
+            ):
+                has_uncertain = True
+            blocking = len(state.inventory.blocking_obligations)
+        return blocking, has_uncertain
+    except (
+        ReviewInputError,
+        SessionLoadError,
+        GitHubPublicationError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return 0, True
+
+
 def execute_restricted_operator_reenroll(
     ledger: GitHubIssueCommentSessionLedger,
     request: OperatorReenrollRequest,
@@ -789,11 +901,13 @@ def execute_restricted_operator_reenroll(
 
     loaded = ledger.load(request.identity, now=now)
     inspected_record = loaded.record
+    discover_failed = False
     if inspected_record is None and loaded.status == "expired":
         try:
             _cid, inspected_record = ledger._discover(request.identity, now=now)
         except SessionLoadError:
             inspected_record = None
+            discover_failed = True
     quarantine_present = request.quarantine_lineage_present or (
         inspected_record is not None and inspected_record.quarantine_lineage is not None
     )
@@ -803,14 +917,43 @@ def execute_restricted_operator_reenroll(
     reservation_present = request.has_active_reservation or (
         inspected_record is not None and inspected_record.reservation_id is not None
     )
-    uncertain_present = request.has_uncertain_write or (
-        inspected_record is not None
-        and (
-            inspected_record.publication_staging is not None
-            or (
-                inspected_record.transaction is not None
-                and inspected_record.transaction.phase
-                in {"publication_pending", "publication_failed"}
+    accounting_uncertain = False
+    if inspected_record is not None and inspected_record.api_run_accounting is not None:
+        raw_acc = inspected_record.api_run_accounting
+        if isinstance(raw_acc, Mapping):
+            raw_uncertain = raw_acc.get("uncertain")
+            if isinstance(raw_uncertain, int) and raw_uncertain > 0:
+                accounting_uncertain = True
+        try:
+            parsed_acc = ApiRunAccounting.from_document(raw_acc)
+        except ReviewInputError:
+            accounting_uncertain = True
+        else:
+            if parsed_acc.uncertain > 0 or (
+                isinstance(parsed_acc.action, dict)
+                and parsed_acc.action.get("phase") == "pending"
+            ):
+                accounting_uncertain = True
+    lifecycle_blocking = 0
+    lifecycle_uncertain = False
+    if inspected_record is not None and inspected_record.finding_lifecycle is not None:
+        lifecycle_blocking, lifecycle_uncertain = _inspect_record_finding_lifecycle(
+            ledger, inspected_record, loaded_status=loaded.status
+        )
+    uncertain_present = (
+        request.has_uncertain_write
+        or discover_failed
+        or accounting_uncertain
+        or lifecycle_uncertain
+        or (
+            inspected_record is not None
+            and (
+                inspected_record.publication_staging is not None
+                or (
+                    inspected_record.transaction is not None
+                    and inspected_record.transaction.phase
+                    in {"publication_pending", "publication_failed"}
+                )
             )
         )
     )
@@ -825,7 +968,9 @@ def execute_restricted_operator_reenroll(
         pr_draft=request.pr_draft,
         enrollment_witness_present=request.enrollment_witness_present,
         enrollment_witness_sha256=request.enrollment_witness_sha256,
-        active_blocking_obligations=request.active_blocking_obligations,
+        active_blocking_obligations=max(
+            request.active_blocking_obligations, lifecycle_blocking
+        ),
         has_active_reservation=reservation_present,
         has_uncertain_write=uncertain_present,
         quarantine_lineage_present=quarantine_present,

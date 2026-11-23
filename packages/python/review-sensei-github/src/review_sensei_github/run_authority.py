@@ -396,39 +396,36 @@ class VerifiedRunAction:
                 or pull.get("state") != "open"
             ):
                 raise GitHubBrokerClientError("Current action head changed")
-            if "base" in pull:
-                base = pull.get("base")
-                repo = base.get("repo") if isinstance(base, dict) else None
-                repo_id = repo.get("id") if isinstance(repo, dict) else None
-                if (
-                    not isinstance(base, dict)
-                    or not isinstance(repo, dict)
-                    or not isinstance(repo_id, int)
-                    or isinstance(repo_id, bool)
-                    or repo_id <= 0
-                    or repo_id != document["repository_id"]
-                    or repo.get("full_name") != document["repository"]
-                ):
-                    raise GitHubBrokerClientError(
-                        "Current action repository identity changed"
-                    )
-                if validate_pull is not None:
-                    # Add stricter consumer facts to this same fresh observation;
-                    # a callback cannot weaken the action's source/head checks.
-                    validate_pull(pull)
-                base_sha = base.get("sha")
-                if isinstance(base_sha, str) and (
-                    re.fullmatch(r"[a-f0-9]{40}", base_sha) is not None
-                ):
-                    self._fenced_pull_identity = (
-                        document["repository_id"],
-                        document["repository"],
-                        document["pull_request"],
-                        base_sha,
-                        document["head_sha"],
-                    )
-            elif validate_pull is not None:
+            base = pull.get("base")
+            repo = base.get("repo") if isinstance(base, dict) else None
+            repo_id = repo.get("id") if isinstance(repo, dict) else None
+            if (
+                not isinstance(base, dict)
+                or not isinstance(repo, dict)
+                or not isinstance(repo_id, int)
+                or isinstance(repo_id, bool)
+                or repo_id <= 0
+                or repo_id != document["repository_id"]
+                or repo.get("full_name") != document["repository"]
+            ):
+                raise GitHubBrokerClientError(
+                    "Current action repository identity changed"
+                )
+            if validate_pull is not None:
+                # Add stricter consumer facts to this same fresh observation;
+                # a callback cannot weaken the action's source/head checks.
                 validate_pull(pull)
+            base_sha = base.get("sha")
+            if isinstance(base_sha, str) and (
+                re.fullmatch(r"[a-f0-9]{40}", base_sha) is not None
+            ):
+                self._fenced_pull_identity = (
+                    document["repository_id"],
+                    document["repository"],
+                    document["pull_request"],
+                    base_sha,
+                    document["head_sha"],
+                )
         return cast(Mapping[str, Any], current)
 
 

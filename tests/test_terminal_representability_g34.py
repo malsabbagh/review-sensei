@@ -2600,6 +2600,40 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
             self.assertEqual(settled_state.action["phase"], "terminal")
             self.assertEqual(settled_state.action["outcome"]["kind"], "explicit_noop")
 
+    def test_command_pricing_scales_with_batch_finding_count_without_raising_512(
+        self,
+    ) -> None:
+        from review_sensei_github.action_representability import _command_pricing
+
+        caller = SimpleNamespace(
+            accounting=SimpleNamespace(
+                configuration=SimpleNamespace(limit=512),
+                blocks=(),
+            ),
+            usable=512,
+        )
+        baseline_zero = _command_pricing(
+            caller, action="accept-risk", writes_enabled=True, finding_count=0
+        )
+        self.assertEqual(
+            (
+                baseline_zero.business_mutation_requests,
+                baseline_zero.refinalization_requests,
+                baseline_zero.receipt_publication_requests,
+                baseline_zero.required_requests,
+            ),
+            (3, 3, 2, 9),
+        )
+        for k, expected_total in ((1, 31), (4, 67), (5, 79), (10, 139)):
+            priced = _command_pricing(
+                caller, action="dismiss", writes_enabled=True, finding_count=k
+            )
+            self.assertEqual(priced.original_api_limit, 512)
+            self.assertEqual(priced.business_mutation_requests, 3 + 7 * k)
+            self.assertEqual(priced.refinalization_requests, 7 + 5 * k)
+            self.assertEqual(priced.receipt_publication_requests, 8)
+            self.assertEqual(priced.required_requests, expected_total)
+
 
 if __name__ == "__main__":
     unittest.main()
