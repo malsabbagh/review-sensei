@@ -1159,7 +1159,7 @@ with patch("socket.socket", side_effect=AssertionError("offline fixture")):
             unclosed_cmd_rec = clone_rec(cmd_rec, api_run_accounting=unclosed_doc)
             abort_doc_bad = copy.deepcopy(abort_doc)
             abort_doc_bad["previous_record"] = archive_into(
-                unclosed_cmd_rec, archive_id
+                unclosed_cmd_rec, archive_id + 1
             )
             current_bad = clone_rec(current_abort, api_run_accounting=abort_doc_bad)
             f.comment["body"] = render_session_comment(
@@ -1176,7 +1176,9 @@ with patch("socket.socket", side_effect=AssertionError("offline fixture")):
             }
             corrupt_rec = clone_rec(cmd_rec, api_run_accounting=corrupt_doc)
             abort_doc_corrupt = copy.deepcopy(abort_doc)
-            abort_doc_corrupt["previous_record"] = archive_into(corrupt_rec, archive_id)
+            abort_doc_corrupt["previous_record"] = archive_into(
+                corrupt_rec, archive_id + 2
+            )
             current_corrupt = clone_rec(
                 current_abort, api_run_accounting=abort_doc_corrupt
             )
@@ -1186,8 +1188,7 @@ with patch("socket.socket", side_effect=AssertionError("offline fixture")):
             f.next_run()
             self._assert_held(f, "earlier native effect evidence is unavailable")
 
-            # Positive: restore authentic command archive + packed-v4 lifecycle -> real rollover succeeds!
-            abort_doc["previous_record"] = archive_into(cmd_rec, archive_id)
+            # Positive: authentic command archive (never mutated by negative controls) + packed-v4 lifecycle -> real rollover succeeds!
             f.comment["body"] = saved_comment
             f.next_run()
             self.assertEqual(f.invoke(), 0, f.error)

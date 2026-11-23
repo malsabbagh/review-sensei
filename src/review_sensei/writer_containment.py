@@ -897,6 +897,31 @@ class ContainedForwardingCoordinator(AuthorityHost):
             pull_request = int(parts[2])
         except ValueError as exc:
             raise AuthorityRefusal("frontier key is invalid") from exc
+        _require_containment(
+            repository_id >= 1
+            and pull_request >= 1
+            and key == f"{store_id}:{repository_id}:{pull_request}",
+            "frontier key is invalid",
+        )
+        _require_containment(isinstance(checkpoint, Snapshot), "checkpoint is invalid")
+        try:
+            ckpt_doc = checkpoint.document()
+        except (ValueError, UnicodeError, TypeError) as exc:
+            raise AuthorityRefusal("checkpoint document is invalid") from exc
+        ckpt_access = ckpt_doc.get("access") if isinstance(ckpt_doc, Mapping) else None
+        ckpt_epoch = (
+            ckpt_access.get("epoch") if isinstance(ckpt_access, Mapping) else None
+        )
+        _require_containment(
+            isinstance(ckpt_access, Mapping)
+            and ckpt_access.get("store_id") == store_id
+            and ckpt_access.get("repository_id") == repository_id
+            and ckpt_access.get("pull_request") == pull_request
+            and type(ckpt_epoch) is int
+            and 1 <= ckpt_epoch <= MAX_REVISION,
+            "checkpoint access scope or epoch is invalid",
+        )
+        assert type(ckpt_epoch) is int
         with self._lock, closing(self._connect_frontier()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -907,21 +932,13 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 ).fetchall()
                 if expected is not None:
                     _require_containment(
-                        any(str(r[3]) == store_id for r in scope_rows),
+                        any(
+                            str(r[3]) == store_id and int(r[1]) == ckpt_epoch
+                            for r in scope_rows
+                        ),
                         "stale writer epoch fenced before frontier mutation",
                     )
                 else:
-                    ckpt_access = checkpoint.document().get("access")
-                    ckpt_epoch = (
-                        ckpt_access.get("epoch")
-                        if isinstance(ckpt_access, Mapping)
-                        else None
-                    )
-                    _require_containment(
-                        type(ckpt_epoch) is int and ckpt_epoch >= 1,
-                        "checkpoint epoch is invalid",
-                    )
-                    assert type(ckpt_epoch) is int
                     matched_scope = False
                     for base_sid, active_ep, alloc_ep, _active_sid in scope_rows:
                         if (
@@ -943,6 +960,14 @@ class ContainedForwardingCoordinator(AuthorityHost):
                         _require_containment(
                             matched_scope,
                             "writer epoch scope must be allocated before epoch-2+ initialization",
+                        )
+                    elif not matched_scope:
+                        _require_containment(
+                            any(
+                                a.key == key and a.epoch == 1
+                                for a in self._grants.values()
+                            ),
+                            "unissued epoch-1 frontier initialization refused",
                         )
                 row = db.execute(
                     "SELECT body FROM frontier WHERE key=?", (key,)

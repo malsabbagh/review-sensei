@@ -42,7 +42,7 @@ from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from . import controlled_restart
-from .api_run_owner import _writer_name
+from .api_run_owner import ApiRunActionsEvidence, _writer_name
 from .errors import GitHubHTTPError
 from .http import GitHubHttp
 from .publication import (
@@ -992,6 +992,22 @@ def _probe_owner_ceased(
                 return len(matching) == 1
         return False
     run_reader = getattr(ledger, "_run_reader", None)
+    if isinstance(run_reader, ApiRunActionsEvidence):
+        try:
+            if run_reader.command_run_id == str(old.identity.run_id):
+                run_reader.ceased_owner(
+                    identity, old.owner, complete_terminal_inventory=True
+                )
+            else:
+                run_reader.ceased_run_owner(
+                    identity,
+                    old.identity.run_id,
+                    old.owner,
+                    complete_terminal_inventory=True,
+                )
+            return True
+        except ReviewInputError:
+            return False
     ceased_fn = getattr(run_reader, "ceased_owner", None)
     if callable(ceased_fn):
         try:
@@ -1932,9 +1948,6 @@ def _load_live_no_transaction_context(
     evidence_author_id = getattr(ledger, "_evidence_author_id", None)
     if type(evidence_author_id) is int and evidence_author_id > 0:
         ro_ledger._evidence_author_id = evidence_author_id
-    run_reader = getattr(ledger, "_run_reader", None)
-    if run_reader is not None:
-        ro_ledger._run_reader = run_reader  # type: ignore[attr-defined]
 
     expected_issue = (
         f"{ro_http.api_url.rstrip('/')}/repos/{identity.repository}"
