@@ -583,7 +583,7 @@ class TrustEnrollmentEntryTests(unittest.TestCase):
                     ),
                 )
             )
-            unenrolled = SessionRecord.create(IDENTITY, now=record.created_at)
+            unenrolled = SessionRecord.create(IDENTITY)
             self.assertIsNone(
                 enroll_application_trust_snapshot(
                     app,
