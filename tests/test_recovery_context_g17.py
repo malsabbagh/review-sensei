@@ -1984,6 +1984,82 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
             _ = ReviewRun
 
     @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_post_recovery_reverifies_when_parts_or_comment_bytes_exceed_pre_recovery_even_with_small_decoded_bytes(
+        self,
+    ) -> None:
+        from review_sensei_github import publication_context_recovery
+
+        for label, post_footprint in (
+            (
+                "parts-exceed",
+                (4_096, 4_096, 1_024, MAX_RECOVERY_RESULT_PARTS + 1, 2_048),
+            ),
+            (
+                "comment-bytes-exceed",
+                (4_096, 4_096, MAX_SESSION_COMMENT_BYTES + 1, 1, 2_048),
+            ),
+        ):
+            with (
+                self.subTest(case=label),
+                tempfile.TemporaryDirectory() as directory,
+                tempfile.TemporaryDirectory() as secret_dir,
+            ):
+                fx = self._make_hosted_fixture(directory, artifacts="diagnostics")
+                sroot = Path(secret_dir)
+                handoff_dir = sroot / "handoff"
+                key_file = sroot / "handoff.key"
+                key_file.write_bytes(HANDOFF_KEY)
+                key_file.chmod(0o600)
+                fx.recovery_context_dir = handoff_dir
+                fx.recovery_context_key_file = key_file
+
+                def crash_before_pub() -> None:
+                    raise OSError("simulated process crash before publication")
+
+                fx.before_publication = crash_before_pub
+                self.assertEqual(fx.invoke(), 1)
+                for local_diag in (
+                    "configuration.json",
+                    "admission.json",
+                    "review.json",
+                ):
+                    (fx.root / local_diag).unlink(missing_ok=True)
+
+                fx.attempt = 2
+                fx.before_publication = None
+                orig_verify = (
+                    publication_context_recovery.verify_stored_recovery_context
+                )
+                verify_calls = []
+
+                def spy_verify(*args, **kwargs):  # type: ignore[no-untyped-def]
+                    verify_calls.append(kwargs)
+                    return orig_verify(*args, **kwargs)
+
+                def fake_footprint(*_args, **kwargs):  # type: ignore[no-untyped-def]
+                    if kwargs.get("recovered_result") is not None:
+                        return post_footprint
+                    return (4_096, 4_096, 1_024, 1, 16_384)
+
+                with (
+                    patch.object(
+                        publication_context_recovery,
+                        "measure_staged_recovery_footprint",
+                        side_effect=fake_footprint,
+                    ),
+                    patch.object(
+                        publication_context_recovery,
+                        "verify_stored_recovery_context",
+                        side_effect=spy_verify,
+                    ),
+                ):
+                    code = fx.invoke()
+                self.assertEqual(code, 1, fx.error)
+                self.assertTrue(verify_calls)
+                self.assertEqual(verify_calls[-1]["total_decoded_bytes"], 2_048)
+                self.assertIn("root_capacity_exceeded", fx.error)
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cli_result_retry_does_not_overwrite_handoff_recover_from_rejection_repo_id_none_and_corrupt_accounting(
         self,
     ) -> None:

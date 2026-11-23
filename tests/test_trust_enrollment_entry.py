@@ -15,11 +15,17 @@ from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import ReviewPublisher
 from review_sensei_github.run_authority import parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
-from review_sensei_github.trust_enrollment import enrolled_trust_snapshot_from_record
+from review_sensei_github.trust_enrollment import (
+    _snapshot_from_authority,
+    enroll_application_trust_snapshot,
+    enrolled_trust_snapshot_from_record,
+    observed_trust_snapshot_from_authority,
+)
 from test_action_run import CommandEntryFixture
 from test_api_work_persistence import IDENTITY
 
 from review_sensei.errors import ReviewInputError
+from review_sensei.session import SessionRecord
 
 
 class ObservedEntryFixture(CommandEntryFixture):
@@ -499,3 +505,101 @@ class TrustEnrollmentEntryTests(unittest.TestCase):
             self.assertEqual(fixture.observed_actor_role_requests, [True, True])
             after = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
             self.assertEqual(after.trust_enrollment, record.trust_enrollment)
+
+    def test_trust_snapshot_bridge_helpers_and_none_branches(self) -> None:
+        from types import SimpleNamespace
+
+        # 1. Non-dict or non-v4 authority returns None cleanly.
+        self.assertIsNone(observed_trust_snapshot_from_authority(None))
+        self.assertIsNone(observed_trust_snapshot_from_authority("invalid"))
+        self.assertIsNone(observed_trust_snapshot_from_authority({"version": 3}))
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ObservedEntryFixture(directory)
+            self.assertEqual(fixture.opted(fixture.invoke), 0, fixture.error)
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            assert record is not None and record.trust_enrollment is not None
+            base_authority = copy.deepcopy(
+                record.trust_enrollment["document"]["authority"]
+            )
+
+            # 2. v1 observation uses passed actor_permission and parses valid capability/selection;
+            #    defensive _snapshot_from_authority handles absent capability or repository_access=False.
+            v1_auth = copy.deepcopy(base_authority)
+            v1_auth["current_observation"]["schema_version"] = "current-observation-v1"
+            snap_v1 = observed_trust_snapshot_from_authority(
+                v1_auth, actor_permission="maintain"
+            )
+            assert snap_v1 is not None
+            self.assertEqual(snap_v1.actor_permission, "maintain")
+            self.assertEqual(
+                snap_v1.required_permissions,
+                {"metadata": "read", "pull_requests": "write"},
+            )
+            self.assertTrue(snap_v1.repository_selected)
+
+            defensive_v1 = copy.deepcopy(v1_auth)
+            defensive_v1["current_observation"].pop("capability", None)
+            defensive_v1["current_observation"]["installation"]["repository_access"] = (
+                False
+            )
+            snap_defensive = _snapshot_from_authority(
+                defensive_v1, actor_permission="maintain"
+            )
+            self.assertIsNone(snap_defensive.required_permissions)
+            self.assertFalse(snap_defensive.repository_selected)
+
+            # 3. v2 observation prefers embedded actor.repository_permission over actor_permission kwarg.
+            v2_auth = copy.deepcopy(base_authority)
+            v2_auth["current_observation"]["schema_version"] = "current-observation-v2"
+            v2_auth["current_observation"]["actor"]["repository_permission"] = "write"
+            v2_auth["current_observation"]["actor"]["repository_role"] = "write"
+            snap_v2 = observed_trust_snapshot_from_authority(
+                v2_auth, actor_permission="admin"
+            )
+            assert snap_v2 is not None
+            self.assertEqual(snap_v2.actor_permission, "write")
+            self.assertEqual(
+                snap_v2.required_permissions,
+                {"metadata": "read", "pull_requests": "write"},
+            )
+
+            # 4. enroll_application_trust_snapshot short-circuits when caller or trust_enrollment is absent,
+            #    and enrolls record snapshot even when run.session_authority is None or non-v4.
+            enrolled_calls = []
+            app = SimpleNamespace(
+                enroll_trust_snapshot=lambda *, snapshot: enrolled_calls.append(
+                    snapshot
+                )
+            )
+            self.assertIsNone(
+                enroll_application_trust_snapshot(app, SimpleNamespace(caller=None))
+            )
+            self.assertIsNone(
+                enroll_application_trust_snapshot(
+                    app,
+                    SimpleNamespace(
+                        caller=SimpleNamespace(_effect_record="not-a-record")
+                    ),
+                )
+            )
+            unenrolled = SessionRecord.create(IDENTITY, now=record.created_at)
+            self.assertIsNone(
+                enroll_application_trust_snapshot(
+                    app,
+                    SimpleNamespace(caller=SimpleNamespace(_effect_record=unenrolled)),
+                )
+            )
+            self.assertEqual(enrolled_calls, [])
+
+            observed_absent = enroll_application_trust_snapshot(
+                app,
+                SimpleNamespace(
+                    caller=SimpleNamespace(_effect_record=record),
+                    session_authority={"version": 3},
+                ),
+                actor_permission="admin",
+            )
+            self.assertIsNone(observed_absent)
+            self.assertEqual(len(enrolled_calls), 1)
+            self.assertIsNone(enrolled_calls[0].actor_permission)

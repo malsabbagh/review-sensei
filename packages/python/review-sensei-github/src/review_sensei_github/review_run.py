@@ -981,7 +981,13 @@ class ReviewRun:
                 identity=self.identity,
                 recovered_result=result,
             )
-            if rec_decoded_bytes > total_decoded_bytes:
+            if (
+                rec_decoded_bytes > total_decoded_bytes
+                or rec_part_count > result_part_count
+                or rec_comment_bytes > current_comment_bytes
+                or rec_root_bytes > current_root_bytes
+                or rec_intermediate_root_bytes > intermediate_root_bytes
+            ):
                 expected_bundle = bundle_from_reconstructed_contexts(
                     contexts,
                     source_root=Path.cwd(),
@@ -1004,9 +1010,11 @@ class ReviewRun:
                     current_root_sha256=loaded.record.record_sha256,
                     ancestor_record_sha256s=ancestor_hashes,
                     ancestor_run_ids=ancestor_runs,
-                    current_root_bytes=rec_root_bytes,
-                    intermediate_root_bytes=rec_intermediate_root_bytes,
-                    current_comment_bytes=rec_comment_bytes,
+                    current_root_bytes=max(current_root_bytes, rec_root_bytes),
+                    intermediate_root_bytes=max(
+                        intermediate_root_bytes, rec_intermediate_root_bytes
+                    ),
+                    current_comment_bytes=max(current_comment_bytes, rec_comment_bytes),
                     result_part_count=max(result_part_count, rec_part_count),
                     total_decoded_bytes=rec_decoded_bytes,
                     original_api_limit=accounting.configuration.limit,
