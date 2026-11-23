@@ -5,24 +5,154 @@ from __future__ import annotations
 import hashlib
 import inspect
 import sys
+from dataclasses import dataclass
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from review_sensei.bounded_evidence import MAX_PART_BYTES, canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.presentation import render_command_receipt
+from review_sensei.session import MAX_SESSION_RECORD_BYTES
 from review_sensei.source_registry import require_module_seal
 
 from .errors import GitHubHTTPTransientError, GitHubPublicationTransientError
+from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_PAGES
 
-_PLAIN_SINGLE_PAGE_RECEIPT_LEASES: WeakKeyDictionary[Any, tuple[Any, Any, str, Any]] = (
+COMMAND_RECEIPT_WIRE_BOUND = 65536 + 4096
+_RECEIPT_PAGE_SIZES = (100, 20, 10, 5, 1)
+_RECEIPT_MARKER_PREFIX = "<!-- reviewsensei:command-receipt:v1 "
+
+
+@dataclass(frozen=True, eq=False)
+class _PlainReceiptPagePlan:
+    caller: Any
+    identity: Any
+    operation_id: str
+    owner: Any
+    inventory_ids: tuple[int, ...]
+    page_requests: tuple[tuple[int, int], ...]
+    page_bounds: tuple[int, ...]
+    maximum_items: int
+
+
+_PLAIN_SINGLE_PAGE_RECEIPT_LEASES: WeakKeyDictionary[Any, _PlainReceiptPagePlan] = (
     WeakKeyDictionary()
 )
 
 
+def plan_plain_receipt_pages(
+    ledger: Any,
+    identity: Any,
+    *,
+    staged_parts_count: int,
+    lifecycle_parts_count: int,
+) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...], tuple[int, ...], int] | None:
+    """Plan byte-aware aligned comment pages for plain command receipt readback."""
+    if (
+        not getattr(ledger, "_inventory_complete", False)
+        or type(staged_parts_count) is not int
+        or staged_parts_count < 0
+        or type(lifecycle_parts_count) is not int
+        or lifecycle_parts_count < 0
+    ):
+        return None
+    items = ledger._cached_comments()
+    if any(
+        not isinstance(item, dict)
+        or type(item.get("id")) is not int
+        or item["id"] <= 0
+        or not isinstance(item.get("body"), str)
+        for item in items
+    ):
+        return None
+    ids = tuple(item["id"] for item in items)
+    if len(set(ids)) != len(ids):
+        return None
+
+    from .session_ledger import parse_session_comment, plain_session_comment_json_bound
+
+    root_indices = [
+        index
+        for index, item in enumerate(items)
+        if parse_session_comment(item["body"], identity=identity) is not None
+    ]
+    if len(root_indices) != 1:
+        return None
+    root_index = root_indices[0]
+    root_wire = 6 * MAX_SESSION_RECORD_BYTES
+    if getattr(ledger, "_controlled_restart", None) is None:
+        grants = set(getattr(ledger, "_observed_consumed_grants", ()) or ())
+        accepted = getattr(ledger, "_accepted_consumed_grant", None)
+        if accepted is not None:
+            grants.add(accepted)
+        root_wire = plain_session_comment_json_bound(
+            consumed_grants=grants,
+            repository_id=identity.repository_id,
+            pull_request=identity.pull_request,
+        )
+
+    bounds = [len(canonical_bytes(item)) for item in items]
+    replaced = len(canonical_bytes(items[root_index]["body"]))
+    bounds[root_index] = max(
+        bounds[root_index], bounds[root_index] - replaced + root_wire + 4096
+    )
+    for index, item in enumerate(items):
+        if _RECEIPT_MARKER_PREFIX in item["body"]:
+            old_body = len(canonical_bytes(item["body"]))
+            bounds[index] = max(
+                bounds[index], bounds[index] - old_body + COMMAND_RECEIPT_WIRE_BOUND
+            )
+    bounds.extend(
+        [MAX_PART_BYTES + 512 + 4096] * (staged_parts_count + lifecycle_parts_count)
+    )
+    bounds.append(COMMAND_RECEIPT_WIRE_BOUND)
+    if len(bounds) > 200:
+        return None
+
+    single_bound = 2 + sum(bounds) + max(0, len(bounds) - 1)
+    if len(bounds) < 100 and single_bound < MAX_GITHUB_RESPONSE_BYTES:
+        return (ids, ((100, 1),), (single_bound,), len(bounds))
+
+    # In multi-page layouts an earlier skipped lifecycle/staged part can shift the
+    # 69,632-byte command receipt earlier into an appended slot, so bound every
+    # newly appended slot by the receipt ceiling before choosing page boundaries.
+    appended_start = len(items)
+    for idx in range(appended_start, len(bounds)):
+        bounds[idx] = max(bounds[idx], COMMAND_RECEIPT_WIRE_BOUND)
+
+    requests: list[tuple[int, int]] = []
+    response_bounds: list[int] = []
+    offset = 0
+    while offset <= len(bounds):
+        for size in _RECEIPT_PAGE_SIZES:
+            if offset % size:
+                continue
+            members = bounds[offset : offset + size]
+            bound = 2 + sum(members) + max(0, len(members) - 1)
+            if bound < MAX_GITHUB_RESPONSE_BYTES:
+                requests.append((size, offset // size + 1))
+                response_bounds.append(bound)
+                offset += size
+                break
+        else:
+            return None
+        if len(requests) > MAX_PAGINATION_PAGES:
+            return None
+    return (ids, tuple(requests), tuple(response_bounds), len(bounds))
+
+
 def _bind_plain_single_page_receipt(
-    ledger: Any, caller: Any, identity: Any, *, operation_id: str
+    ledger: Any,
+    caller: Any,
+    identity: Any,
+    *,
+    operation_id: str,
+    page_requests: tuple[tuple[int, int], ...] = ((100, 1),),
+    page_bounds: tuple[int, ...] = (MAX_GITHUB_RESPONSE_BYTES - 1,),
+    inventory_ids: tuple[int, ...] = (),
+    maximum_items: int = 99,
 ) -> None:
-    """Bind one single-page receipt window exclusively from sealed command preflight."""
+    """Bind one single-page or sealed multi-page receipt window from command preflight."""
     from . import finding_lifecycle
 
     require_module_seal(sys.modules[__name__])
@@ -41,11 +171,40 @@ def _bind_plain_single_page_receipt(
         raise ReviewInputError(
             "plain single-page receipt lease requires command preflight"
         )
-    _PLAIN_SINGLE_PAGE_RECEIPT_LEASES[ledger] = (
-        caller,
-        identity,
-        operation_id,
-        caller.accounting.owner,
+    if (
+        not isinstance(page_requests, tuple)
+        or not 1 <= len(page_requests) <= MAX_PAGINATION_PAGES
+        or any(
+            not isinstance(req, tuple)
+            or len(req) != 2
+            or type(req[0]) is not int
+            or req[0] not in _RECEIPT_PAGE_SIZES
+            or type(req[1]) is not int
+            or req[1] < 1
+            for req in page_requests
+        )
+        or not isinstance(page_bounds, tuple)
+        or len(page_bounds) != len(page_requests)
+        or any(
+            type(bound) is not int or not 0 < bound < MAX_GITHUB_RESPONSE_BYTES
+            for bound in page_bounds
+        )
+        or not isinstance(inventory_ids, tuple)
+        or any(type(cid) is not int or cid <= 0 for cid in inventory_ids)
+        or len(set(inventory_ids)) != len(inventory_ids)
+        or type(maximum_items) is not int
+        or not 0 <= maximum_items <= 200
+    ):
+        raise ReviewInputError("plain receipt page plan is invalid")
+    _PLAIN_SINGLE_PAGE_RECEIPT_LEASES[ledger] = _PlainReceiptPagePlan(
+        caller=caller,
+        identity=identity,
+        operation_id=operation_id,
+        owner=caller.accounting.owner,
+        inventory_ids=inventory_ids,
+        page_requests=page_requests,
+        page_bounds=page_bounds,
+        maximum_items=maximum_items,
     )
 
 
@@ -81,26 +240,89 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
             if bounded_receipt is None and guard is None
             else None
         )
-        plain_single_page = bool(
-            plain_lease is not None
-            and plain_lease[0] is run.caller
-            and plain_lease[1] == run.identity
-            and plain_lease[3] == run.caller.accounting.owner
-            and verification_profile(run.caller) is None
-            and not getattr(run.ledger, "_quarantine_required", False)
+        receipt_wire_ok = (
+            len(canonical_bytes({"body": text})) + 4096 <= COMMAND_RECEIPT_WIRE_BOUND
+        )
+        plain_plan = (
+            plain_lease
+            if (
+                isinstance(plain_lease, _PlainReceiptPagePlan)
+                and plain_lease.caller is run.caller
+                and plain_lease.identity == run.identity
+                and plain_lease.owner == run.caller.accounting.owner
+                and verification_profile(run.caller) is None
+                and not getattr(run.ledger, "_quarantine_required", False)
+                and receipt_wire_ok
+            )
+            else None
         )
 
         def matching(live_readback: bool = False):
             if bounded_receipt is not None:
                 values = bounded_receipt.read(path=path, token=token)
-            elif plain_single_page:
-                status, values = run.http.request(
-                    "GET", f"{path}?per_page=100&page=1", token=token
-                )
-                if status != 200 or not isinstance(values, list) or len(values) >= 100:
-                    raise ReviewInputError(
-                        "command receipt single-page frontier changed"
+            elif plain_plan is not None:
+                if plain_plan.page_requests == ((100, 1),):
+                    status, values = run.http.request(
+                        "GET", f"{path}?per_page=100&page=1", token=token
                     )
+                    if (
+                        status != 200
+                        or not isinstance(values, list)
+                        or len(values) >= 100
+                    ):
+                        raise ReviewInputError(
+                            "command receipt single-page frontier changed"
+                        )
+                else:
+                    collected: list[Any] = []
+                    seen_ids: set[int] = set()
+                    observed_ids: list[int] = []
+                    for (page_size, page), _bound in zip(
+                        plain_plan.page_requests, plain_plan.page_bounds, strict=True
+                    ):
+                        status, page_values = run.http.request(
+                            "GET",
+                            f"{path}?per_page={page_size}&page={page}",
+                            token=token,
+                        )
+                        if (
+                            status != 200
+                            or not isinstance(page_values, list)
+                            or len(page_values) > page_size
+                        ):
+                            raise ReviewInputError(
+                                "command receipt paged frontier changed"
+                            )
+                        for item in page_values:
+                            if (
+                                not isinstance(item, dict)
+                                or type(item.get("id")) is not int
+                                or item["id"] <= 0
+                                or item["id"] in seen_ids
+                            ):
+                                raise ReviewInputError(
+                                    "command receipt paged frontier changed"
+                                )
+                            seen_ids.add(item["id"])
+                            observed_ids.append(item["id"])
+                        collected.extend(page_values)
+                        if len(collected) > plain_plan.maximum_items:
+                            raise ReviewInputError(
+                                "command receipt paged frontier changed"
+                            )
+                        if len(page_values) < page_size:
+                            prefix_len = len(plain_plan.inventory_ids)
+                            if (
+                                tuple(observed_ids[:prefix_len])
+                                != plain_plan.inventory_ids
+                            ):
+                                raise ReviewInputError(
+                                    "command receipt paged frontier changed"
+                                )
+                            values = collected
+                            break
+                    else:
+                        raise ReviewInputError("command receipt paged frontier changed")
             elif (
                 guard is None
                 and getattr(run.ledger, "_quarantine_required", False)
@@ -185,8 +407,8 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
         # This local allocation preserves confirmation, but is not whole-route
         # admission. The source effect gate still refuses an unpriced business route.
         write_tail = 1 + (
-            3
-            if (bounded_receipt is None and plain_single_page)
+            (len(plain_plan.page_requests) + 2)
+            if (bounded_receipt is None and plain_plan is not None)
             else (
                 COMMAND_RECEIPT_CONFIRMATION_REQUESTS
                 if bounded_receipt is None

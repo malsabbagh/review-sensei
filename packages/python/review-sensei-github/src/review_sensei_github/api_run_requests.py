@@ -3386,7 +3386,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         replaced_body = (
             len(canonical_bytes(root_bodies[0])) if selected is not None else 0
         )
-        wire = len(canonical_bytes(items)) - replaced_body + root_wire + 4096
+        wire = (
+            len(canonical_bytes(items))
+            - replaced_body
+            + max(replaced_body, root_wire)
+            + 4096
+        )
         # Core supplies the sum of canonical part wire maxima (compressBound
         # included, with the short final part), not arbitrary payload lengths.
         # Actual staging repeats this with canonical rendered-part lengths.
@@ -3424,7 +3429,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             root_index = next(
                 i for i, item in enumerate(items) if item["body"] == root_bodies[0]
             )
-            bounds[root_index] += root_wire - replaced_body + 4096
+            bounds[root_index] += max(0, root_wire - replaced_body) + 4096
             # Per-page partitioning needs individual maxima, not an average of
             # aggregate bytes. The original canonical part bound is unchanged.
             from review_sensei.bounded_evidence import MAX_PART_BYTES
