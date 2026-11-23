@@ -8,12 +8,16 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.budgets import LEGACY_ASSESSMENT_PROMPT_BYTES, ReviewWorkBudgets
 from review_sensei.diff import analyze_diff
 from review_sensei.document_context import DocumentDecision, DocumentSelectionReport
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
-from review_sensei.hunk_subdivision import SubdivisionAllowance, subdivide_hunk
+from review_sensei.hunk_subdivision import (
+    HUNK_SUBDIVISION_POLICY,
+    SubdivisionAllowance,
+    subdivide_hunk,
+)
 from review_sensei.models import (
     ProviderResponse,
     ReviewDocument,
@@ -21,7 +25,10 @@ from review_sensei.models import (
     ReviewRequest,
 )
 from review_sensei.outcomes import ResourceBudget
-from review_sensei.service import ReviewService
+from review_sensei.service import (
+    _PROVIDER_OUTPUT_CORRECTION,
+    ReviewService,
+)
 from review_sensei.stages import Stage
 from review_sensei.work_recovery import WorkRecoveryStore
 
@@ -312,6 +319,73 @@ class HunkSubdivisionTests(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0].fragment.body_end, parts[0].fragment.body_bytes)
 
+    def test_boundary_aware_split_prefers_top_level_def_and_falls_back_to_midpoint(
+        self,
+    ):
+        self.assertEqual(HUNK_SUBDIVISION_POLICY, "canonical-line-segments-v2")
+        lines = []
+        for idx in range(1, 302):
+            lines.append(f"+HELPER_{idx:03d} = {idx}\n")
+        lines.append("+def _build_action_harness(flag):\n")
+        for idx in range(303, 521):
+            lines.append(f"+    step_{idx} = {idx}\n")
+        lines.append("+    return (\n")
+        lines.append("+        flag,\n")
+        lines.append("+        True,\n")
+        for idx in range(524, 537):
+            lines.append(f"+        {idx},\n")
+        lines.append("+    )\n")
+        lines.append("+\n")
+        lines.append("+def _preflight_and_publish():\n")
+        for idx in range(540, 1001):
+            lines.append(f"+    published_{idx} = {idx}\n")
+        self.assertEqual(len(lines), 1000)
+
+        patch = "@@ -0,0 +1,1000 @@\n" + "".join(lines)
+        snapshot, _, record, hunk = self.fixture(patch)
+        parts = subdivide_hunk(
+            record,
+            hunk,
+            snapshot,
+            admit=lambda part: (
+                len(part.analysis.hunk_records[0].text.splitlines()) <= 600
+            ),
+        )
+        self.assertEqual(len(parts), 2)
+        first_body = parts[0].analysis.hunk_records[0].text.partition("\n")[2]
+        second_body = parts[1].analysis.hunk_records[0].text.partition("\n")[2]
+        self.assertEqual(len(first_body.splitlines()), 538)
+        self.assertEqual(len(second_body.splitlines()), 462)
+        self.assertTrue(second_body.startswith("+def _preflight_and_publish():\n"))
+        self.assertEqual(
+            (first_body + second_body).encode("utf-8"),
+            hunk.text.partition("\n")[2].encode("utf-8"),
+        )
+
+        # Contiguous 1,000-line indented block with no boundary falls back to midpoint 500.
+        contiguous_lines = ["+def _monolithic_block():\n"] + [
+            f"+    value_{idx} = {idx}\n" for idx in range(2, 1001)
+        ]
+        contiguous_patch = "@@ -0,0 +1,1000 @@\n" + "".join(contiguous_lines)
+        _, _, cont_record, cont_hunk = self.fixture(contiguous_patch)
+        cont_parts = subdivide_hunk(
+            cont_record,
+            cont_hunk,
+            snapshot,
+            admit=lambda part: (
+                len(part.analysis.hunk_records[0].text.splitlines()) <= 600
+            ),
+        )
+        self.assertEqual(len(cont_parts), 2)
+        cont_first = cont_parts[0].analysis.hunk_records[0].text.partition("\n")[2]
+        cont_second = cont_parts[1].analysis.hunk_records[0].text.partition("\n")[2]
+        self.assertEqual(len(cont_first.splitlines()), 500)
+        self.assertEqual(len(cont_second.splitlines()), 500)
+        self.assertEqual(
+            (cont_first + cont_second).encode("utf-8"),
+            cont_hunk.text.partition("\n")[2].encode("utf-8"),
+        )
+
 
 class RecordingProvider:
     name = "fixture"
@@ -489,6 +563,143 @@ class DiscoverySubdivisionTests(unittest.TestCase):
         self.assertIsNone(run.outcome.diagnostic)
         self.assertEqual(run.context_admission["original_inventories"][0]["omitted"], 1)
         self.assertFalse(run.context_admission["batches"][0]["complete"])
+
+    def test_pr488_shaped_multifile_and_split_test_injects_scope_and_labels_summary(
+        self,
+    ):
+        prod_paths = (
+            "packages/python/review-sensei-github/src/review_sensei_github/action_receipt.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/comment_pages.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/fence.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/page_planner.py",
+            "src/review_sensei/page_budgets.py",
+        )
+        prod_diffs = []
+        for idx, path in enumerate(prod_paths):
+            body_lines = "".join(
+                f"+prod_{idx}_line_{line_no} = 'padding_{'x' * 34}_{line_no}'\n"
+                for line_no in range(1, 79)
+            )
+            prod_diffs.append(
+                f"diff --git a/{path} b/{path}\n"
+                "--- /dev/null\n"
+                f"+++ b/{path}\n"
+                "@@ -0,0 +1,78 @@\n"
+                f"{body_lines}"
+            )
+        prod_total_bytes = sum(len(item.encode("utf-8")) for item in prod_diffs)
+        self.assertGreater(prod_total_bytes, 24_000)
+        self.assertLess(prod_total_bytes, 29_000)
+
+        test_path = "tests/test_byte_aware_comment_pages.py"
+        test_lines = []
+        for line_no in range(1, 302):
+            test_lines.append(
+                f"+CONST_{line_no:03d} = 'setup_fixture_{'a' * 16}_{line_no}'\n"
+            )
+        test_lines.append("+def _build_action_harness():\n")
+        for line_no in range(303, 520):
+            test_lines.append(
+                f"+    harness_{line_no} = 'entry_{'b' * 16}_{line_no}'\n"
+            )
+        test_lines.append("+    return (\n")
+        for line_no in range(521, 537):
+            test_lines.append(
+                f"+        ('arg_{line_no}', {'True' if line_no % 2 else 'False'}),\n"
+            )
+        test_lines.append("+    )\n")
+        test_lines.append("+\n")
+        test_lines.append("+def _preflight_and_publish():\n")
+        for line_no in range(540, 1043):
+            test_lines.append(
+                f"+    assert_page_{line_no} = 'check_{'c' * 16}_{line_no}'\n"
+            )
+        self.assertEqual(len(test_lines), 1042)
+        test_diff = (
+            f"diff --git a/{test_path} b/{test_path}\n"
+            "--- /dev/null\n"
+            f"+++ b/{test_path}\n"
+            "@@ -0,0 +1,1042 @@\n" + "".join(test_lines)
+        )
+        self.assertGreater(len(test_diff.encode("utf-8")), 41_000)
+        full_diff = "".join(prod_diffs) + test_diff
+
+        class ScopedProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def __init__(self):
+                self.requests = []
+
+            def complete(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    summary = "Reviewed 5 production modules."
+                elif len(self.requests) == 2:
+                    summary = "Reviewed _build_action_harness segment."
+                else:
+                    summary = "Reviewed _preflight_and_publish segment."
+                return ProviderResponse(
+                    json.dumps({"summary": summary, "comments": []}), self.name
+                )
+
+        provider = ScopedProvider()
+        service = ReviewService(
+            provider,
+            budget=ResourceBudget.create(max_provider_calls=8),
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        run = service.run(
+            ReviewRequest(diff=full_diff, base_sha="a" * 40, head_sha="b" * 40)
+        )
+        self.assertEqual(run.outcome.status, "reviewed")
+        self.assertIsNotNone(run.result)
+        self.assertTrue(run.result.coverage.fully_reviewed)
+        self.assertEqual(len(run.result.coverage.files), 6)
+        self.assertEqual(len(provider.requests), 3)
+        for req in provider.requests:
+            self.assertLessEqual(
+                len(
+                    (req.prompt + "\n\n" + _PROVIDER_OUTPUT_CORRECTION).encode("utf-8")
+                ),
+                LEGACY_ASSESSMENT_PROMPT_BYTES,
+            )
+
+        batch1_scope = (
+            provider.requests[0]
+            .prompt.split("<review-batch-scope>", 1)[1]
+            .split("</review-batch-scope>", 1)[0]
+        )
+        self.assertIn(test_path, batch1_scope)
+        for path in prod_paths:
+            self.assertIn(path, provider.requests[0].prompt)
+
+        for req, expected_range in zip(
+            provider.requests[1:],
+            ("lines +1..+538", "lines +539..+1042"),
+            strict=True,
+        ):
+            scope = req.prompt.split("<review-batch-scope>", 1)[1].split(
+                "</review-batch-scope>", 1
+            )[0]
+            for path in prod_paths:
+                self.assertIn(path, scope)
+            self.assertIn(f"{test_path} hunk #6 {expected_range}", scope)
+            self.assertIn("bytes ", scope)
+            self.assertIn("Lossless canonical hunk segment", scope)
+            self.assertIn("NOT truncated or missing from the PR", scope)
+            self.assertIn("Do NOT report absent sibling files", scope)
+
+        self.assertIn("+def _preflight_and_publish():", provider.requests[2].prompt)
+        self.assertIn("**Batch 1/3 (", run.result.summary)
+        self.assertIn(
+            f"**Batch 2/3 ({test_path} lines 1-538):** Reviewed _build_action_harness segment.",
+            run.result.summary,
+        )
+        self.assertIn(
+            f"**Batch 3/3 ({test_path} lines 539-1042):** Reviewed _preflight_and_publish segment.",
+            run.result.summary,
+        )
 
 
 if __name__ == "__main__":

@@ -11,8 +11,122 @@ from .errors import ReviewInputError
 from .evidence import EvidenceRecord, EvidenceSnapshot, HunkFragment
 from .validation import DEFAULT_TOTAL_WORK_BUDGET
 
-HUNK_SUBDIVISION_POLICY = "canonical-line-segments-v1"
+HUNK_SUBDIVISION_POLICY = "canonical-line-segments-v2"
 MAX_HUNK_SEGMENTS = 128
+
+_TOP_LEVEL_DECL_PREFIXES = (
+    "def ",
+    "async def ",
+    "class ",
+    "@",
+    "function ",
+    "async function ",
+    "export ",
+    "func ",
+    "fn ",
+    "pub ",
+    "struct ",
+    "impl ",
+    "interface ",
+    "enum ",
+)
+_BLOCK_DECL_PREFIXES = ("def ", "async def ", "class ", "@")
+_CONTINUATION_PREFIXES = (
+    ")",
+    "]",
+    "}",
+    ",",
+    ".",
+    ":",
+    "elif ",
+    "elif:",
+    "else:",
+    "else ",
+    "except",
+    "finally:",
+    "catch",
+    "finally",
+    "and ",
+    "or ",
+    '"""',
+    "'''",
+)
+
+
+def _source_line(unit: str) -> str | None:
+    first = unit.split("\n", 1)[0].rstrip("\r") if unit else ""
+    if not first or first[0] not in "+- ":
+        return None
+    return first[1:]
+
+
+def _boundary_tier(units: list[str], idx: int) -> int | None:
+    """Rank structural boundary quality before ``units[idx]`` (lower is stronger)."""
+    curr = _source_line(units[idx])
+    prev = _source_line(units[idx - 1])
+    if curr is None or prev is None:
+        return None
+    curr_stripped = curr.lstrip(" \t")
+    if not curr_stripped:
+        return None
+    prev_stripped = prev.lstrip(" \t")
+    prev_is_blank = not prev_stripped
+    if prev_stripped.startswith("@") or prev.rstrip().endswith("\\"):
+        return None
+    if curr_stripped.startswith(_CONTINUATION_PREFIXES):
+        return None
+    curr_indent = len(curr) - len(curr_stripped)
+    if curr_indent == 0:
+        if curr_stripped.startswith(_TOP_LEVEL_DECL_PREFIXES):
+            return 0
+        if prev_is_blank:
+            return 1
+        return 3
+    if curr_stripped.startswith(_BLOCK_DECL_PREFIXES):
+        return 2
+    if prev_is_blank:
+        return 4
+    return None
+
+
+def _choose_split_index(
+    units: list[str],
+    offsets: list[int],
+    begin: int,
+    end: int,
+) -> int:
+    """Pick the closest balanced structural boundary within ±25% of midpoint."""
+    span = end - begin
+    middle = (begin + end) // 2
+    if span < 4:
+        return middle
+    radius = span // 4
+    low = max(begin + 1, middle - radius)
+    high = min(end - 1, middle + radius)
+    total_bytes = offsets[end] - offsets[begin]
+    mid_left = offsets[middle] - offsets[begin]
+    mid_right = offsets[end] - offsets[middle]
+    mid_balanced = total_bytes == 0 or min(mid_left, mid_right) * 4 >= total_bytes
+
+    best_key: tuple[int, int, int, int] | None = None
+    best_idx = middle
+    for idx in range(low, high + 1):
+        tier = _boundary_tier(units, idx)
+        if tier is None:
+            continue
+        left_bytes = offsets[idx] - offsets[begin]
+        right_bytes = offsets[end] - offsets[idx]
+        if (
+            mid_balanced
+            and total_bytes > 0
+            and min(left_bytes, right_bytes) * 4 < total_bytes
+        ):
+            continue
+        key = (tier, abs(idx - middle), 0 if idx >= middle else 1, idx)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_idx = idx
+    return best_idx
 
 
 @dataclass
@@ -158,8 +272,8 @@ def subdivide_hunk(
             result.append(part)
         else:
             remaining -= 1
-            middle = (begin + end) // 2
-            stack.extend(((middle, end), (begin, middle)))
+            split = _choose_split_index(units, offsets, begin, end)
+            stack.extend(((split, end), (begin, split)))
     # Conservation is checked before a fragment bundle or provider call exists.
     cursor = 0
     source_body = body.encode("utf-8")
