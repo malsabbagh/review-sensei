@@ -1279,12 +1279,16 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                     retire_after=200,
                 )
 
-            # 3. Foreign review author (`type="User"` or wrong login) is ignored by
-            #    exact-review echo lookup; non-overflow failure-before-write classifies
-            #    as `confirmed_prepublication_failure_before_write`:
+            # 3. Foreign readable review authors (`type="User"` or wrong Bot login or
+            #    other commit) are ignored by exact-review echo lookup; unreadable
+            #    entries/Bot reviews hold as uncertain and NEVER certify before_write:
             foreign_reviews: list[Any] = [
-                "not-a-dict",
-                {"id": 10, "commit_id": "0" * 40},
+                {
+                    "id": 10,
+                    "commit_id": "0" * 40,
+                    "user": {"login": "other-reviewer", "type": "User"},
+                    "body": "Looks good on older commit.",
+                },
                 {
                     "id": 11,
                     "commit_id": HEAD,
@@ -1318,6 +1322,62 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                 qual_non_overflow.state_code,
                 "confirmed_prepublication_failure_before_write",
             )
+            self.assertTrue(qual_non_overflow.confirmed_failure_before_write)
+
+            exact_marker = review_marker(
+                repository_id=1, pull_request=1, head_sha=HEAD, result=small_res
+            )
+            for unreadable_reviews in (
+                ["not-a-dict"],
+                [{"id": 13, "commit_id": HEAD, "user": None, "body": exact_marker}],
+                [
+                    {
+                        "id": 14,
+                        "commit_id": HEAD,
+                        "user": {"login": APP, "type": "Bot"},
+                        "body": None,
+                    }
+                ],
+                [
+                    {
+                        "id": 15,
+                        "commit_id": HEAD,
+                        "user": {"login": APP, "type": "Bot"},
+                        "body": exact_marker,
+                    },
+                    {
+                        "id": 16,
+                        "commit_id": HEAD,
+                        "user": {"login": APP, "type": "Bot"},
+                        "body": exact_marker,
+                    },
+                ],
+                [
+                    {
+                        "id": -1,
+                        "commit_id": HEAD,
+                        "user": {"login": APP, "type": "Bot"},
+                        "body": exact_marker,
+                    }
+                ],
+            ):
+                qual_unreadable = qualify_nonterminal_publication_failure(
+                    identity=IDENTITY,
+                    record=failed_rec,
+                    result=small_res,
+                    policy=POLICY,
+                    current_base_sha=BASE,
+                    current_head_sha=HEAD,
+                    live_reviews=unreadable_reviews,
+                    app_slug=APP,
+                    owner_ceased=True,
+                    formatter_comparison=comp_fits,
+                )
+                self.assertEqual(
+                    qual_unreadable.state_code, "response_loss_unobserved_remote_hold"
+                )
+                self.assertFalse(qual_unreadable.confirmed_failure_before_write)
+                self.assertTrue(qual_unreadable.remote_effect_uncertain)
 
             # 4. Digest mismatch & authority=True negative controls fail closed:
             other_policy = ReviewConvergencePolicy(
@@ -1894,6 +1954,11 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             REVIEWSENSEI_443_PULL_REQUEST,
             REVIEWSENSEI_443_REPOSITORY,
             REVIEWSENSEI_443_RUN_ID,
+            REVIEWSENSEI_459_CASE_ID,
+            REVIEWSENSEI_459_GENERATION,
+            REVIEWSENSEI_459_PULL_REQUEST,
+            REVIEWSENSEI_459_REPOSITORY,
+            REVIEWSENSEI_459_RUN_ID,
             build_attempt_evidence_packet,
         )
         from test_human_assessment import HUMAN, prior
@@ -1942,6 +2007,52 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
         )
         pkt_443 = build_attempt_evidence_packet(
             rec_443, current_base=BASE, current_head=HEAD
+        )
+
+        # 1b. ReviewSensei #459 gen-5 run 43321546017 (G03):
+        acc_459 = ApiRunAccounting.from_document(
+            {
+                **_make_accounting(run_id=REVIEWSENSEI_459_RUN_ID).to_document(),
+                "identity": {
+                    "repository_id": 987654,
+                    "run_id": REVIEWSENSEI_459_RUN_ID,
+                },
+            }
+        )
+        tx_459 = replace(
+            ReviewTransaction.create(
+                repository=REVIEWSENSEI_459_REPOSITORY,
+                pull_request=REVIEWSENSEI_459_PULL_REQUEST,
+                base_sha=BASE,
+                head_sha=HEAD,
+                reservation_id="6" * 64,
+                policy_digest=POLICY.digest(),
+                configuration_digest=acc_459.configuration.digest,
+                evidence_digest="7" * 64,
+                generation=REVIEWSENSEI_459_GENERATION,
+            ),
+            phase="publication_succeeded",
+            result_sha256="8" * 64,
+        )
+        rec_459 = SessionRecord._construct(
+            repository=REVIEWSENSEI_459_REPOSITORY,
+            pull_request=REVIEWSENSEI_459_PULL_REQUEST,
+            repository_id=987654,
+            completed_initial_reviews=1,
+            completed_verification_rounds=0,
+            failed_attempts=0,
+            generation=REVIEWSENSEI_459_GENERATION,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id="6" * 64,
+            created_at="2026-11-11T12:00:00Z",
+            updated_at="2026-11-11T12:05:00Z",
+            expires_at="2026-12-11T12:00:00Z",
+            transaction=tx_459,
+            api_run_accounting=acc_459.to_document(),
+        )
+        pkt_459 = build_attempt_evidence_packet(
+            rec_459, current_base=BASE, current_head=HEAD
         )
 
         # 2. SiteVault #142 & #153 (G29):
@@ -2070,6 +2181,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
         self.assertEqual(
             {
                 pkt_443.case_id,
+                pkt_459.case_id,
                 pkt_142.case_id,
                 pkt_153.case_id,
                 pkt_408.case_id,
@@ -2078,6 +2190,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             },
             {
                 REVIEWSENSEI_443_CASE_ID,
+                REVIEWSENSEI_459_CASE_ID,
                 SITEVAULT_142_CASE_ID,
                 SITEVAULT_153_CASE_ID,
                 REVIEWSENSEI_408_CASE_ID,
@@ -2085,10 +2198,12 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                 "owner/repo#1:gen-2:run-7700",
             },
         )
-        for pkt in (pkt_443, pkt_142, pkt_153, pkt_408, pkt_generic):
+        for pkt in (pkt_443, pkt_459, pkt_142, pkt_153, pkt_408, pkt_generic):
             self.assertFalse(pkt.authority)
         self.assertEqual(pkt_443.inferred_cause, "unknown")
+        self.assertEqual(pkt_459.inferred_cause, "unknown")
         self.assertIn("historical_live_settlement_receipt", pkt_443.missing_proofs)
+        self.assertIn("historical_live_settlement_receipt", pkt_459.missing_proofs)
         for pkt_sub in (pkt_142, pkt_153, pkt_408, pkt_generic):
             self.assertIn(
                 "historical_live_settlement_receipt",
@@ -2176,6 +2291,347 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
         ):
             with self.assertRaises(ReviewInputError):
                 replace(pkt_generic, **bad_over)
+
+    def test_g31_quarantine_alignment_and_identity_sha_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            res_ok = _build_taskalong_41_result(
+                ledger, narrative_bytes=500, candidate_count=2, human_hold_count=1
+            )
+            loaded = ledger.load(IDENTITY)
+            assert loaded.record is not None and loaded.record.transaction is not None
+            failed_tx = replace(loaded.record.transaction, phase="publication_failed")
+            base_rec = _with_accounting(
+                loaded.record, _make_accounting(run_id=7800), transaction=failed_tx
+            )
+            comp_baseline = compare_publication_formatter_outputs(
+                identity=IDENTITY,
+                base_sha=BASE,
+                head_sha=HEAD,
+                result=res_ok,
+                diff=FULL_DIFF,
+                policy=POLICY,
+            )
+            comp_c7_fit = replace(
+                comp_baseline,
+                historical_exceeded_ceiling=True,
+                historical_failure_check="framed-review-body",
+                archive_excerpt_fits_ceiling=True,
+                archive_failure_check=None,
+                archive_framed_body="excerpt-body",
+                archive_framed_bytes=1024,
+                bytes_saved_by_excerpt=64_000,
+                finding_index_identical=True,
+                eligibility_digest_identical=True,
+                finding_explanations_preserved=True,
+                carrier_links_verified=True,
+            )
+
+            # 1. Baseline valid c7 qualified different-head -> quarantine_prepublication_isolation:
+            qual_ok = qualify_nonterminal_publication_failure(
+                identity=IDENTITY,
+                record=base_rec,
+                result=res_ok,
+                policy=POLICY,
+                current_base_sha=BASE,
+                current_head_sha="e" * 40,
+                live_reviews=[],
+                app_slug=APP,
+                owner_ceased=True,
+                formatter_comparison=comp_c7_fit,
+                executor_sha=EXECUTOR,
+                caller_blob=BODY_CALLER_BLOB,
+            )
+            self.assertTrue(qual_ok.is_c7_body_limit_qualified)
+            self.assertEqual(
+                qual_ok.primary_route, "quarantine_prepublication_isolation"
+            )
+
+            # 2. Validation errors: record.identity(), old.identity.repository_id, and non-40-hex SHAs:
+            with self.assertRaisesRegex(ReviewInputError, "record identity"):
+                qualify_nonterminal_publication_failure(
+                    identity=SessionIdentity("other/repo", 1, repository_id=1),
+                    record=base_rec,
+                    result=res_ok,
+                    policy=POLICY,
+                    current_base_sha=BASE,
+                    current_head_sha=HEAD,
+                    live_reviews=[],
+                    app_slug=APP,
+                    owner_ceased=True,
+                )
+            acct_repo2_doc = dict(base_rec.api_run_accounting or {})
+            acct_repo2_doc["identity"] = {"repository_id": 2, "run_id": 7800}
+            rec_repo2 = SessionRecord._construct(
+                **{
+                    **{
+                        k: v
+                        for k, v in vars(base_rec).items()
+                        if k != "record_sha256" and not k.startswith("_")
+                    },
+                    "repository_id": 2,
+                    "api_run_accounting": acct_repo2_doc,
+                }
+            )
+            with self.assertRaisesRegex(ReviewInputError, "record identity"):
+                qualify_nonterminal_publication_failure(
+                    identity=IDENTITY,
+                    record=rec_repo2,
+                    result=res_ok,
+                    policy=POLICY,
+                    current_base_sha=BASE,
+                    current_head_sha=HEAD,
+                    live_reviews=[],
+                    app_slug=APP,
+                    owner_ceased=True,
+                )
+            with self.assertRaisesRegex(ReviewInputError, "accounting repository_id"):
+                with patch.object(SessionRecord, "identity", return_value=IDENTITY):
+                    qualify_nonterminal_publication_failure(
+                        identity=IDENTITY,
+                        record=rec_repo2,
+                        result=res_ok,
+                        policy=POLICY,
+                        current_base_sha=BASE,
+                        current_head_sha=HEAD,
+                        live_reviews=[],
+                        app_slug=APP,
+                        owner_ceased=True,
+                    )
+            for bad_field, bad_kwargs in (
+                (
+                    "current_base_sha",
+                    {"current_base_sha": "short", "current_head_sha": HEAD},
+                ),
+                (
+                    "current_head_sha",
+                    {"current_base_sha": BASE, "current_head_sha": "Z" * 40},
+                ),
+            ):
+                with self.subTest(bad_field=bad_field):
+                    with self.assertRaisesRegex(ReviewInputError, bad_field):
+                        qualify_nonterminal_publication_failure(
+                            identity=IDENTITY,
+                            record=base_rec,
+                            result=res_ok,
+                            policy=POLICY,
+                            live_reviews=[],
+                            app_slug=APP,
+                            owner_ceased=True,
+                            **bad_kwargs,
+                        )
+
+            # 3. Aligned quarantine predicates refuse c7 quarantine on:
+            #    local job, run_attempt != 1, generation != 0, rescan_state,
+            #    quarantine_lineage, reservation_id, operator_paused, and coverage_only_partial!
+            from review_sensei_github.api_run_host import review_startup_plan
+            from review_sensei_github.publication import review_result_digest
+
+            local_acc = initial_accounting(
+                ApiRunIdentity(1, 7801),
+                _make_accounting(run_id=7801).configuration,
+                ApiExecutionOwner(1, "local", 0),
+                review_startup_plan("local"),
+                prior_nonstartup_liability_upper_bound=0,
+            )
+            attempt2_acc = _make_accounting(run_id=7802, attempt=2)
+            gen1_base = _make_accounting(run_id=7803)
+            gen1_acc = replace(gen1_base, owner=ApiExecutionOwner(1, "hosted", 1))
+            partial_raw = ReviewResult(
+                summary=res_ok.summary,
+                comments=res_ok.comments,
+                provider="fixture",
+                model="fixture-model",
+                review_status="partial",
+                coverage_only_partial=True,
+                coverage=CoverageManifest(
+                    enumerated_paths=("src/generated.py",),
+                    files=(
+                        FileCoverage(
+                            "src/generated.py", "excluded-by-policy", "generated"
+                        ),
+                    ),
+                    enumeration_complete=True,
+                ),
+            )
+            partial_tx = replace(failed_tx, result_sha256=partial_raw.content_digest())
+            partial_res = replace(
+                partial_raw,
+                transaction=replace(
+                    partial_tx,
+                    phase="analysis",
+                    result_sha256=None,
+                ),
+            )
+            partial_rec = _with_accounting(
+                base_rec, _make_accounting(run_id=7800), transaction=partial_tx
+            )
+            partial_comp = replace(
+                comp_c7_fit,
+                result_content_digest=partial_res.content_digest(),
+                result_digest=review_result_digest(partial_res),
+            )
+            from review_sensei.bounded_evidence import (
+                canonical_bytes,
+                evidence_manifest,
+                inline_manifest,
+                partition_evidence,
+            )
+
+            lineage_binding = {
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "base_sha": BASE,
+                "head_sha": HEAD,
+                "policy_digest": failed_tx.policy_digest,
+                "configuration_digest": failed_tx.configuration_digest,
+                "generation": 1,
+                "producer": "github-bot:99",
+                "purpose": "evidence",
+                "schema_version": "1.0",
+            }
+            lineage_archive = {
+                "schema_version": "synthetic-origin-for-value-validation"
+            }
+            lineage_parts = partition_evidence(
+                lineage_archive, binding=lineage_binding, item_count=1
+            )
+            valid_lineage: dict[str, Any] = {
+                "schema_version": "quarantine-lineage-v1",
+                "predecessor_comment_id": 41,
+                "predecessor_record_sha256": "e" * 64,
+                "creation_run_id": 900,
+                "registration_sha256": "f" * 64,
+                "origin_count": 2,
+                "origin_manifest": evidence_manifest(
+                    lineage_archive,
+                    binding=lineage_binding,
+                    item_count=1,
+                    parts=lineage_parts,
+                    storage_ids=("42",),
+                ),
+            }
+            valid_lineage["scope_sha256"] = hashlib.sha256(
+                canonical_bytes(
+                    {
+                        "domain": "quarantine-lineage-v1",
+                        "origin": dict(valid_lineage),
+                    }
+                )
+            ).hexdigest()
+            valid_lineage["assessment_state_manifest"] = inline_manifest(
+                {
+                    "schema_version": "quarantine-assessment-state-v1",
+                    "scope_sha256": valid_lineage["scope_sha256"],
+                    "settlements": [],
+                },
+                binding={
+                    **lineage_binding,
+                    "policy_digest": valid_lineage["scope_sha256"],
+                },
+                item_count=0,
+            )
+
+            pub_source_tx = replace(failed_tx, phase="publication_succeeded")
+            valid_rescan_state = {
+                "issue_comment": 1,
+                "workflow_dispatch": 0,
+                "receipts": [
+                    {
+                        "kind": "issue_comment",
+                        "request_id": 1,
+                        "reservation": pub_source_tx.reservation_id,
+                        "source": pub_source_tx.to_dict(),
+                        "review_id": 1,
+                        "ordinary_reservation": pub_source_tx.reservation_id,
+                    }
+                ],
+            }
+            disqualifying_cases: list[
+                tuple[str, SessionRecord, ReviewResult, FormatterComparisonReport]
+            ] = [
+                (
+                    "job=local",
+                    _with_accounting(base_rec, local_acc),
+                    res_ok,
+                    comp_c7_fit,
+                ),
+                (
+                    "run_attempt=2",
+                    _with_accounting(base_rec, attempt2_acc),
+                    res_ok,
+                    comp_c7_fit,
+                ),
+                (
+                    "generation=1",
+                    _with_accounting(base_rec, gen1_acc),
+                    res_ok,
+                    comp_c7_fit,
+                ),
+                (
+                    "rescan_state",
+                    SessionRecord._construct(
+                        **{
+                            **{
+                                k: v
+                                for k, v in vars(base_rec).items()
+                                if k != "record_sha256" and not k.startswith("_")
+                            },
+                            "rescan_state": valid_rescan_state,
+                        }
+                    ),
+                    res_ok,
+                    comp_c7_fit,
+                ),
+                (
+                    "quarantine_lineage",
+                    SessionRecord._construct(
+                        **{
+                            **{
+                                k: v
+                                for k, v in vars(base_rec).items()
+                                if k != "record_sha256" and not k.startswith("_")
+                            },
+                            "quarantine_lineage": valid_lineage,
+                        }
+                    ),
+                    res_ok,
+                    comp_c7_fit,
+                ),
+                (
+                    "operator_paused",
+                    base_rec.evolve(operator_paused=True),
+                    res_ok,
+                    comp_c7_fit,
+                ),
+                (
+                    "coverage_only_partial",
+                    partial_rec,
+                    partial_res,
+                    partial_comp,
+                ),
+            ]
+            for label, bad_rec, bad_res, bad_comp in disqualifying_cases:
+                with self.subTest(disqualifier=label):
+                    qual_bad = qualify_nonterminal_publication_failure(
+                        identity=IDENTITY,
+                        record=bad_rec,
+                        result=bad_res,
+                        policy=POLICY,
+                        current_base_sha=BASE,
+                        current_head_sha="e" * 40,
+                        live_reviews=[],
+                        app_slug=APP,
+                        owner_ceased=True,
+                        formatter_comparison=bad_comp,
+                        executor_sha=EXECUTOR,
+                        caller_blob=BODY_CALLER_BLOB,
+                    )
+                    self.assertFalse(qual_bad.is_c7_body_limit_qualified)
+                    self.assertEqual(
+                        qual_bad.primary_route, "controlled_serialized_restart"
+                    )
 
 
 if __name__ == "__main__":

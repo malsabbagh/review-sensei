@@ -230,8 +230,12 @@ def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
                             "id": 10,
                             "run_id": queried_run,
                             "run_attempt": 1,
+                            "name": "ReviewSensei / hosted",
                             "status": "completed" if is_completed else "in_progress",
                             "conclusion": "failure" if is_completed else None,
+                            "completed_at": (
+                                "2026-11-10T12:00:00Z" if is_completed else None
+                            ),
                         }
                     ],
                 }
@@ -909,8 +913,10 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                                         "id": 10,
                                         "run_id": old_run_id,
                                         "run_attempt": 1,
+                                        "name": "ReviewSensei / hosted",
                                         "status": "completed",
                                         "conclusion": "failure",
+                                        "completed_at": "2026-11-10T12:00:00Z",
                                     }
                                 ],
                             }
@@ -1314,7 +1320,17 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             return json_response(
                 {
                     "total_count": 2,  # incomplete page (only 1 job returned) -> fail closed!
-                    "jobs": [{"id": 1, "status": "completed", "conclusion": "failure"}],
+                    "jobs": [
+                        {
+                            "id": 1,
+                            "run_id": 1001,
+                            "run_attempt": 1,
+                            "name": "ReviewSensei / hosted",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "completed_at": "2026-11-10T12:00:00Z",
+                        }
+                    ],
                 }
             )
 
@@ -1440,6 +1456,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                 "id": 88,
                 "body": comment_body,
                 "user": {"type": "Bot", "login": "reviewsensei[bot]"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
         )
         spoof_safe_qual, spoof_safe_ref = inspect_live_no_transaction_predecessor(
@@ -1454,6 +1471,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                 "id": 89,
                 "body": comment_body,
                 "user": {"type": "Bot", "login": "reviewsensei[bot]"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
         )
         with self.assertRaisesRegex(
@@ -1463,9 +1481,57 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                 ledger=guard_ledger, identity=IDENTITY
             )
 
+        # Duplicate comment ID -> fail closed!
+        live_state["comments"] = [
+            {
+                "id": 88,
+                "body": comment_body,
+                "user": {"type": "Bot", "login": "reviewsensei[bot]"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            },
+            {
+                "id": 88,
+                "body": "unrelated echo",
+                "user": {"type": "User", "login": "alice"},
+            },
+        ]
+        with self.assertRaisesRegex(
+            ReviewInputError, "duplicate issue comment identifier"
+        ):
+            inspect_live_no_transaction_predecessor(
+                ledger=guard_ledger, identity=IDENTITY
+            )
+
+        # Mismatched or missing issue_url on Bot session comment -> fail closed!
+        for bad_issue_url in (
+            None,
+            "https://api.github.test/repos/owner/repo/issues/8",
+        ):
+            live_state["comments"] = [
+                {
+                    "id": 88,
+                    "body": comment_body,
+                    "user": {"type": "Bot", "login": "reviewsensei[bot]"},
+                    **(
+                        {"issue_url": bad_issue_url}
+                        if bad_issue_url is not None
+                        else {}
+                    ),
+                }
+            ]
+            with self.assertRaisesRegex(ReviewInputError, "issue_url"):
+                inspect_live_no_transaction_predecessor(
+                    ledger=guard_ledger, identity=IDENTITY
+                )
+
         # Invalid numeric comment ID -> fail closed!
         live_state["comments"] = [
-            {"id": 0, "body": comment_body, "user": {"type": "Bot"}}
+            {
+                "id": 0,
+                "body": comment_body,
+                "user": {"type": "Bot"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            }
         ]
         with self.assertRaisesRegex(ReviewInputError, "invalid numeric identifier"):
             inspect_live_no_transaction_predecessor(
@@ -1479,7 +1545,12 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             record=_make_record(accounting=None, generation=0),
         )
         live_state["comments"] = [
-            {"id": 90, "body": unenrolled_body, "user": {"type": "Bot"}}
+            {
+                "id": 90,
+                "body": unenrolled_body,
+                "user": {"type": "Bot"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            }
         ]
         with self.assertRaisesRegex(ReviewInputError, "not API-accounted"):
             inspect_live_no_transaction_predecessor(
@@ -1541,14 +1612,33 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                     "id": 203,
                     "body": session_body,
                     "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                 },
             ],
             "run_conclusion": "cancelled",
             "jobs_p1": [
-                {"id": i, "status": "completed", "conclusion": "failure"}
+                {
+                    "id": i,
+                    "run_id": 1001,
+                    "run_attempt": 1,
+                    "name": "ReviewSensei / hosted" if i == 1 else f"aux-job-{i}",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "completed_at": "2026-11-10T12:00:00Z",
+                }
                 for i in range(1, 101)
             ],
-            "jobs_p2": [{"id": 101, "status": "completed", "conclusion": "cancelled"}],
+            "jobs_p2": [
+                {
+                    "id": 101,
+                    "run_id": 1001,
+                    "run_attempt": 1,
+                    "name": "aux-job-101",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "completed_at": "2026-11-10T12:00:00Z",
+                }
+            ],
             "jobs_total": 101,
             "reviews_p1": [
                 {"id": i, "body": None, "user": _HUMAN_AUTHOR} for i in range(1, 101)
@@ -1624,6 +1714,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             "id": 1,
             "body": session_body,
             "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
         }
         with self.assertRaisesRegex(
             ReviewInputError, "multiple conflicting session comments"
@@ -1638,10 +1729,28 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         }
 
         # 3. Job on page 2 still `in_progress` -> owner NOT ceased!
-        state["jobs_p2"] = [{"id": 101, "status": "in_progress", "conclusion": None}]
+        state["jobs_p2"] = [
+            {
+                "id": 101,
+                "run_id": 1001,
+                "run_attempt": 1,
+                "name": "aux-job-101",
+                "status": "in_progress",
+                "conclusion": None,
+                "completed_at": None,
+            }
+        ]
         self.assertFalse(_probe_owner_ceased(paged_ledger, IDENTITY, abort_acc, "tok"))
         state["jobs_p2"] = [
-            {"id": 101, "status": "completed", "conclusion": "cancelled"}
+            {
+                "id": 101,
+                "run_id": 1001,
+                "run_attempt": 1,
+                "name": "aux-job-101",
+                "status": "completed",
+                "conclusion": "cancelled",
+                "completed_at": "2026-11-10T12:00:00Z",
+            }
         ]
 
         # 4. A late review on page 2 is positively observed.
@@ -2049,6 +2158,7 @@ class LateNativeEffectsEvidenceTests(unittest.TestCase):
                     repository_id=123, pull_request=7, record=record
                 ),
                 "user": _APP_AUTHOR,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             },
             requests=[],
         )
@@ -2348,7 +2458,17 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
         }
         page = {
             "total_count": 1,
-            "jobs": [{"id": 10, "status": "completed", "conclusion": "failure"}],
+            "jobs": [
+                {
+                    "id": 10,
+                    "run_id": 1001,
+                    "run_attempt": 1,
+                    "name": "ReviewSensei / hosted",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "completed_at": "2026-11-10T12:00:00Z",
+                }
+            ],
         }
         run.update(run_changes or {})
         page.update(page_changes or {})
@@ -2389,8 +2509,12 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
                             "jobs": [
                                 {
                                     "id": 10,
+                                    "run_id": 1001,
+                                    "run_attempt": 1,
+                                    "name": "ReviewSensei / hosted",
                                     "status": "completed",
                                     "conclusion": conclusion,
+                                    "completed_at": "2026-11-10T12:00:00Z",
                                 }
                             ]
                         }
@@ -2410,8 +2534,12 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
                             "jobs": [
                                 {
                                     "id": job_id,
+                                    "run_id": 1001,
+                                    "run_attempt": 1,
+                                    "name": "ReviewSensei / hosted",
                                     "status": "completed",
                                     "conclusion": "failure",
+                                    "completed_at": "2026-11-10T12:00:00Z",
                                 }
                             ]
                         }
@@ -2422,6 +2550,152 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
         for total in (None, True, 0, 2, "1"):
             with self.subTest(total=total):
                 self.assertFalse(self.probe(page_changes={"total_count": total}))
+
+    def test_missing_job_metadata_duplicate_owner_or_bad_timestamp_refuse(self):
+        base_job = {
+            "id": 10,
+            "run_id": 1001,
+            "run_attempt": 1,
+            "name": "ReviewSensei / hosted",
+            "status": "completed",
+            "conclusion": "failure",
+            "completed_at": "2026-11-10T12:00:00Z",
+        }
+        bad_jobs = (
+            {**base_job, "run_id": 9999},
+            {**base_job, "run_attempt": 2},
+            {**base_job, "name": "other-job"},
+            {**base_job, "completed_at": None},
+            {**base_job, "completed_at": "not-a-timestamp"},
+        )
+        for bad in bad_jobs:
+            with self.subTest(bad=bad):
+                self.assertFalse(self.probe(page_changes={"jobs": [bad]}))
+        # Duplicate matching owner job -> refuses!
+        self.assertFalse(
+            self.probe(
+                page_changes={
+                    "total_count": 2,
+                    "jobs": [base_job, {**base_job, "id": 11}],
+                }
+            )
+        )
+
+    def test_owner_ceased_gating_readonly_http_and_real_api_run_actions_evidence(self):
+        from review_sensei_github.api_run_owner import ApiRunActionsEvidence
+        from review_sensei_github.pre_entry_abort_recovery import (
+            _probe_owner_ceased,
+            _ReadOnlyNoTransactionHttp,
+        )
+
+        # 1. `owner_ceased=False` gates corrupt receipts & unknown dispatch routes.
+        base_acc = _base_accounting(run_id=1001)
+        abort_tx = ReviewTransaction.create(
+            repository="owner/repo",
+            pull_request=7,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            reservation_id="5" * 64,
+            policy_digest="2" * 64,
+            configuration_digest="1" * 64,
+            evidence_digest="3" * 64,
+            generation=1,
+        )
+        valid_abort = {
+            "source_root": "1" * 64,
+            "cleanup_root": "2" * 64,
+            "transaction": abort_tx.to_dict(),
+            "entry_state": "not_started",
+            "run_id": 1001,
+            "owner": asdict(base_acc.owner),
+        }
+        corrupt_rec = _make_record(
+            accounting=replace(base_acc, analysis_abort=valid_abort), generation=1
+        )
+        q_corrupt_unceased = qualify_no_transaction_abort(
+            corrupt_rec, owner_ceased=False
+        )
+        self.assertEqual(
+            q_corrupt_unceased.state_code, "pre_entry_abort_corrupt_receipt"
+        )
+        self.assertIn(
+            "predecessor_owner_cessation", q_corrupt_unceased.missing_predicates
+        )
+        self.assertEqual(
+            q_corrupt_unceased.primary_route, "wait_for_owner_cessation_then_recover"
+        )
+        q_corrupt_ceased = qualify_no_transaction_abort(corrupt_rec, owner_ceased=True)
+        self.assertEqual(
+            q_corrupt_ceased.primary_route, "controlled_serialized_restart"
+        )
+
+        unk_acc = replace(
+            base_acc.dispatch("hosted-review", PendingApiRequest("c-0-1", 999999999)),
+            analysis_abort=valid_abort,
+        )
+        unk_rec = _make_record(accounting=unk_acc, generation=2)
+        q_unk_unceased = qualify_no_transaction_abort(unk_rec, owner_ceased=False)
+        self.assertEqual(q_unk_unceased.state_code, "no_transaction_unknown_dispatch")
+        self.assertIn("predecessor_owner_cessation", q_unk_unceased.missing_predicates)
+        self.assertEqual(
+            q_unk_unceased.primary_route, "wait_for_owner_cessation_then_recover"
+        )
+        q_unk_ceased = qualify_no_transaction_abort(unk_rec, owner_ceased=True)
+        self.assertEqual(q_unk_ceased.primary_route, "controlled_serialized_restart")
+
+        # 2. Real `ApiRunActionsEvidence` works through `_probe_owner_ceased` 2-arg call.
+        def ev_opener(req, timeout=None):
+            path = urlsplit(req.full_url).path
+            if path.endswith("/actions/runs/5000/attempts/1/jobs"):
+                return json_response(
+                    {
+                        "total_count": 1,
+                        "jobs": [
+                            {
+                                "id": 10,
+                                "run_id": 5000,
+                                "run_attempt": 1,
+                                "name": "ReviewSensei / hosted",
+                                "status": "completed",
+                                "conclusion": "cancelled",
+                                "completed_at": "2026-11-10T12:00:00Z",
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(path)
+
+        ev = ApiRunActionsEvidence(
+            GitHubHttp(api_url="https://api.github.test", opener=ev_opener),
+            token="tok",
+            command_run_id="5000",
+            job="hosted",
+        )
+        self.assertTrue(
+            _probe_owner_ceased(
+                SimpleNamespace(_run_reader=ev),
+                IDENTITY,
+                _base_accounting(run_id=5000),
+                None,
+            )
+        )
+
+        # 3. `_ReadOnlyNoTransactionHttp` blocks mutations and foreign GraphQL queries.
+        ro = _ReadOnlyNoTransactionHttp(
+            GitHubHttp(
+                api_url="https://api.github.test",
+                opener=lambda *_a, **_kw: (_ for _ in ()).throw(
+                    AssertionError("called")
+                ),
+            )
+        )
+        for bad_call in (
+            ("POST", "/repos/owner/repo/issues/7/comments", {"body": "x"}),
+            ("PATCH", "/repos/owner/repo/issues/comments/1", {"body": "x"}),
+            ("POST", "/graphql", {"query": "mutation { x }", "variables": {}}),
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "strictly read-only"):
+                ro.request(bad_call[0], bad_call[1], token="t", body=bad_call[2])
 
 
 if __name__ == "__main__":

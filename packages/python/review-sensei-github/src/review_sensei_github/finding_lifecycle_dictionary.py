@@ -197,7 +197,7 @@ def restore_cost(ledger, stored, *, record=None):
 
     from .api_run_requests import ApiRunSessionLedger
     from .caller_operation import prewrite_fence_requests
-    from .review_run import ActionRunLedger
+    from .review_run import ActionRunLedger, ReviewRunLedger
 
     manifest = stored.get("dictionary_manifest")
     if not isinstance(manifest, dict):
@@ -222,7 +222,7 @@ def restore_cost(ledger, stored, *, record=None):
         # read. A missing closing root can also inspect its enrollment witness.
         return 4 * parts + 4
     if (
-        type(ledger) in {ApiRunSessionLedger, ActionRunLedger}
+        type(ledger) in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}
         and getattr(ledger.load, "__func__", None) is ApiRunSessionLedger.load
     ):
         return parts + 10 + prewrite_fence_requests(ledger.caller)
