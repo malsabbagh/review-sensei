@@ -19,6 +19,28 @@ from review_sensei.session import SessionIdentity
 from .reservation_recovery import ActionsReservationEvidence, _stamp
 
 BUSINESS_WRITER_JOBS: Final[tuple[str, ...]] = ("hosted", "local", "command")
+MAX_LATER_ATTEMPT_INSPECTION: Final[int] = 4
+_MAX_LATER_ATTEMPT_INSPECTION: Final[int] = MAX_LATER_ATTEMPT_INSPECTION
+_BUSINESS_EXECUTION_STEPS_BY_JOB: Final[dict[str, frozenset[str]]] = {
+    "hosted": frozenset(
+        {
+            "Run hosted review",
+            "Generate and publish hosted mention reply",
+        }
+    ),
+    "local": frozenset(
+        {
+            "Run local review",
+            "Generate and publish local mention reply",
+        }
+    ),
+    "command": frozenset(
+        {
+            "Apply broker-attested maintainer command",
+            "Run command",
+        }
+    ),
+}
 _TERMINAL_JOB_CONCLUSIONS: Final[frozenset[str]] = frozenset(
     {
         "success",
@@ -65,13 +87,82 @@ def _writer_name(name: object, job: str) -> bool:
     return isinstance(name, str) and (name == job or name.endswith(" / " + job))
 
 
-def _terminal_job(row: dict[str, Any]) -> bool:
+def is_terminal_job(row: dict[str, Any]) -> bool:
+    """Return True when an Actions run or job row has completed with a terminal conclusion."""
     conclusion = row.get("conclusion")
     return (
         row.get("status") == "completed"
         and isinstance(conclusion, str)
         and conclusion in _TERMINAL_JOB_CONCLUSIONS
     )
+
+
+_terminal_job = is_terminal_job
+
+
+def later_attempt_proved_no_business_entry(later_jobs: list[dict[str, Any]]) -> bool:
+    """Positively prove a later Actions attempt exited before Python business entry.
+
+    ``later_jobs`` comes from the complete ``total_count``-validated job inventory
+    for that attempt, so every ``hosted``/``local``/``command`` job that ran is
+    present. Workflows that declare only a subset of ``BUSINESS_WRITER_JOBS``
+    legitimately omit undeclared jobs, so validating every matched writer job
+    with ``matched_writer_jobs > 0`` proves no writer entered Python business code.
+    """
+    matched_writer_jobs = 0
+    seen_kinds: set[str] = set()
+    for job in later_jobs:
+        matched_kinds = [
+            kind for kind in BUSINESS_WRITER_JOBS if _writer_name(job.get("name"), kind)
+        ]
+        if not matched_kinds:
+            continue
+        if len(matched_kinds) != 1:
+            return False
+        kind = matched_kinds[0]
+        if kind in seen_kinds:
+            return False
+        seen_kinds.add(kind)
+        matched_writer_jobs += 1
+        if not is_terminal_job(job):
+            return False
+        conclusion = job.get("conclusion")
+        steps = job.get("steps")
+        recognized = _BUSINESS_EXECUTION_STEPS_BY_JOB[kind]
+        if conclusion == "skipped":
+            if steps is not None and not isinstance(steps, list):
+                return False
+            if isinstance(steps, list) and any(
+                isinstance(step, dict)
+                and step.get("name") in recognized
+                and (
+                    step.get("status") != "completed"
+                    or step.get("conclusion") != "skipped"
+                )
+                for step in steps
+            ):
+                return False
+            continue
+        if conclusion == "success":
+            return False
+        if (
+            not isinstance(steps, list)
+            or not steps
+            or any(not isinstance(step, dict) for step in steps)
+        ):
+            return False
+        business_steps = [step for step in steps if step.get("name") in recognized]
+        if not business_steps:
+            return False
+        if any(
+            step.get("status") != "completed" or step.get("conclusion") != "skipped"
+            for step in business_steps
+        ):
+            return False
+    return matched_writer_jobs > 0
+
+
+_later_attempt_proved_no_business_entry = later_attempt_proved_no_business_entry
 
 
 class ApiRunActionsEvidence(ActionsReservationEvidence):
@@ -114,13 +205,14 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             raise ReviewInputError("API owner job inventory is incomplete or invalid")
         return jobs
 
-    def current_owner(
+    def _current_owner_with_jobs(
         self,
         identity: SessionIdentity,
         *,
         attempt: int,
         generation: int,
         event: str | None = None,
+        jobs: list[dict[str, Any]] | None = None,
     ) -> ApiExecutionOwner:
         owner = ApiExecutionOwner(attempt, self.job, generation)
         run = self._get(identity, f"/actions/runs/{self.command_run_id}")
@@ -139,12 +231,15 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             and run.get("event") != event
         ):
             raise ReviewInputError("current API run identity is unavailable")
-        jobs = self._jobs(identity, attempt)
-        matching = [j for j in jobs if _writer_name(j.get("name"), self.job)]
+        observed_jobs = self._jobs(identity, attempt) if jobs is None else jobs
+        matching = [j for j in observed_jobs if _writer_name(j.get("name"), self.job)]
+        # Conditional disabled sibling jobs report status="completed", conclusion="skipped".
+        # Any non-terminal sibling writer (including queued/waiting/pending/requested) in the
+        # same attempt is scheduled to run concurrently and must be refused as overlapping.
         active_writers = [
             j
-            for j in jobs
-            if j.get("status") == "in_progress"
+            for j in observed_jobs
+            if not is_terminal_job(j)
             and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
         ]
         if (
@@ -154,6 +249,18 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         ):
             raise ReviewInputError("API writer ownership is ambiguous or overlapping")
         return owner
+
+    def current_owner(
+        self,
+        identity: SessionIdentity,
+        *,
+        attempt: int,
+        generation: int,
+        event: str | None = None,
+    ) -> ApiExecutionOwner:
+        return self._current_owner_with_jobs(
+            identity, attempt=attempt, generation=generation, event=event
+        )
 
     def ceased_run_owner(
         self,
@@ -170,6 +277,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         )
         run = previous._get(identity, f"/actions/runs/{run_id}")
         repository = run.get("repository")
+        latest_attempt = run.get("run_attempt")
         if (
             type(run.get("id")) is not int
             or run["id"] != run_id
@@ -178,19 +286,74 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             or type(repository.get("id")) is not int
             or repository.get("full_name") != identity.repository
             or run.get("status") != "completed"
-            or type(run.get("run_attempt")) is not int
-            or run["run_attempt"] != predecessor.run_attempt
-            or complete_terminal_inventory
-            and not _terminal_job(run)
+            or type(latest_attempt) is not int
+            or latest_attempt < 1
         ):
             raise ReviewInputError(
                 "previous Actions run has not ceased or its identity conflicts"
             )
-        return run_id, *previous.ceased_owner(
+        # Legacy same-attempt callers omitting "conclusion" are accepted only when
+        # complete_terminal_inventory=False and no later attempt exists; any later
+        # attempt, complete-inventory check, or explicit conclusion field must be terminal.
+        require_terminal_run_conclusion = (
+            complete_terminal_inventory
+            or latest_attempt > predecessor.run_attempt
+            or "conclusion" in run
+        )
+        if require_terminal_run_conclusion and not is_terminal_job(run):
+            raise ReviewInputError(
+                "previous Actions run has not ceased or its identity conflicts"
+            )
+        if latest_attempt < predecessor.run_attempt:
+            raise ReviewInputError(
+                "previous Actions run attempt conflicts with predecessor"
+            )
+        if latest_attempt - predecessor.run_attempt > MAX_LATER_ATTEMPT_INSPECTION:
+            raise ReviewInputError(
+                "previous Actions run has too many later attempts to verify cessation"
+            )
+        predecessor_proof = previous.ceased_owner(
             identity,
             predecessor,
             complete_terminal_inventory=complete_terminal_inventory,
         )
+        later_proofs: list[tuple[object, ...]] = []
+        for later_attempt in range(predecessor.run_attempt + 1, latest_attempt + 1):
+            later_jobs = previous._jobs(identity, later_attempt)
+            incomplete_jobs = [
+                j
+                for j in later_jobs
+                if (
+                    complete_terminal_inventory
+                    or any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+                )
+                and not is_terminal_job(j)
+            ]
+            if incomplete_jobs:
+                raise ReviewInputError(
+                    f"later Actions attempt {later_attempt} has not ceased"
+                )
+            if not later_attempt_proved_no_business_entry(later_jobs):
+                raise ReviewInputError(
+                    f"later Actions attempt {later_attempt} entered writer step with unconfirmed effects or charges"
+                )
+            later_proofs.append(
+                (
+                    later_attempt,
+                    tuple(
+                        (
+                            j["id"],
+                            str(j.get("name", "")),
+                            str(j.get("conclusion", "")),
+                            j.get("completed_at"),
+                        )
+                        for j in sorted(later_jobs, key=lambda row: row["id"])
+                    ),
+                )
+            )
+        if later_proofs:
+            return run_id, *predecessor_proof, tuple(later_proofs)
+        return run_id, *predecessor_proof
 
     def qualified_publication_cessation(
         self,
@@ -375,7 +538,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
                 complete_terminal_inventory
                 or any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
             )
-            and not _terminal_job(j)
+            and not is_terminal_job(j)
         ]
         if incomplete_jobs:
             if complete_terminal_inventory:
@@ -426,16 +589,21 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         # a transient first read must not become an empty/clean overlap report
         # even if current_owner's later independent read succeeds.
         jobs = self._jobs(identity, attempt)
+        # Conditional disabled sibling jobs report status="completed", conclusion="skipped".
+        # Any non-terminal sibling writer (including queued/waiting/pending/requested) in the
+        # same attempt is scheduled to run concurrently and must be refused as overlapping.
         active_writer_jobs = tuple(
             str(j.get("name", ""))
             for j in jobs
-            if j.get("status") == "in_progress"
+            if not is_terminal_job(j)
             and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
         )
         exclusive_owner = False
         refusal_reason: str | None = None
         try:
-            self.current_owner(identity, attempt=attempt, generation=0, event=event)
+            self._current_owner_with_jobs(
+                identity, attempt=attempt, generation=0, event=event, jobs=jobs
+            )
             exclusive_owner = True
         except ReviewInputError as exc:
             refusal_reason = str(exc)
