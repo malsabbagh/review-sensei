@@ -1814,6 +1814,293 @@ class FalseApprovalBlocksTests(unittest.TestCase):
         self.assertTrue(elig.facts.has_blocking_findings)
         self.assertFalse(evaluate_approval_facts(elig.facts).approved)
 
+    def test_window_needs_human_only_emits_human_adjudication_open_and_never_blocking(
+        self,
+    ) -> None:
+        from review_sensei_github.publication import (
+            approval_eligibility_from_body,
+            evaluate_approval_facts,
+        )
+
+        from review_sensei.convergence import BlockerCandidate
+        from review_sensei.disposition import FindingDisposition
+
+        # Case 1: human-only obligation in window mode -> finalizer.finalize emits
+        # diagnostic="human_adjudication_open" (not "required_fixes_open").
+        host_h = _MinimalDriftHost(head_sha=HEAD_1)
+        pub_h = ReviewPublisher(http=host_h.http)
+        app_h = GitHubApplication(
+            http=host_h.http,
+            broker=_FakeBroker(),  # type: ignore[arg-type]
+            reviewer=pub_h,
+            learner=LearningPRPublisher(http=host_h.http),
+            replier=ConversationPublisher(http=host_h.http),
+            session_ledger=None,
+        )
+        opts_h = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            operation_entry="disabled",
+            max_active_findings=2,
+            enable_drift_tracking=False,
+        )
+        policy = ReviewConvergencePolicy()
+        human_comment = ReviewComment(
+            path="src/app.py",
+            line=3,
+            body="Check external invariant assumption.",
+            severity="medium",
+            blocking=False,
+            needs_human=True,
+            symbol="helper",
+            defect_kind="logic",
+        )
+        human_cand = BlockerCandidate(
+            proposed_blocking=False,
+            path=human_comment.path,
+            line=human_comment.line,
+            side=human_comment.side,
+            severity="medium",
+            needs_human=True,
+            attribution="pr-change",
+            has_specific_violation=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+        )
+        res_h = ReviewResult(
+            summary="Human adjudication required.",
+            comments=(human_comment,),
+            provider="fake",
+            review_status="complete",
+            coverage=_complete_coverage("src/app.py"),
+        )
+        out_h = app_h.publish_review(
+            options=opts_h,
+            oidc_token="oidc-h1",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_1,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=res_h,
+            diff=SRC_DIFF,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+            blocker_candidates=(human_cand,),
+        )
+        self.assertEqual(out_h.status, "published")
+        elig_h = approval_eligibility_from_body(str(host_h.reviews[-1]["body"]))
+        assert elig_h is not None
+        self.assertFalse(elig_h.facts.has_blocking_findings)
+        self.assertTrue(elig_h.facts.has_human_adjudication_findings)
+        fin_h = pub_h.finalizer.finalize(
+            token="tok-review",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD_1,
+            app_slug="reviewsensei[bot]",
+            eligibility=elig_h,
+        )
+        self.assertEqual(fin_h.status, "approval_withheld")
+        self.assertEqual(fin_h.diagnostic, "human_adjudication_open")
+
+        # Also verify finalize() reaches window_state directly when facts do not
+        # preempt it and emits "human_adjudication_open" (never "required_fixes_open").
+        elig_h_window = replace(
+            elig_h,
+            facts=replace(elig_h.facts, has_human_adjudication_findings=False),
+        )
+        fin_h_window = pub_h.finalizer.finalize(
+            token="tok-review",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD_1,
+            app_slug="reviewsensei[bot]",
+            eligibility=elig_h_window,
+        )
+        self.assertEqual(fin_h_window.status, "approval_withheld")
+        self.assertEqual(fin_h_window.diagnostic, "human_adjudication_open")
+
+        # Negative control: blocking obligation -> "required_fixes_open".
+        class _InlineCommentDriftHost(_MinimalDriftHost):
+            def _open(self, request, timeout=None):
+                path = urlparse(request.full_url).path
+                if request.method == "GET" and "/pulls/comments/" in path:
+                    cid = int(path.rsplit("/", 1)[-1])
+                    for t in self.threads:
+                        for c in t["comments"]["nodes"]:  # type: ignore[index]
+                            if c.get("databaseId") == cid:
+                                return self._resp(
+                                    {
+                                        "id": cid,
+                                        "body": c["body"],
+                                        "path": c["path"],
+                                        "line": c["line"],
+                                        "commit_id": c["commit"]["oid"],
+                                        "pull_request_review_id": c[
+                                            "pull_request_review_id"
+                                        ],
+                                        "user": {
+                                            "id": 9001,
+                                            "login": "reviewsensei[bot]",
+                                            "type": "Bot",
+                                        },
+                                    }
+                                )
+                return super()._open(request, timeout=timeout)
+
+        host_b = _InlineCommentDriftHost(head_sha=HEAD_1)
+        pub_b = ReviewPublisher(http=host_b.http)
+        app_b = GitHubApplication(
+            http=host_b.http,
+            broker=_FakeBroker(),  # type: ignore[arg-type]
+            reviewer=pub_b,
+            learner=LearningPRPublisher(http=host_b.http),
+            replier=ConversationPublisher(http=host_b.http),
+            session_ledger=None,
+        )
+        blocker = ReviewComment(
+            path="src/app.py",
+            line=3,
+            body="Required security fix.",
+            severity="critical",
+            blocking=True,
+            needs_human=False,
+            symbol="helper",
+            defect_kind="authz",
+        )
+        hidden_human = ReviewComment(
+            path="src/app.py",
+            line=4,
+            body="Hidden human question beyond window cap.",
+            severity="low",
+            blocking=False,
+            needs_human=True,
+            symbol="other_fn",
+            defect_kind="assumption",
+        )
+        blocker_cand = BlockerCandidate(
+            proposed_blocking=True,
+            path=blocker.path,
+            line=blocker.line,
+            side=blocker.side,
+            severity="critical",
+            attribution="pr-change",
+            has_specific_violation=True,
+            has_required_contract=True,
+            named_mandatory_rule="SEC-01",
+            has_actionable_remedy=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+        )
+        hidden_human_cand = BlockerCandidate(
+            proposed_blocking=False,
+            path=hidden_human.path,
+            line=hidden_human.line,
+            side=hidden_human.side,
+            severity="low",
+            needs_human=True,
+            attribution="pr-change",
+            has_specific_violation=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+        )
+        opts_cap1 = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            operation_entry="disabled",
+            max_active_findings=1,
+            enable_drift_tracking=False,
+        )
+        pub_b_out = app_b.publish_review(
+            options=opts_cap1,
+            oidc_token="oidc-b1",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_1,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=ReviewResult(
+                summary="Blocking + hidden human.",
+                comments=(blocker, hidden_human),
+                provider="fake",
+                review_status="complete",
+                coverage=_complete_coverage("src/app.py"),
+            ),
+            diff=SRC_DIFF,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+            blocker_candidates=(blocker_cand, hidden_human_cand),
+        )
+        self.assertEqual(pub_b_out.status, "published")
+        elig_b = approval_eligibility_from_body(str(host_b.reviews[-1]["body"]))
+        assert elig_b is not None
+        elig_b_window = replace(
+            elig_b,
+            facts=replace(elig_b.facts, has_human_adjudication_findings=False),
+        )
+        fin_b = pub_b.finalizer.finalize(
+            token="tok-review",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD_1,
+            app_slug="reviewsensei[bot]",
+            eligibility=elig_b_window,
+        )
+        self.assertEqual(fin_b.diagnostic, "required_fixes_open")
+
+        # Case 2: dispose the blocking finding; hidden needs_human window obligation remains.
+        # refinalize_with_dispositions must NOT set has_blocking_findings=True!
+        blocker_ob = next(
+            ob
+            for ob in pub_b.active_window_state(
+                repository_id=1, pull_request=1
+            ).authoritative_decision_inventory.obligations
+            if ob.blocking
+        )
+        disp = FindingDisposition(
+            fingerprint=blocker_ob.fingerprint,
+            action="accept-risk",
+            reason="Covered by upstream auth gateway",
+            actor="repo-admin",
+            head_sha=HEAD_1,
+            policy_digest=policy.digest(),
+        )
+        refinalized = pub_b.finalizer.refinalize_with_dispositions(
+            token="tok-review",
+            check_token="tok-check",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD_1,
+            app_slug="reviewsensei[bot]",
+            actor="repo-admin",
+            finding_ids=(f"RS-{blocker_ob.fingerprint[:6].upper()}",),
+            dispositions=(disp,),
+            policy_digest=policy.digest(),
+        )
+        self.assertEqual(refinalized.status, "approval_withheld")
+        elig_after = approval_eligibility_from_body(str(host_b.reviews[-1]["body"]))
+        assert elig_after is not None
+        self.assertFalse(elig_after.facts.has_blocking_findings)
+        self.assertTrue(elig_after.facts.has_human_adjudication_findings)
+        self.assertFalse(evaluate_approval_facts(elig_after.facts).approved)
+        self.assertEqual(host_b.check_runs[-1]["conclusion"], "action_required")
+        fin_after = pub_b.finalizer.finalize(
+            token="tok-review",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD_1,
+            app_slug="reviewsensei[bot]",
+            eligibility=elig_after,
+        )
+        self.assertEqual(fin_after.status, "approval_withheld")
+        self.assertEqual(fin_after.diagnostic, "human_adjudication_open")
+
 
 if __name__ == "__main__":
     unittest.main()

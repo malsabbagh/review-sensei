@@ -2340,6 +2340,9 @@ class ReviewApprovalFinalizer:
         # Installed only on a single command finalization copy. Other
         # publication/conversation entry points acquire no new authority.
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
+        self._native_finding_receipt_records: dict[
+            tuple[int, int], dict[str, dict[str, object]]
+        ] = {}
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._drift_states: dict[tuple[int, int], DriftEvaluationResult] = {}
         self._artifact_decisions: dict[
@@ -2908,10 +2911,20 @@ class ReviewApprovalFinalizer:
                     or not window_state.authoritative_decision_inventory.inventory_satisfied
                 ):
                     has_window_blockers = (
-                        bool(
-                            window_state.authoritative_decision_inventory.blocking_obligations
+                        any(
+                            ob.unresolved
+                            and (
+                                ob.blocking
+                                or ob.lifecycle_state
+                                in {"omitted-uncertain", "ambiguous-identity"}
+                            )
+                            for ob in window_state.authoritative_decision_inventory.obligations
                         )
                         or window_state.display_active_findings.has_uncertain_slots
+                    )
+                    has_window_human = any(
+                        ob.unresolved and ob.needs_human
+                        for ob in window_state.authoritative_decision_inventory.obligations
                     )
                     return known(
                         PublicationResult(
@@ -2919,6 +2932,8 @@ class ReviewApprovalFinalizer:
                             diagnostic=(
                                 "required_fixes_open"
                                 if has_window_blockers
+                                else "human_adjudication_open"
+                                if has_window_human
                                 else "approval_withheld"
                             ),
                         )
@@ -3418,6 +3433,8 @@ class ReviewApprovalFinalizer:
                     "_read_operation",
                     "_human_reader_for_scope",
                     "_decided_cleanup_inputs",
+                    "_decided_cleanup_selection",
+                    "_held_cleanup_instances",
                     "_plain_cleanup_frontier",
                     "_native_thread_nodes",
                 )
@@ -3469,6 +3486,7 @@ class ReviewApprovalFinalizer:
         )
         operation = copy(self)
         for name in (
+            "_native_finding_receipt_records",
             "_active_window_states",
             "_drift_states",
             "_artifact_decisions",
@@ -3718,12 +3736,19 @@ class ReviewApprovalFinalizer:
                 for entry in preview_window.display_active_findings.entries
             }
             if preview_window.display_active_findings.has_uncertain_slots or any(
-                ob.obligation_id not in displayed_ob_ids
-                or ob.comment is None
-                or finding_instance_fingerprint(ob.comment)
-                not in displayed_inline_instances
-                or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
-                for ob in preview_window.authoritative_decision_inventory.blocking_obligations
+                ob.unresolved
+                and (
+                    ob.blocking
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                )
+                and (
+                    ob.obligation_id not in displayed_ob_ids
+                    or ob.comment is None
+                    or finding_instance_fingerprint(ob.comment)
+                    not in displayed_inline_instances
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                )
+                for ob in preview_window.authoritative_decision_inventory.obligations
             ):
                 has_blocking = True
             if preview_window.changed_file_coverage.coverage_uncertainty_accepted:
@@ -5056,8 +5081,158 @@ class ReviewApprovalFinalizer:
             )
         return matching[0]
 
-    @staticmethod
-    def _decided_cleanup_inputs(
+    def _held_cleanup_instances(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        honored_instances: frozenset[str] = frozenset(),
+    ) -> frozenset[str]:
+        """Return inline instances held by ambiguous lifecycle or uncertain slots."""
+        held: set[str] = set()
+        receipts: tuple[Mapping[str, Any], ...] = ()
+        for carrier_name in (
+            "_finding_lifecycle_journal",
+            "_finding_lifecycle_consumer",
+        ):
+            carrier = getattr(self, carrier_name, None)
+            reviewer = (
+                getattr(carrier, "reviewer", None) if carrier is not None else None
+            )
+            reader = getattr(reviewer, "native_finding_receipts", None)
+            if callable(reader):
+                candidate = tuple(
+                    reader(repository_id=repository_id, pull_request=pull_request)
+                )
+                if candidate:
+                    receipts = candidate
+                    break
+        native_reader = getattr(self, "native_finding_receipts", None)
+        if not receipts and callable(native_reader):
+            receipts = tuple(
+                native_reader(repository_id=repository_id, pull_request=pull_request)
+            )
+        key = (repository_id, pull_request)
+        if not receipts:
+            receipts = tuple(
+                (getattr(self, "_native_finding_receipt_records", None) or {})
+                .get(key, {})
+                .values()
+            )
+        window_state = (getattr(self, "_active_window_states", None) or {}).get(key)
+        if window_state is not None and window_state.head_sha == head_sha:
+            slot_states = {
+                slot.target: slot.state
+                for slot in window_state.display_active_findings.slots
+            }
+            for ob in window_state.authoritative_decision_inventory.obligations:
+                is_uncertain_slot = ob.native_target is not None and (
+                    slot_states.get(ob.native_target, ob.target_state) == "uncertain"
+                    or ob.target_state == "uncertain"
+                )
+                is_ambiguous = ob.lifecycle_state in {
+                    "ambiguous-multi-target",
+                    "ambiguous-identity",
+                }
+                if not is_uncertain_slot and not is_ambiguous:
+                    continue
+                ob_instances: set[str] = set()
+                if ob.comment is not None:
+                    ob_instances.add(finding_instance_fingerprint(ob.comment))
+                    projected = replace(
+                        ob.comment,
+                        path=ob.path or ob.comment.path,
+                        line=ob.line if ob.line is not None else ob.comment.line,
+                        side=ob.side,
+                        symbol=ob.symbol
+                        if ob.symbol is not None
+                        else ob.comment.symbol,
+                    )
+                    ob_instances.add(finding_instance_fingerprint(projected))
+                for receipt in receipts:
+                    if receipt.get("obligation_id") == ob.obligation_id or (
+                        ob.native_target is not None
+                        and (
+                            receipt.get("thread_id") == ob.native_target
+                            or receipt.get("target") == ob.native_target
+                        )
+                    ):
+                        inst = receipt.get("instance")
+                        if isinstance(inst, str):
+                            ob_instances.add(inst)
+                if is_uncertain_slot or not (ob_instances & honored_instances):
+                    held.update(ob_instances)
+        drift_state = (getattr(self, "_drift_states", None) or {}).get(key)
+        if drift_state is not None and drift_state.head_sha == head_sha:
+            from review_sensei.finding_drift import project_drift_review_result
+            from review_sensei.models import ReviewResult as _DriftProjResult
+
+            projected_result = project_drift_review_result(
+                _DriftProjResult(
+                    summary="drift-projection",
+                    comments=(),
+                    provider="internal",
+                    review_status=(
+                        "complete" if drift_state.review_complete else "partial"
+                    ),
+                ),
+                drift_state,
+            )
+            ob_ids = {item.obligation_id for item in drift_state.inventory.obligations}
+            projected_entries = tuple(
+                entry
+                for entry in drift_state.active_entries
+                if entry.obligation_id in ob_ids
+            )
+            projected_by_oid = {
+                entry.obligation_id: p_comment
+                for entry, p_comment in zip(
+                    projected_entries, projected_result.comments, strict=True
+                )
+            }
+            drift_slots = {slot.target: slot.state for slot in drift_state.slots}
+            for drift_ob in drift_state.inventory.obligations:
+                tb = drift_ob.thread_binding
+                is_uncertain_slot = tb is not None and (
+                    tb.slot_state == "uncertain"
+                    or drift_slots.get(tb.thread_id) == "uncertain"
+                )
+                is_ambiguous = drift_ob.lifecycle_state in {
+                    "ambiguous-multi-target",
+                    "ambiguous-identity",
+                }
+                if not is_uncertain_slot and not is_ambiguous:
+                    continue
+                ob_instances = {
+                    finding_instance_fingerprint(
+                        drift_ob.synthetic_comment_for_placement()
+                    )
+                }
+                if drift_ob.latest_comment is not None:
+                    ob_instances.add(
+                        finding_instance_fingerprint(drift_ob.latest_comment)
+                    )
+                proj_c = projected_by_oid.get(drift_ob.obligation_id)
+                if proj_c is not None:
+                    ob_instances.add(finding_instance_fingerprint(proj_c))
+                for receipt in receipts:
+                    if receipt.get("obligation_id") == drift_ob.obligation_id or (
+                        tb is not None
+                        and (
+                            receipt.get("thread_id") == tb.thread_id
+                            or receipt.get("target") == tb.thread_id
+                        )
+                    ):
+                        inst = receipt.get("instance")
+                        if isinstance(inst, str):
+                            ob_instances.add(inst)
+                if is_uncertain_slot or not (ob_instances & honored_instances):
+                    held.update(ob_instances)
+        return frozenset(held)
+
+    def _decided_cleanup_selection(
+        self,
         *,
         eligibility,
         index,
@@ -5071,7 +5246,7 @@ class ReviewApprovalFinalizer:
         from .thread_resolution import resolution_records
 
         if index is None:
-            return (), frozenset()
+            return (), frozenset(), frozenset()
         durable_records = resolution_records(reviews, app_slug)
         records = tuple(
             record
@@ -5097,15 +5272,49 @@ class ReviewApprovalFinalizer:
             else set()
         )
         addressed = {record["instance"] for record in records}
-        instances = frozenset(
+        requested = frozenset(
             entry.instance
             for entry in index.entries
-            if not entry.body_placed
-            and (
+            if (
                 entry.instance in honored_instances
                 or entry.instance in addressed
                 or (entry.needs_human and entry.instance in assessed)
             )
+        )
+        candidates = frozenset(
+            entry.instance
+            for entry in index.entries
+            if not entry.body_placed and entry.instance in requested
+        )
+        held = self._held_cleanup_instances(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            honored_instances=honored_instances,
+        )
+        return records, candidates - held, requested & held
+
+    def _decided_cleanup_inputs(
+        self,
+        *,
+        eligibility,
+        index,
+        reviews,
+        app_slug,
+        repository_id,
+        pull_request,
+        head_sha,
+        honored_instances,
+    ):
+        records, instances, _ = self._decided_cleanup_selection(
+            eligibility=eligibility,
+            index=index,
+            reviews=reviews,
+            app_slug=app_slug,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            honored_instances=honored_instances,
         )
         return records, instances
 
@@ -5357,7 +5566,7 @@ class ReviewApprovalFinalizer:
         if index is None:
             return ThreadResolutionResult()
         try:
-            records, instances = self._decided_cleanup_inputs(
+            records, instances, held_cleanup = self._decided_cleanup_selection(
                 eligibility=eligibility,
                 index=index,
                 reviews=reviews,
@@ -5377,6 +5586,8 @@ class ReviewApprovalFinalizer:
                 )
             )
         if not instances:
+            if held_cleanup:
+                return ThreadResolutionResult(unconfirmed=tuple(sorted(held_cleanup)))
             return ThreadResolutionResult()
 
         native_root = None
@@ -5610,7 +5821,9 @@ class ReviewApprovalFinalizer:
                 self._observe_stage("cleanup.hold")
                 if self._operation_observer is not None:
                     self._operation_observer.exception(exc)
-                return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+                return ThreadResolutionResult(
+                    unconfirmed=tuple(sorted(instances | held_cleanup))
+                )
         try:
             try:
                 from .command_finalization_plan import execution_cleanup_roots
@@ -5684,11 +5897,20 @@ class ReviewApprovalFinalizer:
                         head_sha=head_sha,
                         instances=resolved_instances,
                     )
+                if held_cleanup:
+                    return ThreadResolutionResult(
+                        resolved=resolution.resolved,
+                        unconfirmed=tuple(
+                            sorted(set(resolution.unconfirmed) | held_cleanup)
+                        ),
+                    )
                 return resolution
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
                 if self._operation_observer is not None:
                     self._operation_observer.exception(exc)
-                return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+                return ThreadResolutionResult(
+                    unconfirmed=tuple(sorted(instances | held_cleanup))
+                )
         finally:
             if reserve and budget is not None:
                 try:
@@ -5808,7 +6030,14 @@ class ReviewApprovalFinalizer:
                     reviews=reviews,
                 )
                 reply_journal = getattr(self, "_finding_lifecycle_journal", None)
-                if reply_journal is not None and resolution.unconfirmed:
+                held_instances = self._held_cleanup_instances(
+                    repository_id=live.repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                if reply_journal is not None and (
+                    set(resolution.unconfirmed) - held_instances
+                ):
                     from .reply_finalization_plan import stop_reply_cleanup
 
                     if stop_reply_cleanup(reply_journal):
@@ -6620,6 +6849,9 @@ class ReviewPublisher:
         self._native_finding_receipt_records: dict[
             tuple[int, int], dict[str, dict[str, object]]
         ] = {}
+        self.finalizer._native_finding_receipt_records = (
+            self._native_finding_receipt_records
+        )
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._active_window_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
         self.finalizer._active_window_states = self._active_window_states

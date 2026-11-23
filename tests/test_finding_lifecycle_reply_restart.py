@@ -49,14 +49,18 @@ from tests.test_durable_finding_lifecycle_restart import (
 from tests.test_review_transaction import CONFIGURATION, EVIDENCE, POLICY
 
 HEAD = "1" * 40
+DRIFT_HEAD = "2" * 40
 PATCH = "@@ -1,5 +1,5 @@\n-a\n+reject_remote_requests(data)\n b\n c\n d\n e"
 SOURCE = "@reviewsensei This path is intentionally local-only; reject_remote_requests(data) runs before any data leaves the machine."
 
 
 class ReplyService(PersistentNativeService):
     def __init__(self, path, *, kind, lose=False, crash=False):
-        super().__init__(path, HEAD)
-        self.kind, self.lose = kind, lose
+        head_sha = DRIFT_HEAD if kind == "drift_human_ambiguous" else HEAD
+        super().__init__(path, head_sha)
+        self.raw_kind = kind
+        self.kind = "human" if "human" in kind else "inline"
+        self.lose = lose
         self.crash = crash
         self.source = {
             "id": 77,
@@ -80,7 +84,7 @@ class ReplyService(PersistentNativeService):
                 id=c["databaseId"],
                 created_at="2026-11-12T11:00:00Z",
                 updated_at="2026-11-12T11:00:00Z",
-                commit_id=HEAD,
+                commit_id=self.head_sha,
                 original_commit_id=HEAD,
                 diff_hunk=PATCH,
             )
@@ -127,7 +131,7 @@ class ReplyService(PersistentNativeService):
                         "additions": 1,
                         "deletions": 1,
                     }
-                    for p in ("src/app.py", "src/db.py")
+                    for p in ("src/app.py", "src/db.py", "src/a.py", "src/b.py")
                 ]
             elif "/contents/" in path:
                 self.calls.append((request.method, path, body))
@@ -234,19 +238,23 @@ def worker(root, kind, action):
         replier=ConversationPublisher(http=host.http),
         session_ledger=ledger,
     )
+    drift_mode = kind.startswith("drift_")
     options = GitHubWriteOptions(
         github_writes=True,
         auto_review=True,
         auto_approve=True,
         mention_replies=True,
         operation_entry="disabled",
-        max_active_findings=1,
+        max_active_findings=4 if kind == "drift_human_ambiguous" else 1,
+        enable_drift_tracking=drift_mode,
     )
     provider = EvidenceProvider(root / "provider-count")
     error, outcome = None, None
     before = len(host.calls)
     try:
         if action in {"produce", "warm"}:
+            from review_sensei.finding_drift import FileDriftDescriptor
+
             ledger.initialize(IDENTITY)
             first = _comment(
                 "src/app.py",
@@ -255,20 +263,25 @@ def worker(root, kind, action):
                 body="Confirm remote requests are rejected before transmission.",
                 severity="critical",
             )
-            if kind == "human":
+            if "human" in kind:
                 first = replace(
                     first, blocking=False, effective_blocking=False, needs_human=True
+                )
+            second = _comment(
+                "src/db.py",
+                line=5,
+                symbol="conn",
+                body="Required cleanup.",
+                severity="high",
+            )
+            if kind == "drift_human_ambiguous":
+                second = replace(
+                    second, blocking=False, effective_blocking=False, needs_human=True
                 )
             result = replace(
                 _result(
                     first,
-                    _comment(
-                        "src/db.py",
-                        line=5,
-                        symbol="conn",
-                        body="Required cleanup.",
-                        severity="high",
-                    ),
+                    second,
                 ),
                 model="fixture-model",
             )
@@ -313,6 +326,8 @@ def worker(root, kind, action):
             blockers = fixtures.OrdinaryPublisherActiveWindowTests._blockers(result)
             if kind == "human":
                 blockers = (replace(blockers[0], needs_human=True), *blockers[1:])
+            elif kind == "drift_human_ambiguous":
+                blockers = tuple(replace(b, needs_human=True) for b in blockers)
             produced_publishers = []
             original_publish = ReviewPublisher.publish
 
@@ -340,6 +355,113 @@ def worker(root, kind, action):
                     evidence_context=EVIDENCE,
                     blocker_candidates=blockers,
                 )
+            if kind == "drift_human_ambiguous":
+                host.head_sha = DRIFT_HEAD
+                ledger = LocalSessionLedger(
+                    root / "ledger", enable_finding_lifecycle_writes=True
+                )
+                reviewer = ReviewPublisher(http=host.http)
+                app = GitHubApplication(
+                    http=host.http,
+                    broker=_WindowFakeBroker(),
+                    reviewer=reviewer,
+                    learner=None,
+                    replier=ConversationPublisher(http=host.http),
+                    session_ledger=ledger,
+                )
+                dup_a = _comment(
+                    "src/a.py",
+                    line=5,
+                    symbol="auth",
+                    body="Confirm remote requests in src/a.py.",
+                    severity="critical",
+                    blocking=False,
+                    needs_human=True,
+                )
+                dup_b = _comment(
+                    "src/b.py",
+                    line=5,
+                    symbol="auth",
+                    body="Confirm remote requests in src/b.py.",
+                    severity="critical",
+                    blocking=False,
+                    needs_human=True,
+                )
+                res_r2 = replace(
+                    _result(
+                        dup_a,
+                        dup_b,
+                        second,
+                        coverage=fixtures._coverage(
+                            "src/a.py", "src/b.py", "src/db.py"
+                        ),
+                    ),
+                    model="fixture-model",
+                )
+                key_r2 = replace(key, head_sha=DRIFT_HEAD)
+                prep_r2 = prepare_review_transaction(
+                    ledger,
+                    IDENTITY,
+                    POLICY,
+                    reservation_id=session_reservation_id(
+                        repository="owner/repo",
+                        pull_request=1,
+                        head_sha=DRIFT_HEAD,
+                        kind="publish",
+                    ),
+                    base_sha=BASE_SHA,
+                    head_sha=DRIFT_HEAD,
+                    configuration_digest=ReviewTransaction.compute_configuration_digest(
+                        CONFIGURATION
+                    ),
+                    evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+                )
+                base_r2 = baseline_from_review(
+                    res_r2,
+                    cache_key=key_r2,
+                    policy=POLICY,
+                    generation=prep_r2.record.generation + 1,
+                )
+                res_r2 = checkpoint_review_analysis(
+                    ledger, IDENTITY, prep_r2, res_r2, baseline=base_r2
+                )
+                block_r2 = tuple(
+                    replace(b, needs_human=True)
+                    for b in fixtures.OrdinaryPublisherActiveWindowTests._blockers(
+                        res_r2
+                    )
+                )
+                outcome = app.publish_review(
+                    options=options,
+                    oidc_token="fixture",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=DRIFT_HEAD,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=res_r2,
+                    diff=ORDINARY_DIFF,
+                    app_slug=host.app_slug,
+                    convergence_policy=POLICY,
+                    current_key=key_r2,
+                    configuration_context=CONFIGURATION,
+                    evidence_context=EVIDENCE,
+                    blocker_candidates=block_r2,
+                    drift_descriptors=(
+                        FileDriftDescriptor(
+                            drift_kind="cross_file_move",
+                            source_path="src/app.py",
+                            target_paths=("src/a.py", "src/b.py"),
+                            moved_symbols=("auth",),
+                        ),
+                        FileDriftDescriptor(
+                            drift_kind="duplicate_code",
+                            source_path="src/app.py",
+                            target_paths=("src/a.py", "src/b.py"),
+                        ),
+                    ),
+                )
             if action == "warm":
                 # Keep the application/publisher warm, but open the new reply
                 # invocation's ordinary local ledger transport. Reusing the
@@ -349,11 +471,13 @@ def worker(root, kind, action):
                     root / "ledger", enable_finding_lifecycle_writes=True
                 )
                 app.session_ledger = ledger
-                if kind == "inline":
+                if "inline" in kind:
                     host.source["in_reply_to_id"] = host.threads[0]["comments"][
                         "nodes"
                     ][0]["databaseId"]
         if action != "produce":
+            target_head = DRIFT_HEAD if kind == "drift_human_ambiguous" else HEAD
+            is_human = "human" in kind
             outcome = app.generate_and_publish_reply(
                 options=options,
                 oidc_token="fixture",
@@ -363,14 +487,12 @@ def worker(root, kind, action):
                 pull_request=1,
                 source_comment_id=77,
                 source_updated_at=host.source["updated_at"],
-                expected_head_sha=HEAD,
+                expected_head_sha=target_head,
                 reply_provider=provider,
                 model="fixture-model",
                 app_slug=host.app_slug,
-                root_comment_id=(
-                    77 if kind == "human" else host.source["in_reply_to_id"]
-                ),
-                source_kind="issue" if kind == "human" else "inline",
+                root_comment_id=(77 if is_human else host.source["in_reply_to_id"]),
+                source_kind="issue" if is_human else "inline",
             )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -381,7 +503,9 @@ def worker(root, kind, action):
                 "error": error,
                 "outcome": asdict(outcome) if outcome else None,
                 "provider_calls": provider.calls,
-                "state": _state_observation(reviewer, "window"),
+                "state": _state_observation(
+                    reviewer, "drift" if drift_mode else "window"
+                ),
                 "durable": _durable_observation(root),
                 "record": (
                     lambda selected: (
@@ -508,6 +632,38 @@ class FindingReplyRestartTests(unittest.TestCase):
                 self.assertEqual(promoted["status"], "published")
                 self.assertEqual(promoted["state"]["active"], [before["conn"]["id"]])
                 self.assertEqual(int((root / "provider-count").read_text()), 1)
+
+    def test_drift_cold_reply_and_human_assessment_hold_ambiguous_threads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self.phase(root, "drift_human_ambiguous", "produce")
+            self.assertIsNone(first["error"])
+            self.assertEqual(first["outcome"]["status"], "published")
+            replied = self.phase(root, "drift_human_ambiguous", "reply")
+            self.assertIsNone(replied["error"])
+            self.assertIn(replied["outcome"]["status"], {"replied", "already_replied"})
+            self.assertEqual(replied["outcome"]["resolution_status"], "unconfirmed")
+            after = {o["symbol"]: o for o in replied["state"]["obligations"]}
+            self.assertEqual(after["auth"]["status"], "ambiguous-multi-target")
+            self.assertEqual(after["conn"]["status"], "verified-fixed")
+            by_path = {t["path"]: t for t in replied["threads"]}
+            self.assertFalse(by_path["src/app.py"]["isResolved"])
+            self.assertTrue(by_path["src/db.py"]["isResolved"])
+            self.assertFalse(any(r["state"] == "APPROVED" for r in replied["reviews"]))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self.phase(root, "drift_inline", "produce")
+            self.assertIsNone(first["error"])
+            self.assertEqual(first["outcome"]["status"], "published")
+            replied = self.phase(root, "drift_inline", "reply")
+            self.assertIsNone(replied["error"])
+            self.assertEqual(replied["outcome"]["resolution_status"], "resolved")
+            after = {o["symbol"]: o for o in replied["state"]["obligations"]}
+            self.assertEqual(after["auth"]["status"], "verified-fixed")
+            self.assertNotEqual(after["conn"]["status"], "verified-fixed")
+            self.assertTrue(replied["threads"][0]["isResolved"])
+            self.assertFalse(any(r["state"] == "APPROVED" for r in replied["reviews"]))
 
 
 if __name__ == "__main__":
