@@ -594,6 +594,78 @@ def related_paths_for_change(changed_paths: Sequence[str]) -> tuple[str, ...]:
     return tuple(related)
 
 
+def _bounded_scope_manifest(
+    paths: Sequence[str],
+    *,
+    max_paths: int = MAX_RELATED_PATHS,
+    max_bytes: int = 8192,
+    total_count: int | None = None,
+) -> tuple[str, int]:
+    """Format a deterministic path manifest capped by count and UTF-8 bytes."""
+    unique = tuple(dict.fromkeys(paths))
+    listed: list[str] = []
+    used = 0
+    for path in unique[:max_paths]:
+        cost = len(path.encode("utf-8")) + (2 if listed else 0)
+        if used + cost > max_bytes:
+            break
+        listed.append(path)
+        used += cost
+    total = max(len(unique), total_count if total_count is not None else len(unique))
+    remaining = max(0, total - len(listed))
+    manifest = ", ".join(listed)
+    if remaining > 0:
+        suffix = f" (+{remaining} more)" if manifest else f"(+{remaining} more)"
+        if len((manifest + suffix).encode("utf-8")) <= max_bytes or not manifest:
+            manifest += suffix
+    return manifest, remaining
+
+
+def _format_scope_label(
+    prefix: str,
+    index: int,
+    total: int,
+    items: Sequence[str],
+    *,
+    max_items: int = 3,
+    max_bytes: int = 200,
+) -> str:
+    """Format a compact Markdown scope prefix for one batch or chunk summary."""
+    unique: list[str] = []
+    for item in items:
+        if item and item not in unique:
+            unique.append(item)
+    shown: list[str] = []
+    used = 0
+    for item in unique[:max_items]:
+        cost = len(item.encode("utf-8")) + (2 if shown else 0)
+        if shown and used + cost > max_bytes:
+            break
+        shown.append(item)
+        used += cost
+    remaining = len(unique) - len(shown)
+    scope = ", ".join(shown)
+    if remaining > 0:
+        scope = f"{scope}, +{remaining} more" if scope else f"+{remaining} more"
+    if not scope:
+        scope = "slice"
+    return f"**{prefix} {index}/{total} ({scope}):**"
+
+
+def _format_scoped_summary(summary: str | None, *, label: str | None) -> str | None:
+    """Prefix a batch or chunk summary with its scope label cleanly."""
+    if not summary:
+        return None
+    if not label:
+        return summary
+    stripped = summary.strip()
+    if not stripped:
+        return None
+    if "\n" in stripped or stripped.startswith(("#", "-", "*", ">", "`")):
+        return f"{label}\n{stripped}"
+    return f"{label} {stripped}"
+
+
 def _chunk_from_records(
     index: int,
     records: tuple[DiffFileRecord, ...],
@@ -611,6 +683,14 @@ def _chunk_from_records(
     related: list[str] = []
     for path in paths:
         for candidate in _related_paths(path, changed_paths):
+            if candidate not in paths and candidate not in related:
+                related.append(candidate)
+            if len(related) >= MAX_RELATED_PATHS:
+                break
+        if len(related) >= MAX_RELATED_PATHS:
+            break
+    if len(related) < MAX_RELATED_PATHS:
+        for candidate in changed_paths:
             if candidate not in paths and candidate not in related:
                 related.append(candidate)
             if len(related) >= MAX_RELATED_PATHS:
@@ -743,7 +823,7 @@ def _reconcile_file_outcomes_from_hunks(
         hunk_indexes = [
             hunk.index
             for hunk in analysis.hunk_records
-            if (hunk.new_path or hunk.old_path) == path
+            if path in (hunk.new_path, hunk.old_path)
         ]
         if not hunk_indexes:
             continue

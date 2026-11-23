@@ -277,7 +277,7 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
                     collected: list[Any] = []
                     seen_ids: set[int] = set()
                     observed_ids: list[int] = []
-                    for (page_size, page), _bound in zip(
+                    for (page_size, page), bound in zip(
                         plain_plan.page_requests, plain_plan.page_bounds, strict=True
                     ):
                         status, page_values = run.http.request(
@@ -292,6 +292,10 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
                         ):
                             raise ReviewInputError(
                                 "command receipt paged frontier changed"
+                            )
+                        if len(canonical_bytes(page_values)) > bound:
+                            raise ReviewInputError(
+                                "plain action receipt page exceeded planned bound"
                             )
                         for item in page_values:
                             if (

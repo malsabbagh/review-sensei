@@ -3212,7 +3212,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                     if (
                         type(self) is ActionRunLedger
                         and trust_profile is None
-                        and page_plan is None
+                        and (page_plan is None or len(page_plan.page_bounds) == 1)
                         and n >= 1
                     )
                     else guard_calls
@@ -3425,7 +3425,15 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 "finding lifecycle comment allocation capacity exceeded"
             )
         page_count = 1
-        if len(items) + added_parts >= 100 or wire >= 512 * 1024:
+        exceeds_generic_operation = any(
+            root_calls + 3 * n + (n + 1) * fences > NATIVE_OPERATION_REQUESTS + fences
+            for n in checkpoints
+        )
+        if (
+            len(items) + added_parts >= 100
+            or wire >= 512 * 1024
+            or (exceeds_generic_operation and selected is not None)
+        ):
             from .review_run import ActionRunLedger, ReviewRunLedger
 
             if (
@@ -3504,11 +3512,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             page_count = len(page_bounds)
         else:
             _PLAIN_FINDING_PLANS.pop(self, None)
-            if any(
-                root_calls + 3 * n + (n + 1) * fences
-                > NATIVE_OPERATION_REQUESTS + fences
-                for n in checkpoints
-            ):
+            if exceeds_generic_operation:
                 raise EvidenceBudgetExhausted(
                     "finding lifecycle parts exceed original checkpoint operation"
                 )
@@ -3552,11 +3556,15 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             raise ReviewInputError("finding lifecycle paged operation custody changed")
         _PLAIN_FINDING_ACTIVE[self] = (plan, True)
         pages = len(plan.page_bounds)
-        calls = plan.root_calls + 3 * plan.checkpoint_parts[0] + 2 * (pages - 1)
-        assert self.evidence_budget is not None
-        self.evidence_budget.preflight(
-            calls + (plan.checkpoint_parts[0] + 1) * plan.fences
+        calls = (
+            plan.root_calls
+            + 3 * plan.checkpoint_parts[0]
+            + 2 * (pages - 1)
+            + plan.checkpoint_parts[0] * plan.fences
         )
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(calls + plan.fences)
+        # Caller opens _operation with `capacity + fences`; returning `calls` avoids double-counting fences.
         return max(
             NATIVE_OPERATION_REQUESTS, calls
         ), WRITE_CONFIRMATION_TAIL + pages - 1
