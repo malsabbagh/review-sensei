@@ -5105,7 +5105,7 @@ class ReviewApprovalFinalizer:
                 native_reader(repository_id=repository_id, pull_request=pull_request)
             )
         key = (repository_id, pull_request)
-        window_state = self._active_window_states.get(key)
+        window_state = (getattr(self, "_active_window_states", None) or {}).get(key)
         if window_state is not None and window_state.head_sha == head_sha:
             slot_states = {
                 slot.target: slot.state
@@ -5148,7 +5148,7 @@ class ReviewApprovalFinalizer:
                             ob_instances.add(inst)
                 if is_uncertain_slot or not (ob_instances & honored_instances):
                     held.update(ob_instances)
-        drift_state = self._drift_states.get(key)
+        drift_state = (getattr(self, "_drift_states", None) or {}).get(key)
         if drift_state is not None and drift_state.head_sha == head_sha:
             from review_sensei.finding_drift import project_drift_review_result
             from review_sensei.models import ReviewResult as _DriftProjResult

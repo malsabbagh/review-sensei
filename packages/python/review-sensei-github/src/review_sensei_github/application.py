@@ -4003,8 +4003,12 @@ class GitHubApplication:
         command_policy_digest = (
             convergence_policy or ReviewConvergencePolicy()
         ).digest()
+        enforce_policy_digest = convergence_policy is not None and (
+            lifecycle_record is None or lifecycle_record.quarantine_lineage is None
+        )
         if (
-            lifecycle_record is not None
+            enforce_policy_digest
+            and lifecycle_record is not None
             and lifecycle_record.finding_lifecycle is not None
             and command.action
             in {
@@ -4220,6 +4224,7 @@ class GitHubApplication:
                     evidence_budget=command_budget,
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
+                    _enforce_policy_digest=enforce_policy_digest,
                     _prepared_review_capability=prepared_review_capability,
                     _capacity_plan=command_finalization_plan,
                 )
@@ -4269,6 +4274,7 @@ class GitHubApplication:
                 evidence_budget=command_budget,
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
+                _enforce_policy_digest=enforce_policy_digest,
                 _prepared_review_capability=prepared_review_capability,
                 _capacity_plan=command_finalization_plan,
             )
@@ -5236,6 +5242,7 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
+        _enforce_policy_digest: bool = True,
         # Private cross-call reuse: None, or the capability this operation's
         # broker exchange minted. Never a caller-supplied token.
         _prepared_review_capability: _PreparedReviewCapability | None = None,
@@ -5379,8 +5386,19 @@ class GitHubApplication:
                 binding = cast(Mapping[str, Any], record.finding_lifecycle["manifest"])[
                     "binding"
                 ]
+                is_quarantine_or_historical = (
+                    _capacity_plan is not None
+                    or _quarantine_lifecycle_transfer is not None
+                    or record.quarantine_lineage is not None
+                    or any(
+                        item.reference.startswith(("quarantine:", "historical:"))
+                        for item in command_result.receipts
+                    )
+                )
                 if (
-                    policy_digest is not None
+                    _enforce_policy_digest
+                    and not is_quarantine_or_historical
+                    and policy_digest is not None
                     and policy_digest != binding["policy_digest"]
                 ):
                     raise ReviewInputError("finding lifecycle policy conflicts")

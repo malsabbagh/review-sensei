@@ -238,7 +238,14 @@ def execute_reply(
         )
     ).hexdigest()
     caller = run.caller
-    if run.finding_inventory_migration_required():
+    effect_record = caller._effect_record
+    if run.finding_inventory_migration_required() and (
+        effect_record is None
+        or (
+            effect_record.historical_assessments is None
+            and effect_record.quarantine_lineage is None
+        )
+    ):
         raise ReviewInputError("durable_finding_inventory_recovery_required")
     intent = caller.admit_action(
         run.ledger,

@@ -881,9 +881,13 @@ class PreRolloverMigrationAndPolicyDriftTests(unittest.TestCase):
                         refinalize_with_dispositions=unexpected_refinalize
                     )
 
+            class _DummyCaller:
+                pass
+
             fake_ledger = SimpleNamespace(
                 enable_finding_lifecycle_writes=True,
                 load=lambda _identity: SimpleNamespace(record=first),
+                caller=_DummyCaller(),
             )
             fake_broker = SimpleNamespace(exchange=lambda *_a, **_k: "tok")
             app = GitHubApplication(
@@ -918,6 +922,153 @@ class PreRolloverMigrationAndPolicyDriftTests(unittest.TestCase):
             self.assertTrue(blocked.evaluation_failed)
             self.assertIn("gate re-evaluation failed", blocked.summary)
             self.assertEqual(refinalize_calls, 0)
+
+    def test_historical_receipt_omitted_policy_and_standalone_finalizer_helpers(
+        self,
+    ) -> None:
+        from review_sensei_github.application import (
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+        from review_sensei_github.finding_lifecycle import (
+            FindingLifecycleJournal,
+            restore_finding_lifecycle,
+        )
+        from review_sensei_github.publication import (
+            PublicationResult,
+            ReviewApprovalFinalizer,
+            ReviewPublisher,
+        )
+
+        from review_sensei.disposition import MaintainerCommandResult, OverrideReceipt
+        from review_sensei.session import LocalSessionLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _PreRolloverFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            first = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            pub = ReviewPublisher(http=f.selected.http)
+            _, real_doc = restore_finding_lifecycle(pub, f.selected.ledger, IDENTITY)
+
+            refinalize_calls = 0
+
+            def ok_refinalize(**_kwargs):
+                nonlocal refinalize_calls
+                refinalize_calls += 1
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="approval_withheld"
+                )
+
+            class _FakePublisher(ReviewPublisher):
+                def __init__(self):
+                    super().__init__(http=None)
+                    self._active_window_states = dict(pub._active_window_states)
+                    self._drift_states = dict(pub._drift_states)
+                    self.finalizer = SimpleNamespace(
+                        http=None,
+                        refinalize_with_dispositions=ok_refinalize,
+                    )
+
+            class _DummyCaller:
+                pass
+
+            fake_ledger = SimpleNamespace(
+                enable_finding_lifecycle_writes=True,
+                load=lambda _identity: SimpleNamespace(record=first),
+                caller=_DummyCaller(),
+            )
+            fake_broker = SimpleNamespace(exchange=lambda *_a, **_k: "tok")
+            app = GitHubApplication(
+                broker=fake_broker,
+                http=None,
+                reviewer=_FakePublisher(),
+                learner=None,
+                replier=None,
+            )
+            with (
+                patch(
+                    "review_sensei_github.finding_lifecycle.restore_finding_lifecycle",
+                    return_value=(first, real_doc),
+                ),
+                patch.object(FindingLifecycleJournal, "finish", return_value=None),
+            ):
+                historical_res = app._refinalize_command(
+                    MaintainerCommandResult(
+                        action="dismiss",
+                        applied=True,
+                        operator_paused=False,
+                        summary="Historical assessment dismissed",
+                        receipts=(
+                            OverrideReceipt(
+                                "historical:scope/RS-ABCDEF",
+                                "abcdef",
+                                "recorded",
+                                "dismiss",
+                            ),
+                        ),
+                    ),
+                    oidc_token="oidc",
+                    repository="owner/repo",
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
+                    app_slug="reviewsensei[bot]",
+                    actor="alice",
+                    record=first,
+                    ledger=fake_ledger,
+                    policy_digest="0" * 64,
+                )
+            self.assertFalse(historical_res.evaluation_failed, historical_res.summary)
+            self.assertEqual(refinalize_calls, 1)
+
+            strict_lifecycle = copy.deepcopy(first.finding_lifecycle)
+            strict_lifecycle["manifest"]["binding"]["policy_digest"] = (
+                ReviewConvergencePolicy(mode="strict").digest()
+            )
+            strict_record = SimpleNamespace(
+                operator_paused=False,
+                quarantine_lineage=None,
+                finding_lifecycle=strict_lifecycle,
+            )
+            local_ledger = LocalSessionLedger(Path(directory) / "local-ledger")
+            local_ledger.initialize(IDENTITY)
+            app.session_ledger = local_ledger
+            with (
+                patch(
+                    "review_sensei_github.finding_lifecycle.restore_finding_lifecycle",
+                    return_value=(strict_record, None),
+                ),
+                patch.object(
+                    ReviewPublisher, "check_trust_boundary", return_value=None
+                ),
+            ):
+                status_without_explicit_policy = app.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=False, github_session_ledger=False
+                    ),
+                    oidc_token=None,
+                    repository="owner/repo",
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
+                    body="@reviewsensei verify",
+                    actor_login="alice",
+                    association="OWNER",
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=None,
+                )
+            self.assertNotIn(
+                "durable_finding_inventory_policy_drift",
+                status_without_explicit_policy.summary,
+            )
+
+        standalone_finalizer = ReviewApprovalFinalizer.__new__(ReviewApprovalFinalizer)
+        self.assertEqual(
+            standalone_finalizer._held_cleanup_instances(
+                repository_id=123, pull_request=7, head_sha=HEAD
+            ),
+            frozenset(),
+        )
 
 
 if __name__ == "__main__":

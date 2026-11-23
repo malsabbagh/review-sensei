@@ -2028,6 +2028,8 @@ def bootstrap(
                         and ReviewRun._record_requires_finding_inventory_migration(
                             previous_root
                         )
+                        and previous_root.historical_assessments is None
+                        and previous_root.quarantine_lineage is None
                     ):
                         raise _PreRolloverMigrationHold(
                             "finding_inventory_migration_required"
