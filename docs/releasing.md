@@ -502,8 +502,9 @@ frozen release candidate and use an already-authorized existing PR when availabl
    publisher. Branch protection still requires the full `Required checks` result.
    The signer re-verifies the receipt, exact main SHA, unused selected GitHub tags
    and releases, and the selected versions on PyPI.
-6. Complete the existing readers-first, compatibility/canary and protected
-   publication qualification below. To automate the signed tag, complete the
+6. Complete the applicable reader, compatibility and canary checks for the
+   selected Python release. The npm publisher owns its native artifact and
+   registry qualification. To automate the signed tag, complete the
    [dedicated release-key user-run setup](release-signing.md) and dispatch with
    `-f sign_tag=true`. A separate main-only job waits for generated CI, rechecks
    the receipt, source, all unused versions, registered key/email, narrow App
@@ -804,12 +805,11 @@ Worker rollback uses the prior recorded deployment.
 
 ## Compatibility manifest and release sequencing
 
-This full-distribution manifest and legacy `v4` serialization contract still
-requires all five publication lanes. It does not represent next-release v5
-admission: use the independently verified Python publication receipt from
-[major-channel validation](major-tag-validation.md) for that channel. Never mark
-an incomplete npm lane complete or fabricate a full-distribution manifest to
-promote v5; preserve its actual partial state for independent recovery.
+The full-distribution manifest and legacy `v4` serialization contract require
+all five publication lanes. Record partial npm publication as partial. Python
+signing and publication use the exact-main Python/platform gates above. For v5,
+use the [pre-move Python candidate gate](#verify-the-candidate-before-an-authorized-move)
+and [post-move validation](major-tag-validation.md).
 
 A supported cutoff binds workflow commit, Python distribution, npm artifacts,
 public schema version, and Worker identity in one compatibility manifest.

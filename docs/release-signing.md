@@ -1,10 +1,10 @@
 # Dedicated Release Marshal signing
 
 The Marshal can sign the qualified prepared commit with a dedicated release
-GPG key. Mo still approves the `npm` and `pypi` environment jobs before either
-registry publishes. That approval records authorization; the GPG key creates
-the cryptographic tag signature, and Trusted Publishing creates package
-provenance/attestations. These are separate records.
+GPG key. Mo approves core and hosted Python publication in their respective
+`pypi` and `pypi-github` environments. The independent npm publisher requests
+its own `npm` approval after Python succeeds. The GPG signature binds the tag
+to the source, and Trusted Publishing attests the resulting packages.
 
 ## User-run setup
 

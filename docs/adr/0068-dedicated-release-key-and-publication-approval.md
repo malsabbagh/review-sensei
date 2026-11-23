@@ -5,6 +5,16 @@ Date: 2026-10-08
 Owners/Reviewers: Maintainers
 Related work: user-requested release Marshal automation; PR #229 preparation
 
+## Subsequent release policy
+
+The dedicated key, signer identity and protected approvals below still apply.
+[ADR 0100](0100-independent-release-channel-runs.md) split the publisher runs.
+[ADR 0143](0143-asynchronous-npm-release.md) replaces this ADR’s combined CI,
+registry-absence and pre-signing environment checks. The signer checks the
+Python/platform CI and selected PyPI publication gates. Native CI, npm registry
+integrity and npm approval belong to the independent npm run. The Python
+publisher finalizes GitHub assets. Released Pages still requires both channels.
+
 ## Context
 
 Release preparation already generates a receipt-bound version/docs commit on
