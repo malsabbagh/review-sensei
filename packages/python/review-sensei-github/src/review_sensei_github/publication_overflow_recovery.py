@@ -664,6 +664,12 @@ def compare_publication_formatter_outputs(
     )
 
 
+@dataclass(frozen=True)
+class _ExactAppReviewLookup:
+    status: str
+    review_id: int | None = None
+
+
 def _find_exact_app_review_id(
     reviews: Sequence[Any],
     *,
@@ -672,12 +678,14 @@ def _find_exact_app_review_id(
     head_sha: str,
     app_slug: str,
     result: ReviewResult,
-) -> int | None:
+) -> _ExactAppReviewLookup:
     """Locate an App-authored exact-head review matching `review_marker`.
 
-    Requires `user.type == "Bot"` so a human GitHub account (`type == "User"`)
-    whose username matches `app_slug` can never spoof an App review echo; both
-    `slug` and `slug[bot]` login forms are normalized and accepted.
+    Returns a 3-state lookup (`matched`, `absent`, or `unreadable_hold`) so
+    unreadable/ambiguous Bot review entries can never certify absence before
+    remote write. Requires `user.type == "Bot"` so a human account
+    (`type == "User"`) cannot spoof an App review echo; both `slug` and
+    `slug[bot]` login forms are normalized case-insensitively.
     """
     expected_marker = review_marker(
         repository_id=repository_id,
@@ -686,25 +694,54 @@ def _find_exact_app_review_id(
         result=result,
     )
     base_login = app_slug.strip().casefold().removesuffix("[bot]")
+    if not base_login:
+        return _ExactAppReviewLookup("unreadable_hold")
     expected_logins = {base_login, f"{base_login}[bot]"}
+    matched_id: int | None = None
+    unreadable_hold = False
+    seen_ids: set[int] = set()
     for review in reviews:
         if not isinstance(review, Mapping):
-            continue
-        if review.get("commit_id") != head_sha:
-            continue
-        user = review.get("user")
-        if not isinstance(user, Mapping) or user.get("type") != "Bot":
-            continue
-        login = user.get("login")
-        if not isinstance(login, str) or login.casefold() not in expected_logins:
-            continue
-        body = review.get("body")
-        if not isinstance(body, str) or expected_marker not in body:
+            unreadable_hold = True
             continue
         rid = review.get("id")
-        if type(rid) is int and rid > 0:
-            return rid
-    return None
+        if type(rid) is not int or rid <= 0 or rid in seen_ids:
+            unreadable_hold = True
+            continue
+        seen_ids.add(rid)
+        user = review.get("user")
+        if not isinstance(user, Mapping):
+            unreadable_hold = True
+            continue
+        if user.get("type") != "Bot":
+            continue
+        login = user.get("login")
+        if not isinstance(login, str):
+            unreadable_hold = True
+            continue
+        if login.strip().casefold() not in expected_logins:
+            continue
+        commit_id = review.get("commit_id")
+        if not isinstance(commit_id, str):
+            unreadable_hold = True
+            continue
+        body = review.get("body")
+        if not isinstance(body, str):
+            if commit_id == head_sha:
+                unreadable_hold = True
+            continue
+        if commit_id != head_sha:
+            continue
+        if expected_marker in body:
+            if matched_id is not None:
+                unreadable_hold = True
+            else:
+                matched_id = rid
+    if unreadable_hold:
+        return _ExactAppReviewLookup("unreadable_hold", None)
+    if matched_id is not None:
+        return _ExactAppReviewLookup("matched", matched_id)
+    return _ExactAppReviewLookup("absent", None)
 
 
 def qualify_nonterminal_publication_failure(
@@ -736,6 +773,18 @@ def qualify_nonterminal_publication_failure(
         raise ReviewInputError(
             "SessionRecord with an active nonterminal ReviewTransaction is required"
         )
+    if record.identity() != identity:
+        raise ReviewInputError("record identity conflicts with SessionIdentity")
+    if (
+        not isinstance(current_base_sha, str)
+        or _HEX40.fullmatch(current_base_sha) is None
+    ):
+        raise ReviewInputError("current_base_sha must be a valid 40-hex SHA")
+    if (
+        not isinstance(current_head_sha, str)
+        or _HEX40.fullmatch(current_head_sha) is None
+    ):
+        raise ReviewInputError("current_head_sha must be a valid 40-hex SHA")
     if record.api_run_accounting is None:
         raise ReviewInputError(
             "nonterminal publication qualification requires API-accounted record"
@@ -755,6 +804,10 @@ def qualify_nonterminal_publication_failure(
         )
 
     old = ApiRunAccounting.from_document(record.api_run_accounting)
+    if old.identity.repository_id != identity.repository_id:
+        raise ReviewInputError(
+            "accounting repository_id conflicts with SessionIdentity"
+        )
     caller_limit = old.configuration.limit
     pol_digest = _policy_digest(policy)
 
@@ -766,19 +819,34 @@ def qualify_nonterminal_publication_failure(
         and caller_blob == BODY_CALLER_BLOB
         and tx.phase == "publication_failed"
         and old.uncertain == 0
+        and old.terminal_transaction is None
+        and old.action is None
+        and old.analysis_abort is None
+        and old.owner.run_attempt == 1
+        and old.owner.job == "hosted"
+        and old.owner.generation == 0
+        and record.reservation_id is None
+        and record.reserved_slot is None
+        and not record.operator_paused
+        and record.rescan_state is None
+        and record.quarantine_lineage is None
+        and not result.coverage_only_partial
         and formatter_comparison is not None
         and formatter_comparison.historical_exceeded_ceiling
         and formatter_comparison.historical_failure_check == "framed-review-body"
         and not any(any(c in item.path for c in "*?[") for item in result.comments)
     )
 
-    observed_review_id = _find_exact_app_review_id(
+    review_lookup = _find_exact_app_review_id(
         live_reviews,
         repository_id=identity.repository_id,
         pull_request=identity.pull_request,
         head_sha=tx.head_sha,
         app_slug=app_slug,
         result=result,
+    )
+    observed_review_id = (
+        review_lookup.review_id if review_lookup.status == "matched" else None
     )
 
     # 1. Predecessor owner still active/unconfirmed -> hold all recovery.
@@ -821,11 +889,11 @@ def qualify_nonterminal_publication_failure(
     )
 
     # 2. Response-loss / uncertain remote write (`publication_pending` or `uncertain > 0`
-    #    or unexpected live review echo under `publication_failed`).
+    #    or unexpected/unreadable live review echo under `publication_failed`).
     if (
         tx.phase == "publication_pending"
         or old.uncertain > 0
-        or observed_review_id is not None
+        or review_lookup.status != "absent"
     ):
         if observed_review_id is not None:
             can_reconcile_same_head = (
@@ -879,13 +947,16 @@ def qualify_nonterminal_publication_failure(
                 fallback_routes=(),
                 operator_action=action_text,
             )
+        unreadable_hold = review_lookup.status == "unreadable_hold"
         return NonterminalPublicationQualification(
             classifier_id=PUBLICATION_OVERFLOW_CLASSIFIER_ID,
             state_code="response_loss_unobserved_remote_hold",
             failure_boundary="response_loss_uncertain",
             transaction_phase=tx.phase,
             remote_effect_uncertain=(
-                tx.phase == "publication_pending" or old.uncertain > 0
+                tx.phase == "publication_pending"
+                or old.uncertain > 0
+                or unreadable_hold
             ),
             confirmed_failure_before_write=False,
             observed_review_id=None,
@@ -905,7 +976,11 @@ def qualify_nonterminal_publication_failure(
             primary_route="controlled_serialized_restart",
             fallback_routes=(),
             operator_action=(
-                "Publication stopped with response-loss or uncertain mutation "
+                "Live review inventory contains unreadable or ambiguous App review "
+                "evidence; hold and recover via controlled serialized restart rather "
+                "than certifying failure before write."
+                if unreadable_hold
+                else "Publication stopped with response-loss or uncertain mutation "
                 "outcome (`publication_pending` or `uncertain > 0`) and no "
                 "persisted review echo on GitHub. Do not classify as prepublication "
                 "failure-before-write or blind-retry; recover via controlled "
@@ -977,9 +1052,17 @@ def qualify_nonterminal_publication_failure(
         and is_c7_qualified
         and archive_can_fit
         and old.owner.run_attempt == 1
+        and old.owner.job == "hosted"
         and old.owner.generation == 0
+        and old.terminal_transaction is None
+        and old.action is None
+        and old.analysis_abort is None
+        and record.reservation_id is None
+        and record.reserved_slot is None
         and not record.operator_paused
+        and record.rescan_state is None
         and record.quarantine_lineage is None
+        and not result.coverage_only_partial
         and retained_context_available
     ):
         return NonterminalPublicationQualification(
@@ -1476,11 +1559,7 @@ def build_publication_overflow_attempt_packet(
         raise ReviewInputError(
             "publication overflow packet requires a SessionRecord with transaction"
         )
-    if (
-        record.repository != identity.repository
-        or record.pull_request != identity.pull_request
-        or (record.repository_id is not None and record.repository_id != repo_id)
-    ):
+    if record.identity() != identity:
         raise ReviewInputError("record identity conflicts with SessionIdentity")
     if (
         narrative_archive is not None

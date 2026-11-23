@@ -873,6 +873,128 @@ class CommandCapacity512ProofTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 ledger.caller._require_ledger(ledger, wrong_repo_identity)
 
+    def test_command_pricing_batch_size_scaling_within_512_envelope(self) -> None:
+        from review_sensei_github.action_representability import (
+            _command_pricing,
+            guard_current_command_representability,
+        )
+
+        from review_sensei.disposition import FindingIdentity, MaintainerCommand
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CommandEntryFixture(directory, limit=512)
+            fixture.provider_comments = _make_blocking_comments(4)
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            index = parse_finding_index(
+                fixture.reviews[-1]["body"],
+                repository_id=123,
+                pull_request=7,
+                head_sha=HEAD,
+            )
+            refs = tuple("RS-" + e.instance[:6].upper() for e in index.entries)
+            # Exhaust usable balance on a depleted 512-limit caller down to 20:
+            # K=1 requires 31 -> caught by guard_current_command_representability
+            # upfront; K=4 requires 67 and fails far earlier than K=1!
+            fixture.SOURCE_ID += 1
+            fixture.select_command(
+                f"@reviewsensei override {refs[0]} acceptable risk",
+                new_run=True,
+            )
+            depleted_caller = SimpleNamespace(
+                accounting=SimpleNamespace(
+                    configuration=SimpleNamespace(
+                        limit=512, commit="a" * 40, digest="d" * 64
+                    ),
+                    owner=SimpleNamespace(generation=1),
+                    action={
+                        "intent": {
+                            "action": "command",
+                            "owner": {"generation": 1},
+                            "head_sha": HEAD,
+                        }
+                    },
+                    blocks=(),
+                    version="caller-requests-v2",
+                ),
+                usable=40,
+            )
+            k1_price = _command_pricing(
+                depleted_caller,
+                action="accept-risk",
+                writes_enabled=True,
+                finding_count=1,
+            )
+            k4_price = _command_pricing(
+                depleted_caller,
+                action="accept-risk",
+                writes_enabled=True,
+                finding_count=4,
+            )
+            self.assertEqual(k1_price.required_requests, 31)
+            self.assertEqual(k4_price.required_requests, 67)
+            self.assertTrue(k1_price.fits())
+            self.assertFalse(k4_price.fits())
+
+            # Full guard path at usable=40 passes K=1 (31 <= 40) and refuses K=4 (67 > 40)
+            # cleanly with an explicit no-op receipt at limit=512 without raising 512.
+            rec = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            assert rec is not None and rec.transaction is not None
+            depleted_caller._effect_record = rec
+            current_action = SimpleNamespace(
+                run=SimpleNamespace(
+                    caller=depleted_caller,
+                    ledger=fixture.selected.ledger,
+                    identity=IDENTITY,
+                )
+            )
+            finding_inventory = tuple(
+                FindingIdentity(
+                    instance=e.instance,
+                    needs_human=True,
+                    blocking=True,
+                )
+                for e in index.entries
+            )
+            cmd_k1 = MaintainerCommand(
+                action="accept-risk",
+                actor="maintainer",
+                reason="acceptable risk",
+                head_sha=HEAD,
+                finding_references=(refs[0],),
+            )
+            cmd_k4 = MaintainerCommand(
+                action="accept-risk",
+                actor="maintainer",
+                reason="acceptable risk",
+                head_sha=HEAD,
+                finding_references=refs,
+            )
+            self.assertIsNone(
+                guard_current_command_representability(
+                    current_action=current_action,
+                    ledger=fixture.selected.ledger,
+                    identity=IDENTITY,
+                    head_sha=HEAD,
+                    command=cmd_k1,
+                    writes_enabled=True,
+                    finding_inventory=finding_inventory,
+                )
+            )
+            refusal_k4 = guard_current_command_representability(
+                current_action=current_action,
+                ledger=fixture.selected.ledger,
+                identity=IDENTITY,
+                head_sha=HEAD,
+                command=cmd_k4,
+                writes_enabled=True,
+                finding_inventory=finding_inventory,
+            )
+            self.assertIsNotNone(refusal_k4)
+            assert refusal_k4 is not None
+            self.assertFalse(refusal_k4.applied)
+            self.assertIn("request_budget_exhausted_before_effect", refusal_k4.summary)
+            self.assertIn("539 exceed original limit 512", refusal_k4.summary)
+
 
 if __name__ == "__main__":
     unittest.main()

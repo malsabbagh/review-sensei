@@ -109,3 +109,59 @@ class EmptyOriginalAdmissionTests(unittest.TestCase):
             self.assertEqual(code, 0, fixture.error)
             self.assertTrue(observed)
             self.assertFalse(any(observed))
+
+    def test_body_limit_prepublication_v1_admits_empty_original_while_literal_blocker_refuses(
+        self,
+    ):
+        import sys
+        import tempfile
+        from unittest.mock import patch
+
+        from test_quarantine_activation import registered_resource
+        from test_quarantine_body_limit import BodyLimitJourneyFixture
+        from test_quarantine_published_tail_journey import BROKER_QUALIFICATIONS
+
+        class StopAfterConsume(BaseException):
+            pass
+
+        observed = []
+
+        def observe(frame, event, value):
+            if frame.f_code is consume.__code__ and event == "return":
+                observed.append(value)
+                raise StopAfterConsume()
+            return observe
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as directory2,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            f = BodyLimitJourneyFixture(directory)
+            _, registration = f.original_body_failure()
+            prior = sys.gettrace()
+            try:
+                # application.py seals empty_original_admission with require_module_seal(),
+                # so monkey-patching consume is disallowed; trace hook matches above tests.
+                sys.settrace(observe)
+                with registered_resource([registration]):
+                    with self.assertRaises(StopAfterConsume):
+                        f.invoke()
+            finally:
+                sys.settrace(prior)
+            self.assertEqual(observed, [True])
+
+            # Mutating target_isolation contract away from body-limit-prepublication-v1
+            # refuses the empty-original fast path.
+            observed.clear()
+            f2 = BodyLimitJourneyFixture(directory2)
+            old2, reg2 = f2.original_body_failure()
+            self.assertIsNone(old2.finding_lifecycle)
+            # Tamper contract in prepublication metadata after registration creation ->
+            # broker qualification digest check refuses before admission.
+            reg2["prepublication"]["contract"] = (
+                "literal-blocker-path-prepublication-v1"
+            )
+            with registered_resource([reg2]):
+                self.assertEqual(f2.invoke(), 1)
+            self.assertEqual(observed, [])

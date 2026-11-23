@@ -270,6 +270,111 @@ class ReservationRecoveryTests(unittest.TestCase):
                     h.ceased()
                 self.assertTrue(all(method == "GET" for method, _url, _body in h.calls))
 
+    def test_ceased_run_owner_enforces_unconditional_conclusion_attempt_bounds_and_later_non_entry(
+        self,
+    ):
+        for bad_conclusion in (None, "in_progress", "bogus"):
+            with self.subTest(bad_conclusion=bad_conclusion):
+                h = ActionsHarness()
+                h.run["conclusion"] = bad_conclusion
+                with self.assertRaisesRegex(
+                    ReviewInputError, "previous Actions run has not ceased"
+                ):
+                    h.ceased()
+
+        # Rollback conflict (run_attempt < predecessor.run_attempt) refuses fail-closed.
+        rollback = ActionsHarness()
+        rollback.run["run_attempt"] = 1
+        with self.assertRaisesRegex(
+            ReviewInputError, "previous Actions run attempt conflicts"
+        ):
+            rollback.ceased(owner=ApiExecutionOwner(2, "hosted", 0))
+
+        # Excessive later attempts (> 4) refuse fail-closed without scanning unboundedly.
+        too_many = ActionsHarness()
+        too_many.run["run_attempt"] = 6
+        with self.assertRaisesRegex(ReviewInputError, "too many later attempts"):
+            too_many.ceased(owner=ApiExecutionOwner(1, "hosted", 0))
+
+        # Later attempt with skipped business execution step qualifies cleanly.
+        later_jobs_by_attempt = {
+            1: [
+                {
+                    "id": 901,
+                    "run_id": 123,
+                    "run_attempt": 1,
+                    "name": "ReviewSensei / hosted",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "completed_at": "2026-10-06T12:01:00Z",
+                }
+            ],
+            2: [
+                {
+                    "id": 902,
+                    "run_id": 123,
+                    "run_attempt": 2,
+                    "name": "ReviewSensei / hosted",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "completed_at": "2026-10-06T12:03:00Z",
+                    "steps": [
+                        {
+                            "name": "Validate trusted workflow inputs",
+                            "status": "completed",
+                            "conclusion": "failure",
+                        },
+                        {
+                            "name": "Run hosted review",
+                            "status": "completed",
+                            "conclusion": "skipped",
+                        },
+                        {
+                            "name": "Generate and publish hosted mention reply",
+                            "status": "completed",
+                            "conclusion": "skipped",
+                        },
+                    ],
+                }
+            ],
+        }
+        run_doc = {
+            "id": 123,
+            "repository": {"id": 99, "full_name": "owner/repo"},
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": 2,
+        }
+
+        def multi_attempt_respond(request):
+            path = urlsplit(request.full_url).path
+            if path == "/repos/owner/repo/actions/runs/123":
+                return json_response(copy.deepcopy(run_doc))
+            if "/attempts/" in path and path.endswith("/jobs"):
+                att = int(path.split("/attempts/")[1].split("/")[0])
+                rows = later_jobs_by_attempt[att]
+                return json_response(
+                    {"jobs": copy.deepcopy(rows), "total_count": len(rows)}
+                )
+            raise AssertionError(path)
+
+        http_multi, _ = make_http([], routes=[(lambda _r: True, multi_attempt_respond)])
+        ev_multi = ApiRunActionsEvidence(
+            http_multi, token="actions-read", command_run_id="456"
+        )
+        proof = ev_multi.ceased_run_owner(
+            IDENTITY, 123, ApiExecutionOwner(1, "hosted", 0)
+        )
+        self.assertEqual(proof[:4], (123, 901, "2026-10-06T12:01:00Z", "failure"))
+        self.assertEqual(len(proof), 5)
+
+        # Later attempt that entered "Run hosted review" refuses fail-closed.
+        later_jobs_by_attempt[2][0]["steps"][1]["conclusion"] = "failure"
+        with self.assertRaisesRegex(
+            ReviewInputError, "entered writer step with unconfirmed effects or charges"
+        ):
+            ev_multi.ceased_run_owner(IDENTITY, 123, ApiExecutionOwner(1, "hosted", 0))
+
     def test_current_owner_permits_unrelated_ci_and_rejects_overlapping_writers(self):
         for sibling in ("ordinary-ci", "command"):
             with self.subTest(sibling=sibling):

@@ -10,6 +10,7 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
@@ -530,8 +531,9 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
     ) -> None:
         """(c) Local vs hosted writer overlap refusal and sibling-job cessation tightening."""
 
-        state = {
+        state: dict[str, Any] = {
             "run_status": "in_progress",
+            "run_conclusion": None,
             "hosted_status": "in_progress",
             "hosted_conclusion": None,
             "local_status": "in_progress",
@@ -551,6 +553,7 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                             "id": 500,
                             "run_attempt": 1,
                             "status": state["run_status"],
+                            "conclusion": state["run_conclusion"],
                             "event": "pull_request",
                             "repository": {"id": 123, "full_name": "owner/repo"},
                         }
@@ -642,10 +645,23 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                 str(err_ctx.exception),
             )
 
-        # 3. Conditional sibling jobs that never ran on GitHub Actions report
-        #    status="completed" with conclusion="skipped" (and cancelled siblings report
-        #    status="completed" with conclusion="cancelled"): both permit clean handover!
+        # 3. Completed run without a terminal conclusion refuses even when
+        #    complete_terminal_inventory=False (G08-1); once run conclusion is terminal
+        #    and siblings are skipped/cancelled, handover succeeds cleanly!
         state["run_status"] = "completed"
+        state["run_conclusion"] = None
+        state["local_status"] = "completed"
+        state["local_conclusion"] = "skipped"
+        successor_ev = ApiRunActionsEvidence(
+            http, token="actions-read", command_run_id="501", job="local"
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "previous Actions run has not ceased"
+        ):
+            successor_ev.ceased_run_owner(
+                IDENTITY, 500, ApiExecutionOwner(1, "hosted", 0)
+            )
+        state["run_conclusion"] = "success"
         for terminal_sibling_conclusion in ("skipped", "cancelled"):
             state["local_status"] = "completed"
             state["local_conclusion"] = terminal_sibling_conclusion
@@ -654,9 +670,6 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
             )
             self.assertEqual(
                 (job_id, stamp, conclusion), (5001, "2026-10-26T00:05:00Z", "success")
-            )
-            successor_ev = ApiRunActionsEvidence(
-                http, token="actions-read", command_run_id="501", job="local"
             )
             self.assertEqual(
                 successor_ev.ceased_run_owner(
@@ -1555,6 +1568,77 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                 ),
             )
         self.assertEqual(len(f.trace), before_guard_traces)
+
+    def test_non_terminal_sibling_writers_overlap_and_single_jobs_read(self) -> None:
+        """Any non-terminal sibling writer overlaps and inspect_concurrency_posture reads _jobs once."""
+        for sibling_status in (
+            "queued",
+            "waiting",
+            "pending",
+            "requested",
+            "in_progress",
+            "completed",
+        ):
+            with self.subTest(sibling_status=sibling_status):
+                calls = {"jobs": 0}
+                jobs = [
+                    {
+                        "id": 7001,
+                        "run_id": 700,
+                        "run_attempt": 1,
+                        "name": "ReviewSensei / hosted",
+                        "status": "in_progress",
+                        "conclusion": None,
+                    },
+                    {
+                        "id": 7002,
+                        "run_id": 700,
+                        "run_attempt": 1,
+                        "name": "ReviewSensei / command",
+                        "status": sibling_status,
+                        "conclusion": None,
+                    },
+                ]
+
+                def opener(req: Request, timeout: float = 5.0):
+                    _ = timeout
+                    path = urlsplit(req.full_url).path
+                    if path.endswith("/actions/runs/700"):
+                        return json_response(
+                            {
+                                "id": 700,
+                                "run_attempt": 1,
+                                "status": "in_progress",
+                                "conclusion": None,
+                                "event": "pull_request",
+                                "repository": {"id": 123, "full_name": "owner/repo"},
+                            }
+                        )
+                    if path.endswith("/actions/runs/700/attempts/1/jobs"):
+                        calls["jobs"] += 1
+                        return json_response({"total_count": len(jobs), "jobs": jobs})
+                    raise AssertionError(path)
+
+                ev = ApiRunActionsEvidence(
+                    GitHubHttp(api_url="https://api.github.test", opener=opener),
+                    token="actions-read",
+                    command_run_id="700",
+                    job="hosted",
+                )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "API writer ownership is ambiguous or overlapping"
+                ):
+                    ev.current_owner(IDENTITY, attempt=1, generation=0)
+                calls["jobs"] = 0
+                posture = ev.inspect_concurrency_posture(IDENTITY, attempt=1)
+                self.assertEqual(calls["jobs"], 1)
+                self.assertTrue(posture.overlapping_active_writers)
+                self.assertFalse(posture.exclusive_active_owner)
+                self.assertEqual(
+                    posture.active_writer_jobs,
+                    ("ReviewSensei / hosted", "ReviewSensei / command"),
+                )
+                self.assertIn("ambiguous or overlapping", posture.refusal_reason or "")
 
 
 if __name__ == "__main__":

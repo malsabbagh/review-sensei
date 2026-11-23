@@ -1855,6 +1855,7 @@ class ApiRunRequestTransport:
             )
             carried_reference = preview_candidate.finding_lifecycle
             settled_prior_record: SessionRecord | None = None
+            settled_prior_chain: tuple[SessionRecord, ...] = ()
             if old.analysis_abort is not None:
                 from .pre_entry_abort_admission import require_pre_entry_abort_admission
 
@@ -1862,11 +1863,13 @@ class ApiRunRequestTransport:
             elif pre_write_settlement_candidate:
                 from .publication_failure_recovery import (
                     admit_publication_failure_recovery,
+                    peek_admitted_prior_chain,
                 )
 
                 _, settled_prior_record = admit_publication_failure_recovery(
                     ledger, identity, record, old
                 )
+                settled_prior_chain = peek_admitted_prior_chain(ledger, record)
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
@@ -1910,7 +1913,9 @@ class ApiRunRequestTransport:
                 )
             elif pre_write_settlement_candidate:
                 updated = record.rollover_pre_write_settled_api_accounting(
-                    state.to_document(), prior_record=settled_prior_record
+                    state.to_document(),
+                    prior_record=settled_prior_record,
+                    skipped_failed_ancestors=settled_prior_chain,
                 )
             else:
                 updated = record.rollover_api_accounting(state.to_document())
@@ -3381,7 +3386,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         replaced_body = (
             len(canonical_bytes(root_bodies[0])) if selected is not None else 0
         )
-        wire = len(canonical_bytes(items)) - replaced_body + root_wire + 4096
+        wire = (
+            len(canonical_bytes(items))
+            - replaced_body
+            + max(replaced_body, root_wire)
+            + 4096
+        )
         # Core supplies the sum of canonical part wire maxima (compressBound
         # included, with the short final part), not arbitrary payload lengths.
         # Actual staging repeats this with canonical rendered-part lengths.
@@ -3419,7 +3429,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             root_index = next(
                 i for i, item in enumerate(items) if item["body"] == root_bodies[0]
             )
-            bounds[root_index] += root_wire - replaced_body + 4096
+            bounds[root_index] += max(0, root_wire - replaced_body) + 4096
             # Per-page partitioning needs individual maxima, not an average of
             # aggregate bytes. The original canonical part bound is unchanged.
             from review_sensei.bounded_evidence import MAX_PART_BYTES

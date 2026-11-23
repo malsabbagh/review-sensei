@@ -170,9 +170,10 @@ def run_decisions(
         "inventory_sha256": digest([c.to_dict() for c in result.comments]),
     }
     verify = []
+    # coverage_only_partial means text analysis completed cleanly; only binary/media files lacked coverage.
     batches = (
         [packets[i : i + 3] for i in range(0, len(packets), 3)]
-        if analysis_complete
+        if analysis_complete or result.coverage_only_partial
         else []
     )
     for batch in batches:

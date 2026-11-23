@@ -259,6 +259,16 @@ class LifecycleDiagnostics:
             if mask & (1 << index)
         ]
 
+    def _runtime_packages(self) -> list[dict[str, object]] | None:
+        try:
+            from review_sensei.provenance_manifest import (
+                inspect_current_process_packages,
+            )
+
+            return [dict(obs.to_dict()) for obs in inspect_current_process_packages()]
+        except BaseException:
+            return None
+
     def _minimal(self, reason: str) -> str:
         return PREFIX + json.dumps(
             {
@@ -320,8 +330,15 @@ class LifecycleDiagnostics:
                 "recovery_classification": "not_evaluated",
                 "authority": False,
                 "check_proof_hook_failures": self._check_proof_failures(),
+                "runtime_packages": self._runtime_packages(),
             }
             line = PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"))
+            if (
+                len((line + "\n").encode()) > MAX_LINE_BYTES
+                and value["runtime_packages"] is not None
+            ):
+                value["runtime_packages"] = None
+                line = PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"))
         except BaseException:
             line = self._minimal("diagnostic_unavailable")
         if len((line + "\n").encode()) > MAX_LINE_BYTES:

@@ -6,7 +6,9 @@ provider; every expected identity is recomputed before retained bytes are read.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Any, cast
 import review_sensei
 from review_sensei.api_work import ACCOUNTING_VERSION
 from review_sensei.baseline import ReviewBaseline, baseline_complete_document
+from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.cli import (
     _CANONICAL_BACKEND_ADAPTERS,
     _configured_resource_budget,
@@ -47,7 +50,9 @@ from review_sensei.outcomes import ResourceBudget
 from review_sensei.provenance_manifest import prescribe_recovery
 from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.registry import ProviderSettings
+from review_sensei.publication_staging import MAX_STAGING_BYTES
 from review_sensei.recovery_context import (
+    MAX_SESSION_COMMENT_BYTES,
     RUNTIME_ONLY_FIELD_LABELS,
     OriginalRecoveryContextBundle,
     RecoveryContextDecision,
@@ -145,6 +150,7 @@ def verify_stored_recovery_context(
     ancestor_run_ids: Sequence[int] = (),
     current_root_bytes: int = 4_096,
     intermediate_root_bytes: int = 4_096,
+    current_comment_bytes: int = 0,
     result_part_count: int = 1,
     total_decoded_bytes: int = 16_384,
     original_api_limit: int = 512,
@@ -171,6 +177,7 @@ def verify_stored_recovery_context(
         ancestor_run_ids=ancestor_run_ids,
         current_root_bytes=current_root_bytes,
         intermediate_root_bytes=intermediate_root_bytes,
+        current_comment_bytes=current_comment_bytes,
         result_part_count=result_part_count,
         total_decoded_bytes=total_decoded_bytes,
         original_api_limit=original_api_limit,
@@ -524,6 +531,7 @@ def reconstruct_publication_contexts(
     ancestor_run_ids: Sequence[int] = (),
     current_root_bytes: int = 4_096,
     intermediate_root_bytes: int = 4_096,
+    current_comment_bytes: int = 0,
     result_part_count: int = 1,
     total_decoded_bytes: int = 16_384,
     original_api_limit: int = 512,
@@ -581,6 +589,7 @@ def reconstruct_publication_contexts(
             ancestor_run_ids=ancestor_run_ids,
             current_root_bytes=current_root_bytes,
             intermediate_root_bytes=intermediate_root_bytes,
+            current_comment_bytes=current_comment_bytes,
             result_part_count=result_part_count,
             total_decoded_bytes=total_decoded_bytes,
             original_api_limit=original_api_limit,
@@ -859,6 +868,7 @@ def reconstruct_publication_contexts(
             ancestor_run_ids=ancestor_run_ids,
             current_root_bytes=current_root_bytes,
             intermediate_root_bytes=intermediate_root_bytes,
+            current_comment_bytes=current_comment_bytes,
             result_part_count=result_part_count,
             total_decoded_bytes=total_decoded_bytes,
             original_api_limit=original_api_limit,
@@ -1013,6 +1023,7 @@ def reconstruct_or_prescribe_publication_contexts(
     ancestor_run_ids: Sequence[int] = (),
     current_root_bytes: int = 4_096,
     intermediate_root_bytes: int = 4_096,
+    current_comment_bytes: int = 0,
     result_part_count: int = 1,
     total_decoded_bytes: int = 16_384,
     original_api_limit: int = 512,
@@ -1059,6 +1070,7 @@ def reconstruct_or_prescribe_publication_contexts(
             ancestor_run_ids=ancestor_run_ids,
             current_root_bytes=current_root_bytes,
             intermediate_root_bytes=intermediate_root_bytes,
+            current_comment_bytes=current_comment_bytes,
             result_part_count=result_part_count,
             total_decoded_bytes=total_decoded_bytes,
             original_api_limit=original_api_limit,
@@ -1116,6 +1128,7 @@ def reconstruct_or_prescribe_publication_contexts(
         ancestor_run_ids=ancestor_run_ids,
         current_root_bytes=current_root_bytes,
         intermediate_root_bytes=intermediate_root_bytes,
+        current_comment_bytes=current_comment_bytes,
         result_part_count=result_part_count,
         total_decoded_bytes=total_decoded_bytes,
         original_api_limit=original_api_limit,
@@ -1126,3 +1139,107 @@ def reconstruct_or_prescribe_publication_contexts(
     if not decision.admitted:
         return (None, decision)
     return (reconstructed, decision)
+
+
+def measure_staged_recovery_footprint(
+    record: SessionRecord,
+    *,
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    recovered_result: Any | None = None,
+) -> tuple[int, int, int, int, int]:
+    """Return ``(current_root_bytes, intermediate_root_bytes, current_comment_bytes, result_part_count, total_decoded_bytes)``."""
+
+    from .operation_host import RESULT_COMMENT_MARKER, comment_payload
+    from .publication_recovery import _event_key
+    from .session_ledger import (
+        GitHubIssueCommentSessionLedger,
+        _marker_shaped,
+        render_session_comment,
+    )
+
+    current_root_bytes = len(canonical_bytes(record.to_dict()))
+    existing_staging_bytes = (
+        len(canonical_bytes(record.publication_staging))
+        if record.publication_staging is not None
+        else 0
+    )
+    intermediate_root_bytes = max(
+        current_root_bytes,
+        current_root_bytes - existing_staging_bytes + MAX_STAGING_BYTES,
+    )
+    current_comment_bytes = 0
+    if (
+        isinstance(ledger, GitHubIssueCommentSessionLedger)
+        and identity.repository_id is not None
+    ):
+        try:
+            current_comment_bytes = len(
+                render_session_comment(
+                    repository_id=identity.repository_id,
+                    pull_request=identity.pull_request,
+                    record=record,
+                ).encode("utf-8")
+            )
+        except ReviewInputError:
+            current_comment_bytes = MAX_SESSION_COMMENT_BYTES + 1
+
+    staged_parts = 0
+    staged_decoded = 0
+    cached_fn = getattr(ledger, "_cached_comments", None)
+    if callable(cached_fn):
+        cached_comments = cached_fn()
+        expected_key = (
+            _event_key(identity, record.transaction)
+            if record.transaction is not None
+            and record.transaction.result_sha256 is not None
+            else None
+        )
+        seen_ids: set[int] = set()
+        for item in cached_comments:
+            if not isinstance(item, Mapping):
+                continue
+            body = item.get("body")
+            if not isinstance(body, str):
+                continue
+            if _marker_shaped(body):
+                current_comment_bytes = max(
+                    current_comment_bytes, len(body.encode("utf-8"))
+                )
+            if expected_key is None or RESULT_COMMENT_MARKER not in body:
+                continue
+            cid = item.get("id")
+            if type(cid) is int:
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+            try:
+                payload = json.loads(comment_payload(body))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("kind") != "result":
+                continue
+            if payload.get("event_key") != expected_key:
+                continue
+            data = payload.get("data")
+            if not isinstance(data, str):
+                continue
+            try:
+                decoded = base64.b64decode(data.encode("ascii"), validate=True)
+            except (ValueError, UnicodeError):
+                continue
+            staged_parts += 1
+            staged_decoded += len(decoded)
+
+    result_part_count = max(1, staged_parts) if staged_parts > 0 else 1
+    total_decoded_bytes = max(1, staged_decoded) if staged_parts > 0 else 16_384
+    if recovered_result is not None:
+        recovered_bytes = len(canonical_bytes(recovered_result.to_dict()))
+        total_decoded_bytes = max(staged_decoded, recovered_bytes)
+    return (
+        current_root_bytes,
+        intermediate_root_bytes,
+        current_comment_bytes,
+        result_part_count,
+        total_decoded_bytes,
+    )

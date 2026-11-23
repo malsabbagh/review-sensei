@@ -366,7 +366,11 @@ native receipts are recorded:
   (`transaction.phase == "publication_succeeded"` with null `terminal_transaction`,
   null `terminal_action`, null `analysis_abort` cleanup, and missing close
   diagnostics) is held as `state_code="same_head_unclosed_publication_succeeded"`
-  (or `"superseded_head_unclosed_publication_succeeded"` across head advance)
+  (or across head advance when ineligible, one of the narrow unclosed
+  publication states such as `"unclosed_publication_failed_executor"`,
+  `"unclosed_publication_unrecognized_executor"`,
+  `"unclosed_publication_owner_active"`, or
+  `"unclosed_publication_missing_historical_evidence"`)
   with `terminal_settlement_form="unsettled"`, `inferred_cause="unknown"`, and
   explicit missing proofs rather than inventing a diagnosis from absent logs.
 - **Pre-entry abort vs provider-entered holds (`pre_entry_abort_recovery`, G29):**

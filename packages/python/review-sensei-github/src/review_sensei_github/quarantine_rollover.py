@@ -233,6 +233,7 @@ def replace_quarantine_rollover(
         _history_legacy_write_guard(ledger, record)
         from .publication_failure_recovery import (
             clear_admitted_prior_record,
+            consume_admitted_prior_chain,
             consume_admitted_prior_record,
         )
 
@@ -245,9 +246,15 @@ def replace_quarantine_rollover(
             updated = prepare(record)
             # admit_publication_failure_recovery stashes the prior record only while
             # _mutation_active is True inside prepare(); finally clears on failure.
-            admitted_prior = consume_admitted_prior_record(ledger, record)
             require_native_decision(ledger, record, updated)
-            _validate_queue_retention(record, updated, prior_record=admitted_prior)
+            admitted_prior = consume_admitted_prior_record(ledger, record)
+            admitted_chain = consume_admitted_prior_chain(ledger, record)
+            _validate_queue_retention(
+                record,
+                updated,
+                prior_record=admitted_prior,
+                skipped_failed_ancestors=admitted_chain,
+            )
             read_session_baseline(ledger, updated)
             read_session_dispositions(ledger, updated)
             read_session_assessment_queue(ledger, updated)

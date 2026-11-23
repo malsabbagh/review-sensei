@@ -638,25 +638,62 @@ class ReviewDecisionEngineTests(unittest.TestCase):
             self.request("src/app.py"),
             diff=diff_for("src/app.py") + binary_diff,
         )
-        clean_binary_run = self.service(
-            ReviewFixture(comments=[]), DecisionFixture()
-        ).run(binary_request)
+        clean_decision = DecisionFixture()
+        clean_binary_run = self.service(ReviewFixture(comments=[]), clean_decision).run(
+            binary_request
+        )
         self.assertEqual(clean_binary_run.result.review_status, "partial")
         self.assertTrue(clean_binary_run.result.coverage_only_partial)
+        self.assertEqual(clean_decision.dispatches, [])
         self.assertEqual(clean_binary_run.result.decision_pass["candidates"], [])
 
-        blocking_binary_run = self.service(
-            ReviewFixture(comments=[comment(blocking=True)]),
-            DecisionFixture(),
+        advisory_decision = DecisionFixture(answers={"kind": "optional_improvement"})
+        advisory_binary_run = self.service(
+            ReviewFixture(comments=[comment(blocking=False)]),
+            advisory_decision,
         ).run(binary_request)
-        self.assertEqual(blocking_binary_run.result.review_status, "partial")
-        self.assertFalse(blocking_binary_run.result.coverage_only_partial)
+        self.assertGreater(len(advisory_decision.dispatches), 0)
+        self.assertEqual(advisory_binary_run.result.review_status, "partial")
+        self.assertTrue(advisory_binary_run.result.coverage_only_partial)
+        self.assertEqual(
+            advisory_binary_run.result.decision_pass["candidates"][0]["action"],
+            "optional_suggestion",
+        )
+
+        continue_blocking_decision = DecisionFixture()
+        continue_blocking_run = self.service(
+            ReviewFixture(comments=[comment(blocking=True)]),
+            continue_blocking_decision,
+        ).run(binary_request)
+        self.assertGreater(len(continue_blocking_decision.dispatches), 0)
+        self.assertEqual(continue_blocking_run.result.review_status, "partial")
+        self.assertTrue(continue_blocking_run.result.coverage_only_partial)
+        self.assertEqual(
+            continue_blocking_run.result.decision_pass["candidates"][0]["action"],
+            "continue",
+        )
+
+        human_review_decision = DecisionFixture(answers={"next": "human_review"})
+        human_review_binary_run = self.service(
+            ReviewFixture(comments=[comment(blocking=True)]),
+            human_review_decision,
+        ).run(binary_request)
+        self.assertGreater(len(human_review_decision.dispatches), 0)
+        self.assertEqual(human_review_binary_run.result.review_status, "partial")
+        self.assertFalse(human_review_binary_run.result.coverage_only_partial)
+        self.assertEqual(
+            human_review_binary_run.result.decision_pass["candidates"][0]["action"],
+            "human_review",
+        )
 
         for failure in ("malformed", "transport"):
             with self.subTest(failure=failure):
+                failed_decision = DecisionFixture(failure=failure)
                 failed_run = self.service(
-                    ReviewFixture(), DecisionFixture(failure=failure)
-                ).run(self.request())
+                    ReviewFixture(comments=[comment(blocking=False)]),
+                    failed_decision,
+                ).run(binary_request)
+                self.assertGreater(len(failed_decision.dispatches), 0)
                 self.assertEqual(failed_run.result.review_status, "partial")
                 self.assertFalse(failed_run.result.coverage_only_partial)
 

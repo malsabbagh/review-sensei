@@ -19,7 +19,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Mapping, Protocol, Sequence, cast
+from typing import Any, Mapping, Protocol, Sequence, TypedDict, cast
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -79,6 +79,8 @@ def _read_cached_manifest_in_memory(
     ledger: Any,
     identity: SessionIdentity,
     manifest: object,
+    *,
+    max_generation: int | None = None,
 ) -> object | None:
     """Decode inline or already-cached partitioned evidence with zero HTTP or cache writes."""
     from review_sensei.bounded_evidence import (
@@ -87,13 +89,25 @@ def _read_cached_manifest_in_memory(
         canonical_bytes,
         read_inline_evidence,
         read_partitioned_evidence,
+        validate_binding,
     )
 
     if not isinstance(manifest, dict):
         return None
-    binding = manifest.get("binding")
-    if not isinstance(binding, dict):
-        raise ReviewInputError("finding lifecycle manifest binding is invalid")
+    binding = validate_binding(manifest.get("binding"))
+    producer_fn = getattr(ledger, "evidence_producer", None)
+    if not callable(producer_fn):
+        raise ReviewInputError("finding lifecycle manifest producer is unavailable")
+    binding_gen = binding["generation"]
+    if (
+        binding["repository"] != identity.repository
+        or binding["repository_id"] != identity.repository_id
+        or binding["pull_request"] != identity.pull_request
+        or binding["producer"] != producer_fn()
+        or type(binding_gen) is not int
+        or (max_generation is not None and not 0 <= binding_gen <= max_generation)
+    ):
+        raise ReviewInputError("finding lifecycle manifest binding conflicts")
     encoding = manifest.get("encoding")
     if encoding == "inline-json-v1":
         return read_inline_evidence(manifest, expected_binding=binding)
@@ -570,7 +584,6 @@ class ReviewRunHooks(ApiRunReviewHooks):
             from .finding_lifecycle import _unpack_journal, _validate
             from .finding_lifecycle_dictionary import is_dictionary, unpack
             from .publication import ReviewPublisher, _reject_conflicting_instances
-            from .quarantine_namespace import inherited_namespace_is_historical
 
             _reject_conflicting_instances(result.comments)
             publisher = ReviewPublisher(http=self.ledger.http)
@@ -595,7 +608,10 @@ class ReviewRunHooks(ApiRunReviewHooks):
             if effect_record.finding_lifecycle is not None:
                 manifest = effect_record.finding_lifecycle.get("manifest")
                 envelope = _read_cached_manifest_in_memory(
-                    self.ledger, self.identity, manifest
+                    self.ledger,
+                    self.identity,
+                    manifest,
+                    max_generation=effect_record.generation,
                 )
                 if (
                     not isinstance(envelope, dict)
@@ -604,11 +620,19 @@ class ReviewRunHooks(ApiRunReviewHooks):
                     return
                 assert isinstance(manifest, dict)
                 binding = manifest["binding"]
+                binding_generation = binding.get("generation")
+                if type(binding_generation) is not int:
+                    raise ReviewInputError(
+                        "finding lifecycle manifest generation is invalid"
+                    )
                 packed = envelope.get("lifecycle")
                 if isinstance(packed, dict) and is_dictionary(packed):
                     dict_manifest = packed.get("dictionary_manifest")
                     base = _read_cached_manifest_in_memory(
-                        self.ledger, self.identity, dict_manifest
+                        self.ledger,
+                        self.identity,
+                        dict_manifest,
+                        max_generation=binding_generation,
                     )
                     if base is None:
                         return
@@ -616,10 +640,6 @@ class ReviewRunHooks(ApiRunReviewHooks):
                 else:
                     document = _validate(_unpack_journal(packed))
                 restored = decode_lifecycle_state(document["lifecycle"])
-                if inherited_namespace_is_historical(
-                    self.ledger, effect_record, restored.state, document
-                ):
-                    return
                 if not isinstance(restored.state, DriftEvaluationResult):
                     return
                 publisher._drift_states[repo_key] = restored.state
@@ -814,8 +834,11 @@ class ReviewRun:
         from review_sensei.validation import read_bounded_utf8
 
         from .publication_context_recovery import (
+            bundle_from_reconstructed_contexts,
+            measure_staged_recovery_footprint,
             reconstruct_publication_contexts,
             resolve_recovery_placement_mode,
+            verify_stored_recovery_context,
         )
         from .publication_recovery import recover_retained_review_result
 
@@ -843,26 +866,21 @@ class ReviewRun:
             for block in accounting.blocks
             if block.issued_by != accounting.owner
         )
-        current_root_bytes = len(
-            json.dumps(
-                loaded.record.to_dict(), sort_keys=True, separators=(",", ":")
-            ).encode("utf-8")
+        (
+            current_root_bytes,
+            intermediate_root_bytes,
+            current_comment_bytes,
+            result_part_count,
+            total_decoded_bytes,
+        ) = measure_staged_recovery_footprint(
+            loaded.record, ledger=self.ledger, identity=self.identity
         )
         ancestor_hashes: tuple[str, ...] = ()
         ancestor_runs: tuple[int, ...] = ()
         if accounting.previous_record is not None:
             ancestor_hashes = (str(accounting.previous_record["root_sha256"]),)
             ancestor_runs = (int(cast(int, accounting.previous_record["run_id"])),)
-        result_part_count = 1
-        if isinstance(loaded.record.publication_staging, Mapping) and isinstance(
-            loaded.record.publication_staging.get("parts"), Sequence
-        ):
-            result_part_count = max(1, len(loaded.record.publication_staging["parts"]))
-        has_cli_overrides = (
-            any(_has_option(argv, opt) for opt in ("--provider", "--model"))
-            or bool(os.environ.get("REVIEWSENSEI_PROVIDER", "").strip())
-            or bool(os.environ.get("REVIEWSENSEI_MODEL", "").strip())
-        )
+        runtime_only_flags = _capture_runtime_only_flags(args, argv)
         raw_cli_provider = _explicit_cli_value(args, argv, "provider")
         raw_cli_model = _explicit_cli_value(args, argv, "model")
         cli_provider = raw_cli_provider if isinstance(raw_cli_provider, str) else None
@@ -872,6 +890,9 @@ class ReviewRun:
         ) or _env_flag("REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT")
         symbol_allowed_paths = tuple(
             getattr(args, "symbol_context_allowed_path", ()) or ()
+        )
+        placement_mode = resolve_recovery_placement_mode(
+            publication_inventory="complete", review_mode=policy.mode
         )
         contexts = reconstruct_publication_contexts(
             source_root=Path.cwd(),
@@ -913,18 +934,19 @@ class ReviewRun:
             recovery_store=self.recovery_context_store,
             policy_commit=accounting.configuration.commit,
             base_ref=self.base_branch,
-            placement_mode=resolve_recovery_placement_mode(
-                publication_inventory="complete", review_mode=policy.mode
-            ),
+            placement_mode=placement_mode,
             producer="github-actions-review-run",
             current_run_id=self.caller.run.run_id,
             attempt=accounting.owner.run_attempt,
-            runtime_only_flags={"cli_overrides": has_cli_overrides},
+            runtime_only_flags=runtime_only_flags,
             current_root_sha256=loaded.record.record_sha256,
             ancestor_record_sha256s=ancestor_hashes,
             ancestor_run_ids=ancestor_runs,
             current_root_bytes=current_root_bytes,
+            intermediate_root_bytes=intermediate_root_bytes,
+            current_comment_bytes=current_comment_bytes,
             result_part_count=result_part_count,
+            total_decoded_bytes=total_decoded_bytes,
             original_api_limit=accounting.configuration.limit,
             already_consumed_requests=already_consumed,
             unknown_usage_requests=unknown_usage,
@@ -946,6 +968,60 @@ class ReviewRun:
             convergence_policy=policy,
             budget=self.caller.budget_view,
         )
+        if self.recovery_context_store is not None:
+            (
+                rec_root_bytes,
+                rec_intermediate_root_bytes,
+                rec_comment_bytes,
+                rec_part_count,
+                rec_decoded_bytes,
+            ) = measure_staged_recovery_footprint(
+                loaded.record,
+                ledger=self.ledger,
+                identity=self.identity,
+                recovered_result=result,
+            )
+            if (
+                rec_decoded_bytes > total_decoded_bytes
+                or rec_part_count > result_part_count
+                or rec_comment_bytes > current_comment_bytes
+                or rec_root_bytes > current_root_bytes
+                or rec_intermediate_root_bytes > intermediate_root_bytes
+            ):
+                expected_bundle = bundle_from_reconstructed_contexts(
+                    contexts,
+                    source_root=Path.cwd(),
+                    diff=diff,
+                    ledger=self.ledger,
+                    identity=self.identity,
+                    base_ref=self.base_branch,
+                    policy_commit=accounting.configuration.commit,
+                    placement_mode=placement_mode,
+                    producer="github-actions-review-run",
+                    run_id=self.caller.run.run_id,
+                    attempt=accounting.owner.run_attempt,
+                    runtime_only_flags=runtime_only_flags,
+                    _preloaded_record=loaded.record,
+                )
+                verify_stored_recovery_context(
+                    self.recovery_context_store,
+                    expected_bundle=expected_bundle,
+                    current_run_id=self.caller.run.run_id,
+                    current_root_sha256=loaded.record.record_sha256,
+                    ancestor_record_sha256s=ancestor_hashes,
+                    ancestor_run_ids=ancestor_runs,
+                    current_root_bytes=max(current_root_bytes, rec_root_bytes),
+                    intermediate_root_bytes=max(
+                        intermediate_root_bytes, rec_intermediate_root_bytes
+                    ),
+                    current_comment_bytes=max(current_comment_bytes, rec_comment_bytes),
+                    result_part_count=max(result_part_count, rec_part_count),
+                    total_decoded_bytes=rec_decoded_bytes,
+                    original_api_limit=accounting.configuration.limit,
+                    already_consumed_requests=already_consumed,
+                    unknown_usage_requests=unknown_usage,
+                    active_reserved_requests=active_reserved,
+                )
         return CompletedAnalysis(
             result,
             contexts.baseline,
@@ -1128,11 +1204,7 @@ class ReviewRun:
                 resolve_recovery_placement_mode,
             )
 
-            has_cli_overrides = (
-                any(_has_option(argv, opt) for opt in ("--provider", "--model"))
-                or bool(os.environ.get("REVIEWSENSEI_PROVIDER", "").strip())
-                or bool(os.environ.get("REVIEWSENSEI_MODEL", "").strip())
-            )
+            capture_args = engine_parser(include_hosted=True).parse_args(argv)
             capture_recovery_context_bundle(
                 self.recovery_context_store,
                 transaction=analysis.result.transaction,
@@ -1154,7 +1226,7 @@ class ReviewRun:
                 producer="github-actions-review-run",
                 run_id=self.caller.run.run_id,
                 attempt=self.caller.accounting.owner.run_attempt,
-                runtime_only_flags={"cli_overrides": has_cli_overrides},
+                runtime_only_flags=_capture_runtime_only_flags(capture_args, argv),
             )
         application = GitHubApplication(
             broker=self.broker,
@@ -1175,6 +1247,9 @@ class ReviewRun:
                     original_reference=hooks.prior_inventory_reference,
                 )
             )
+        from .trust_enrollment import enroll_application_trust_snapshot
+
+        observed_trust = enroll_application_trust_snapshot(application, self)
         lifecycle_diagnostics.phase("publication")
         try:
             publication: PublicationResult = hooks.publish_review(
@@ -1206,6 +1281,7 @@ class ReviewRun:
                 baseline=analysis.baseline,
                 current_key=analysis.current_key,
                 changed_paths=analysis.changed_paths,
+                observed_trust=observed_trust,
             )
         except ReviewSenseiError:
             # A durable native intent may stop a later effect before the
@@ -2239,6 +2315,59 @@ def _has_option(argv: Sequence[str], name: str) -> bool:
     return any(arg == name or arg.startswith(name + "=") for arg in argv)
 
 
+def _capture_runtime_only_flags(
+    args: argparse.Namespace, argv: Sequence[str]
+) -> dict[str, bool]:
+    """Classify runtime-only custom stage and CLI/env override flags consistently."""
+
+    from review_sensei.cli import _env_flag
+
+    has_custom_stages = bool(
+        getattr(args, "stages_dir", None) is not None
+        or getattr(args, "categories_dir", None) is not None
+        or _has_option(argv, "--stages-dir")
+        or _has_option(argv, "--categories-dir")
+        or os.environ.get("REVIEWSENSEI_STAGES_DIR", "").strip()
+        or os.environ.get("REVIEWSENSEI_CATEGORIES_DIR", "").strip()
+    )
+    has_cli_overrides = bool(
+        any(
+            _has_option(argv, opt)
+            for opt in (
+                "--provider",
+                "--model",
+                "--profile",
+                "--base-url",
+                "--api-key-env",
+                "--timeout-seconds",
+                "--allow-custom-endpoint",
+                "--allow-unqualified-profile",
+                "--enable-symbol-context",
+                "--symbol-context-allowed-path",
+                "--symbol-context-max-files",
+                "--symbol-context-max-bytes",
+                "--symbol-context-max-depth",
+                "--orchestrate-large-changes",
+                "--evidence-policy",
+                "--snapshot-sha256",
+            )
+        )
+        or getattr(args, "enable_symbol_context", False)
+        or getattr(args, "orchestrate_large_changes", False)
+        or bool(getattr(args, "symbol_context_allowed_path", ()) or ())
+        or os.environ.get("REVIEWSENSEI_PROVIDER", "").strip()
+        or os.environ.get("REVIEWSENSEI_MODEL", "").strip()
+        or os.environ.get("REVIEWSENSEI_PROFILE", "").strip()
+        or os.environ.get("OLLAMA_MODEL", "").strip()
+        or os.environ.get("OLLAMA_BASE_URL", "").strip()
+        or _env_flag("REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT")
+    )
+    return {
+        "custom_stages": has_custom_stages,
+        "cli_overrides": has_cli_overrides,
+    }
+
+
 def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     parser = argparse.ArgumentParser(prog="review-sensei-github review-run")
     parser.add_argument("--policy-commit", required=True)
@@ -2249,6 +2378,12 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         "--enable-current-trust-enrollment",
         action="store_true",
         help="Opt in to original observed trust enrollment with a compatible v4 broker; not continuous trust history or effect authorization.",
+    )
+    parser.add_argument(
+        "--observe-original-actor-role",
+        action="store_true",
+        default=False,
+        help="Opt in to observing the original actor role via v4 broker (requires --enable-current-trust-enrollment); default-off.",
     )
     parser.add_argument("--recovery-context-dir", type=Path, default=None)
     parser.add_argument("--recovery-context-key-file", type=Path, default=None)
@@ -2301,6 +2436,15 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
                 "controlled restart diff cannot use retained history storage"
             )
         try:
+
+            class _ActorRoleKwargs(TypedDict, total=False):
+                observe_original_actor_role: bool
+
+            actor_role_kwargs: _ActorRoleKwargs = (
+                {"observe_original_actor_role": True}
+                if options.observe_original_actor_role
+                else {}
+            )
             selected = bootstrap(
                 args,
                 run_directory=options.run_directory,
@@ -2311,6 +2455,7 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
                 recovery_context_key_file=options.recovery_context_key_file,
                 recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
                 enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+                **actor_role_kwargs,
                 input_directory=Path(working_directory),
             )
         except _PreRolloverMigrationHold as error:

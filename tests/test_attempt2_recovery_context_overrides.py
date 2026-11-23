@@ -1293,6 +1293,80 @@ class Attempt2HostedRecoveryContextOverridesTests(unittest.TestCase):
             self.assertFalse(refusal.admitted)
             self.assertEqual(refusal.refusal_code, "absent_context")
 
+    def test_attempt1_and_attempt2_populate_custom_stages_and_full_cli_overrides(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as handoff_root,
+        ):
+            extra_files = {
+                "docs/storage.md": "Storage writes must be atomic.\n",
+                "src/helper.py": "VALUE = 1\n",
+                ".reviewsensei/categories/storage.json": _custom_category_json(),
+                ".reviewsensei/stages/10-storage.json": _custom_stage_json(),
+            }
+            fx = _OverrideEntryFixture(directory, extra_files=extra_files)
+            handoff_dir, hmac_file = _setup_handoff(Path(handoff_root))
+            fx.recovery_context_dir = handoff_dir
+            fx.recovery_context_hmac_path = hmac_file
+            fx.extra_engine_args = [
+                "--stages-dir",
+                ".reviewsensei/stages",
+                "--categories-dir",
+                ".reviewsensei/categories",
+                "--enable-symbol-context",
+                "--symbol-context-allowed-path",
+                "src/**",
+                "--orchestrate-large-changes",
+            ]
+            fx.before_publication = lambda: (_ for _ in ()).throw(
+                OSError("simulated crash before publication")
+            )
+            self.assertEqual(fx.invoke(), 1, fx.error)
+            handoff_files = list(handoff_dir.glob("*.json"))
+            self.assertEqual(len(handoff_files), 1)
+            attempt1_bundle = json.loads(handoff_files[0].read_text(encoding="utf-8"))[
+                "document"
+            ]["bundle"]
+            self.assertFalse(attempt1_bundle["reconstructible_from_defaults"])
+            self.assertEqual(
+                attempt1_bundle["runtime_only_fields"],
+                ["cli_overrides", "custom_stages"],
+            )
+
+            _clear_local_diagnostics(fx.root)
+            fx.before_publication = None
+            fx.attempt = 2
+            fx.override_run_directory = Path(handoff_root) / "attempt2-run"
+            fx.override_run_directory.mkdir()
+            captured_verify: list[tuple[str, ...]] = []
+            original_verify = review_run.ReviewRun.retained_analysis
+
+            def observe_retained(selected, argv):  # type: ignore[no-untyped-def]
+                captured_verify.append(
+                    tuple(
+                        sorted(
+                            k
+                            for k, v in review_run._capture_runtime_only_flags(
+                                review_run.engine_parser(
+                                    include_hosted=True
+                                ).parse_args(argv),
+                                argv,
+                            ).items()
+                            if v
+                        )
+                    )
+                )
+                return original_verify(selected, argv)
+
+            with patch.object(
+                review_run.ReviewRun, "retained_analysis", observe_retained
+            ):
+                self.assertEqual(fx.invoke(), 0, fx.error)
+            self._assert_attempt2_approved_and_closed(fx)
+            self.assertEqual(captured_verify, [("cli_overrides", "custom_stages")])
+
 
 class _SingleRecordLedger:
     def __init__(self, record):  # type: ignore[no-untyped-def]

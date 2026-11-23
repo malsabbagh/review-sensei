@@ -10,6 +10,7 @@ import hashlib
 import json
 import time
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
@@ -23,6 +24,7 @@ from review_sensei.trust_enrollment import (
 )
 
 from .run_authority import parse_authority
+from .trust_transitions import AuthenticatedTrustSnapshot
 
 
 @dataclass(frozen=True, eq=False)
@@ -179,6 +181,97 @@ def original_observation(record):
     document = reference["document"]
     parse_authority(document["authority"], grant=True)
     return document
+
+
+def _snapshot_from_authority(
+    authority: dict[str, Any],
+    *,
+    actor_permission: str | None = None,
+) -> AuthenticatedTrustSnapshot:
+    obs = authority["current_observation"]
+    repo = obs["repository"]
+    inst = obs["installation"]
+    actor = obs["actor"]
+    effective_permission = (
+        actor["repository_permission"]
+        if obs["schema_version"] == "current-observation-v2"
+        else actor_permission
+    )
+    capability = obs.get("capability")
+    required_permissions = (
+        dict(capability["permissions"])
+        if isinstance(capability, Mapping)
+        and isinstance(capability.get("permissions"), Mapping)
+        and capability["permissions"]
+        else None
+    )
+    return AuthenticatedTrustSnapshot(
+        repository_id=repo["id"],
+        owner_id=repo["owner_id"],
+        owner_login=repo["owner_login"],
+        repository_slug=repo["full_name"],
+        is_fork=repo["fork"],
+        installation_id=inst["id"],
+        repository_selected=bool(
+            inst["repository_access"] is True
+            and inst["repository_selection"] in {"all", "selected"}
+        ),
+        granted_permissions=dict(inst["permissions"]),
+        actor_id=actor["id"],
+        actor_login=actor["login"],
+        actor_association=actor["source_association"] or "NONE",
+        actor_permission=effective_permission,
+        pull_request=authority["pull_request"],
+        head_sha=authority["head_sha"],
+        permission_epoch=None,
+        continuous_history="unavailable",
+        required_permissions=required_permissions,
+    )
+
+
+def enrolled_trust_snapshot_from_record(
+    record: Any,
+    *,
+    actor_permission: str | None = None,
+) -> AuthenticatedTrustSnapshot:
+    """Convert verified original-trust-enrollment-v1 to ``AuthenticatedTrustSnapshot``."""
+    document = original_observation(record)
+    return _snapshot_from_authority(
+        document["authority"], actor_permission=actor_permission
+    )
+
+
+def observed_trust_snapshot_from_authority(
+    authority: object,
+    *,
+    actor_permission: str | None = None,
+) -> AuthenticatedTrustSnapshot | None:
+    """Build a current ``AuthenticatedTrustSnapshot`` from verified v4 authority."""
+    if not isinstance(authority, dict) or authority.get("version") != 4:
+        return None
+    parsed = parse_authority(authority, grant=True)
+    return _snapshot_from_authority(parsed, actor_permission=actor_permission)
+
+
+def enroll_application_trust_snapshot(
+    application: Any,
+    run: Any,
+    *,
+    actor_permission: str | None = None,
+) -> AuthenticatedTrustSnapshot | None:
+    """Enroll durable ``SessionRecord.trust_enrollment`` onto ``application`` when present."""
+    from review_sensei.session import SessionRecord
+
+    caller = getattr(run, "caller", None)
+    record = getattr(caller, "_effect_record", None) if caller is not None else None
+    if not isinstance(record, SessionRecord) or record.trust_enrollment is None:
+        return None
+    snapshot = enrolled_trust_snapshot_from_record(record)
+    application.enroll_trust_snapshot(snapshot=snapshot)
+    return observed_trust_snapshot_from_authority(
+        getattr(run, "session_authority", None),
+        actor_permission=actor_permission,
+    )
 
 
 def compare_current_observation(broker, session, record):
