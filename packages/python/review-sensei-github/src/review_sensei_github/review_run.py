@@ -1555,6 +1555,7 @@ def bootstrap(
     observe_original_actor_role: bool = False,
     input_directory: Path | None = None,
     command_action: str | None = None,
+    allow_duplicate_terminal: bool = False,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     if purpose == "review" and args.diff is None and input_directory is None:
@@ -1812,10 +1813,29 @@ def bootstrap(
     ):
         raise ReviewInputError("live reviewed base or head conflicts")
     if purpose in {"command", "reply"}:
+        from .accepted_semantic_history import action_operation_key
+
+        op_key = (
+            None
+            if source is None
+            else action_operation_key(
+                purpose=purpose,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+                source=source,
+                configuration_digest=frozen.digest,
+            )
+        )
         setattr(
             caller,
             "_accepted_semantic_target",
-            (purpose, args.base_sha, args.head_sha, command_action),
+            (purpose, args.base_sha, args.head_sha, command_action, source, op_key),
+        )
+        setattr(
+            caller,
+            "_allow_duplicate_terminal_delivery",
+            bool(allow_duplicate_terminal),
         )
     title = pull.get("title", "")
     if not isinstance(title, str) or len(title.encode("utf-8")) > 256:

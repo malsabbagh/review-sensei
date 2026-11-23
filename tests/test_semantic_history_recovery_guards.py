@@ -748,6 +748,275 @@ class SemanticHistoryRecoveryGuardsTests(unittest.TestCase):
             self.assertTrue(retained["records"][-1]["made_progress"])
             self.assertNotIn("disposition_entry", retained["records"][-1])
 
+    def test_semantic_advancement_recognizes_pending_decrement_and_unknown_trust_resolution(
+        self,
+    ):
+        base_snap = {
+            "base_sha": "a" * 40,
+            "head_sha": HEAD,
+            "review_complete": True,
+            "inventory_sha256": "1" * 64,
+            "unresolved_sha256": "2" * 64,
+            "unresolved_count": 1,
+            "enumerated_sha256": "3" * 64,
+            "reviewed_sha256": "4" * 64,
+            "reviewed_count": 1,
+            "enumeration_complete": True,
+            "fully_reviewed": True,
+            "uncertain_sha256": "5" * 64,
+            "uncertain_count": 0,
+            "pending_sha256": "6" * 64,
+            "pending_count": 2,
+            "unknown_trust_effect": True,
+            "receipts_sha256": "7" * 64,
+        }
+        # Pending count decrement -> True; resolution 1 -> 0 -> True; unknown_trust_effect True -> False -> True
+        self.assertTrue(
+            semantic_advancement(base_snap, {**base_snap, "pending_count": 1})
+        )
+        self.assertTrue(
+            semantic_advancement(
+                {**base_snap, "pending_count": 1}, {**base_snap, "pending_count": 0}
+            )
+        )
+        self.assertTrue(
+            semantic_advancement(
+                base_snap, {**base_snap, "unknown_trust_effect": False}
+            )
+        )
+        # Non-decreasing pending_count or changed inventory_sha256 alone -> False
+        self.assertFalse(
+            semantic_advancement(base_snap, {**base_snap, "pending_count": 2})
+        )
+        self.assertFalse(
+            semantic_advancement(
+                base_snap,
+                {**base_snap, "inventory_sha256": "f" * 64, "pending_count": 1},
+            )
+        )
+
+    def test_allow_unqualified_refuses_missing_predecessor_when_lifecycle_owned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory, limit=512)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.SOURCE_ID = 41
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            f.SOURCE_ID = 42
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            # Owned finding_lifecycle exists + predecessor summary poisoned unavailable ->
+            # prepare_action(..., allow_missing_predecessor=False) refuses fail-closed!
+            cur = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert cur is not None
+            run = SimpleNamespace(
+                caller=SimpleNamespace(
+                    _root=cur.record_sha256,
+                    _accepted_semantic_predecessor={"qualification": "unavailable"},
+                    _accepted_semantic_target=(
+                        "command",
+                        "a" * 40,
+                        HEAD,
+                        "status",
+                        {
+                            "kind": "issue_comment",
+                            "id": 99,
+                            "updated_at": f.SOURCE_STAMP,
+                            "body_sha256": "c" * 64,
+                        },
+                        "op-miss",
+                    ),
+                ),
+                ledger=f.selected.ledger,
+                identity=IDENTITY,
+                base_sha="a" * 40,
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "accepted_semantic_history_missing_predecessor_summary",
+            ):
+                prepare_action(
+                    run,
+                    allow_unqualified=True,
+                    allow_missing_predecessor=False,
+                )
+
+        # Unreviewed PR (finding_lifecycle is None) STILL degrades to complete_inventory_required!
+        with tempfile.TemporaryDirectory() as d_empty:
+            f2 = CommandEntryFixture(d_empty, limit=512)
+            f2.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f2.invoke_command(), 0, f2.error)
+            empty_rec = parse_session_comment(f2.comment["body"], identity=IDENTITY)
+            assert empty_rec is not None and empty_rec.finding_lifecycle is None
+            caller_empty = SimpleNamespace(_root=empty_rec.record_sha256)
+            prepare_action(
+                SimpleNamespace(
+                    caller=caller_empty,
+                    ledger=f2.selected.ledger,
+                    identity=IDENTITY,
+                    base_sha="a" * 40,
+                ),
+                allow_unqualified=True,
+                allow_missing_predecessor=False,
+            )
+            self.assertEqual(
+                caller_empty._accepted_semantic_context.reason,
+                "accepted_semantic_history_complete_inventory_required",
+            )
+
+    def test_verify_command_operation_journal_keys_include_source_kind_and_body_sha256(
+        self,
+    ):
+        from review_sensei_github.accepted_semantic_history import action_operation_key
+        from review_sensei_github.application import GitHubApplication
+        from review_sensei_github.run_authority import VerifiedRunAction
+        from test_action_reply import ReplyFixture, synthetic_authority
+
+        recorded: list[tuple[str, str, str]] = []
+        orig_through = GitHubApplication._through_operation
+
+        def spy_through(app_self, **kwargs):
+            recorded.append(
+                (
+                    str(kwargs.get("trigger")),
+                    str(kwargs.get("delivery_id")),
+                    str(kwargs.get("reservation_id")),
+                )
+            )
+            return orig_through(app_self, **kwargs)
+
+        def run_verify(*, kind: str, body: str) -> None:
+            with tempfile.TemporaryDirectory() as d:
+                if kind == "review_comment":
+                    fixture = ReplyFixture(d)
+                    auth_doc = {
+                        **synthetic_authority("command"),
+                        "job": "command",
+                        "source": {
+                            "kind": kind,
+                            "id": 41,
+                            "updated_at": "2026-10-26T00:00:00Z",
+                            "body_sha256": __import__("hashlib")
+                            .sha256(body.encode())
+                            .hexdigest(),
+                        },
+                        "actor": {
+                            "login": "alice",
+                            "type": "User",
+                            "association": "OWNER",
+                        },
+                    }
+                    with patch(
+                        "test_action_reply.synthetic_authority", return_value=auth_doc
+                    ):
+                        run, _args = fixture.prepare()
+                    VerifiedRunAction(run)
+                    return
+
+                import hashlib
+
+                from review_sensei_github.operation_comments import ResultPartStore
+                from review_sensei_github.operation_host import InMemoryOperationStore
+
+                class _MemParts(ResultPartStore):
+                    def __init__(self) -> None:
+                        self._data: dict[tuple[str, str], bytes] = {}
+
+                    def write(
+                        self,
+                        *,
+                        event_key: str,
+                        result: bytes,
+                        _check_existing: bool = True,
+                    ) -> str:
+                        digest = hashlib.sha256(result).hexdigest()
+                        self._data[(event_key, digest)] = result
+                        return digest
+
+                    def read(self, *, event_key: str, payload_digest: str) -> bytes:
+                        return self._data[(event_key, payload_digest)]
+
+                f = CommandEntryFixture(d, limit=512)
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+                f.SOURCE_ID = 41
+                f.select_command(body, new_run=True)
+                orig_apply = GitHubApplication.apply_maintainer_command
+
+                def with_op_store(app_self, **kw):
+                    if kw.get("operation_store") is None:
+                        kw["operation_store"] = InMemoryOperationStore()
+                        kw["operation_parts"] = _MemParts()
+                    return orig_apply(app_self, **kw)
+
+                with patch.object(
+                    GitHubApplication,
+                    "apply_maintainer_command",
+                    autospec=True,
+                    side_effect=with_op_store,
+                ):
+                    self.assertEqual(f.invoke_command(), 0, f.error)
+
+        from review_sensei_github.errors import GitHubBrokerClientError
+
+        with patch.object(
+            GitHubApplication,
+            "_through_operation",
+            autospec=True,
+            side_effect=spy_through,
+        ):
+            run_verify(kind="issue_comment", body="@reviewsensei verify")
+            run_verify(kind="issue_comment", body="@reviewsensei verify  ")
+            with self.assertRaises(GitHubBrokerClientError):
+                run_verify(kind="review_comment", body="@reviewsensei verify")
+
+        k_issue = action_operation_key(
+            purpose="command",
+            repository_id=123,
+            pull_request=7,
+            head_sha=HEAD,
+            source={
+                "kind": "issue_comment",
+                "id": 41,
+                "updated_at": "2026-10-26T00:00:00Z",
+                "body_sha256": "a" * 64,
+            },
+            configuration_digest="f" * 64,
+        )
+        k_review = action_operation_key(
+            purpose="command",
+            repository_id=123,
+            pull_request=7,
+            head_sha=HEAD,
+            source={
+                "kind": "review_comment",
+                "id": 41,
+                "updated_at": "2026-10-26T00:00:00Z",
+                "body_sha256": "a" * 64,
+            },
+            configuration_digest="f" * 64,
+        )
+        k_body = action_operation_key(
+            purpose="command",
+            repository_id=123,
+            pull_request=7,
+            head_sha=HEAD,
+            source={
+                "kind": "issue_comment",
+                "id": 41,
+                "updated_at": "2026-10-26T00:00:00Z",
+                "body_sha256": "b" * 64,
+            },
+            configuration_digest="f" * 64,
+        )
+        self.assertEqual(len({k_issue, k_review, k_body}), 3)
+        verify_keys = [(d, r) for trig, d, r in recorded if trig == "verify"]
+        self.assertEqual(len(verify_keys), 2)
+        self.assertTrue(
+            all(d.startswith("verify-v2:issue_comment:") for d, _ in verify_keys)
+        )
+        self.assertEqual(len({d for d, _ in verify_keys}), 2)
+        self.assertNotEqual(verify_keys[0][0], verify_keys[1][0])
+
 
 if __name__ == "__main__":
     unittest.main()

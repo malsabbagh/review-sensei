@@ -527,7 +527,7 @@ class PendingReassessmentG30Tests(unittest.TestCase):
                 root_comment_id=source_id,
                 source_kind="issue",
                 operation_entry="enabled",
-                repository_id=123,
+                repository_id=1,
                 app_id=999,
                 run_id="7001",
                 run_attempt="1",

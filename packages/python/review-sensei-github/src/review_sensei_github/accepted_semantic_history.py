@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
@@ -19,6 +20,35 @@ from review_sensei.errors import ReviewInputError
 KEY = "accepted_semantic_history"
 VERSION = "accepted-semantic-history-v1"
 LIMIT = 2
+
+
+class DuplicateTerminalDelivery(ReviewInputError):
+    """Cross-run duplicate delivery of an already terminally completed source."""
+
+
+def action_operation_key(
+    *,
+    purpose: str,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    source: Mapping[str, Any],
+    configuration_digest: str,
+) -> str:
+    """Compute the canonical operation key shared by action admission and guards."""
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "purpose": purpose,
+                "repository_id": repository_id,
+                "pull_request": pull_request,
+                "head_sha": head_sha,
+                "source": dict(source),
+                "configuration": configuration_digest,
+            }
+        )
+    ).hexdigest()
+
 
 _STATE_ADVANCING_COMMAND_ACTIONS = frozenset(
     {
@@ -64,6 +94,113 @@ def _digest(value):
 
 def _hold(reason) -> NoReturn:
     raise ReviewInputError("accepted_semantic_history_" + reason)
+
+
+def _target_identity(
+    caller: Any,
+) -> tuple[str | None, str | None, Any, str | None, bool]:
+    target = getattr(caller, "_accepted_semantic_target", None)
+    if type(target) is not tuple:
+        return None, None, None, None, False
+    purpose = target[0] if len(target) >= 1 and type(target[0]) is str else None
+    action = target[3] if len(target) >= 4 and type(target[3]) is str else None
+    source = target[4] if len(target) >= 5 and isinstance(target[4], dict) else None
+    op_key = target[5] if len(target) >= 6 and type(target[5]) is str else None
+    allow_dup = getattr(caller, "_allow_duplicate_terminal_delivery", None)
+    allowed = (
+        allow_dup
+        if type(allow_dup) is bool
+        else (purpose == "command" and action != "approve-media")
+    )
+    return purpose, action, source, op_key, allowed
+
+
+def _matches_target(
+    purpose: str | None,
+    source: dict[str, Any] | None,
+    op_key: str | None,
+    *,
+    item_purpose: Any,
+    item_source: Any,
+    item_op_key: Any,
+) -> bool:
+    return (
+        purpose in {"command", "reply"}
+        and item_purpose == purpose
+        and isinstance(op_key, str)
+        and isinstance(item_op_key, str)
+        and item_op_key == op_key
+        and isinstance(source, dict)
+        and item_source == source
+    )
+
+
+def _check_duplicate_terminal_delivery(
+    caller: Any,
+    history: Any,
+    *,
+    old_action: Mapping[str, Any] | None = None,
+    record: Any = None,
+    old_record: Any = None,
+) -> None:
+    if (
+        getattr(record, "quarantine_lineage", None) is not None
+        or getattr(old_record, "quarantine_lineage", None) is not None
+    ):
+        return
+    purpose, action, source, op_key, allowed = _target_identity(caller)
+    if not allowed or action == "approve-media" or (source is None and op_key is None):
+        return
+    if (
+        isinstance(old_action, Mapping)
+        and old_action.get("phase") == "terminal"
+        and not (
+            isinstance(old_action.get("outcome"), Mapping)
+            and old_action["outcome"].get("kind") == "canceled_unstarted"
+        )
+    ):
+        old_intent = old_action.get("intent")
+        if isinstance(old_intent, Mapping) and _matches_target(
+            purpose,
+            source,
+            op_key,
+            item_purpose=old_intent.get("purpose"),
+            item_source=old_intent.get("source"),
+            item_op_key=old_intent.get("operation_key"),
+        ):
+            raise DuplicateTerminalDelivery(
+                "accepted_semantic_history_duplicate_terminal_delivery"
+            )
+    rows: Any = None
+    if isinstance(history, dict):
+        if history.get("qualification") == "unavailable":
+            prior = history.get("prior")
+            if isinstance(prior, dict):
+                rows = prior.get("records")
+        else:
+            rows = history.get("records")
+    if isinstance(rows, list):
+        for item in rows:
+            if isinstance(item, dict) and _matches_target(
+                purpose,
+                source,
+                op_key,
+                item_purpose=item.get("purpose"),
+                item_source=item.get("source"),
+                item_op_key=item.get("operation_key"),
+            ):
+                raise DuplicateTerminalDelivery(
+                    "accepted_semantic_history_duplicate_terminal_delivery"
+                )
+
+
+def _record_has_pending_receipt(record: Any) -> bool:
+    if record is None:
+        return False
+    if getattr(record, "publication_staging", None) is not None:
+        return True
+    queue = getattr(record, "assessment_queue", None)
+    return isinstance(queue, Mapping) and queue.get("active_operation") is not None
 
 
 def semantic_snapshot(state, journal):
@@ -233,6 +370,15 @@ def semantic_advancement(before, after):
         or (not before["review_complete"] and after["review_complete"])
         or (
             before["uncertain_count"] > after["uncertain_count"]
+            and before["inventory_sha256"] == after["inventory_sha256"]
+        )
+        or (
+            before["pending_count"] > after["pending_count"]
+            and before["inventory_sha256"] == after["inventory_sha256"]
+        )
+        or (
+            before["unknown_trust_effect"]
+            and not after["unknown_trust_effect"]
             and before["inventory_sha256"] == after["inventory_sha256"]
         )
     )
@@ -547,32 +693,57 @@ def _prepare_action(run):
         _hold("selected_root_changed")
     state = ApiRunAccounting.from_document(record.api_run_accounting)
     previous = None
+    old_action_for_dup: Mapping[str, Any] | None = None
+    old_record_for_dup: Any = None
     if hasattr(run.caller, "_accepted_semantic_predecessor"):
         previous = run.caller._accepted_semantic_predecessor
     elif state.previous_record is not None:
         # One exact immutable predecessor, not an ancestor census or search.
         old = read_previous_run(run.ledger, run.identity, state.previous_record)
+        old_record_for_dup = old
         old_state = ApiRunAccounting.from_document(old.api_run_accounting)
         if old_state.action is None:
             previous = history_from_record(run.ledger, run.identity, record)
         else:
-            previous = read_action_result(run.ledger, run.identity, old)["result"].get(
-                KEY
-            )
-        if previous is None:
-            _hold("missing_predecessor_summary")
+            old_action_for_dup = old_state.action if state.action is None else None
+            retained_old = read_action_result(run.ledger, run.identity, old)
+            previous = retained_old["result"].get(KEY)
+            if previous is None:
+                canceled_unstarted = (
+                    isinstance(old_state.action.get("outcome"), Mapping)
+                    and old_state.action["outcome"].get("kind") == "canceled_unstarted"
+                )
+                if canceled_unstarted:
+                    previous = history_from_record(run.ledger, run.identity, old)
+                else:
+                    _hold("missing_predecessor_summary")
     if previous is not None:
         if isinstance(previous, dict) and (
             previous == {"missing": True}
             or previous.get("qualification") == "unavailable"
         ):
+            _check_duplicate_terminal_delivery(
+                run.caller,
+                previous,
+                old_action=old_action_for_dup,
+                record=record,
+                old_record=old_record_for_dup,
+            )
             _hold("missing_predecessor_summary")
         validate_history(previous, run.identity)
+        _check_duplicate_terminal_delivery(
+            run.caller,
+            previous,
+            old_action=old_action_for_dup,
+            record=record,
+            old_record=old_record_for_dup,
+        )
         # Pending native publication/result recovery precedes refusal. Never
         # replace its original liability with new work or report convergence.
         pending = (
             snapshot["pending_count"]
             or snapshot["unknown_trust_effect"]
+            or _record_has_pending_receipt(record)
             or (state.action is not None and state.action["phase"] == "pending")
         )
         if (
@@ -582,6 +753,14 @@ def _prepare_action(run):
             and not semantic_advancement(previous["records"][-1]["snapshot"], snapshot)
         ):
             _hold("finite_no_progress_stop")
+    elif old_action_for_dup is not None:
+        _check_duplicate_terminal_delivery(
+            run.caller,
+            None,
+            old_action=old_action_for_dup,
+            record=record,
+            old_record=old_record_for_dup,
+        )
     run.caller._accepted_semantic_context = SemanticContext(
         snapshot,
         previous,
@@ -598,17 +777,19 @@ class UnqualifiedContext:
     identity: Any
 
 
-def prepare_action(run, *, allow_unqualified=False):
+def prepare_action(run, *, allow_unqualified=False, allow_missing_predecessor=False):
     try:
         _prepare_action(run)
     except ReviewInputError as error:
+        if isinstance(error, DuplicateTerminalDelivery):
+            raise
         # Existing executors still own reviewed-snapshot and finalization gates.
-        # Preserve their ordinary outcomes while recording semantic qualification
-        # unavailable. Invalid/authentication errors and finite stop still hold.
-        permitted = {
-            "accepted_semantic_history_complete_inventory_required",
-            "accepted_semantic_history_missing_predecessor_summary",
-        }
+        # Preserve their ordinary outcomes only when no owned finding_lifecycle
+        # exists yet (`complete_inventory_required`). When an owned
+        # finding_lifecycle exists, missing_predecessor_summary refuses fail-closed.
+        permitted = {"accepted_semantic_history_complete_inventory_required"}
+        if allow_missing_predecessor:
+            permitted.add("accepted_semantic_history_missing_predecessor_summary")
         if not allow_unqualified or str(error) not in permitted:
             raise
         run.caller._accepted_semantic_context = UnqualifiedContext(
@@ -720,17 +901,34 @@ def guard_successor_admission(caller, ledger, identity, record, retained):
 def guard_carried_successor(caller, ledger, identity, record, history):
     if getattr(caller, "_accepted_semantic_target", None) is None:
         return
-    if history is None or (
+    from review_sensei.api_work import ApiRunAccounting
+
+    old_action = (
+        ApiRunAccounting.from_document(record.api_run_accounting).action
+        if getattr(record, "api_run_accounting", None) is not None
+        else None
+    )
+    unavailable = (
         isinstance(history, dict) and history.get("qualification") == "unavailable"
-    ):
+    )
+    if history is not None and not unavailable:
+        validate_history(history, identity)
+    _check_duplicate_terminal_delivery(
+        caller, history, old_action=old_action, record=record
+    )
+    if history is None or unavailable:
         return  # No semantic claim; the ordinary route handles missing history.
-    validate_history(history, identity)
     if history["streak"] < LIMIT:
         return
     selected, snapshot = capture_selected(ledger, identity)
     if selected.record_sha256 != record.record_sha256:
         _hold("selected_root_changed")
-    if snapshot["pending_count"] or snapshot["unknown_trust_effect"]:
+    if (
+        snapshot["pending_count"]
+        or snapshot["unknown_trust_effect"]
+        or _record_has_pending_receipt(record)
+        or _record_has_pending_receipt(selected)
+    ):
         return  # Original pending result reconciliation retains priority.
     if not _disposition_entry_allowed(caller, history) and not semantic_advancement(
         history["records"][-1]["snapshot"], snapshot

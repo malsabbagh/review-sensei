@@ -111,7 +111,19 @@ class StatusFixture(ReceiptFixture):
                 )
             if request.get_method() == "GET" and path.endswith("/pulls/7"):
                 self.native.append(("GET", path, None))
-                return json_response({"head": {"sha": HEAD}, "state": "open"})
+                return json_response(
+                    {
+                        "head": {"sha": HEAD},
+                        "base": {
+                            "sha": "a" * 40,
+                            "repo": {
+                                "id": self.request["repository_id"],
+                                "full_name": self.request["repository"],
+                            },
+                        },
+                        "state": "open",
+                    }
+                )
             if request.get_method() == "PATCH" and path.endswith(
                 "/issues/comments/1000000"
             ):

@@ -1790,15 +1790,35 @@ class ApiRunRequestTransport:
                 from .api_run_history import read_action_result
 
                 retained_action = read_action_result(ledger, identity, record)
-                from .accepted_semantic_history import guard_successor_admission
+                from .accepted_semantic_history import (
+                    guard_carried_successor,
+                    guard_successor_admission,
+                    history_from_record,
+                )
 
-                guard_successor_admission(
-                    self, ledger, identity, record, retained_action
-                )
                 # Data only: this cannot authorize cancellation or dispatch.
-                self._accepted_semantic_predecessor = retained_action["result"].get(
-                    "accepted_semantic_history", {"missing": True}
+                canceled_unstarted = (
+                    isinstance(old.action.get("outcome"), Mapping)
+                    and old.action["outcome"].get("kind") == "canceled_unstarted"
                 )
+                if "accepted_semantic_history" in retained_action["result"]:
+                    guard_successor_admission(
+                        self, ledger, identity, record, retained_action
+                    )
+                    self._accepted_semantic_predecessor = retained_action["result"][
+                        "accepted_semantic_history"
+                    ]
+                elif canceled_unstarted:
+                    carried_history = history_from_record(ledger, identity, record)
+                    guard_carried_successor(
+                        self, ledger, identity, record, carried_history
+                    )
+                    self._accepted_semantic_predecessor = carried_history
+                else:
+                    guard_successor_admission(
+                        self, ledger, identity, record, retained_action
+                    )
+                    self._accepted_semantic_predecessor = {"missing": True}
             else:
                 from .accepted_semantic_history import history_from_record
 
@@ -1806,13 +1826,7 @@ class ApiRunRequestTransport:
                 from .accepted_semantic_history import guard_carried_successor
 
                 guard_carried_successor(self, ledger, identity, record, carried_history)
-                self._accepted_semantic_predecessor = (
-                    carried_history
-                    if carried_history is not None
-                    else None
-                    if old.previous_record is None
-                    else {"missing": True}
-                )
+                self._accepted_semantic_predecessor = carried_history
             allocation = owner_allocations(configuration.limit, self.plan.liability)
 
             def candidate_state(reference):
@@ -2570,12 +2584,6 @@ class ApiRunRequestTransport:
             return loaded.record
         if self._root != verified.target_root_sha256:
             raise ReviewInputError("unstarted cancellation root changed")
-        settled_state = settle_unstarted_accounting(
-            identity=identity,
-            state=self.accounting,
-            producer=producer,
-            witness=verified,
-        )
         if self._terminal_reason is None:
             self.begin_terminal("action-completion")
 
@@ -2604,6 +2612,21 @@ class ApiRunRequestTransport:
                 identity=identity,
                 record=record,
                 expected_intent=verified.intent,
+            )
+            prior_history = (
+                record.finding_lifecycle.get("accepted_semantic_history")
+                if isinstance(record.finding_lifecycle, Mapping)
+                else None
+            )
+            settled_state = settle_unstarted_accounting(
+                identity=identity,
+                state=self.accounting,
+                producer=producer,
+                witness=verified,
+                prior_history=(
+                    prior_history if isinstance(prior_history, Mapping) else None
+                ),
+                has_finding_lifecycle=record.finding_lifecycle is not None,
             )
             self._state = settled_state
             return record.evolve(generation=record.generation + 1)

@@ -743,6 +743,22 @@ def _collaborator_permission(
     return permission
 
 
+def _validate_reply_repository_id(
+    args: argparse.Namespace, *, hosted_required: bool
+) -> None:
+    repository_id = getattr(args, "repository_id", None)
+    if repository_id is not None and (
+        type(repository_id) is not int or repository_id <= 0
+    ):
+        raise ReviewInputError(
+            "reply with --allow-write requires a positive integer --repository-id"
+        )
+    if hosted_required and (type(repository_id) is not int or repository_id <= 0):
+        raise ReviewInputError(
+            "reply with --allow-write requires a positive integer --repository-id"
+        )
+
+
 def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     if os.environ.get("GITHUB_RUN_ID") and args.command in {
         "review",
@@ -1791,6 +1807,13 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         if not args.enable_reply:
             print("disabled")
             return 0
+        _validate_reply_repository_id(
+            args,
+            hosted_required=bool(getattr(args, "github_session_ledger", False))
+            or bool(getattr(args, "oidc_token", None))
+            or bool(os.getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+            or bool(os.getenv("ACTIONS_ID_TOKEN_REQUEST_URL")),
+        )
         read_token = os.getenv(args.github_token_env)
         if not read_token:
             raise ReviewInputError(
@@ -1910,6 +1933,14 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         raise ReviewInputError(
             "publishing a reply requires --reply and --head-sha unless --generate is used"
         )
+    if args.enable_reply:
+        _validate_reply_repository_id(
+            args,
+            hosted_required=bool(getattr(args, "github_session_ledger", False))
+            or bool(getattr(args, "oidc_token", None))
+            or bool(os.getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+            or bool(os.getenv("ACTIONS_ID_TOKEN_REQUEST_URL")),
+        )
     reply = ConversationReply.from_dict(
         json.loads(
             engine_cli.read_bounded_utf8(args.reply, maximum=16 * 1024, label="reply")
@@ -1930,6 +1961,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         app_slug=args.app_slug,
         root_comment_id=args.root_comment_id,
         source_kind=args.source_kind,
+        repository_id=getattr(args, "repository_id", None),
     )
     print(reply_outcome.status)
     return 0

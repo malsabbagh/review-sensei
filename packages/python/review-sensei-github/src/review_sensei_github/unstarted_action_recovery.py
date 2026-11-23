@@ -29,15 +29,14 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any, Final, cast
 
+from review_sensei.action_result_codec import encode_action_result_carrier
 from review_sensei.api_work import (
     UNSTARTED_CANCELLATION_REASONS,
     ApiExecutionOwner,
     ApiRunAccounting,
 )
 from review_sensei.bounded_evidence import (
-    MAX_PARTITION_DECODED_BYTES,
     canonical_bytes,
-    encode_evidence,
     inline_manifest,
     read_inline_evidence,
 )
@@ -60,6 +59,7 @@ from .api_run_history import (
 )
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_requests import json_copy
+from .run_authority import validate_comment_url_binding
 
 if TYPE_CHECKING:
     from .api_run_requests import ApiRunRequestTransport
@@ -117,11 +117,12 @@ class NoBusinessDispatchEvidence:
     ) -> NoBusinessDispatchEvidence:
         """Capture non-dispatch evidence from an authenticated stranded caller transport."""
 
-        _, intent, intent_sha256 = _validate_unstarted_record(
+        state, intent, intent_sha256 = _validate_unstarted_record(
             identity=identity,
             record=record,
             expected_intent=None,
         )
+        original_owner = ApiExecutionOwner(**intent["owner"])
         if caller.run.run_id != int(intent["run_id"]):
             raise ReviewInputError(
                 "stranded caller transport run_id conflicts with action intent"
@@ -129,6 +130,8 @@ class NoBusinessDispatchEvidence:
         if (
             caller._root != record.record_sha256
             or caller.accounting.identity.repository_id != identity.repository_id
+            or caller.accounting.owner != original_owner
+            or state.owner != original_owner
             or caller.accounting.action is None
             or caller.accounting.action["intent"] != intent
         ):
@@ -144,7 +147,7 @@ class NoBusinessDispatchEvidence:
         captured = cls(
             identity=identity,
             target_run_id=caller.run.run_id,
-            target_owner=ApiExecutionOwner(**intent["owner"]),
+            target_owner=caller.accounting.owner,
             intent_sha256=intent_sha256,
             observed_requests=tuple(
                 cast(Mapping[str, Any], json_copy(obs)) for obs in caller.observations
@@ -254,6 +257,10 @@ def _observe_mutated_source(
     identity: SessionIdentity,
     source: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
+    if type(identity.repository_id) is not int or identity.repository_id <= 0:
+        raise ReviewInputError(
+            "live action source observation requires positive repository_id"
+        )
     suffix = (
         "/issues/comments/" if source["kind"] == "issue_comment" else "/pulls/comments/"
     ) + str(source["id"])
@@ -281,6 +288,14 @@ def _observe_mutated_source(
         or not isinstance(payload.get("updated_at"), str)
         or _ISO_STAMP_RE.fullmatch(payload["updated_at"]) is None
         or not isinstance(payload.get("body"), str)
+        or not validate_comment_url_binding(
+            payload,
+            kind=str(source["kind"]),
+            pull_request=identity.pull_request,
+            repository=identity.repository,
+            expected_api_url=ledger.http.api_url,
+            require_url=True,
+        )
     ):
         raise ReviewInputError("live action source payload is malformed")
     observed_updated_at = payload["updated_at"]
@@ -534,8 +549,8 @@ def verify_no_business_dispatch_evidence(
         or type(evidence.target_run_id) is not int
         or evidence.target_run_id != state.identity.run_id
         or not isinstance(evidence.target_owner, ApiExecutionOwner)
-        or evidence.target_owner not in {original_owner, state.owner}
-        or evidence.target_owner.job != original_owner.job
+        or evidence.target_owner != original_owner
+        or evidence.target_owner != state.owner
         or evidence.intent_sha256 != intent_sha256
     ):
         raise ReviewInputError(
@@ -718,7 +733,7 @@ def authenticate_unstarted_cancellation(
     canonical_coordinator: ContainedForwardingCoordinator | None = None,
     canonical_token: IssuedWriterToken | None = None,
     no_business_dispatch_evidence: NoBusinessDispatchEvidence | None = None,
-    require_positive_dispatch_proof: bool = False,
+    require_positive_dispatch_proof: bool = True,
     expected_intent: Mapping[str, Any] | None = None,
     mode: str = "same_run",
 ) -> UnstartedCancellationWitness:
@@ -758,18 +773,6 @@ def authenticate_unstarted_cancellation(
     else:
         raise ReviewInputError("unstarted cancellation mode is unsupported")
 
-    dispatch_proof_sha256: str | None = None
-    if require_positive_dispatch_proof or no_business_dispatch_evidence is not None:
-        dispatch_proof_sha256 = verify_no_business_dispatch_evidence(
-            caller=caller,
-            ledger=ledger,
-            identity=identity,
-            state=state,
-            intent=intent,
-            intent_sha256=intent_sha256,
-            evidence=no_business_dispatch_evidence,
-        )
-
     authority_mode, authority_proof_sha256 = _authenticate_authority_proof(
         caller=caller,
         identity=identity,
@@ -780,6 +783,20 @@ def authenticate_unstarted_cancellation(
         canonical_coordinator=canonical_coordinator,
         canonical_token=canonical_token,
     )
+    dispatch_proof_sha256: str | None = None
+    if (
+        no_business_dispatch_evidence is not None
+        or authority_mode != "canonical_epoch_fenced"
+    ):
+        dispatch_proof_sha256 = verify_no_business_dispatch_evidence(
+            caller=caller,
+            ledger=ledger,
+            identity=identity,
+            state=state,
+            intent=intent,
+            intent_sha256=intent_sha256,
+            evidence=no_business_dispatch_evidence,
+        )
     if dispatch_proof_sha256 is not None:
         authority_proof_sha256 = _sha256_json(
             {
@@ -816,6 +833,8 @@ def settle_unstarted_accounting(
     state: ApiRunAccounting,
     producer: str,
     witness: UnstartedCancellationWitness,
+    prior_history: Mapping[str, Any] | None = None,
+    has_finding_lifecycle: bool = False,
 ) -> ApiRunAccounting:
     """Build the terminal ``canceled_unstarted`` accounting value with prior charges intact."""
 
@@ -837,7 +856,8 @@ def settle_unstarted_accounting(
         raise ReviewInputError("unstarted cancellation witness binding conflicts")
 
     outcome = {"kind": "canceled_unstarted", "reason": verified.reason}
-    result_document = {
+    carried_history = None if prior_history is None else json_copy(dict(prior_history))
+    result_document: dict[str, Any] = {
         "status": "canceled_unstarted",
         "reason": verified.reason,
         "authority_mode": verified.authority_mode,
@@ -846,18 +866,18 @@ def settle_unstarted_accounting(
         "superseded_from_root_sha256": verified.target_root_sha256,
         "live_source_observation": json_copy(verified.live_source_observation),
     }
+    if carried_history is not None:
+        result_document["accepted_semantic_history"] = carried_history
     envelope = {
         "schema_version": "caller-action-result-v1",
         "intent_sha256": verified.intent_sha256,
         "outcome": outcome,
         "result": result_document,
     }
-    carrier = {
-        "schema_version": "caller-action-result-v1",
-        "payload": encode_evidence(
-            envelope, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES
-        ),
-    }
+    carrier = encode_action_result_carrier(
+        envelope,
+        reference_history=has_finding_lifecycle,
+    )
     manifest = inline_manifest(
         carrier,
         binding=action_result_binding(identity, state, producer),
@@ -872,7 +892,8 @@ def settle_unstarted_accounting(
             read_inline_evidence(
                 manifest,
                 expected_binding=cast(Mapping[str, object], manifest["binding"]),
-            )
+            ),
+            history=carried_history,
         )
         != envelope
     ):
@@ -912,11 +933,18 @@ def settle_unstarted_record(
             "cross-run unstarted cancellation record binding conflicts"
         )
     state = ApiRunAccounting.from_document(record.api_run_accounting)
+    prior_history = (
+        record.finding_lifecycle.get("accepted_semantic_history")
+        if isinstance(record.finding_lifecycle, Mapping)
+        else None
+    )
     settled_state = settle_unstarted_accounting(
         identity=identity,
         state=state,
         producer=producer,
         witness=verified,
+        prior_history=(prior_history if isinstance(prior_history, Mapping) else None),
+        has_finding_lifecycle=record.finding_lifecycle is not None,
     )
     preserved_now = _parse_aware_datetime(record.updated_at, label="updated_at")
     return record.evolve(

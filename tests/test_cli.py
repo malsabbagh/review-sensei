@@ -532,6 +532,8 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                             str(reply_path),
                             "--repository",
                             "owner/repo",
+                            "--repository-id",
+                            "1",
                             "--pull-request",
                             "2",
                             "--source-comment-id",
@@ -621,6 +623,8 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                             "--generate",
                             "--repository",
                             "owner/repo",
+                            "--repository-id",
+                            "1",
                             "--pull-request",
                             "2",
                             "--source-comment-id",
@@ -693,6 +697,8 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                             "--generate",
                             "--repository",
                             "owner/repo",
+                            "--repository-id",
+                            "1",
                             "--pull-request",
                             "2",
                             "--source-comment-id",
@@ -747,6 +753,8 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                         str(reply_path),
                         "--repository",
                         "owner/repo",
+                        "--repository-id",
+                        "1",
                         "--pull-request",
                         "2",
                         "--source-comment-id",
@@ -762,6 +770,130 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(FakeApplication.instance.call["head_sha"], "a" * 40)
+        self.assertEqual(FakeApplication.instance.call["repository_id"], 1)
+
+    def test_github_reply_cli_requires_positive_repository_id_for_writes(self):
+        import review_sensei_github as github_module
+
+        publish_calls = []
+
+        class FakeApplication:
+            def __init__(self, **kwargs):
+                pass
+
+            def publish_reply(self, **kwargs):
+                publish_calls.append(kwargs)
+                return SimpleNamespace(status="replied")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reply_path = Path(temp_dir) / "reply.json"
+            reply_path.write_text('{"body":"Thanks."}', encoding="utf-8")
+            with patch.multiple(
+                github_module,
+                BrokerClient=lambda: object(),
+                GitHubHttp=lambda: object(),
+                ReviewPublisher=lambda **kwargs: object(),
+                LearningPRPublisher=lambda **kwargs: object(),
+                ConversationPublisher=lambda **kwargs: object(),
+                GitHubApplication=FakeApplication,
+            ):
+                for extra in (
+                    ("--repository-id", "0"),
+                    ("--repository-id", "-1"),
+                    ("--oidc-token", "synthetic-oidc"),
+                ):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        status = github_main(
+                            [
+                                "reply",
+                                "--reply",
+                                str(reply_path),
+                                "--repository",
+                                "owner/repo",
+                                *extra,
+                                "--pull-request",
+                                "2",
+                                "--source-comment-id",
+                                "10",
+                                "--source-updated-at",
+                                "2026-08-19T00:00:00Z",
+                                "--head-sha",
+                                "a" * 40,
+                                "--allow-write",
+                                "--enable-reply",
+                            ]
+                        )
+                    self.assertNotEqual(status, 0)
+                    self.assertIn("--repository-id", stderr.getvalue())
+                    self.assertEqual(publish_calls, [])
+
+                for env_var in (
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL",
+                ):
+                    with patch.dict("os.environ", {env_var: "synthetic-actions-env"}):
+                        stderr = io.StringIO()
+                        with redirect_stderr(stderr):
+                            status = github_main(
+                                [
+                                    "reply",
+                                    "--reply",
+                                    str(reply_path),
+                                    "--repository",
+                                    "owner/repo",
+                                    "--pull-request",
+                                    "2",
+                                    "--source-comment-id",
+                                    "10",
+                                    "--source-updated-at",
+                                    "2026-08-19T00:00:00Z",
+                                    "--head-sha",
+                                    "a" * 40,
+                                    "--allow-write",
+                                    "--enable-reply",
+                                ]
+                            )
+                        self.assertNotEqual(status, 0)
+                        self.assertIn("--repository-id", stderr.getvalue())
+                        self.assertEqual(publish_calls, [])
+
+                # Standalone local reply without --repository-id and without --oidc-token remains allowed.
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    patch.dict(
+                        "os.environ",
+                        {
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "",
+                        },
+                    ),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    status = github_main(
+                        [
+                            "reply",
+                            "--reply",
+                            str(reply_path),
+                            "--repository",
+                            "owner/repo",
+                            "--pull-request",
+                            "2",
+                            "--source-comment-id",
+                            "10",
+                            "--source-updated-at",
+                            "2026-08-19T00:00:00Z",
+                            "--head-sha",
+                            "a" * 40,
+                            "--allow-write",
+                            "--enable-reply",
+                        ]
+                    )
+                self.assertEqual(status, 0, stderr.getvalue())
+                self.assertEqual(len(publish_calls), 1)
+                self.assertIsNone(publish_calls[0]["repository_id"])
 
     def test_retired_provider_mode_does_not_select_a_review_backend(self):
         with patch.dict(

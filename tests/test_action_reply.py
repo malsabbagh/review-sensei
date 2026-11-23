@@ -101,6 +101,7 @@ class ReplyFixture(LifecycleFixture):
             "id": SOURCE["id"],
             "updated_at": SOURCE["updated_at"],
             "body": BODY,
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             "user": {"login": "alice", "type": "User"},
             "author_association": "OWNER",
         }
@@ -565,6 +566,271 @@ class ActionReplyTests(unittest.TestCase):
                 setattr(selected, field, value)
                 with self.subTest(field=field), self.assertRaises(ReviewInputError):
                     _providers(run, selected, configuration)
+
+    def test_edited_source_removing_mention_midflight_holds_started_work_not_explicit_noop(
+        self,
+    ):
+        # Mid-flight comment edit removing @reviewsensei returns skipped_edited_source
+        # BEFORE mention/auth checks and NEVER settles explicit_noop!
+        for mutate_on in ("updated_at_and_body", "same_updated_at_body"):
+            with (
+                self.subTest(mutate_on=mutate_on),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = ReplyFixture(directory)
+                run, args = fixture.prepare()
+                fixture.source_reads = 0
+                orig_ext = fixture.accounted._opener
+
+                def mutate_second_read(
+                    request, timeout, *, orig=orig_ext, m=mutate_on, fix=fixture
+                ):
+                    path = request.full_url.split("?", 1)[0]
+                    if request.get_method() == "GET" and path.endswith(
+                        f"/issues/comments/{SOURCE['id']}"
+                    ):
+                        fix.source_reads += 1
+                        if fix.source_reads >= 3:
+                            fix.source["body"] = "mention removed cleanly"
+                            fix.source["author_association"] = "CONTRIBUTOR"
+                            if m == "updated_at_and_body":
+                                fix.source["updated_at"] = "2026-10-26T00:05:00Z"
+                    return orig(request, timeout)
+
+                with (
+                    patch.object(
+                        fixture.accounted, "_opener", side_effect=mutate_second_read
+                    ),
+                    patch.dict(
+                        os.environ,
+                        {"GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "1"},
+                        clear=True,
+                    ),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "skipped_edited_source"
+                    ):
+                        execute_reply(run, args)
+                action = fixture.action()
+                self.assertEqual(action["phase"], "pending")
+                self.assertIsNone(action["outcome"])
+                self.assertEqual(fixture.effects, 0)
+
+        # Even if skipped_edited_source is observed after begin_action_effect,
+        # _outcome rejects explicit_noop settlement so work stays in started_work.
+        with self.assertRaisesRegex(ReviewInputError, "skipped_edited_source"):
+            _outcome(ReplyResult("skipped_edited_source"))
+
+    def test_operation_journal_keys_include_source_kind_and_body_sha256(self):
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+        from review_sensei_github.application import (
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+        from review_sensei_github.conversation import (
+            ConversationPublisher,
+            PreparedConversation,
+            ReplyResult,
+        )
+        from review_sensei_github.operation_comments import ResultPartStore
+        from review_sensei_github.operation_host import InMemoryOperationStore
+        from review_sensei_github.publication import ReviewPublisher
+        from review_sensei_github.run_authority import VerifiedRunAction
+
+        from review_sensei.models import (
+            ConversationContext,
+            ConversationMessage,
+            ConversationReply,
+        )
+
+        class _MemParts(ResultPartStore):
+            def __init__(self) -> None:
+                self._data: dict[tuple[str, str], bytes] = {}
+
+            def write(
+                self,
+                *,
+                event_key: str,
+                result: bytes,
+                _check_existing: bool = True,
+            ) -> str:
+                digest = hashlib.sha256(result).hexdigest()
+                self._data[(event_key, digest)] = result
+                return digest
+
+            def read(self, *, event_key: str, payload_digest: str) -> bytes:
+                return self._data[(event_key, payload_digest)]
+
+        recorded: list[tuple[str, str, str]] = []
+        orig_through = GitHubApplication._through_operation
+        base_authority = synthetic_authority("reply")
+
+        def spy_through(app_self, **kwargs):
+            recorded.append(
+                (
+                    str(kwargs.get("trigger")),
+                    str(kwargs.get("delivery_id")),
+                    str(kwargs.get("reservation_id")),
+                )
+            )
+            return orig_through(app_self, **kwargs)
+
+        def run_real_app_reply(*, kind: str, body: str, updated_at: str) -> None:
+            with tempfile.TemporaryDirectory() as d:
+                auth_doc = {
+                    **base_authority,
+                    "source": {
+                        "kind": "review_comment"
+                        if kind == "inline"
+                        else "issue_comment",
+                        "id": 41,
+                        "updated_at": updated_at,
+                        "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                    },
+                }
+                import sys
+
+                with patch.object(
+                    sys.modules[__name__],
+                    "synthetic_authority",
+                    return_value=auth_doc,
+                ):
+                    fixture = ReplyFixture(d)
+                    run, _args = fixture.prepare()
+                fixture.source["body"] = body
+                fixture.source["updated_at"] = updated_at
+                if kind == "inline":
+                    fixture.source.pop("issue_url", None)
+                    fixture.source["pull_request_url"] = (
+                        "https://api.github.test/repos/owner/repo/pulls/7"
+                    )
+                orig_open = fixture.accounted._opener
+
+                def inline_aware_open(req, timeout):
+                    path = urlsplit(req.full_url).path
+                    if req.get_method() == "GET" and path.endswith(
+                        "/pulls/comments/41"
+                    ):
+                        fixture.trace.append((fixture.attempt, req.get_method(), path))
+                        return json_response(copy.deepcopy(fixture.source))
+                    return orig_open(req, timeout)
+
+                prepared = PreparedConversation(
+                    context=ConversationContext(
+                        pull_request_number=7,
+                        head_sha=HEAD,
+                        base_sha=BASE,
+                        base_ref="main",
+                        diff_context="diff --git a/app.py b/app.py\n+return 1\n",
+                        messages=(
+                            ConversationMessage(
+                                author="alice",
+                                body=body,
+                                created_at=updated_at,
+                            ),
+                        ),
+                    ),
+                    head_sha=HEAD,
+                    root_comment_id=41,
+                    source_kind=kind,
+                    source_comment_id=41,
+                    source_updated_at=updated_at,
+                )
+                pub = ConversationPublisher(http=run.http)
+                app = GitHubApplication(
+                    broker=run.broker,
+                    http=run.http,
+                    reviewer=ReviewPublisher(http=run.http),
+                    replier=pub,
+                    learner=object(),  # type: ignore[arg-type]
+                    session_ledger=run.ledger,
+                )
+                with (
+                    patch.object(
+                        fixture.accounted, "_opener", side_effect=inline_aware_open
+                    ),
+                    patch.object(
+                        ConversationPublisher, "prepare_context", return_value=prepared
+                    ),
+                    patch.object(
+                        ConversationPublisher,
+                        "add_processing_reaction",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        ConversationPublisher,
+                        "remove_processing_reaction",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        ConversationPublisher,
+                        "publish_current",
+                        return_value=ReplyResult("replied", comment_id=91),
+                    ),
+                    patch(
+                        "review_sensei.conversation.ConversationService.reply",
+                        return_value=ConversationReply(body="Done."),
+                    ),
+                    patch.object(
+                        run.broker,
+                        "exchange",
+                        return_value="synthetic-tok",
+                        create=True,
+                    ),
+                ):
+                    authority = VerifiedRunAction(run)
+                    app.generate_and_publish_reply(
+                        options=GitHubWriteOptions(
+                            github_writes=True,
+                            mention_replies=True,
+                            auto_review=False,
+                            operation_entry="enabled",
+                        ),
+                        oidc_token="synthetic-oidc",
+                        read_token="synthetic-read",
+                        repository="owner/repo",
+                        pull_request=7,
+                        source_comment_id=41,
+                        source_updated_at=updated_at,
+                        expected_head_sha=HEAD,
+                        reply_provider=object(),  # type: ignore[arg-type]
+                        model="qwen3.5:4b",
+                        app_slug="reviewsensei[bot]",
+                        root_comment_id=41,
+                        source_kind=kind,
+                        repository_id=123,
+                        operation_entry="enabled",
+                        app_id=999,
+                        run_id="456",
+                        run_attempt="1",
+                        operation_store=InMemoryOperationStore(),
+                        operation_parts=_MemParts(),
+                        current_action=authority,
+                    )
+
+        with patch.object(
+            GitHubApplication,
+            "_through_operation",
+            autospec=True,
+            side_effect=spy_through,
+        ):
+            stamp = SOURCE["updated_at"]
+            run_real_app_reply(kind="issue", body=BODY, updated_at=stamp)
+            run_real_app_reply(kind="inline", body=BODY, updated_at=stamp)
+            run_real_app_reply(
+                kind="issue",
+                body="@reviewsensei explain the revised hunk",
+                updated_at=stamp,
+            )
+
+        reply_keys = [(d, r) for trig, d, r in recorded if trig == "reply"]
+        self.assertEqual(len(reply_keys), 3)
+        self.assertTrue(all(d.startswith("reply-v2:") for d, _ in reply_keys))
+        self.assertEqual(len({d for d, _ in reply_keys}), 3)
+        self.assertNotEqual(reply_keys[0][1], reply_keys[1][1])
 
 
 if __name__ == "__main__":
