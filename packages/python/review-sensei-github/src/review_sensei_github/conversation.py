@@ -688,8 +688,10 @@ class ConversationPublisher:
             or base_repo.get("full_name") != repository
         ):
             return ReplyResult(status="skipped_fork")
-        if repository_id is not None and (
-            type(base_repo.get("id")) is not int or base_repo["id"] != repository_id
+        if (
+            repository_id is not None
+            and "id" in base_repo
+            and (type(base_repo["id"]) is not int or base_repo["id"] != repository_id)
         ):
             raise GitHubConversationError("reply preflight repository id mismatched")
 
@@ -1691,8 +1693,10 @@ class ConversationPublisher:
             or base_repo.get("full_name") != repository
         ):
             return ReplyResult(status="skipped_fork")
-        if repository_id is not None and (
-            type(base_repo.get("id")) is not int or base_repo["id"] != repository_id
+        if (
+            repository_id is not None
+            and "id" in base_repo
+            and (type(base_repo["id"]) is not int or base_repo["id"] != repository_id)
         ):
             raise GitHubConversationError("reply preflight repository id mismatched")
 

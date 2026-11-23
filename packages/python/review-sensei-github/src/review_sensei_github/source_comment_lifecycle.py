@@ -273,9 +273,11 @@ def admit_event_comment_source(
         )
         if "pull_request" in pull and not has_pr_marker:
             raise ReviewInputError("action source does not match the original event")
-        # Legacy pinned reply fixture omits action and uses {"number": N} on issue.
+        # Legacy pinned fixtures omit action and use {"number": N} on issue.
         if not has_pr_marker and not (
-            raw_action is None and purpose == "reply" and set(pull) == {"number"}
+            raw_action is None
+            and purpose in {"reply", "command"}
+            and set(pull) == {"number"}
         ):
             raise ReviewInputError(
                 "issue_comment event requires pull_request association"
@@ -290,7 +292,7 @@ def admit_event_comment_source(
         kind=kind,
         pull_request=pull_request,
         repository=repository,
-        require_url=True,
+        require_url=(raw_action is not None),
     ):
         raise ReviewInputError("action source does not match the original event")
     if purpose == "command" and comment["body"] != expected_body:

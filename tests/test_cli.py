@@ -797,7 +797,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ConversationPublisher=lambda **kwargs: object(),
                 GitHubApplication=FakeApplication,
             ):
-                for extra in ((), ("--repository-id", "0")):
+                for extra in (
+                    ("--repository-id", "0"),
+                    ("--repository-id", "-1"),
+                    ("--oidc-token", "synthetic-oidc"),
+                ):
                     stderr = io.StringIO()
                     with redirect_stderr(stderr):
                         status = github_main(
@@ -823,6 +827,33 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     self.assertNotEqual(status, 0)
                     self.assertIn("--repository-id", stderr.getvalue())
                     self.assertEqual(publish_calls, [])
+
+                # Standalone local reply without --repository-id and without --oidc-token remains allowed.
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = github_main(
+                        [
+                            "reply",
+                            "--reply",
+                            str(reply_path),
+                            "--repository",
+                            "owner/repo",
+                            "--pull-request",
+                            "2",
+                            "--source-comment-id",
+                            "10",
+                            "--source-updated-at",
+                            "2026-08-19T00:00:00Z",
+                            "--head-sha",
+                            "a" * 40,
+                            "--allow-write",
+                            "--enable-reply",
+                        ]
+                    )
+                self.assertEqual(status, 0, stderr.getvalue())
+                self.assertEqual(len(publish_calls), 1)
+                self.assertIsNone(publish_calls[0]["repository_id"])
 
     def test_retired_provider_mode_does_not_select_a_review_backend(self):
         with patch.dict(

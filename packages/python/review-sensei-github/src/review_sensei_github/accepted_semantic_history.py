@@ -96,14 +96,23 @@ def _hold(reason) -> NoReturn:
     raise ReviewInputError("accepted_semantic_history_" + reason)
 
 
-def _target_identity(caller: Any) -> tuple[str | None, Any, str | None]:
+def _target_identity(
+    caller: Any,
+) -> tuple[str | None, str | None, Any, str | None, bool]:
     target = getattr(caller, "_accepted_semantic_target", None)
     if type(target) is not tuple:
-        return None, None, None
+        return None, None, None, None, False
     purpose = target[0] if len(target) >= 1 and type(target[0]) is str else None
+    action = target[3] if len(target) >= 4 and type(target[3]) is str else None
     source = target[4] if len(target) >= 5 and isinstance(target[4], dict) else None
     op_key = target[5] if len(target) >= 6 and type(target[5]) is str else None
-    return purpose, source, op_key
+    allow_dup = getattr(caller, "_allow_duplicate_terminal_delivery", None)
+    allowed = (
+        allow_dup
+        if type(allow_dup) is bool
+        else (purpose == "command" and action != "approve-media")
+    )
+    return purpose, action, source, op_key, allowed
 
 
 def _matches_target(
@@ -115,12 +124,13 @@ def _matches_target(
     item_source: Any,
     item_op_key: Any,
 ) -> bool:
-    if op_key is not None and item_op_key == op_key:
-        return True
     return (
-        source is not None
-        and purpose is not None
+        purpose in {"command", "reply"}
         and item_purpose == purpose
+        and isinstance(op_key, str)
+        and isinstance(item_op_key, str)
+        and item_op_key == op_key
+        and isinstance(source, dict)
         and item_source == source
     )
 
@@ -130,9 +140,16 @@ def _check_duplicate_terminal_delivery(
     history: Any,
     *,
     old_action: Mapping[str, Any] | None = None,
+    record: Any = None,
+    old_record: Any = None,
 ) -> None:
-    purpose, source, op_key = _target_identity(caller)
-    if source is None and op_key is None:
+    if (
+        getattr(record, "quarantine_lineage", None) is not None
+        or getattr(old_record, "quarantine_lineage", None) is not None
+    ):
+        return
+    purpose, action, source, op_key, allowed = _target_identity(caller)
+    if not allowed or action == "approve-media" or (source is None and op_key is None):
         return
     if (
         isinstance(old_action, Mapping)
@@ -677,11 +694,13 @@ def _prepare_action(run):
     state = ApiRunAccounting.from_document(record.api_run_accounting)
     previous = None
     old_action_for_dup: Mapping[str, Any] | None = None
+    old_record_for_dup: Any = None
     if hasattr(run.caller, "_accepted_semantic_predecessor"):
         previous = run.caller._accepted_semantic_predecessor
     elif state.previous_record is not None:
         # One exact immutable predecessor, not an ancestor census or search.
         old = read_previous_run(run.ledger, run.identity, state.previous_record)
+        old_record_for_dup = old
         old_state = ApiRunAccounting.from_document(old.api_run_accounting)
         if old_state.action is None:
             previous = history_from_record(run.ledger, run.identity, record)
@@ -704,12 +723,20 @@ def _prepare_action(run):
             or previous.get("qualification") == "unavailable"
         ):
             _check_duplicate_terminal_delivery(
-                run.caller, previous, old_action=old_action_for_dup
+                run.caller,
+                previous,
+                old_action=old_action_for_dup,
+                record=record,
+                old_record=old_record_for_dup,
             )
             _hold("missing_predecessor_summary")
         validate_history(previous, run.identity)
         _check_duplicate_terminal_delivery(
-            run.caller, previous, old_action=old_action_for_dup
+            run.caller,
+            previous,
+            old_action=old_action_for_dup,
+            record=record,
+            old_record=old_record_for_dup,
         )
         # Pending native publication/result recovery precedes refusal. Never
         # replace its original liability with new work or report convergence.
@@ -728,7 +755,11 @@ def _prepare_action(run):
             _hold("finite_no_progress_stop")
     elif old_action_for_dup is not None:
         _check_duplicate_terminal_delivery(
-            run.caller, None, old_action=old_action_for_dup
+            run.caller,
+            None,
+            old_action=old_action_for_dup,
+            record=record,
+            old_record=old_record_for_dup,
         )
     run.caller._accepted_semantic_context = SemanticContext(
         snapshot,
@@ -882,7 +913,9 @@ def guard_carried_successor(caller, ledger, identity, record, history):
     )
     if history is not None and not unavailable:
         validate_history(history, identity)
-    _check_duplicate_terminal_delivery(caller, history, old_action=old_action)
+    _check_duplicate_terminal_delivery(
+        caller, history, old_action=old_action, record=record
+    )
     if history is None or unavailable:
         return  # No semantic claim; the ordinary route handles missing history.
     if history["streak"] < LIMIT:

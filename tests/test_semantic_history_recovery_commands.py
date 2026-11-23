@@ -683,8 +683,31 @@ class SemanticHistoryRecoveryCommandsTests(unittest.TestCase):
             self.assertEqual(f.business_writes, before_writes)
             self.assertEqual(len(f.extra_comments), before_comments)
 
-        # 2. Immediately preceding terminal reply (old.action["intent"]) for both
-        #    issue_comment and review_comment redelivered on attempt=1 -> exit 0, ZERO rollover!
+        # 2. Immediately preceding terminal command (old.action["intent"])
+        #    redelivered on fresh run_id+1, attempt=1 -> exit 0, ZERO rollover!
+        with tempfile.TemporaryDirectory() as d_cmd:
+            cf = RecoveryEntryFixture(d_cmd, limit=512)
+            self.assertEqual(cf.invoke(human=False), 0, cf.error)
+            cf.SOURCE_ID = 41
+            cf.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(cf.invoke_command(), 0, cf.error)
+            cmd_first = parse_session_comment(cf.comment["body"], identity=IDENTITY)
+            assert cmd_first is not None
+            before_cmd_sha = cmd_first.record_sha256
+            before_cmd_writes = cf.business_writes
+            before_cmd_extra = len(cf.extra_comments)
+            cf.past_jobs[cf.run_id] = cf.owner_job
+            cf.run_id += 1
+            cf.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(cf.invoke_command(), 0, (cf.error, cf.stdout))
+            cmd_dup = parse_session_comment(cf.comment["body"], identity=IDENTITY)
+            assert cmd_dup is not None
+            self.assertEqual(cmd_dup.record_sha256, before_cmd_sha)
+            self.assertEqual(cf.business_writes, before_cmd_writes)
+            self.assertEqual(len(cf.extra_comments), before_cmd_extra)
+
+        # 3. Distinct-run re-entry of an accepted reply (issue_comment and review_comment)
+        #    does NOT short-circuit DuplicateTerminalDelivery; operation_entry binding_conflict runs.
         for inline_mode in (False, True):
             with (
                 self.subTest(inline=inline_mode),
@@ -699,25 +722,31 @@ class SemanticHistoryRecoveryCommandsTests(unittest.TestCase):
                     0,
                     (rf.error, rf.exception),
                 )
-                first_rec = parse_session_comment(rf.comment["body"], identity=IDENTITY)
-                assert first_rec is not None
-                first_sha = first_rec.record_sha256
                 before_calls = rf.provider_calls
-                before_extra = len(rf.extra_comments)
+                before_replies = [
+                    c
+                    for c in rf.extra_comments.values()
+                    if "reviewsensei:reply:" in c.get("body", "")
+                ]
+                before_inline = len(rf.inline)
                 # Redeliver the exact same comment id/updated_at/body WITHOUT advancing SOURCE_ID
                 rf.SOURCE_ID -= 1
                 self.assertEqual(
                     rf.invoke_reply(
                         "@reviewsensei explain this finding", inline=inline_mode
                     ),
-                    0,
+                    1,
                     (rf.error, rf.exception),
                 )
-                dup_rec = parse_session_comment(rf.comment["body"], identity=IDENTITY)
-                assert dup_rec is not None
-                self.assertEqual(dup_rec.record_sha256, first_sha)
+                self.assertIn("accepted_semantic_history_invalid_record", rf.error)
                 self.assertEqual(rf.provider_calls, before_calls)
-                self.assertEqual(len(rf.extra_comments), before_extra)
+                after_replies = [
+                    c
+                    for c in rf.extra_comments.values()
+                    if "reviewsensei:reply:" in c.get("body", "")
+                ]
+                self.assertEqual(len(after_replies), len(before_replies))
+                self.assertEqual(len(rf.inline), before_inline)
         self.assertIsNotNone(ReplyEntryFixture)
 
     def test_pre_rollover_pending_receipt_staging_and_queue_yield_over_stop(self):

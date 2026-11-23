@@ -191,6 +191,18 @@ def _cross_run_unstarted_rollover_guard(
         )
 
 
+def _read_event_payload(*, optional: bool = False) -> Any:
+    raw_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    path = Path(raw_path)
+    if optional and (not raw_path or not path.is_file()):
+        return None
+    with path.open("rb") as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ReviewInputError("action event exceeds its byte bound")
+    return json.loads(raw)
+
+
 def event_source(args: Any, *, purpose: str) -> dict[str, object]:
     """The runner event selects a source; live Worker reads authenticate it."""
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -198,12 +210,7 @@ def event_source(args: Any, *, purpose: str) -> dict[str, object]:
         raise GitHubMergeGroupUnsupportedError(
             "GitHub merge_group event is unsupported by action admission"
         )
-    path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
-    with path.open("rb") as stream:
-        raw = stream.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        raise ReviewInputError("action event exceeds its byte bound")
-    value = json.loads(raw)
+    value = _read_event_payload(optional=False)
     return admit_event_comment_source(
         value,
         pull_request=args.pull_request,
@@ -895,8 +902,9 @@ def run_action(
         raise ReviewInputError("current Actions routes require their native run ledger")
     command_action: str | None = None
     classified_command: Any = None
+    quarantine_command: Any = None
     if purpose == "command":
-        _, _, classified_command = _parse_action_command(
+        _, quarantine_command, classified_command = _parse_action_command(
             args.comment_body, actor="classification-only"
         )
         if classified_command is None:
@@ -911,6 +919,15 @@ def run_action(
     args.rescan = args.review_remaining = False
     if cancel_on_mutation:
         args.cancel_unstarted_on_source_mutation = True
+    if purpose == "command":
+        allow_duplicate_terminal = (
+            quarantine_command is None and command_action != "approve-media"
+        )
+    else:
+        event_payload = _read_event_payload(optional=True)
+        allow_duplicate_terminal = (
+            isinstance(event_payload, dict) and event_payload.get("action") == "created"
+        )
     from .accepted_semantic_history import DuplicateTerminalDelivery, prepare_action
 
     with _cross_run_unstarted_rollover_guard(unstarted_recovery) as rollover_service:
@@ -924,8 +941,11 @@ def run_action(
                 rollover_service=rollover_service,
                 enable_current_trust_enrollment=options.enable_current_trust_enrollment,
                 command_action=command_action,
+                allow_duplicate_terminal=allow_duplicate_terminal,
             )
         except DuplicateTerminalDelivery:
+            if not allow_duplicate_terminal:
+                raise
             return 0
     same_run_gate = (
         unstarted_recovery
@@ -967,6 +987,8 @@ def run_action(
             allow_missing_predecessor=False,
         )
     except DuplicateTerminalDelivery:
+        if not allow_duplicate_terminal:
+            raise
         return 0
     if purpose == "command":
         return execute_command(run, args)
