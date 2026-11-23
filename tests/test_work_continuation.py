@@ -213,8 +213,12 @@ class DirectPartialScopeTests(unittest.TestCase):
         self.assertEqual(second.review_status, "complete")
         self.assertTrue(second.coverage.fully_reviewed)
         self.assertEqual(len(fresh_provider.prompts), 1)
-        self.assertIn("src/mod_1.py", fresh_provider.prompts[0])
-        self.assertNotIn("src/mod_0.py", fresh_provider.prompts[0])
+        self.assertIn("diff --git a/src/mod_1.py", fresh_provider.prompts[0])
+        self.assertNotIn("diff --git a/src/mod_0.py", fresh_provider.prompts[0])
+        self.assertIn(
+            "Other changed PR paths not in this batch: src/mod_0.py",
+            fresh_provider.prompts[0],
+        )
 
     def test_missing_scope_fails_closed_without_changing_v1_content_digest(self):
         from review_sensei.errors import ReviewInputError
@@ -1594,7 +1598,7 @@ class WorkContinuationTests(unittest.TestCase):
             def complete(self, request):
                 tag = "FIRST" if "FIRST_STAGE" in request.prompt else "SECOND"
                 for idx in range(9):
-                    if f"src/mod_{idx}.py" in request.prompt:
+                    if f"diff --git a/src/mod_{idx}.py" in request.prompt:
                         stage_calls.append(f"{tag}:{idx}")
                         break
                 return ProviderResponse('{"summary":"Clean.","comments":[]}', self.name)

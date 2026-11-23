@@ -52,6 +52,10 @@ from .outcomes import (
 )
 from .planning import (
     LargeChangePlan,
+    ReviewChunk,
+    _bounded_scope_manifest,
+    _format_scope_label,
+    _format_scoped_summary,
     apply_chunk_outcomes,
     merge_chunk_coverage,
     plan_change,
@@ -154,16 +158,75 @@ Do not treat absence of a prior finding in this pass as proof that it is fixed.
 MAX_COVERAGE_PATHS = 64
 
 
-def _chunk_context_note(related_paths: tuple[str, ...]) -> str:
-    if not related_paths:
-        return "This chunk is part of a larger change."
-    related = "\n".join(related_paths)
-    return (
-        "This chunk is part of a larger change.\n\n"
-        "<related-changed-paths-not-in-chunk>\n"
-        f"{related}\n"
-        "</related-changed-paths-not-in-chunk>"
+def _chunk_context_note(
+    related_paths: tuple[str, ...],
+    *,
+    chunk_index: int | None = None,
+    total_chunks: int | None = None,
+    chunk_paths: tuple[str, ...] = (),
+    total_changed_paths: int | None = None,
+    max_paths_bytes: int = 8192,
+) -> str:
+    slice_desc = (
+        f"Chunk {chunk_index}/{total_chunks}"
+        if chunk_index is not None and total_chunks is not None
+        else "This chunk"
     )
+    lines = [
+        f"{slice_desc} is one partial slice of a multi-chunk PR review; sibling chunks review the remaining changed files and/or remaining hunks of split files."
+    ]
+    if chunk_paths:
+        in_chunk, _ = _bounded_scope_manifest(
+            chunk_paths,
+            max_paths=MAX_COVERAGE_PATHS,
+            max_bytes=max(256, max_paths_bytes // 2),
+        )
+        if in_chunk:
+            lines.append(f"Files in this chunk: {in_chunk}")
+    lines.append(
+        "Do NOT report absent sibling files, chunk boundaries, or symbols defined in sibling chunks/files as truncation, syntax errors, or blocking defects. "
+        "Scope `summary` strictly to the files and hunks supplied in THIS chunk."
+    )
+    if related_paths:
+        expected_other = (
+            max(len(related_paths), total_changed_paths - len(set(chunk_paths)))
+            if total_changed_paths is not None
+            else len(related_paths)
+        )
+        related_manifest, _ = _bounded_scope_manifest(
+            related_paths,
+            max_paths=MAX_COVERAGE_PATHS,
+            max_bytes=max(256, max_paths_bytes),
+            total_count=expected_other,
+        )
+        lines.append("")
+        lines.append("<related-changed-paths-not-in-chunk>")
+        lines.append(related_manifest)
+        lines.append("</related-changed-paths-not-in-chunk>")
+    return "\n".join(lines)
+
+
+def _chunk_scope_label(
+    chunk: ReviewChunk,
+    *,
+    total_chunks: int,
+    analysis: DiffAnalysis,
+) -> str:
+    items: tuple[str, ...] = chunk.paths
+    if len(chunk.paths) == 1 and chunk.hunk_indexes:
+        path = chunk.paths[0]
+        file_hunk_indexes = {
+            hunk.index
+            for hunk in analysis.hunk_records
+            if path in (hunk.new_path, hunk.old_path)
+        }
+        if file_hunk_indexes - set(chunk.hunk_indexes):
+            shown_hunks = ", ".join(f"#{idx}" for idx in chunk.hunk_indexes[:3])
+            extra = len(chunk.hunk_indexes) - 3
+            if extra > 0:
+                shown_hunks += f", +{extra} more"
+            items = (f"{path} hunk {shown_hunks}",)
+    return _format_scope_label("Chunk", chunk.index, total_chunks, items)
 
 
 @dataclass(frozen=True)
@@ -657,10 +720,36 @@ class ReviewService:
                             limits=request.limits,
                         )
                 break
-            note = _chunk_context_note(chunk.related_paths)
-            instructions = (
-                f"{request.instructions}\n\n{note}" if request.instructions else note
-            )
+            instructions: str | None = request.instructions
+            if (
+                len(plan.reviewable_chunks) > 1
+                or chunk.related_paths
+                or set(chunk.paths) != set(plan.analysis.changed_paths)
+            ):
+                base_instruction_bytes = (
+                    len(request.instructions.encode("utf-8")) + 2
+                    if request.instructions
+                    else 0
+                )
+                remaining_instruction_bytes = max(
+                    0, request.limits.max_instructions_bytes - base_instruction_bytes
+                )
+                note = _chunk_context_note(
+                    chunk.related_paths,
+                    chunk_index=chunk.index,
+                    total_chunks=len(plan.reviewable_chunks),
+                    chunk_paths=chunk.paths,
+                    total_changed_paths=len(plan.analysis.changed_paths),
+                    max_paths_bytes=min(
+                        8192, max(256, remaining_instruction_bytes - 1024)
+                    ),
+                )
+                if len(note.encode("utf-8")) <= remaining_instruction_bytes:
+                    instructions = (
+                        f"{request.instructions}\n\n{note}"
+                        if request.instructions
+                        else note
+                    )
             chunk_request = replace(
                 request,
                 diff=chunk.diff,
@@ -771,10 +860,20 @@ class ReviewService:
                 )
                 continue
             chunks_completed += 1
+            chunk_summary = chunk_result.summary
+            if len(plan.reviewable_chunks) > 1:
+                chunk_label = _chunk_scope_label(
+                    chunk,
+                    total_chunks=len(plan.reviewable_chunks),
+                    analysis=plan.analysis,
+                )
+                chunk_summary = (
+                    _format_scoped_summary(chunk_summary, label=chunk_label) or ""
+                )
             accumulated_summary = (
-                f"{accumulated_summary}\n\n{chunk_result.summary}"
-                if accumulated_summary
-                else chunk_result.summary
+                f"{accumulated_summary}\n\n{chunk_summary}"
+                if accumulated_summary and chunk_summary
+                else accumulated_summary or chunk_summary
             )
             accumulated_comments.extend(chunk_result.comments)
             accumulated_proposals.extend(chunk_result.learning_proposals)

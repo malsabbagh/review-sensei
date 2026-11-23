@@ -36,10 +36,14 @@ from .models import (
 )
 from .outcomes import ResourceBudgetTracker
 from .planning import (
+    MAX_RELATED_PATHS,
     WorkBatch,
     WorkRequirement,
+    _bounded_scope_manifest,
     _classify_file,
     _coverage_for,
+    _format_scope_label,
+    _format_scoped_summary,
     _hunk_record,
     _reconcile_file_outcomes_from_hunks,
     apply_chunk_outcomes,
@@ -72,6 +76,115 @@ def _context_digest_line(document: dict[str, object] | None) -> str:
 
 
 CONTEXT_DIGEST_LINE_BYTES = len(_context_digest_line({}).encode("utf-8"))
+
+
+def _batch_scope_note(
+    batch: WorkBatch,
+    *,
+    changed_paths: tuple[str, ...],
+    max_other_paths_bytes: int = 8192,
+) -> str:
+    """Return bounded PR-wide and split-segment scope context for a partial batch."""
+    batch_covered = {
+        path
+        for record in batch.records
+        for path in (record.path, record.old_path)
+        if path
+    }
+    other_paths = sorted(set(changed_paths) - batch_covered)
+    has_partial_records = any(
+        record.fragment is not None or not record.supplied_complete
+        for record in batch.records
+    )
+    if not other_paths and not has_partial_records:
+        return ""
+    in_batch_manifest, _ = _bounded_scope_manifest(
+        batch.paths,
+        max_paths=MAX_RELATED_PATHS,
+        max_bytes=max(512, max_other_paths_bytes // 2),
+    )
+    lines = [
+        "<review-batch-scope>",
+        "This request is one partial slice of a multi-batch PR review; sibling batches review the remaining changed files and/or remaining segments of split files.",
+        f"Files in this batch: {in_batch_manifest or '(none)'}",
+    ]
+    if other_paths:
+        other_manifest, _ = _bounded_scope_manifest(
+            other_paths,
+            max_paths=MAX_RELATED_PATHS,
+            max_bytes=max_other_paths_bytes,
+            total_count=len(other_paths),
+        )
+        lines.append(f"Other changed PR paths not in this batch: {other_manifest}")
+    segment_lines: list[str] = []
+    for record in batch.records:
+        if record.fragment is not None:
+            proof = record.fragment
+            line_range = ""
+            if record.analysis is not None and record.analysis.hunk_records:
+                piece = record.analysis.hunk_records[0]
+                if piece.new_count:
+                    new_end = piece.new_start + piece.new_count - 1
+                    line_range = f" lines +{piece.new_start}..+{new_end}"
+                else:
+                    line_range = f" lines +{piece.new_start}"
+            segment_lines.append(
+                f"- {record.path} hunk #{proof.source_hunk_index}{line_range} "
+                f"(bytes {proof.body_start}..{proof.body_end}/{proof.body_bytes}): "
+                "Lossless canonical hunk segment; preceding/following lines are reviewed in sibling batches, NOT truncated or missing from the PR."
+            )
+        elif not record.supplied_complete:
+            hunk_desc = ""
+            if record.analysis is not None and record.analysis.hunk_records:
+                piece = record.analysis.hunk_records[0]
+                if piece.new_count:
+                    new_end = piece.new_start + piece.new_count - 1
+                    hunk_desc = (
+                        f" hunk #{piece.index} lines +{piece.new_start}..+{new_end}"
+                    )
+                else:
+                    hunk_desc = f" hunk #{piece.index} lines +{piece.new_start}"
+            segment_lines.append(
+                f"- {record.path}{hunk_desc}: Partial file hunk slice; remaining hunks are reviewed in sibling batches, NOT truncated or missing from the PR."
+            )
+    if segment_lines:
+        lines.append("Split-file segment scope:")
+        lines.extend(segment_lines)
+    lines.append(
+        "Do NOT report absent sibling files, segment boundaries, or symbols defined in sibling segments/files as truncation, syntax errors, or blocking defects. "
+        "Scope `summary` strictly to the files and segments supplied in THIS batch."
+    )
+    lines.append("</review-batch-scope>")
+    return "\n\n" + "\n".join(lines)
+
+
+def _batch_scope_items(batch: WorkBatch) -> tuple[str, ...]:
+    """Return compact per-record scope labels for batch summary prefixes."""
+    items: list[str] = []
+    for record in batch.records:
+        if (
+            record.fragment is not None
+            and record.analysis is not None
+            and record.analysis.hunk_records
+        ):
+            piece = record.analysis.hunk_records[0]
+            if piece.new_count:
+                new_end = piece.new_start + piece.new_count - 1
+                desc = f"{record.path} lines {piece.new_start}-{new_end}"
+            else:
+                old_end = piece.old_start + max(0, piece.old_count - 1)
+                desc = f"{record.path} old lines {piece.old_start}-{old_end}"
+        elif (
+            not record.supplied_complete
+            and record.analysis is not None
+            and record.analysis.hunk_records
+        ):
+            piece = record.analysis.hunk_records[0]
+            desc = f"{record.path} hunk #{piece.index}"
+        else:
+            desc = record.path
+        items.append(desc)
+    return tuple(items)
 
 
 def context_admission_document(
@@ -289,6 +402,14 @@ def discover(
                 request, diff=batch.diff_context, orchestrate_large_changes=False
             )
             batch_analysis = analyze_diff(batch.diff_context, limits=request.limits)
+            scope_note = _batch_scope_note(
+                batch,
+                changed_paths=analysis.changed_paths,
+                max_other_paths_bytes=min(
+                    8192, max(512, budgets.batch_prompt_bytes // 4)
+                ),
+            )
+            batch_frame_bytes = frame_bytes + len(scope_note.encode("utf-8"))
             admission = admit_prompt_context(
                 batch_request,
                 active_category_ids=tuple(category.id for category in categories),
@@ -302,10 +423,11 @@ def discover(
                         reviewed_paths=batch.paths,
                         related_paths=coverage_decision.related_paths,
                         max_prompt_bytes=max(
-                            0, budgets.batch_prompt_bytes - frame_bytes
+                            0, budgets.batch_prompt_bytes - batch_frame_bytes
                         ),
                         analysis=batch_analysis,
                     )
+                    + scope_note
                     + suffix
                 ),
                 fits=lambda prompt: budgets.fits_prompt(
@@ -437,6 +559,16 @@ def discover(
                 }
             ),
         )
+        batch_labels: dict[str, str] = {}
+        if len(plan.batches) > 1:
+            total_batches = len(plan.batches)
+            for idx, planned_batch in enumerate(plan.batches, start=1):
+                batch_labels[planned_batch.batch_id] = _format_scope_label(
+                    "Batch",
+                    idx,
+                    total_batches,
+                    _batch_scope_items(planned_batch),
+                )
 
         def validate(
             response: ProviderResponse, batch: WorkBatch
@@ -484,7 +616,13 @@ def discover(
                 if admission is None:
                     render(item.batch)
                     admission = admissions[item.batch.batch_id]
-                prospective_summary = "\n\n".join([*summaries, output.summary or ""])
+                batch_summary = _format_scoped_summary(
+                    output.summary,
+                    label=batch_labels.get(item.batch.batch_id),
+                )
+                prospective_summary = "\n\n".join(
+                    [*summaries, *([batch_summary] if batch_summary else [])]
+                )
                 if (
                     len(prospective_summary.encode("utf-8"))
                     + (CONTEXT_DIGEST_LINE_BYTES if context_enabled else 0)
@@ -503,8 +641,8 @@ def discover(
                 )
             except ReviewInputError:
                 return False
-            if output.summary:
-                summaries.append(output.summary)
+            if batch_summary:
+                summaries.append(batch_summary)
             comments.extend(output.comments)
             proposals.extend(output.proposals)
             if context_enabled:
@@ -597,6 +735,15 @@ def discover(
                     correction=_PROVIDER_OUTPUT_CORRECTION,
                     authority_digest=plan.authority_digest,
                 )
+                if len(bridge_plan.batches) > 1 or len(plan.batches) > 1:
+                    bridge_total = len(bridge_plan.batches)
+                    for idx, bridge_batch in enumerate(bridge_plan.batches, start=1):
+                        batch_labels[bridge_batch.batch_id] = _format_scope_label(
+                            "Scope batch",
+                            idx,
+                            bridge_total,
+                            _batch_scope_items(bridge_batch),
+                        )
 
                 def validate_bridge(
                     response: ProviderResponse, batch: WorkBatch
@@ -647,6 +794,12 @@ def discover(
                         file_outcomes[path] = ("budget-exhausted", "chunk-failed")
                     for file_record in analysis.file_records:
                         if path in file_record.coverage_paths:
+                            for cov_path in file_record.coverage_paths:
+                                if cov_path in file_outcomes:
+                                    file_outcomes[cov_path] = (
+                                        "budget-exhausted",
+                                        "chunk-failed",
+                                    )
                             for bridge_hunk in file_record.hunks:
                                 hunk_outcomes[bridge_hunk.index] = (
                                     "budget-exhausted",
@@ -695,10 +848,12 @@ def discover(
             for key in item.evidence_ids:
                 pending_record = evidence_by_id.get(key)
                 if pending_record is not None:
-                    file_outcomes[pending_record.path] = (
-                        "budget-exhausted",
-                        diagnostic,
-                    )
+                    for pending_path in (pending_record.path, pending_record.old_path):
+                        if pending_path is not None and pending_path in file_outcomes:
+                            file_outcomes[pending_path] = (
+                                "budget-exhausted",
+                                diagnostic,
+                            )
             for index in item.hunk_indexes:
                 hunk_outcomes[index] = ("budget-exhausted", diagnostic)
     for path in analysis.changed_paths:
