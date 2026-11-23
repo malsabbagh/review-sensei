@@ -11166,6 +11166,47 @@ class ReviewPublisher:
                 preserve_explanations=human_inventory is not None,
                 window_non_inline_blocking=window_non_inline_blocking,
             )
+        if (
+            lifecycle_journal is not None
+            and not lifecycle_journal.effects
+            and not write_preflight.app_authored
+            and not grouped_publication
+            and ordinary_observation is None
+            and getattr(lifecycle_journal, "_armed", False)
+            and lifecycle_journal._record is not None
+            and getattr(lifecycle_journal._record, "quarantine_lineage", None) is None
+            and getattr(lifecycle_journal.ledger, "caller", None) is not None
+        ):
+            _preflight_plain_review_lifecycle(
+                self,
+                lifecycle_journal,
+                result=result,
+                assembled=continuation_review or preflight_review,
+                analysis=analysis,
+                eligibility=prospective_eligibility,
+                marker=marker,
+                outcome=planned_check_outcome,
+                check_token=check_token,
+                check_capability_failure=check_capability_failure,
+                approval_enabled=approval_enabled,
+                complete_inventory=complete_inventory,
+                complete_suppression=complete_suppression,
+                retained_eligibility=retained_eligibility,
+                qualification_binding=qualification_binding,
+                admitted_verdict=admitted_verdict,
+                needs_human_inventory=needs_human_inventory,
+                preserve_explanations=human_inventory is not None,
+                planned_window=planned_window_state,
+                planned_drift=planned_drift_state,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
+                continuation=continuation_review is not None,
+                continuation_suffix=continuation_suffix,
+                window_non_inline_blocking=window_non_inline_blocking,
+                window_has_human=window_has_human,
+                base_branch=base_branch,
+                token=token,
+            )
         if write_preflight.app_authored:
             check_diagnostic: str | None = "app_authored"
         else:
@@ -13323,6 +13364,415 @@ from .adjacent_publication_preflight import (  # noqa: E402
 
 _install_adjacent_preflight(ReviewPublisher)
 del _install_adjacent_preflight
+
+
+def _preflight_plain_review_lifecycle(
+    publisher: ReviewPublisher,
+    journal: Any,
+    *,
+    result: ReviewResult,
+    assembled: AssembledReview | None,
+    analysis: DiffAnalysis,
+    eligibility: ReviewApprovalEligibility,
+    marker: str,
+    outcome: CheckOutcome | None,
+    check_token: str | None,
+    check_capability_failure: Any,
+    approval_enabled: bool,
+    complete_inventory: bool,
+    complete_suppression: PublishedFindingSuppression | None,
+    retained_eligibility: ReviewApprovalEligibility | None,
+    qualification_binding: Any,
+    admitted_verdict: Any,
+    needs_human_inventory: bool,
+    preserve_explanations: bool,
+    planned_window: Any,
+    planned_drift: Any,
+    convergence_policy: ReviewConvergencePolicy,
+    auto_approval: bool,
+    continuation: bool,
+    continuation_suffix: str,
+    window_non_inline_blocking: bool,
+    window_has_human: bool,
+    base_branch: str,
+    token: str,
+) -> None:
+    """Size the planned review lifecycle checkpoint before Effect #1 writes."""
+    import copy
+
+    from review_sensei.bounded_evidence import (
+        INLINE_ENCODING,
+        MAX_PARTS,
+        PACKED_CHUNK_BYTES,
+        canonical_bytes,
+    )
+    from review_sensei.finding_lifecycle_store import (
+        _prepare_lifecycle,
+        preflight_finding_lifecycle,
+    )
+
+    from .finding_lifecycle import _digest, _require_effect_scope
+    from .ordinary_publication_plan import _capacity_request_identity
+
+    budget = getattr(journal.ledger, "evidence_budget", None)
+    if budget is None:
+        return
+    record = journal._record
+    if record is None:
+        return
+    if assembled is None:
+        assembled = publisher._adjust_assembled_for_drift(
+            publisher._adjust_assembled_for_window(
+                publisher._assemble_review_body(
+                    result=result,
+                    analysis=analysis,
+                    convergence_policy=convergence_policy,
+                    read_facts=lambda: publisher._conversation_resolution_facts(
+                        token=token,
+                        repository=journal.identity.repository,
+                        branch=base_branch,
+                    ),
+                    auto_approve=auto_approval,
+                    repository_id=journal.identity.repository_id,
+                    pull_request=journal.identity.pull_request,
+                    head_sha=journal.head_sha,
+                    base_sha=journal.base_sha,
+                ),
+                planned_window,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
+            ),
+            planned_drift,
+            convergence_policy=convergence_policy,
+            auto_approval=auto_approval,
+        )
+    planned_diag: str | None = None
+    if check_token is None:
+        planned_diag = (
+            check_capability_failure.code
+            if check_capability_failure is not None
+            else "check_capability_unavailable"
+        )
+    planned_eligibility = replace(
+        eligibility,
+        facts=replace(
+            eligibility.facts,
+            check_published=planned_diag is None,
+        ),
+    )
+    if planned_window is not None or planned_drift is not None:
+        planned_eligibility = replace(
+            planned_eligibility,
+            facts=replace(
+                planned_eligibility.facts,
+                has_blocking_findings=(
+                    planned_eligibility.facts.has_blocking_findings
+                    or bool(
+                        admitted_verdict and admitted_verdict.unselected_blocking_defect
+                    )
+                ),
+                has_human_adjudication_findings=(
+                    planned_eligibility.facts.has_human_adjudication_findings
+                    or window_has_human
+                    or bool(
+                        admitted_verdict and admitted_verdict.unselected_human_decision
+                    )
+                ),
+            ),
+        )
+    if needs_human_inventory:
+        planned_eligibility = replace(
+            planned_eligibility,
+            human_inventory_reference=eligibility.human_inventory_reference,
+        )
+    planned_eligibility = publisher._bind_qualification(
+        planned_eligibility, qualification_binding
+    )
+    body_blocking = (
+        any(entry.blocking and entry.body_placed for entry in assembled.index_entries)
+        or window_non_inline_blocking
+    )
+    if retained_eligibility is not None:
+        body_blocking = (
+            body_blocking or retained_eligibility.facts.has_blocking_findings
+        )
+    planned_eligibility = replace(
+        planned_eligibility,
+        facts=replace(planned_eligibility.facts, has_blocking_findings=body_blocking),
+    )
+    eligibility_marker = approval_eligibility_marker(planned_eligibility)
+    check_warning = (
+        render_check_warning(planned_diag, concise=True)
+        if planned_diag in CHECK_FAILURE_CODES or planned_diag == "check_permission"
+        else ""
+    )
+    from .controlled_restart import effect_guard
+
+    restart_guard = effect_guard(publisher.http)
+    restart_marker = (
+        "\n" + restart_guard.admission.marker if restart_guard is not None else ""
+    )
+    try:
+        summary, index_marker = fit_assembled_review(
+            assembled,
+            review_marker=marker,
+            eligibility_marker=eligibility_marker,
+            repository_id=journal.identity.repository_id,
+            pull_request=journal.identity.pull_request,
+            head_sha=journal.head_sha,
+            base_sha=journal.base_sha,
+            result_digest=review_result_digest(result),
+            summary_limit=_published_summary_byte_limit(result),
+            suffix=continuation_suffix if continuation else "",
+            complete_inventory=complete_inventory,
+            reserved_bytes=_disposition_frame_reserve(
+                planned_eligibility, assembled.index_entries
+            )
+            + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0)
+            + len(restart_marker.encode("utf-8")),
+            preserve_explanations=preserve_explanations,
+        )
+        body = (
+            _framed_review_body(
+                summary,
+                review_marker=marker,
+                index_marker=index_marker,
+                eligibility_marker=eligibility_marker,
+            )
+            + restart_marker
+        )
+        if planned_diag in CHECK_FAILURE_CODES or planned_diag == "check_permission":
+            body = f"{check_warning}\n\n{body}"
+        validate_bounded_text(
+            body,
+            MAX_PUBLISHED_REVIEW_BODY_BYTES,
+            label="published review body",
+            allow_empty=False,
+        )
+    except ReviewInputError as exc:
+        raise GitHubPublicationError(
+            "formatted review exceeds the configured publication limit"
+        ) from exc
+
+    comments: list[dict[str, object]] = []
+    for comment, fingerprint, comment_body, anchor in assembled.inline_comments:
+        if complete_suppression is not None and _should_suppress_published_finding(
+            comment,
+            fingerprint,
+            complete_suppression,
+            instance=finding_instance_fingerprint(comment),
+            head_sha=journal.head_sha,
+            base_sha=journal.base_sha,
+        ):
+            continue
+        comments.append(
+            publisher._inline_comment_payload(comment, comment_body, anchor)
+        )
+    retained_blocking = (
+        retained_eligibility is not None
+        and retained_eligibility.facts.has_blocking_findings
+    )
+    event, _ = publisher._ordinary_review_event(
+        approval_enabled=approval_enabled,
+        requests_changes=assembled.requests_changes,
+        retained_blocking=retained_blocking,
+        app_authored=False,
+    )
+    shadow = copy.copy(journal)
+    shadow.effects = []
+    repository = journal.identity.repository
+    check_path = f"/repos/{repository}/check-runs"
+    review_path = f"/repos/{repository}/pulls/{journal.identity.pull_request}/reviews"
+
+    def _append_shadow_effect(
+        method: str,
+        effect_path: str,
+        effect_body: Mapping[str, Any],
+        precondition: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        request = _capacity_request_identity(method, effect_path, effect_body)
+        effect: dict[str, Any] = {
+            "method": method,
+            "path": effect_path,
+            "request": request,
+            "request_sha256": _digest(
+                {"method": method, "path": effect_path, "request": request}
+            ),
+            "status": "pending",
+            "response": None,
+        }
+        if precondition is not None:
+            effect["check_update_precondition"] = dict(precondition)
+        prior_prefix = copy.deepcopy(shadow.effects)
+        shadow.effects.append(effect)
+        _require_effect_scope(shadow._document(), journal.identity, journal.head_sha)
+        pending_doc, future_doc, confirmed = shadow._preflight_effect(
+            capacity_only=True
+        )
+        if len(confirmed) != len(prior_prefix) + 1 or confirmed[:-1] != prior_prefix:
+            raise ReviewInputError(
+                "shadow lifecycle preflight diverged from appended effects"
+            )
+        shadow.effects = confirmed
+        return pending_doc, future_doc
+
+    pending_check_1: dict[str, Any] | None = None
+    if (
+        check_token is not None
+        and callable(getattr(publisher.checks, "_state_fields", None))
+        and callable(getattr(publisher.checks, "_mutation_body", None))
+    ):
+        max_id = 9_223_372_036_854_775_807
+        pending_check_1, _ = _append_shadow_effect(
+            "POST",
+            check_path,
+            publisher.checks._mutation_body(
+                repository=repository,
+                head_sha=journal.head_sha,
+                create=True,
+                **publisher.checks._state_fields(None),
+            ),
+        )
+        _append_shadow_effect(
+            "PATCH",
+            f"{check_path}/{max_id}",
+            publisher.checks._mutation_body(
+                repository=repository,
+                head_sha=journal.head_sha,
+                create=False,
+                **publisher.checks._state_fields(outcome),
+            ),
+            {
+                "check_run_id": max_id,
+                "head_sha": journal.head_sha,
+                "app_id": max_id,
+                "app_slug": journal.app_slug.removesuffix("[bot]"),
+            },
+        )
+    pending_review, future_review = _append_shadow_effect(
+        "POST",
+        review_path,
+        {
+            "body": body,
+            "event": event,
+            "commit_id": journal.head_sha,
+            "comments": comments,
+        },
+    )
+    check_physical = 10 if check_token is not None else 0
+    drift_resolved = planned_drift is not None and any(
+        not ob.unresolved and ob.thread_binding is not None
+        for ob in planned_drift.inventory.obligations
+    )
+    suppression_physical = (
+        1 if (comments or drift_resolved) and complete_suppression is None else 0
+    )
+    pre_review_physical = check_physical + suppression_physical
+    existing_fl = getattr(record, "finding_lifecycle", None)
+    prior_fl_parts = (
+        len(existing_fl["manifest"]["parts"])
+        if isinstance(existing_fl, Mapping)
+        and isinstance(existing_fl.get("manifest"), Mapping)
+        and isinstance(existing_fl["manifest"].get("parts"), list)
+        else 0
+    )
+    snapshot = getattr(record, "disposition_snapshot", None)
+    partitioned_snapshot = (
+        isinstance(snapshot, Mapping)
+        and isinstance(snapshot.get("state_manifest"), Mapping)
+        and snapshot["state_manifest"].get("encoding") == "partitioned-json-v1"
+    )
+
+    def _reserve_review_lifecycle_tail(
+        *, p_pending: int, future_calls: int, preflight_when_inline: bool
+    ) -> None:
+        if not p_pending:
+            if preflight_when_inline:
+                budget.preflight(pre_review_physical + 4 + future_calls + 6)
+            return
+        stage_cost_3 = 8 * p_pending + 16
+        check1_stage = (4 + 2 * min(p_pending, prior_fl_parts)) if prior_fl_parts else 4
+        prior_checkpoints = (
+            (check1_stage + 4 + 2 * p_pending + 2) if pending_check_1 is not None else 0
+        )
+        budget.preflight(
+            pre_review_physical + prior_checkpoints + stage_cost_3 + future_calls + 6
+        )
+
+    def _worst_case_parts(envelope: Mapping[str, object], candidate: Any) -> int:
+        manifest = candidate.finding_lifecycle["manifest"]
+        if manifest["encoding"] == INLINE_ENCODING:
+            return 0
+        envelope_bytes = len(canonical_bytes(envelope))
+        packed_bound = (
+            envelope_bytes
+            + (envelope_bytes >> 12)
+            + (envelope_bytes >> 14)
+            + (envelope_bytes >> 25)
+            + 13
+        )
+        count = (packed_bound + PACKED_CHUNK_BYTES - 1) // PACKED_CHUNK_BYTES
+        if count > MAX_PARTS:
+            raise ReviewInputError("finding lifecycle future part capacity exceeded")
+        return count
+
+    if partitioned_snapshot:
+        # Partitioned snapshots cannot invoke preflight_finding_lifecycle without live
+        # snapshot-part reads on non-staged ledgers; size via _prepare_lifecycle and
+        # compressBound worst-case parts while reserving the identical tail envelope.
+        _, pending_env, _, _, pending_cand = _prepare_lifecycle(
+            journal.ledger,
+            record,
+            document=pending_review,
+            operation_id=journal.operation_id,
+            base_sha=journal.base_sha,
+            head_sha=journal.head_sha,
+            policy_digest=journal.policy_digest,
+            configuration_digest=journal.configuration_digest,
+            item_count=len(shadow.effects) + 1,
+            reserved_tail_calls=pre_review_physical + 6,
+        )
+        _, future_env, _, _, future_cand = _prepare_lifecycle(
+            journal.ledger,
+            pending_cand,
+            document=future_review,
+            operation_id=journal.operation_id,
+            base_sha=journal.base_sha,
+            head_sha=journal.head_sha,
+            policy_digest=journal.policy_digest,
+            configuration_digest=journal.configuration_digest,
+            item_count=len(shadow.effects) + 1,
+            reserved_tail_calls=pre_review_physical + 6,
+        )
+        p_pending = _worst_case_parts(pending_env, pending_cand)
+        p_future = _worst_case_parts(future_env, future_cand)
+        _reserve_review_lifecycle_tail(
+            p_pending=p_pending,
+            future_calls=(4 + 3 * p_future) if p_future else 4,
+            preflight_when_inline=True,
+        )
+        return
+
+    plan = preflight_finding_lifecycle(
+        journal.ledger,
+        record,
+        document=pending_review,
+        future_documents=(future_review,),
+        operation_id=journal.operation_id,
+        base_sha=journal.base_sha,
+        head_sha=journal.head_sha,
+        policy_digest=journal.policy_digest,
+        configuration_digest=journal.configuration_digest,
+        item_count=len(shadow.effects) + 1,
+        reserved_tail_calls=pre_review_physical + 6,
+    )
+    pending_cp = plan["checkpoints"][0]
+    future_cp = plan["checkpoints"][1]
+    _reserve_review_lifecycle_tail(
+        p_pending=pending_cp["parts"],
+        future_calls=future_cp["conditional_calls"],
+        preflight_when_inline=False,
+    )
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

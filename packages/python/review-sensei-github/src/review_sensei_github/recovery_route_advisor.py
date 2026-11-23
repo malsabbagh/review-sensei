@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +42,7 @@ from review_sensei.provenance_manifest import (
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from .api_run_history import (
+    RETAINED_CONFIRMATION_TAIL,
     _match_action_result,
     _read_bound_action_result,
     action_result_binding,
@@ -55,17 +57,33 @@ from .api_run_owner import (
     later_attempt_proved_no_business_entry,
 )
 from .checkpoint_result_store import CheckpointResultStore
+from .checks import REVIEW_CHECK_EXTERNAL_ID, REVIEW_CHECK_NAME
 from .operation_comments import GitHubIssueCommentOperationPort
 from .pre_entry_abort_recovery import (
     _detect_late_native_effects,
     _ReadOnlyNoTransactionHttp,
     _validate_analysis_abort_receipt,
+    classify_abort_inline_effect,
+    classify_abort_review_effect,
 )
 from .prior_rescan_publication import admitted_rescan
+from .publication_failure_recovery import (
+    _NO_EARLIER_EFFECTS,
+    SETTLEMENT_WITNESS_MARKER,
+    PreExternalWriteSettlementWitness,
+    _earlier_settled_effects,
+    _find_settlement_witness_for_producer,
+    _is_authenticated_bot_comment,
+    iter_step_down_pages,
+    parse_settlement_witness_comment,
+)
 from .publication_recovery import _event_key, _payload
 from .session_ledger import GitHubIssueCommentSessionLedger
 
 SCHEMA_VERSION = "review-recovery-classification-v1"
+PRE_482_LIFECYCLE_OVERFLOW_DIAGNOSTIC = (
+    "finding lifecycle parts exceed original checkpoint operation"
+)
 
 SUPPORTED_RECOVERY_ROUTES: frozenset[str] = frozenset(
     {
@@ -76,6 +94,7 @@ SUPPORTED_RECOVERY_ROUTES: frozenset[str] = frozenset(
         "automatic_historical_completion",
         "same_run_attempt2_retained_replay",
         "pre_entry_abort_rollover",
+        "pre_external_write_rollover",
         "pending_reassessment_continuation",
         "targeted_human_disposition",
         "quarantine_published_tail_isolation",
@@ -135,6 +154,9 @@ MISSING_WITNESSES: frozenset[str] = frozenset(
         "confirmed_review_publication",
         "same_head_and_base_for_attempt2_replay",
         "confirmed_failure_before_write",
+        "valid_pre_external_write_settlement_witness",
+        "unpublished_zero_effect_finding_lifecycle",
+        "clean_native_effect_census",
     }
 )
 
@@ -151,6 +173,10 @@ RECOVERY_STATES: frozenset[str] = frozenset(
         "pending_action_pre_entry",
         "pending_action_started_unfinished",
         "pre_entry_analysis_abort_settled",
+        "pre_external_write_settlement_ready",
+        "pre_external_write_settlement_unverified",
+        "pre_482_lifecycle_operation_overflow_zero_effect",
+        "pre_482_lifecycle_operation_overflow_effects_present",
         "no_transaction_abort_unconfirmed",
         "conflicting_abort_with_transaction",
         "no_transaction_unclosed",
@@ -196,6 +222,7 @@ TERMINAL_SETTLEMENT_FORMS: frozenset[str] = frozenset(
         "authenticated_terminal_action_null_review_marker",
         "authenticated_terminal_action_with_prior_review_marker",
         "pre_entry_analysis_abort",
+        "pre_external_write_settlement",
         "unenrolled_session",
         "unsettled",
     }
@@ -340,6 +367,271 @@ def _verify_inline_action_result(
     return True
 
 
+def _is_pre_482_lifecycle_overflow(failure_diagnostic: str | None) -> bool:
+    return (
+        isinstance(failure_diagnostic, str)
+        and PRE_482_LIFECYCLE_OVERFLOW_DIAGNOSTIC in failure_diagnostic.casefold()
+    )
+
+
+def _finding_lifecycle_dirty_for_tx(record: SessionRecord, tx: Any) -> bool:
+    if record.publication_staging is not None:
+        return True
+    lifecycle = record.finding_lifecycle
+    if lifecycle is None:
+        return False
+    if not isinstance(lifecycle, Mapping):
+        return True
+    op_id = lifecycle.get("operation_id")
+    if tx is None:
+        return op_id is not None
+    return not isinstance(op_id, str) or op_id == tx.transaction_id
+
+
+def _parse_settlement_witness(
+    settlement_witness: Any,
+) -> PreExternalWriteSettlementWitness | None:
+    if isinstance(settlement_witness, PreExternalWriteSettlementWitness):
+        return settlement_witness
+    if isinstance(settlement_witness, Mapping):
+        try:
+            fields = {
+                key: settlement_witness[key]
+                for key in (
+                    "schema_version",
+                    "repository",
+                    "repository_id",
+                    "pull_request",
+                    "run_id",
+                    "owner",
+                    "settled_root_sha256",
+                    "settled_generation",
+                    "settled_phase",
+                    "boundary",
+                    "transaction_id",
+                    "base_sha",
+                    "head_sha",
+                    "producer",
+                    "content_sha256",
+                )
+            }
+            if len(settlement_witness) != len(fields):
+                return None
+            return PreExternalWriteSettlementWitness(**fields)
+        except (KeyError, ReviewInputError, TypeError, ValueError):
+            return None
+    return None
+
+
+def _validate_settlement_witness_for_record(
+    settlement_witness: Any,
+    *,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    tx: Any,
+    tx_phase: str,
+    evidence_producer: str | None,
+) -> bool:
+    witness = _parse_settlement_witness(settlement_witness)
+    if witness is None:
+        return False
+    expected_boundary = (
+        "post_checkpoint_pre_write" if tx is not None else "pre_checkpoint_validation"
+    )
+    expected_tx_id = tx.transaction_id if tx is not None else None
+    if (
+        witness.repository != record.repository
+        or witness.repository_id != record.repository_id
+        or witness.pull_request != record.pull_request
+        or witness.run_id != old.identity.run_id
+        or witness.owner
+        != {
+            "run_attempt": old.owner.run_attempt,
+            "job": old.owner.job,
+            "generation": old.owner.generation,
+        }
+        or witness.settled_root_sha256 != record.record_sha256
+        or witness.settled_generation != record.generation
+        or witness.settled_phase != tx_phase
+        or witness.boundary != expected_boundary
+        or witness.transaction_id != expected_tx_id
+        or (evidence_producer is not None and witness.producer != evidence_producer)
+    ):
+        return False
+    if tx is not None:
+        return witness.base_sha == tx.base_sha and witness.head_sha == tx.head_sha
+    return (
+        record.failed_attempts > 0
+        and record.failed_attempts_head_sha == witness.head_sha
+    )
+
+
+def _classify_pre_write_or_pre_482_state(
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    *,
+    tx: Any,
+    tx_phase: str,
+    head_relation: str,
+    base_relation: str,
+    attempt: int,
+    executor_status: str,
+    dispatch_status: str,
+    evidence_producer: str | None,
+    native_effects_confirmed: bool | None,
+    settlement_witness: Any,
+    failure_diagnostic: str | None,
+) -> RecoveryClassification | None:
+    if tx is not None and tx.phase not in {"publication_failed", "publication_pending"}:
+        return None
+    owner_ceased = executor_status in {"ceased", "failed", "qualified_success"}
+    lifecycle_clean = not _finding_lifecycle_dirty_for_tx(record, tx)
+    native_clean = native_effects_confirmed is True
+    dispatch_clean = dispatch_status == "known_clean" and old.uncertain == 0
+
+    if settlement_witness is not None and (
+        tx is None or tx.phase == "publication_failed"
+    ):
+        witness_valid = (
+            settlement_witness is not False
+            and _validate_settlement_witness_for_record(
+                settlement_witness,
+                record=record,
+                old=old,
+                tx=tx,
+                tx_phase=tx_phase,
+                evidence_producer=evidence_producer,
+            )
+        )
+        if (
+            witness_valid
+            and lifecycle_clean
+            and owner_ceased
+            and native_clean
+            and dispatch_clean
+            and not record.operator_paused
+        ):
+            return RecoveryClassification(
+                state_code="pre_external_write_settlement_ready",
+                terminal=True,
+                automatic_zero_inference=True,
+                head_relation=head_relation,
+                base_relation=base_relation,
+                run_attempt=attempt,
+                executor_status=executor_status,
+                transaction_phase=tx_phase,
+                action_phase=None,
+                dispatch_status=dispatch_status,
+                missing_witnesses=(),
+                primary_route="pre_external_write_rollover",
+                fallback_routes=("ordinary_rollover",),
+                operator_action=(
+                    "Verified `pre-external-write-settlement-v1` witness, "
+                    "zero-effect finding lifecycle, clean native census, and "
+                    "ceased owner; automatic pre-external-write rollover is ready "
+                    "(read-only diagnosis, authority=False)."
+                ),
+            )
+        missing_witness_reasons: list[str] = []
+        if not witness_valid:
+            missing_witness_reasons.append(
+                "valid_pre_external_write_settlement_witness"
+            )
+        if not lifecycle_clean:
+            missing_witness_reasons.append("unpublished_zero_effect_finding_lifecycle")
+        if not owner_ceased:
+            missing_witness_reasons.append("predecessor_owner_cessation")
+        if not native_clean:
+            missing_witness_reasons.append("clean_native_effect_census")
+        if not dispatch_clean:
+            missing_witness_reasons.append("confirmed_failure_before_write")
+        if record.operator_paused:
+            missing_witness_reasons.append("operator_pause_cleared")
+        return RecoveryClassification(
+            state_code="pre_external_write_settlement_unverified",
+            terminal=False,
+            automatic_zero_inference=False,
+            head_relation=head_relation,
+            base_relation=base_relation,
+            run_attempt=attempt,
+            executor_status=executor_status,
+            transaction_phase=tx_phase,
+            action_phase=None,
+            dispatch_status=dispatch_status,
+            missing_witnesses=tuple(missing_witness_reasons),
+            primary_route="controlled_serialized_restart",
+            fallback_routes=(),
+            operator_action=(
+                "Pre-external-write settlement rollover lacks a verified witness, "
+                "owner cessation, clean lifecycle, or clean native census; hold "
+                "and recover via controlled serialized restart."
+            ),
+        )
+
+    if _is_pre_482_lifecycle_overflow(failure_diagnostic):
+        if (
+            lifecycle_clean
+            and owner_ceased
+            and native_clean
+            and dispatch_clean
+            and not record.operator_paused
+        ):
+            return RecoveryClassification(
+                state_code="pre_482_lifecycle_operation_overflow_zero_effect",
+                terminal=False,
+                automatic_zero_inference=False,
+                head_relation=head_relation,
+                base_relation=base_relation,
+                run_attempt=attempt,
+                executor_status=executor_status,
+                transaction_phase=tx_phase,
+                action_phase=None,
+                dispatch_status=dispatch_status,
+                missing_witnesses=("valid_pre_external_write_settlement_witness",),
+                primary_route="controlled_serialized_restart",
+                fallback_routes=(),
+                operator_action=(
+                    "Pre-#482 `finding lifecycle parts exceed original checkpoint "
+                    "operation` record verified unpublished zero-effect "
+                    "`finding_lifecycle`, empty native census, and ceased exact/later "
+                    "attempts; lacks runtime settlement witness, so use designated "
+                    "controlled serialized restart."
+                ),
+            )
+        missing_pre_482: list[str] = ["valid_pre_external_write_settlement_witness"]
+        if not lifecycle_clean:
+            missing_pre_482.append("unpublished_zero_effect_finding_lifecycle")
+        if not native_clean:
+            missing_pre_482.append("clean_native_effect_census")
+        if not owner_ceased:
+            missing_pre_482.append("predecessor_owner_cessation")
+        if not dispatch_clean:
+            missing_pre_482.append("confirmed_failure_before_write")
+        if record.operator_paused:
+            missing_pre_482.append("operator_pause_cleared")
+        return RecoveryClassification(
+            state_code="pre_482_lifecycle_operation_overflow_effects_present",
+            terminal=False,
+            automatic_zero_inference=False,
+            head_relation=head_relation,
+            base_relation=base_relation,
+            run_attempt=attempt,
+            executor_status=executor_status,
+            transaction_phase=tx_phase,
+            action_phase=None,
+            dispatch_status=dispatch_status,
+            missing_witnesses=tuple(missing_pre_482),
+            primary_route="controlled_serialized_restart",
+            fallback_routes=(),
+            operator_action=(
+                "Pre-#482 lifecycle checkpoint overflow record retains recorded "
+                "or uncertain native/lifecycle effects or active owner; isolate "
+                "via controlled serialized restart."
+            ),
+        )
+    return None
+
+
 def classify_recovery_state(
     record: SessionRecord,
     *,
@@ -353,6 +645,8 @@ def classify_recovery_state(
     native_effects_confirmed: bool | None = None,
     action_result_authenticated: bool | None = None,
     evidence_producer: str | None = None,
+    settlement_witness: Any = None,
+    failure_diagnostic: str | None = None,
 ) -> RecoveryClassification:
     """Classify a `SessionRecord` into an exact state, witness set, and route."""
     if not isinstance(record, SessionRecord):
@@ -442,6 +736,8 @@ def classify_recovery_state(
         native_effects_confirmed=native_effects_confirmed,
         action_result_authenticated=action_result_authenticated,
         evidence_producer=evidence_producer,
+        settlement_witness=settlement_witness,
+        failure_diagnostic=failure_diagnostic,
     )
     if old.version == PARTITIONED_ACTION_ACCOUNTING_VERSION and (
         classification.primary_route != "controlled_serialized_restart"
@@ -479,6 +775,8 @@ def _classify_accounted_recovery_state(
     native_effects_confirmed: bool | None,
     action_result_authenticated: bool | None,
     evidence_producer: str | None,
+    settlement_witness: Any = None,
+    failure_diagnostic: str | None = None,
 ) -> RecoveryClassification:
 
     attempt = old.owner.run_attempt
@@ -819,6 +1117,23 @@ def _classify_accounted_recovery_state(
         )
 
     if tx is None:
+        pre_write_classification = _classify_pre_write_or_pre_482_state(
+            record,
+            old,
+            tx=None,
+            tx_phase="no-transaction",
+            head_relation="no_transaction_head",
+            base_relation="no_transaction_base",
+            attempt=attempt,
+            executor_status=executor_status,
+            dispatch_status=dispatch_status,
+            evidence_producer=evidence_producer,
+            native_effects_confirmed=native_effects_confirmed,
+            settlement_witness=settlement_witness,
+            failure_diagnostic=failure_diagnostic,
+        )
+        if pre_write_classification is not None:
+            return pre_write_classification
         return RecoveryClassification(
             state_code="no_transaction_unclosed",
             terminal=False,
@@ -1284,6 +1599,23 @@ def _classify_accounted_recovery_state(
 
     # 7. Unclosed `publication_failed` matrix (G03 / G31).
     if tx.phase == "publication_failed":
+        pre_write_classification = _classify_pre_write_or_pre_482_state(
+            record,
+            old,
+            tx=tx,
+            tx_phase=tx.phase,
+            head_relation=head_relation,
+            base_relation=base_relation,
+            attempt=attempt,
+            executor_status=executor_status,
+            dispatch_status=dispatch_status,
+            evidence_producer=evidence_producer,
+            native_effects_confirmed=native_effects_confirmed,
+            settlement_witness=settlement_witness,
+            failure_diagnostic=failure_diagnostic,
+        )
+        if pre_write_classification is not None:
+            return pre_write_classification
         if (
             head_relation == "same_head"
             and base_relation == "same_base"
@@ -1395,6 +1727,24 @@ def _classify_accounted_recovery_state(
         )
 
     # 8. Remaining non-terminal phases (`analysis`, `publication_pending`, unclosed `publication_suppressed`).
+    if tx.phase == "publication_pending":
+        pre_write_pending = _classify_pre_write_or_pre_482_state(
+            record,
+            old,
+            tx=tx,
+            tx_phase=tx.phase,
+            head_relation=head_relation,
+            base_relation=base_relation,
+            attempt=attempt,
+            executor_status=executor_status,
+            dispatch_status=dispatch_status,
+            evidence_producer=evidence_producer,
+            native_effects_confirmed=native_effects_confirmed,
+            settlement_witness=None,
+            failure_diagnostic=failure_diagnostic,
+        )
+        if pre_write_pending is not None:
+            return pre_write_pending
     same_run_replay_ok = (
         head_relation == "same_head"
         and base_relation == "same_base"
@@ -1815,6 +2165,8 @@ def _derive_terminal_settlement_form(
         return "authenticated_terminal_action_with_prior_review_marker"
     if classification.state_code == "pre_entry_analysis_abort_settled":
         return "pre_entry_analysis_abort"
+    if classification.state_code == "pre_external_write_settlement_ready":
+        return "pre_external_write_settlement"
     if classification.state_code in {
         "terminal_review_settled",
         "terminal_review_operator_paused",
@@ -2108,6 +2460,8 @@ def build_attempt_evidence_packet(
     historical_settlement_receipt_supplied: bool = False,
     diagnostics_available: bool = False,
     diagnostic_cause: str | None = None,
+    settlement_witness: Any = None,
+    failure_diagnostic: str | None = None,
 ) -> AttemptEvidencePacket:
     """Build an immutable offline `AttemptEvidencePacket` (`authority=False`).
 
@@ -2129,6 +2483,8 @@ def build_attempt_evidence_packet(
         native_effects_confirmed=native_effects_confirmed,
         action_result_authenticated=action_result_authenticated,
         evidence_producer=evidence_producer,
+        settlement_witness=settlement_witness,
+        failure_diagnostic=failure_diagnostic,
     )
     if type(record.repository_id) is not int or record.repository_id <= 0:
         raise ReviewInputError(
@@ -2309,6 +2665,229 @@ def _probe_executor_status_readonly(
     )[0]
 
 
+def _inspect_pre_write_witness_readonly(
+    ro_ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    *,
+    author_id: int | None,
+    producer: str | None,
+    budget: EvidenceReadBudget,
+    force_scan: bool,
+) -> PreExternalWriteSettlementWitness | bool | None:
+    if author_id is None or producer is None or not ro_ledger.app_slug:
+        return None
+    if force_scan:
+        try:
+            return _find_settlement_witness_for_producer(
+                http=ro_ledger.http,
+                token=ro_ledger.token,
+                app_slug=ro_ledger.app_slug,
+                producer_id=author_id,
+                producer=producer,
+                budget=budget,
+                identity=identity,
+                record=record,
+                old=old,
+            )
+        except ReviewInputError:
+            return False
+    cached = getattr(ro_ledger, "_cached_comments", lambda: ())()
+    matches: list[PreExternalWriteSettlementWitness] = []
+    saw_bot_marker = False
+    for row in cached:
+        if not isinstance(row, dict) or not _is_authenticated_bot_comment(
+            row, producer_id=author_id, app_slug=ro_ledger.app_slug
+        ):
+            continue
+        body = row.get("body")
+        if isinstance(body, str) and SETTLEMENT_WITNESS_MARKER in body:
+            saw_bot_marker = True
+            try:
+                parsed = parse_settlement_witness_comment(body)
+            except ReviewInputError:
+                return False
+            if (
+                parsed is not None
+                and parsed.settled_root_sha256 == record.record_sha256
+            ):
+                matches.append(parsed)
+    if not matches:
+        return False if saw_bot_marker else None
+    if len(matches) != 1:
+        return False
+    return matches[0]
+
+
+def _inspect_pre_write_census_readonly(
+    ro_ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    *,
+    author_id: int | None,
+    budget: EvidenceReadBudget,
+) -> bool | None:
+    app_slug = ro_ledger.app_slug
+    if author_id is None or not app_slug:
+        return None
+    tx = record.transaction
+    head_sha = tx.head_sha if tx is not None else record.failed_attempts_head_sha
+    if not isinstance(head_sha, str) or not head_sha:
+        return None
+    http = ro_ledger.http
+    deadline = http.evidence_monotonic() + 30
+    earlier: Any = None
+    earlier_review_ids: set[int] = set()
+
+    def ensure_earlier() -> Any:
+        nonlocal earlier
+        if earlier is None:
+            earlier = (
+                _earlier_settled_effects(
+                    ro_ledger, identity, record, old, head_sha, author_id, budget
+                )
+                if tx is not None and record.finding_lifecycle is not None
+                else _NO_EARLIER_EFFECTS
+            )
+        return earlier
+
+    def hold(msg: str) -> ReviewInputError:
+        return ReviewInputError(msg)
+
+    try:
+        for resource, inline in (("reviews", False), ("comments", True)):
+            path = http.repository_path(
+                identity.repository, f"/pulls/{identity.pull_request}/{resource}"
+            )
+            seen: set[int] = set()
+            for rows in iter_step_down_pages(
+                http=http,
+                token=ro_ledger.token,
+                path=path,
+                deadline=deadline,
+                protect_request=lambda: budget.preflight(
+                    RETAINED_CONFIRMATION_TAIL + 1
+                ),
+                hold=hold,
+                unavailable_message="pre-write readonly census is unavailable",
+                incomplete_message="pre-write readonly census is incomplete",
+                deadline_message="pre-write readonly census reached its deadline",
+                pagination_bound_message="pre-write readonly census reached pagination bound",
+            ):
+                for row in rows:
+                    row_id = row.get("id") if isinstance(row, dict) else None
+                    if type(row_id) is not int or row_id <= 0 or row_id in seen:
+                        return None
+                    seen.add(row_id)
+                    effect = (
+                        classify_abort_inline_effect(
+                            author=row.get("user"),
+                            native_head=row.get("original_commit_id"),
+                            current_head=row.get("commit_id"),
+                            body=row.get("body"),
+                            identity=identity,
+                            head_sha=head_sha,
+                            app_slug=app_slug,
+                            app_user_id=author_id,
+                        )
+                        if inline
+                        else classify_abort_review_effect(
+                            row,
+                            identity=identity,
+                            head_sha=head_sha,
+                            app_slug=app_slug,
+                            app_user_id=author_id,
+                        )
+                    )
+                    if effect is None:
+                        return None
+                    if effect is True:
+                        ancestor = ensure_earlier()
+                        if inline:
+                            parent = row.get("pull_request_review_id")
+                            if (
+                                type(parent) is not int
+                                or parent not in earlier_review_ids
+                            ):
+                                return False
+                        if not ancestor.explains(row, inline=inline):
+                            return False
+                        if not inline:
+                            earlier_review_ids.add(row_id)
+
+        check_path = http.repository_path(
+            identity.repository, f"/commits/{head_sha}/check-runs"
+        )
+        seen_checks: set[int] = set()
+        total_checks: int | None = None
+        expected_slug = app_slug.removesuffix("[bot]").casefold()
+
+        def extract_checks(status: int, value: Any, page_size: int) -> list[Any] | None:
+            nonlocal total_checks
+            if status != 200 or not isinstance(value, dict):
+                return None
+            rows, count = value.get("check_runs"), value.get("total_count")
+            if (
+                not isinstance(rows, list)
+                or len(rows) > page_size
+                or type(count) is not int
+                or count < 0
+                or (total_checks is not None and total_checks != count)
+            ):
+                return None
+            total_checks = count
+            return rows
+
+        def verify_checks() -> None:
+            if len(seen_checks) != total_checks:
+                raise ReviewInputError("pre-write readonly check-run census incomplete")
+
+        for rows in iter_step_down_pages(
+            http=http,
+            token=ro_ledger.token,
+            path=check_path,
+            deadline=deadline,
+            protect_request=lambda: budget.preflight(RETAINED_CONFIRMATION_TAIL + 1),
+            hold=hold,
+            unavailable_message="pre-write readonly check census is unavailable",
+            incomplete_message="pre-write readonly check census is incomplete",
+            deadline_message="pre-write readonly check census reached its deadline",
+            pagination_bound_message="pre-write readonly check census reached pagination bound",
+            extra_query=f"check_name={REVIEW_CHECK_NAME}",
+            extract_rows=extract_checks,
+        ):
+            for row in rows:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if type(row_id) is not int or row_id <= 0 or row_id in seen_checks:
+                    return None
+                seen_checks.add(row_id)
+                app = row.get("app")
+                if row.get("name") == REVIEW_CHECK_NAME:
+                    if (
+                        not isinstance(app, dict)
+                        or not isinstance(app.get("slug"), str)
+                        or row.get("head_sha") not in {head_sha, None}
+                    ):
+                        return None
+                    if app["slug"].casefold() == expected_slug:
+                        if row.get("external_id") not in {
+                            None,
+                            REVIEW_CHECK_EXTERNAL_ID,
+                        }:
+                            return False
+                        if row.get("head_sha") != head_sha:
+                            return None
+                        ancestor = ensure_earlier()
+                        if not ancestor.explains_check_run(row):
+                            return False
+        verify_checks()
+    except ReviewInputError:
+        return None
+    return True
+
+
 def _inspect_live_ledger_readonly(
     *,
     ledger: GitHubIssueCommentSessionLedger,
@@ -2320,6 +2899,8 @@ def _inspect_live_ledger_readonly(
     dispatch_status: str = "known_clean",
     native_effects_confirmed: bool | None = None,
     budget: EvidenceReadBudget | None = None,
+    inspect_settlement_witness: bool = False,
+    failure_diagnostic: str | None = None,
 ) -> tuple[
     SessionRecord | None,
     RecoveryClassification,
@@ -2575,6 +3156,45 @@ def _inspect_live_ledger_readonly(
         )
         effective_native_effects_confirmed = late_effects is False
 
+    settlement_witness_val: PreExternalWriteSettlementWitness | bool | None = None
+    if (tx is None and old.analysis_abort is None) or (
+        tx is not None and tx.phase == "publication_failed"
+    ):
+        settlement_witness_val = _inspect_pre_write_witness_readonly(
+            ro_ledger,
+            identity,
+            record,
+            old,
+            author_id=author_id,
+            producer=producer,
+            budget=read_budget,
+            force_scan=inspect_settlement_witness,
+        )
+
+    if effective_native_effects_confirmed is None and (
+        settlement_witness_val is not None
+        or (
+            _is_pre_482_lifecycle_overflow(failure_diagnostic)
+            and (
+                (tx is None and old.analysis_abort is None)
+                or (
+                    tx is not None
+                    and tx.phase in {"publication_failed", "publication_pending"}
+                )
+            )
+        )
+    ):
+        census_result = _inspect_pre_write_census_readonly(
+            ro_ledger,
+            identity,
+            record,
+            old,
+            author_id=author_id,
+            budget=read_budget,
+        )
+        if census_result is not None:
+            effective_native_effects_confirmed = census_result
+
     classification = classify_recovery_state(
         record,
         current_base=current_base,
@@ -2586,6 +3206,8 @@ def _inspect_live_ledger_readonly(
         native_effects_confirmed=effective_native_effects_confirmed,
         action_result_authenticated=action_authenticated,
         evidence_producer=producer,
+        settlement_witness=settlement_witness_val,
+        failure_diagnostic=failure_diagnostic,
     )
     return (
         record,
@@ -2611,6 +3233,8 @@ def classify_live_ledger_recovery(
     dispatch_status: str = "known_clean",
     native_effects_confirmed: bool | None = None,
     budget: EvidenceReadBudget | None = None,
+    inspect_settlement_witness: bool = False,
+    failure_diagnostic: str | None = None,
 ) -> RecoveryClassification:
     """Inspect a live ledger strictly read-only (`_ReadOnlyHttp`) and classify."""
     return _inspect_live_ledger_readonly(
@@ -2623,6 +3247,8 @@ def classify_live_ledger_recovery(
         dispatch_status=dispatch_status,
         native_effects_confirmed=native_effects_confirmed,
         budget=budget,
+        inspect_settlement_witness=inspect_settlement_witness,
+        failure_diagnostic=failure_diagnostic,
     )[1]
 
 
@@ -2647,6 +3273,8 @@ def build_live_ledger_attempt_evidence_packet(
     diagnostics_available: bool = False,
     diagnostic_cause: str | None = None,
     budget: EvidenceReadBudget | None = None,
+    inspect_settlement_witness: bool = False,
+    failure_diagnostic: str | None = None,
 ) -> AttemptEvidencePacket:
     """Inspect a live ledger strictly read-only (`_ReadOnlyHttp`) into an `AttemptEvidencePacket`."""
     (
@@ -2669,6 +3297,8 @@ def build_live_ledger_attempt_evidence_packet(
         dispatch_status=dispatch_status,
         native_effects_confirmed=native_effects_confirmed,
         budget=budget,
+        inspect_settlement_witness=inspect_settlement_witness,
+        failure_diagnostic=failure_diagnostic,
     )
     return _assemble_attempt_evidence_packet(
         identity=identity,
