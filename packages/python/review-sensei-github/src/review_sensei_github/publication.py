@@ -13400,6 +13400,12 @@ def _preflight_plain_review_lifecycle(
     """Size the planned review lifecycle checkpoint before Effect #1 writes."""
     import copy
 
+    from review_sensei.bounded_evidence import (
+        INLINE_ENCODING,
+        MAX_PARTS,
+        PACKED_CHUNK_BYTES,
+        canonical_bytes,
+    )
     from review_sensei.finding_lifecycle_store import (
         _prepare_lifecycle,
         preflight_finding_lifecycle,
@@ -13597,11 +13603,16 @@ def _preflight_plain_review_lifecycle(
         }
         if precondition is not None:
             effect["check_update_precondition"] = dict(precondition)
+        prior_prefix = copy.deepcopy(shadow.effects)
         shadow.effects.append(effect)
         _require_effect_scope(shadow._document(), journal.identity, journal.head_sha)
         pending_doc, future_doc, confirmed = shadow._preflight_effect(
             capacity_only=True
         )
+        if len(confirmed) != len(prior_prefix) + 1 or confirmed[:-1] != prior_prefix:
+            raise ReviewInputError(
+                "shadow lifecycle preflight diverged from appended effects"
+            )
         shadow.effects = confirmed
         return pending_doc, future_doc
 
@@ -13671,8 +13682,45 @@ def _preflight_plain_review_lifecycle(
         and isinstance(snapshot.get("state_manifest"), Mapping)
         and snapshot["state_manifest"].get("encoding") == "partitioned-json-v1"
     )
+
+    def _reserve_review_lifecycle_tail(
+        *, p_pending: int, future_calls: int, preflight_when_inline: bool
+    ) -> None:
+        if not p_pending:
+            if preflight_when_inline:
+                budget.preflight(pre_review_physical + 4 + future_calls + 6)
+            return
+        stage_cost_3 = 8 * p_pending + 16
+        check1_stage = (4 + 2 * min(p_pending, prior_fl_parts)) if prior_fl_parts else 4
+        prior_checkpoints = (
+            (check1_stage + 4 + 2 * p_pending + 2) if pending_check_1 is not None else 0
+        )
+        budget.preflight(
+            pre_review_physical + prior_checkpoints + stage_cost_3 + future_calls + 6
+        )
+
+    def _worst_case_parts(envelope: Mapping[str, object], candidate: Any) -> int:
+        manifest = candidate.finding_lifecycle["manifest"]
+        if manifest["encoding"] == INLINE_ENCODING:
+            return 0
+        envelope_bytes = len(canonical_bytes(envelope))
+        packed_bound = (
+            envelope_bytes
+            + (envelope_bytes >> 12)
+            + (envelope_bytes >> 14)
+            + (envelope_bytes >> 25)
+            + 13
+        )
+        count = (packed_bound + PACKED_CHUNK_BYTES - 1) // PACKED_CHUNK_BYTES
+        if count > MAX_PARTS:
+            raise ReviewInputError("finding lifecycle future part capacity exceeded")
+        return count
+
     if partitioned_snapshot:
-        _, _, pending_parts, _, _ = _prepare_lifecycle(
+        # Partitioned snapshots cannot invoke preflight_finding_lifecycle without live
+        # snapshot-part reads on non-staged ledgers; size via _prepare_lifecycle and
+        # compressBound worst-case parts while reserving the identical tail envelope.
+        _, pending_env, _, _, pending_cand = _prepare_lifecycle(
             journal.ledger,
             record,
             document=pending_review,
@@ -13681,33 +13729,27 @@ def _preflight_plain_review_lifecycle(
             head_sha=journal.head_sha,
             policy_digest=journal.policy_digest,
             configuration_digest=journal.configuration_digest,
-            item_count=len(shadow.effects),
-            reserved_tail_calls=6,
+            item_count=len(shadow.effects) + 1,
+            reserved_tail_calls=pre_review_physical + 6,
         )
-        _, _, future_parts, _, _ = _prepare_lifecycle(
+        _, future_env, _, _, future_cand = _prepare_lifecycle(
             journal.ledger,
-            record,
+            pending_cand,
             document=future_review,
             operation_id=journal.operation_id,
             base_sha=journal.base_sha,
             head_sha=journal.head_sha,
             policy_digest=journal.policy_digest,
             configuration_digest=journal.configuration_digest,
-            item_count=len(shadow.effects),
-            reserved_tail_calls=6,
+            item_count=len(shadow.effects) + 1,
+            reserved_tail_calls=pre_review_physical + 6,
         )
-        p_pending = len(pending_parts)
-        p_future = len(future_parts)
-        stage_cost_3 = (8 * p_pending + 16) if p_pending else 3
-        c_future = (4 + 3 * p_future) if p_future else 4
-        check1_stage = (4 + 2 * min(p_pending, prior_fl_parts)) if prior_fl_parts else 4
-        prior_checkpoints = (
-            (check1_stage + 4 + 2 * p_pending + 2)
-            if (pending_check_1 is not None and p_pending)
-            else 0
-        )
-        budget.preflight(
-            pre_review_physical + prior_checkpoints + stage_cost_3 + c_future + 6
+        p_pending = _worst_case_parts(pending_env, pending_cand)
+        p_future = _worst_case_parts(future_env, future_cand)
+        _reserve_review_lifecycle_tail(
+            p_pending=p_pending,
+            future_calls=(4 + 3 * p_future) if p_future else 4,
+            preflight_when_inline=True,
         )
         return
 
@@ -13721,25 +13763,16 @@ def _preflight_plain_review_lifecycle(
         head_sha=journal.head_sha,
         policy_digest=journal.policy_digest,
         configuration_digest=journal.configuration_digest,
-        item_count=len(shadow.effects),
+        item_count=len(shadow.effects) + 1,
         reserved_tail_calls=pre_review_physical + 6,
     )
     pending_cp = plan["checkpoints"][0]
     future_cp = plan["checkpoints"][1]
-    p_pending = pending_cp["parts"]
-    if p_pending:
-        stage_cost_3 = 8 * p_pending + 16
-        check1_stage = (4 + 2 * min(p_pending, prior_fl_parts)) if prior_fl_parts else 4
-        prior_checkpoints = (
-            (check1_stage + 4 + 2 * p_pending + 2) if pending_check_1 is not None else 0
-        )
-        budget.preflight(
-            pre_review_physical
-            + prior_checkpoints
-            + stage_cost_3
-            + future_cp["conditional_calls"]
-            + 6
-        )
+    _reserve_review_lifecycle_tail(
+        p_pending=pending_cp["parts"],
+        future_calls=future_cp["conditional_calls"],
+        preflight_when_inline=False,
+    )
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

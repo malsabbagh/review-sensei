@@ -232,10 +232,12 @@ class CurrentRunFindingPartsTests(unittest.TestCase):
             # makes the single-page frontier larger than pinned inventory_ids; it must
             # refuse rather than re-paging or falling back to stale capacity.
             original = fixture.caller._opener
-            attempts = []
+            growth_attempts: list[tuple[str, str]] = []
+            in_growth_window = False
 
             def grown(request, timeout):
-                attempts.append((request.get_method(), request.full_url))
+                if in_growth_window:
+                    growth_attempts.append((request.get_method(), request.full_url))
                 if (
                     request.get_method() == "GET"
                     and "/issues/7/comments?" in request.full_url
@@ -246,11 +248,16 @@ class CurrentRunFindingPartsTests(unittest.TestCase):
                 return original(request, timeout)
 
             fixture.caller._opener = grown
-            with self.assertRaisesRegex(
-                ReviewInputError, "single-page frontier changed"
-            ):
-                stage_finding_lifecycle(ledger, record, **kwargs)
-            self.assertFalse(any(method == "PATCH" for method, _ in attempts))
+            in_growth_window = True
+            try:
+                with self.assertRaisesRegex(
+                    ReviewInputError, "single-page frontier changed"
+                ):
+                    stage_finding_lifecycle(ledger, record, **kwargs)
+            finally:
+                in_growth_window = False
+            self.assertTrue(any(method == "GET" for method, _ in growth_attempts))
+            self.assertFalse(any(method == "PATCH" for method, _ in growth_attempts))
             self.assertEqual(
                 fixture.caller._effect_record.finding_lifecycle,
                 record.finding_lifecycle,

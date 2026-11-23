@@ -3564,6 +3564,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         )
         assert self.evidence_budget is not None
         self.evidence_budget.preflight(calls + plan.fences)
+        # Caller opens _operation with `capacity + fences`; returning `calls` avoids double-counting fences.
         return max(
             NATIVE_OPERATION_REQUESTS, calls
         ), WRITE_CONFIRMATION_TAIL + pages - 1

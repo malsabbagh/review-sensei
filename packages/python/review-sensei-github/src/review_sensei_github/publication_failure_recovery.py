@@ -515,7 +515,6 @@ def iter_step_down_pages(
     pagination_bound_message: str,
     extra_query: str = "",
     extract_rows: Callable[[int, Any, int], list[Any] | None] | None = None,
-    verify_complete: Callable[[], None] | None = None,
     page_sizes: tuple[int, ...] = _STEP_DOWN_PAGE_SIZES,
 ) -> Iterator[list[Any]]:
     """Yield aligned paginated slices with byte-aware step-down on 512 KiB errors."""
@@ -527,6 +526,7 @@ def iter_step_down_pages(
         if callable(pagination_hint):
             hinted = pagination_hint(path, collected)
             if hinted in page_sizes:
+                # page_sizes is descending: higher index means a smaller page size, never stepping back up.
                 page_size_index = max(page_size_index, page_sizes.index(hinted))
         while (
             page_size_index + 1 < len(page_sizes)
@@ -566,8 +566,11 @@ def iter_step_down_pages(
             if next_index is None:
                 raise hold(unavailable_message) from None
             page_size_index = next_index
+            # Loop re-entry invokes protect_request() before issuing the stepped-down retry.
             continue
         except GitHubHTTPError:
+            if http.evidence_monotonic() >= deadline:
+                raise hold(deadline_message) from None
             raise hold(unavailable_message) from None
         if http.evidence_monotonic() >= deadline:
             raise hold(deadline_message)
@@ -582,8 +585,6 @@ def iter_step_down_pages(
         yield rows
         collected += len(rows)
         if len(rows) < page_size:
-            if verify_complete is not None:
-                verify_complete()
             if http.evidence_monotonic() >= deadline:
                 raise hold(deadline_message)
             return
@@ -1375,7 +1376,6 @@ def admit_publication_failure_recovery(
             pagination_bound_message="native check-run census reached its pagination bound",
             extra_query=f"check_name={REVIEW_CHECK_NAME}",
             extract_rows=extract_check_runs,
-            verify_complete=verify_check_runs,
         ):
             for row in rows:
                 if (
@@ -1414,6 +1414,7 @@ def admit_publication_failure_recovery(
                                 "late native check-run effect on the failed scope",
                                 record=record,
                             )
+        verify_check_runs()
 
     inspect_pr_surface("reviews", classify_review)
     inspect_pr_surface("comments", classify_inline, inline=True)

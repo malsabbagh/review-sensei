@@ -18,13 +18,22 @@ import test_historical_recovery_matrix_g03 as g03_tests
 import test_publication_failure_recovery as pub_recovery_tests
 import test_review_run as review_run_tests
 from fake_github_http import json_response
+from review_sensei_github import action_receipt
 from review_sensei_github import api_run_requests as adapter
 from review_sensei_github.action_receipt import publish_command_receipt
 from review_sensei_github.api_run_plan import NATIVE_OPERATION_REQUESTS
-from review_sensei_github.errors import GitHubHTTPResponseTooLargeError
-from review_sensei_github.publication import ReviewPublisher
+from review_sensei_github.errors import (
+    GitHubHTTPError,
+    GitHubHTTPResponseTooLargeError,
+)
+from review_sensei_github.http import MAX_PAGINATION_PAGES
+from review_sensei_github.publication import (
+    ReviewPublisher,
+    _preflight_plain_review_lifecycle,
+)
 from review_sensei_github.publication_failure_recovery import (
     PreExternalWriteSettlementWitness,
+    iter_step_down_pages,
 )
 from review_sensei_github.recovery_route_advisor import (
     PRE_482_LIFECYCLE_OVERFLOW_DIAGNOSTIC,
@@ -38,7 +47,14 @@ from review_sensei_github.run_authority import VerifiedRunAction
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_persistence import IDENTITY
 
-from review_sensei.bounded_evidence import inline_manifest
+from review_sensei.bounded_evidence import (
+    EvidenceReadBudget,
+    canonical_bytes,
+    evidence_manifest,
+    inline_manifest,
+    partition_evidence,
+    validate_binding,
+)
 from review_sensei.errors import ReviewInputError
 from review_sensei.finding_lifecycle_store import (
     preflight_finding_lifecycle,
@@ -255,20 +271,24 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
                     observed_preflights.append(calls)
                     original_preflight(calls)
 
-                with patch.object(
-                    action_ledger.evidence_budget,
-                    "preflight",
-                    side_effect=capture_preflight,
-                ):
-                    staged = stage_finding_lifecycle(action_ledger, record, **kwargs)
-                self.assertIsNotNone(staged.finding_lifecycle)
-                staged_parts = len(staged.finding_lifecycle["manifest"]["parts"])
-                self.assertGreaterEqual(staged_parts, 3)
-                expected_op = 4 + 3 * staged_parts + staged_parts * 1
-                # _take_plain_finding_operation preflights (4 + 3*n + n*fences) + fences.
-                self.assertIn(expected_op + 1, observed_preflights)
-                adapter._PLAIN_FINDING_ACTIVE.pop(action_ledger, None)
-                adapter._PLAIN_FINDING_PLANS.pop(action_ledger, None)
+                try:
+                    with patch.object(
+                        action_ledger.evidence_budget,
+                        "preflight",
+                        side_effect=capture_preflight,
+                    ):
+                        staged = stage_finding_lifecycle(
+                            action_ledger, record, **kwargs
+                        )
+                    self.assertIsNotNone(staged.finding_lifecycle)
+                    staged_parts = len(staged.finding_lifecycle["manifest"]["parts"])
+                    self.assertGreaterEqual(staged_parts, 3)
+                    expected_op = 4 + 3 * staged_parts + staged_parts * 1
+                    # _take_plain_finding_operation preflights (4 + 3*n + n*fences) + fences.
+                    self.assertIn(expected_op + 1, observed_preflights)
+                finally:
+                    adapter._PLAIN_FINDING_ACTIVE.pop(action_ledger, None)
+                    adapter._PLAIN_FINDING_PLANS.pop(action_ledger, None)
 
         # Verify tight pricing (`guard_calls` omitted when len(page_plan.page_bounds) == 1)
         # for ActionRunLedger with valid business_guard.
@@ -281,28 +301,35 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
                 "data": "".join(random.Random(7).choices(alphabet, k=72000))
             }
             ledger = ActionRunLedger(fixture.native, fixture.caller, fixture.identity)
-            ledger._replace_inventory(copy.deepcopy(fixture.ledger._cached_comments()))
-            ledger._inventory_complete = True
-            fake_action = object.__new__(VerifiedRunAction)
-            fake_action.run = SimpleNamespace(
-                caller=fixture.caller,
-                ledger=ledger,
-                identity=fixture.identity,
-                http=fixture.native,
-            )
-            fake_action.owner = fixture.caller.accounting.owner
-            fake_action.document = {}
-            ledger.business_guard = fake_action.fence
-            tight_plan = preflight_finding_lifecycle(ledger, record, **kwargs)
-            tight_parts = tight_plan["checkpoints"][0]["parts"]
-            self.assertGreaterEqual(tight_parts, 3)
-            self.assertEqual(len(adapter._PLAIN_FINDING_PLANS[ledger].page_bounds), 1)
-            # Tight single-page cost omits extra guard_calls (`4 + 3 * n`, not `4 + 3 * n + 2`).
-            self.assertEqual(
-                tight_plan["checkpoints"][0]["conditional_calls"],
-                4 + 3 * tight_parts,
-            )
-            adapter._PLAIN_FINDING_PLANS.pop(ledger, None)
+            try:
+                ledger._replace_inventory(
+                    copy.deepcopy(fixture.ledger._cached_comments())
+                )
+                ledger._inventory_complete = True
+                fake_action = object.__new__(VerifiedRunAction)
+                fake_action.run = SimpleNamespace(
+                    caller=fixture.caller,
+                    ledger=ledger,
+                    identity=fixture.identity,
+                    http=fixture.native,
+                )
+                fake_action.owner = fixture.caller.accounting.owner
+                fake_action.document = {}
+                ledger.business_guard = fake_action.fence
+                tight_plan = preflight_finding_lifecycle(ledger, record, **kwargs)
+                tight_parts = tight_plan["checkpoints"][0]["parts"]
+                self.assertGreaterEqual(tight_parts, 3)
+                self.assertEqual(
+                    len(adapter._PLAIN_FINDING_PLANS[ledger].page_bounds), 1
+                )
+                # Tight single-page cost omits extra guard_calls (`4 + 3 * n`, not `4 + 3 * n + 2`).
+                self.assertEqual(
+                    tight_plan["checkpoints"][0]["conditional_calls"],
+                    4 + 3 * tight_parts,
+                )
+            finally:
+                adapter._PLAIN_FINDING_ACTIVE.pop(ledger, None)
+                adapter._PLAIN_FINDING_PLANS.pop(ledger, None)
 
     def test_action_receipt_enforces_per_page_byte_bound(self) -> None:
         comments = [byte_pages._human_comment(10 + i, 32_000) for i in range(14)]
@@ -332,10 +359,19 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
                 budget=run.caller.budget_view,
             )
             self.assertGreater(quote["reserved_cost_breakdown"]["receipt_calls"], 8)
+            receipt_lease = action_receipt._PLAIN_SINGLE_PAGE_RECEIPT_LEASES[_ledger]
+            planned_first_page_size = receipt_lease.page_requests[0][0]
+            planned_first_page_bound = receipt_lease.page_bounds[0]
+            self.assertLess(planned_first_page_bound, 512 * 1024)
 
             # Mutate server response after preflight: same count, extra bytes
             # exceeding the planned per-page bound while staying < 512 KiB HTTP wire!
-            server.comments[0]["body"] = "b" * 40_000
+            server.comments[1]["body"] = "b" * 120_000
+            mutated_first_page_bytes = len(
+                canonical_bytes(server.comments[:planned_first_page_size])
+            )
+            self.assertGreater(mutated_first_page_bytes, planned_first_page_bound)
+            self.assertLess(mutated_first_page_bytes, 512 * 1024)
             posts_before = [
                 req for req in server.requests if req[0] in {"POST", "PATCH"}
             ]
@@ -483,10 +519,16 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
                 "/pulls/7/comments",
                 "/check-runs",
             ):
-                self.assertTrue(
-                    any(suffix in q and "per_page=20" in q for _m, q in seen_queries),
-                    (suffix, seen_queries),
-                )
+                stepped_pages = [
+                    (
+                        parse_qs(urlsplit(q).query).get("per_page"),
+                        parse_qs(urlsplit(q).query).get("page"),
+                    )
+                    for method, q in seen_queries
+                    if method == "GET" and urlsplit(q).path.endswith(suffix)
+                ]
+                self.assertIn((["20"], ["1"]), stepped_pages, (suffix, seen_queries))
+                self.assertIn((["20"], ["2"]), stepped_pages, (suffix, seen_queries))
 
         # (a2) Fail closed when per_page=1 itself still exceeds 512 KiB.
         with tempfile.TemporaryDirectory() as directory:
@@ -528,22 +570,25 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
                 }
                 for idx in range(25)
             ]
-            abort_queries: list[str] = []
+            abort_queries: list[tuple[str, str]] = []
+            last_obs = len(af.accounted.observations)
             orig_abort_ext = af.external
 
             def paged_abort_ext(request, timeout):
+                nonlocal last_obs
                 parsed = urlsplit(request.full_url)
-                abort_queries.append(f"{parsed.path}?{parsed.query}")
+                abort_queries.append(
+                    (request.get_method(), f"{parsed.path}?{parsed.query}")
+                )
                 if (
                     af.accounted._state is None
                     and request.get_method() == "GET"
                     and parsed.path.endswith("/pulls/7/reviews")
                 ):
-                    if (
-                        len(af.accounted.observations)
-                        == sum(a == af.attempt for a, _, _ in af.trace) + 1
-                    ):
+                    current_obs = len(af.accounted.observations)
+                    if current_obs > last_obs:
                         af.trace.append((af.attempt, request.get_method(), parsed.path))
+                        last_obs = current_obs
                     qs = parse_qs(parsed.query)
                     per_page = int(qs.get("per_page", [100])[0])
                     page = int(qs.get("page", [1])[0])
@@ -551,22 +596,25 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
                     return json_response(
                         copy.deepcopy(big_reviews[start : start + per_page])
                     )
-                return orig_abort_ext(request, timeout)
+                response = orig_abort_ext(request, timeout)
+                last_obs = len(af.accounted.observations)
+                return response
 
             with patch.object(af, "external", side_effect=paged_abort_ext):
                 af.invoke()
             rolled = parse_session_comment(af.comment["body"], identity=IDENTITY)
             assert rolled is not None
             self.assertEqual(rolled.api_run_accounting["identity"]["run_id"], af.run_id)
-            self.assertTrue(
-                any(
-                    "/pulls/7/reviews" in q and "per_page=20" in q
-                    for q in abort_queries
+            review_step_pages = [
+                (
+                    parse_qs(urlsplit(q).query).get("per_page"),
+                    parse_qs(urlsplit(q).query).get("page"),
                 )
-            )
-            self.assertTrue(
-                any("/pulls/7/reviews" in q and "page=2" in q for q in abort_queries)
-            )
+                for method, q in abort_queries
+                if method == "GET" and urlsplit(q).path.endswith("/pulls/7/reviews")
+            ]
+            self.assertIn((["20"], ["1"]), review_step_pages, abort_queries)
+            self.assertIn((["20"], ["2"]), review_step_pages, abort_queries)
 
     def test_recovery_route_advisor_witness_and_pre_482_classifications(self) -> None:
         # (a) Offline `pre-external-write-settlement-v1` classification & negative controls
@@ -608,6 +656,46 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
         self.assertEqual(ready.state_code, "pre_external_write_settlement_ready")
         self.assertEqual(ready.primary_route, "pre_external_write_rollover")
         self.assertEqual(ready.missing_witnesses, ())
+
+        packet_ready = build_attempt_evidence_packet(
+            rec_failed,
+            current_base=g03_tests.BASE_A,
+            current_head=g03_tests.HEAD_B,
+            executor_status="failed",
+            native_effects_confirmed=True,
+            evidence_producer="github-bot:999",
+            settlement_witness=witness,
+        )
+        self.assertFalse(packet_ready.authority)
+        self.assertEqual(
+            packet_ready.classification.state_code,
+            "pre_external_write_settlement_ready",
+        )
+
+        # Extra keys or bumped schema_version must never silently validate a witness.
+        for bad_witness in (
+            {**witness.to_dict(), "unexpected": True},
+            {
+                **witness.to_dict(),
+                "schema_version": "pre-external-write-settlement-v2",
+                "unexpected": True,
+            },
+        ):
+            bad_res = classify_recovery_state(
+                rec_failed,
+                current_base=g03_tests.BASE_A,
+                current_head=g03_tests.HEAD_B,
+                executor_status="failed",
+                native_effects_confirmed=True,
+                settlement_witness=bad_witness,
+            )
+            self.assertEqual(
+                bad_res.state_code, "pre_external_write_settlement_unverified"
+            )
+            self.assertIn(
+                "valid_pre_external_write_settlement_witness",
+                bad_res.missing_witnesses,
+            )
 
         # Missing or unverified witness controls
         missing_w = classify_recovery_state(
@@ -946,6 +1034,266 @@ class CheckpointOperationAndPagedRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(live_pkt.inferred_cause, "confirmed_pre_write_overflow")
             self.assertTrue(all(m == "GET" for m, _ in ro_obs), ro_obs)
+
+    def test_iter_step_down_pages_budget_deadline_pagination_bound_and_post_loop_check(
+        self,
+    ) -> None:
+        class _FakePagedHttp:
+            def __init__(self, handler, clock_values):
+                self._handler = handler
+                self._clock = iter(clock_values)
+                self._last_clock = 0.0
+                self.calls: list[str] = []
+
+            def evidence_monotonic(self) -> float:
+                try:
+                    self._last_clock = next(self._clock)
+                except StopIteration:
+                    pass
+                return self._last_clock
+
+            def request(
+                self, method: str, url: str, *, token: str, timeout_seconds: float
+            ):
+                self.calls.append(url)
+                return self._handler(method, url, token, timeout_seconds)
+
+        # (i) Step-down retry re-invokes protect_request() before issuing retry HTTP GET.
+        protect_calls = 0
+
+        def count_protect() -> None:
+            nonlocal protect_calls
+            protect_calls += 1
+
+        def step_down_handler(_m, url, _tok, _to):
+            qs = parse_qs(urlsplit(url).query)
+            per_page = int(qs["per_page"][0])
+            page = int(qs["page"][0])
+            if per_page == 100:
+                raise GitHubHTTPResponseTooLargeError("too large")
+            if per_page == 20 and page == 1:
+                return 200, [{"id": i} for i in range(1, 21)]
+            return 200, [{"id": i} for i in range(21, 26)]
+
+        http = _FakePagedHttp(step_down_handler, [0.0] * 10)
+        rows_out = list(
+            iter_step_down_pages(
+                http=http,
+                token="t",
+                path="/repos/o/r/issues/7/comments",
+                deadline=30.0,
+                protect_request=count_protect,
+                hold=ReviewInputError,
+                unavailable_message="unavailable",
+                incomplete_message="incomplete",
+                deadline_message="deadline reached",
+                pagination_bound_message="pagination bound reached",
+            )
+        )
+        self.assertEqual([len(chunk) for chunk in rows_out], [20, 5])
+        self.assertEqual(protect_calls, 3)
+
+        base_budget = EvidenceReadBudget()
+        snap = base_budget.snapshot()
+        tight_budget = EvidenceReadBudget(
+            snapshot={
+                **snap,
+                "calls": base_budget.calls + base_budget.ordinary_remaining() - 1,
+            }
+        )
+        tight_http = _FakePagedHttp(step_down_handler, [0.0] * 10)
+        with self.assertRaises(ReviewInputError):
+            list(
+                iter_step_down_pages(
+                    http=tight_http,
+                    token="t",
+                    path="/repos/o/r/issues/7/comments",
+                    deadline=30.0,
+                    protect_request=tight_budget.consume,
+                    hold=ReviewInputError,
+                    unavailable_message="unavailable",
+                    incomplete_message="incomplete",
+                    deadline_message="deadline reached",
+                    pagination_bound_message="pagination bound reached",
+                )
+            )
+        self.assertEqual(len(tight_http.calls), 1)
+
+        # (ii) GitHubHTTPError at/past deadline raises deadline_message (not unavailable_message).
+        def fail_http(*_args):
+            raise GitHubHTTPError("timeout")
+
+        deadline_http = _FakePagedHttp(fail_http, [0.0, 35.0])
+        with self.assertRaisesRegex(ReviewInputError, "deadline reached"):
+            list(
+                iter_step_down_pages(
+                    http=deadline_http,
+                    token="t",
+                    path="/repos/o/r/issues/7/comments",
+                    deadline=30.0,
+                    protect_request=lambda: None,
+                    hold=ReviewInputError,
+                    unavailable_message="unavailable",
+                    incomplete_message="incomplete",
+                    deadline_message="deadline reached",
+                    pagination_bound_message="pagination bound reached",
+                )
+            )
+
+        # (iii) MAX_PAGINATION_PAGES full pages raises pagination_bound_message.
+        def full_page_handler(_m, _url, _tok, _to):
+            return 200, [{"id": i} for i in range(1, 101)]
+
+        bound_http = _FakePagedHttp(full_page_handler, [0.0] * 100)
+        with self.assertRaisesRegex(ReviewInputError, "pagination bound reached"):
+            list(
+                iter_step_down_pages(
+                    http=bound_http,
+                    token="t",
+                    path="/repos/o/r/issues/7/comments",
+                    deadline=30.0,
+                    protect_request=lambda: None,
+                    hold=ReviewInputError,
+                    unavailable_message="unavailable",
+                    incomplete_message="incomplete",
+                    deadline_message="deadline reached",
+                    pagination_bound_message="pagination bound reached",
+                )
+            )
+        self.assertEqual(len(bound_http.calls), MAX_PAGINATION_PAGES)
+
+        # (iv) Check-run census verifies len(seen) == total_count after consuming the last page.
+        with tempfile.TemporaryDirectory() as directory:
+            helper = pub_recovery_tests.PublicationFailureRecoveryTests()
+            f = helper._round2_post_checkpoint_pre_write_failure(directory, limit=1024)
+            for idx in range(5):
+                f.check_runs.append(
+                    {
+                        "id": 995_000 + idx,
+                        "name": "ReviewSensei",
+                        "head_sha": pub_recovery_tests.HEAD_2,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "app": {"id": 555, "slug": "other-ci"},
+                        "output": {"title": "other", "summary": "ok"},
+                    }
+                )
+            orig_external = f.external
+
+            def bad_total_check_runs(request, timeout):
+                parsed = urlsplit(request.full_url)
+                if (
+                    request.get_method() == "GET"
+                    and "/commits/" in parsed.path
+                    and parsed.path.endswith("/check-runs")
+                ):
+                    head_sha = parsed.path.split("/commits/")[1].split("/")[0]
+                    matching = [
+                        copy.deepcopy(c)
+                        for c in f.check_runs
+                        if c.get("head_sha") == head_sha
+                    ]
+                    return json_response(
+                        {"total_count": len(matching) + 1, "check_runs": matching}
+                    )
+                return orig_external(request, timeout)
+
+            with patch.object(f, "external", side_effect=bad_total_check_runs):
+                f.next_review_run(head_sha=pub_recovery_tests.HEAD_3)
+                self.assertEqual(f.invoke(), 1)
+                self.assertIn("native check-run pagination is incomplete", f.error)
+
+    def test_preflight_plain_review_lifecycle_equal_reservation_across_snapshot_encodings(
+        self,
+    ) -> None:
+        import review_sensei_github.publication as pub_mod
+
+        comparisons: list[tuple[list[int], list[int]]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            f = pub_recovery_tests.PublicationFailureRecoveryFixture(
+                directory, limit=1024
+            )
+            f.provider_comments = _three_part_findings()
+
+            def compare_encodings(publisher, journal, **kwargs):
+                orig_record = journal._record
+                budget = journal.ledger.evidence_budget
+                assert orig_record is not None and budget is not None
+                orig_preflight = budget.preflight
+
+                snap_digest = "a" * 64
+                snap_doc = {
+                    "schema_version": "1.0",
+                    "result_digest": snap_digest,
+                    "dispositions": [],
+                }
+                snap_binding = validate_binding(
+                    {
+                        "repository": orig_record.repository,
+                        "repository_id": orig_record.repository_id,
+                        "pull_request": orig_record.pull_request,
+                        "base_sha": orig_record.transaction.base_sha
+                        if orig_record.transaction is not None
+                        else f.requested_base,
+                        "head_sha": orig_record.transaction.head_sha
+                        if orig_record.transaction is not None
+                        else pub_recovery_tests.HEAD_1,
+                        "policy_digest": journal.policy_digest,
+                        "configuration_digest": journal.configuration_digest,
+                        "generation": orig_record.generation,
+                        "producer": journal.ledger.evidence_producer(),
+                        "purpose": "dispositions",
+                        "schema_version": "1.0",
+                    }
+                )
+                snap_parts = partition_evidence(
+                    snap_doc, binding=snap_binding, item_count=0
+                )
+                snap_manifest = evidence_manifest(
+                    snap_doc,
+                    binding=snap_binding,
+                    item_count=0,
+                    parts=snap_parts,
+                    storage_ids=tuple(f"{idx:064d}" for idx in range(len(snap_parts))),
+                )
+                part_calls: list[int] = []
+                journal._record = orig_record.evolve(
+                    disposition_snapshot={
+                        "schema_version": "1.0",
+                        "result_digest": snap_digest,
+                        "state_manifest": snap_manifest,
+                    }
+                )
+                try:
+                    with patch.object(
+                        budget, "preflight", side_effect=lambda c: part_calls.append(c)
+                    ):
+                        _preflight_plain_review_lifecycle(publisher, journal, **kwargs)
+                finally:
+                    journal._record = orig_record
+
+                none_calls: list[int] = []
+
+                def record_and_check(calls: int) -> None:
+                    none_calls.append(calls)
+                    orig_preflight(calls)
+
+                with patch.object(budget, "preflight", side_effect=record_and_check):
+                    _preflight_plain_review_lifecycle(publisher, journal, **kwargs)
+                comparisons.append((part_calls, none_calls))
+
+            with patch.object(
+                pub_mod,
+                "_preflight_plain_review_lifecycle",
+                side_effect=compare_encodings,
+            ):
+                self.assertEqual(f.invoke(), 0, f.error)
+
+        self.assertEqual(len(comparisons), 1)
+        part_calls, none_calls = comparisons[0]
+        self.assertTrue(part_calls)
+        self.assertTrue(none_calls)
+        self.assertEqual(part_calls[-1], none_calls[-1])
 
 
 if __name__ == "__main__":

@@ -2677,7 +2677,7 @@ def _inspect_pre_write_witness_readonly(
     force_scan: bool,
 ) -> PreExternalWriteSettlementWitness | bool | None:
     if author_id is None or producer is None or not ro_ledger.app_slug:
-        return False if force_scan else None
+        return None
     if force_scan:
         try:
             return _find_settlement_witness_for_producer(
@@ -2857,7 +2857,6 @@ def _inspect_pre_write_census_readonly(
             pagination_bound_message="pre-write readonly check census reached pagination bound",
             extra_query=f"check_name={REVIEW_CHECK_NAME}",
             extract_rows=extract_checks,
-            verify_complete=verify_checks,
         ):
             for row in rows:
                 row_id = row.get("id") if isinstance(row, dict) else None
@@ -2883,6 +2882,7 @@ def _inspect_pre_write_census_readonly(
                         ancestor = ensure_earlier()
                         if not ancestor.explains_check_run(row):
                             return False
+        verify_checks()
     except ReviewInputError:
         return None
     return True
