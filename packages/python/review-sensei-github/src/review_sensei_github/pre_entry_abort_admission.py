@@ -22,7 +22,7 @@ from .api_run_history import (
     read_previous_run,
 )
 from .errors import GitHubHTTPError, GitHubPublicationError
-from .http import MAX_PAGINATION_PAGES
+from .publication_failure_recovery import iter_step_down_pages
 from .session_ledger import GitHubIssueCommentSessionLedger
 
 _PAGE_SIZE = 100
@@ -334,24 +334,18 @@ def require_pre_entry_abort_admission(
             identity.repository, f"/pulls/{identity.pull_request}/{resource}"
         )
         seen: set[int] = set()
-        for page in range(1, MAX_PAGINATION_PAGES + 1):
-            _protect_tail(budget, 1)
-            remaining = deadline - http.evidence_monotonic()
-            if remaining <= 0:
-                raise _hold("native effect census reached its deadline")
-            try:
-                status, rows = http.request(
-                    "GET",
-                    f"{path}?per_page={_PAGE_SIZE}&page={page}",
-                    token=ledger.token,
-                    timeout_seconds=remaining,
-                )
-            except GitHubHTTPError:
-                raise _hold("native effect census is unavailable") from None
-            if status != 200 or not isinstance(rows, list) or len(rows) > _PAGE_SIZE:
-                raise _hold("native effect census is incomplete")
-            if http.evidence_monotonic() >= deadline:
-                raise _hold("native effect census reached its deadline")
+        for rows in iter_step_down_pages(
+            http=http,
+            token=ledger.token,
+            path=path,
+            deadline=deadline,
+            protect_request=lambda: _protect_tail(budget, 1),
+            hold=_hold,
+            unavailable_message="native effect census is unavailable",
+            incomplete_message="native effect census is incomplete",
+            deadline_message="native effect census reached its deadline",
+            pagination_bound_message="native effect census reached its pagination bound",
+        ):
             for row in rows:
                 if (
                     not isinstance(row, dict)
@@ -376,11 +370,6 @@ def require_pre_entry_abort_admission(
                         raise _hold("late native effect on the aborted scope")
                     if not inline:
                         earlier_review_ids.add(row["id"])
-            if len(rows) < _PAGE_SIZE:
-                if http.evidence_monotonic() >= deadline:
-                    raise _hold("native effect census reached its deadline")
-                return
-        raise _hold("native effect census reached its pagination bound")
 
     def review(row: dict[str, Any]) -> bool | None:
         return classify_abort_review_effect(

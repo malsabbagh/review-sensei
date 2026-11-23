@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakKeyDictionary
@@ -34,6 +34,7 @@ from .api_run_history import RETAINED_CONFIRMATION_TAIL, read_previous_run
 from .checks import REVIEW_CHECK_EXTERNAL_ID, REVIEW_CHECK_NAME
 from .errors import (
     GitHubHTTPError,
+    GitHubHTTPResponseTooLargeError,
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
@@ -54,6 +55,7 @@ SETTLEMENT_BOUNDARIES = frozenset(
 )
 
 _PAGE_SIZE = 100
+_STEP_DOWN_PAGE_SIZES: tuple[int, ...] = (100, 20, 10, 5, 1)
 _CENSUS_WALL_SECONDS = 30
 _HEX40 = re.compile(r"^[a-f0-9]{40}\Z")
 _HEX64 = re.compile(r"^[a-f0-9]{64}\Z")
@@ -499,48 +501,127 @@ def _is_authenticated_bot_comment(
     )
 
 
-def find_authenticated_settlement_witness(
-    ledger: GitHubIssueCommentSessionLedger,
+def iter_step_down_pages(
+    *,
+    http: Any,
+    token: str,
+    path: str,
+    deadline: float,
+    protect_request: Callable[[], None],
+    hold: Callable[[str], ReviewInputError],
+    unavailable_message: str,
+    incomplete_message: str,
+    deadline_message: str,
+    pagination_bound_message: str,
+    extra_query: str = "",
+    extract_rows: Callable[[int, Any, int], list[Any] | None] | None = None,
+    page_sizes: tuple[int, ...] = _STEP_DOWN_PAGE_SIZES,
+) -> Iterator[list[Any]]:
+    """Yield aligned paginated slices with byte-aware step-down on 512 KiB errors."""
+    collected = 0
+    requests = 0
+    page_size_index = 0
+    pagination_hint = getattr(http, "pagination_page_size", None)
+    while requests < MAX_PAGINATION_PAGES:
+        if callable(pagination_hint):
+            hinted = pagination_hint(path, collected)
+            if hinted in page_sizes:
+                # page_sizes is descending: higher index means a smaller page size, never stepping back up.
+                page_size_index = max(page_size_index, page_sizes.index(hinted))
+        while (
+            page_size_index + 1 < len(page_sizes)
+            and collected % page_sizes[page_size_index] != 0
+        ):
+            page_size_index += 1
+        page_size = page_sizes[page_size_index]
+        page = (collected // page_size) + 1
+        protect_request()
+        remaining = deadline - http.evidence_monotonic()
+        if remaining <= 0:
+            raise hold(deadline_message)
+        query = (
+            f"{extra_query}&per_page={page_size}&page={page}"
+            if extra_query
+            else f"per_page={page_size}&page={page}"
+        )
+        requests += 1
+        try:
+            status, value = http.request(
+                "GET",
+                f"{path}?{query}",
+                token=token,
+                timeout_seconds=remaining,
+            )
+        except GitHubHTTPResponseTooLargeError:
+            if http.evidence_monotonic() >= deadline:
+                raise hold(deadline_message) from None
+            next_index = next(
+                (
+                    index
+                    for index in range(page_size_index + 1, len(page_sizes))
+                    if collected % page_sizes[index] == 0
+                ),
+                None,
+            )
+            if next_index is None:
+                raise hold(unavailable_message) from None
+            page_size_index = next_index
+            # Loop re-entry invokes protect_request() before issuing the stepped-down retry.
+            continue
+        except GitHubHTTPError:
+            if http.evidence_monotonic() >= deadline:
+                raise hold(deadline_message) from None
+            raise hold(unavailable_message) from None
+        if http.evidence_monotonic() >= deadline:
+            raise hold(deadline_message)
+        if extract_rows is not None:
+            rows = extract_rows(status, value, page_size)
+        elif status != 200 or not isinstance(value, list) or len(value) > page_size:
+            rows = None
+        else:
+            rows = value
+        if rows is None:
+            raise hold(incomplete_message)
+        yield rows
+        collected += len(rows)
+        if len(rows) < page_size:
+            if http.evidence_monotonic() >= deadline:
+                raise hold(deadline_message)
+            return
+    raise hold(pagination_bound_message)
+
+
+def _find_settlement_witness_for_producer(
+    *,
+    http: Any,
+    token: str,
+    app_slug: str,
+    producer_id: int,
+    producer: str,
+    budget: EvidenceReadBudget,
     identity: SessionIdentity,
     record: SessionRecord,
     old: ApiRunAccounting,
 ) -> PreExternalWriteSettlementWitness:
-    """Find and strictly authenticate the unique settlement witness for ``record``."""
-    budget, app_slug = ledger.evidence_budget, ledger.app_slug
-    if budget is None or not app_slug or not ledger._mutation_active:
-        raise _hold("authenticated witness reader is unavailable", record=record)
-    producer = ledger.evidence_producer()
-    try:
-        producer_id = _producer_id(producer)
-    except ReviewInputError as exc:
-        raise _hold(str(exc), record=record) from exc
-    http = ledger.http
+    """Scan issue comments using caller-supplied producer identity and verify unique witness."""
     deadline = http.evidence_monotonic() + _CENSUS_WALL_SECONDS
     path = http.repository_path(
         identity.repository, f"/issues/{identity.pull_request}/comments"
     )
     seen_ids: set[int] = set()
     matches: list[PreExternalWriteSettlementWitness] = []
-    for page in range(1, MAX_PAGINATION_PAGES + 1):
-        _protect_tail(budget, 1, record=record)
-        remaining = deadline - http.evidence_monotonic()
-        if remaining <= 0:
-            raise _hold("settlement witness scan reached its deadline", record=record)
-        try:
-            status, rows = http.request(
-                "GET",
-                f"{path}?per_page={_PAGE_SIZE}&page={page}",
-                token=ledger.token,
-                timeout_seconds=remaining,
-            )
-        except GitHubHTTPError:
-            raise _hold(
-                "settlement witness scan is unavailable", record=record
-            ) from None
-        if status != 200 or not isinstance(rows, list) or len(rows) > _PAGE_SIZE:
-            raise _hold("settlement witness scan is incomplete", record=record)
-        if http.evidence_monotonic() >= deadline:
-            raise _hold("settlement witness scan reached its deadline", record=record)
+    for rows in iter_step_down_pages(
+        http=http,
+        token=token,
+        path=path,
+        deadline=deadline,
+        protect_request=lambda: _protect_tail(budget, 1, record=record),
+        hold=lambda message: _hold(message, record=record),
+        unavailable_message="settlement witness scan is unavailable",
+        incomplete_message="settlement witness scan is incomplete",
+        deadline_message="settlement witness scan reached its deadline",
+        pagination_bound_message="settlement witness scan reached its pagination bound",
+    ):
         for row in rows:
             if (
                 not isinstance(row, dict)
@@ -570,16 +651,6 @@ def find_authenticated_settlement_witness(
                     and parsed.settled_root_sha256 == record.record_sha256
                 ):
                     matches.append(parsed)
-        if len(rows) < _PAGE_SIZE:
-            if http.evidence_monotonic() >= deadline:
-                raise _hold(
-                    "settlement witness scan reached its deadline", record=record
-                )
-            break
-    else:
-        raise _hold(
-            "settlement witness scan reached its pagination bound", record=record
-        )
 
     if not matches:
         if record.transaction is None:
@@ -638,6 +709,34 @@ def find_authenticated_settlement_witness(
             record=record,
         )
     return witness
+
+
+def find_authenticated_settlement_witness(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+) -> PreExternalWriteSettlementWitness:
+    """Find and strictly authenticate the unique settlement witness for ``record``."""
+    budget, app_slug = ledger.evidence_budget, ledger.app_slug
+    if budget is None or not app_slug or not ledger._mutation_active:
+        raise _hold("authenticated witness reader is unavailable", record=record)
+    producer = ledger.evidence_producer()
+    try:
+        producer_id = _producer_id(producer)
+    except ReviewInputError as exc:
+        raise _hold(str(exc), record=record) from exc
+    return _find_settlement_witness_for_producer(
+        http=ledger.http,
+        token=ledger.token,
+        app_slug=app_slug,
+        producer_id=producer_id,
+        producer=producer,
+        budget=budget,
+        identity=identity,
+        record=record,
+        old=old,
+    )
 
 
 @dataclass(frozen=True)
@@ -1171,26 +1270,18 @@ def admit_publication_failure_recovery(
             identity.repository, f"/pulls/{identity.pull_request}/{resource}"
         )
         seen: set[int] = set()
-        for page in range(1, MAX_PAGINATION_PAGES + 1):
-            _protect_tail(budget, 1, record=record)
-            remaining = deadline - http.evidence_monotonic()
-            if remaining <= 0:
-                raise _hold("native effect census reached its deadline", record=record)
-            try:
-                status, rows = http.request(
-                    "GET",
-                    f"{path}?per_page={_PAGE_SIZE}&page={page}",
-                    token=ledger.token,
-                    timeout_seconds=remaining,
-                )
-            except GitHubHTTPError:
-                raise _hold(
-                    "native effect census is unavailable", record=record
-                ) from None
-            if status != 200 or not isinstance(rows, list) or len(rows) > _PAGE_SIZE:
-                raise _hold("native effect census is incomplete", record=record)
-            if http.evidence_monotonic() >= deadline:
-                raise _hold("native effect census reached its deadline", record=record)
+        for rows in iter_step_down_pages(
+            http=http,
+            token=ledger.token,
+            path=path,
+            deadline=deadline,
+            protect_request=lambda: _protect_tail(budget, 1, record=record),
+            hold=lambda message: _hold(message, record=record),
+            unavailable_message="native effect census is unavailable",
+            incomplete_message="native effect census is incomplete",
+            deadline_message="native effect census reached its deadline",
+            pagination_bound_message="native effect census reached its pagination bound",
+        ):
             for row in rows:
                 if (
                     not isinstance(row, dict)
@@ -1220,13 +1311,6 @@ def admit_publication_failure_recovery(
                         )
                     if not inline:
                         earlier_review_ids.add(row["id"])
-            if len(rows) < _PAGE_SIZE:
-                if http.evidence_monotonic() >= deadline:
-                    raise _hold(
-                        "native effect census reached its deadline", record=record
-                    )
-                return
-        raise _hold("native effect census reached its pagination bound", record=record)
 
     def classify_review(row: dict[str, Any]) -> bool | None:
         return classify_abort_review_effect(
@@ -1256,40 +1340,43 @@ def admit_publication_failure_recovery(
         seen: set[int] = set()
         total: int | None = None
         expected_slug = app_slug.removesuffix("[bot]").casefold()
-        for page in range(1, MAX_PAGINATION_PAGES + 1):
-            _protect_tail(budget, 1, record=record)
-            remaining = deadline - http.evidence_monotonic()
-            if remaining <= 0:
-                raise _hold(
-                    "native check-run census reached its deadline", record=record
-                )
-            try:
-                status, value = http.request(
-                    "GET",
-                    f"{path}?check_name={REVIEW_CHECK_NAME}&per_page={_PAGE_SIZE}&page={page}",
-                    token=ledger.token,
-                    timeout_seconds=remaining,
-                )
-            except GitHubHTTPError:
-                raise _hold(
-                    "native check-run census is unavailable", record=record
-                ) from None
-            if http.evidence_monotonic() >= deadline:
-                raise _hold(
-                    "native check-run census reached its deadline", record=record
-                )
+
+        def extract_check_runs(
+            status: int, value: Any, page_size: int
+        ) -> list[Any] | None:
+            nonlocal total
             if not isinstance(value, dict) or status != 200:
-                raise _hold("native check-run census is incomplete", record=record)
+                return None
             rows, count = value.get("check_runs"), value.get("total_count")
             if (
                 not isinstance(rows, list)
-                or len(rows) > _PAGE_SIZE
+                or len(rows) > page_size
                 or type(count) is not int
                 or count < 0
                 or (total is not None and total != count)
             ):
-                raise _hold("native check-run census is incomplete", record=record)
+                return None
             total = count
+            return rows
+
+        def verify_check_runs() -> None:
+            if len(seen) != total:
+                raise _hold("native check-run pagination is incomplete", record=record)
+
+        for rows in iter_step_down_pages(
+            http=http,
+            token=ledger.token,
+            path=path,
+            deadline=deadline,
+            protect_request=lambda: _protect_tail(budget, 1, record=record),
+            hold=lambda message: _hold(message, record=record),
+            unavailable_message="native check-run census is unavailable",
+            incomplete_message="native check-run census is incomplete",
+            deadline_message="native check-run census reached its deadline",
+            pagination_bound_message="native check-run census reached its pagination bound",
+            extra_query=f"check_name={REVIEW_CHECK_NAME}",
+            extract_rows=extract_check_runs,
+        ):
             for row in rows:
                 if (
                     not isinstance(row, dict)
@@ -1327,19 +1414,7 @@ def admit_publication_failure_recovery(
                                 "late native check-run effect on the failed scope",
                                 record=record,
                             )
-            if len(rows) < _PAGE_SIZE:
-                if len(seen) != total:
-                    raise _hold(
-                        "native check-run pagination is incomplete", record=record
-                    )
-                if http.evidence_monotonic() >= deadline:
-                    raise _hold(
-                        "native check-run census reached its deadline", record=record
-                    )
-                return
-        raise _hold(
-            "native check-run census reached its pagination bound", record=record
-        )
+        verify_check_runs()
 
     inspect_pr_surface("reviews", classify_review)
     inspect_pr_surface("comments", classify_inline, inline=True)
