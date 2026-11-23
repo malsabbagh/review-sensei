@@ -2817,15 +2817,28 @@ def apply_authenticated_finding_resolution(
     ):
         raise GitHubConversationError("finding resolution evidence is invalid")
     receipts: tuple[Mapping[str, Any], ...] = ()
-    for carrier_name in ("_finding_lifecycle_consumer", "_finding_lifecycle_journal"):
+    for carrier_name in ("_finding_lifecycle_journal", "_finding_lifecycle_consumer"):
         carrier = getattr(finalizer, carrier_name, None)
         reviewer = getattr(carrier, "reviewer", None) if carrier is not None else None
         reader = getattr(reviewer, "native_finding_receipts", None)
         if callable(reader):
-            receipts = tuple(
+            carrier_receipts = tuple(
                 reader(repository_id=repository_id, pull_request=pull_request)
             )
-            break
+            if carrier_receipts:
+                receipts = carrier_receipts
+                break
+    native_reader = getattr(finalizer, "native_finding_receipts", None)
+    if not receipts and callable(native_reader):
+        receipts = tuple(
+            native_reader(repository_id=repository_id, pull_request=pull_request)
+        )
+    if not receipts:
+        receipts = tuple(
+            (getattr(finalizer, "_native_finding_receipt_records", None) or {})
+            .get((repository_id, pull_request), {})
+            .values()
+        )
     key = (repository_id, pull_request)
     for attr, apply, inventory_attr in (
         (
@@ -2900,10 +2913,14 @@ def apply_authenticated_finding_resolution(
                 ),
                 state,
             )
+            ob_ids = {item.obligation_id for item in inventory.obligations}
+            projected_entries = tuple(
+                entry for entry in state.active_entries if entry.obligation_id in ob_ids
+            )
             projected_by_oid = {
                 entry.obligation_id: p_comment
                 for entry, p_comment in zip(
-                    state.active_entries, projected_result.comments, strict=False
+                    projected_entries, projected_result.comments, strict=True
                 )
             }
             slot_states = {s.target: s.state for s in state.slots}

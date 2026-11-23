@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
 
@@ -59,6 +60,59 @@ HEAD_SHA_2 = "2" * 40
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _persist_cleared_record(
+    host: _ArtifactGitHubHost,
+    rec: SessionRecord,
+    *,
+    finding_lifecycle: Mapping[str, object] | None,
+) -> SessionRecord:
+    """Persist an integrity-valid copy with no active transaction/staging/reservation."""
+    cleaned = SessionRecord._construct(
+        repository=rec.repository,
+        pull_request=rec.pull_request,
+        repository_id=rec.repository_id,
+        completed_initial_reviews=rec.completed_initial_reviews,
+        completed_verification_rounds=rec.completed_verification_rounds,
+        failed_attempts=rec.failed_attempts,
+        generation=rec.generation,
+        reservation_id=None,
+        reserved_slot=None,
+        last_committed_reservation_id=rec.last_committed_reservation_id,
+        created_at=rec.created_at,
+        updated_at=rec.updated_at,
+        expires_at=rec.expires_at,
+        operator_paused=rec.operator_paused,
+        failed_attempts_head_sha=rec.failed_attempts_head_sha,
+        dispositions=rec.dispositions,
+        continuation_grants=rec.continuation_grants,
+        transaction=None,
+        convergence_history=rec.convergence_history,
+        reservation_owner=None,
+        rescan_state=rec.rescan_state,
+        assessment_queue=rec.assessment_queue,
+        disposition_snapshot=rec.disposition_snapshot,
+        api_run_accounting=rec.api_run_accounting,
+        historical_assessments=rec.historical_assessments,
+        quarantine_lineage=rec.quarantine_lineage,
+        publication_staging=None,
+        finding_lifecycle=finding_lifecycle,
+        trust_enrollment=rec.trust_enrollment,
+    )
+    assert rec.repository_id is not None
+    rendered = render_session_comment(
+        repository_id=rec.repository_id,
+        pull_request=rec.pull_request,
+        record=cleaned,
+    )
+    for item in host.issue_comments:
+        if SESSION_MARKER_PREFIX in str(item.get("body", "")):
+            item["body"] = rendered
+            break
+    else:
+        raise AssertionError("session comment not found")
+    return cleaned
 
 
 def _blocking_inventory() -> AuthoritativeDecisionInventory:
@@ -1151,12 +1205,43 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
                 stored_rec = exp_ledger.load(id_exp, now=live_now).record
                 assert stored_rec is not None
                 assert stored_rec.finding_lifecycle is not None
+                if case == "pending-effect":
+                    from review_sensei_github.artifact_authority import (
+                        _inspect_record_finding_lifecycle,
+                    )
+                    from review_sensei_github.finding_lifecycle import (
+                        restore_finding_lifecycle,
+                    )
+
+                    _exp_loaded = exp_ledger.load(id_exp, now=live_now)
+                    _, lc_doc = restore_finding_lifecycle(
+                        _exp_pub, exp_ledger, id_exp, loaded=_exp_loaded
+                    )
+                    assert lc_doc is not None
+                    self.assertTrue(
+                        any(
+                            isinstance(eff, Mapping) and eff.get("status") == "pending"
+                            for eff in lc_doc.get("effects", ())
+                        )
+                    )
+                    stored_rec = _persist_cleared_record(
+                        exp_host,
+                        stored_rec,
+                        finding_lifecycle=stored_rec.finding_lifecycle,
+                    )
                 cold_exp_ledger = GitHubIssueCommentSessionLedger(
                     exp_host.http,
                     token="tok-exp",
                     app_slug="reviewsensei[bot]",
                     enable_finding_lifecycle_writes=True,
                 )
+                if case == "pending-effect":
+                    self.assertEqual(
+                        _inspect_record_finding_lifecycle(
+                            cold_exp_ledger, stored_rec, loaded_status="expired"
+                        ),
+                        (0, True),
+                    )
                 req = OperatorReenrollRequest(
                     identity=id_exp,
                     head_sha=HEAD_SHA,
@@ -2608,7 +2693,7 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
                     enable_finding_lifecycle_writes=True,
                 )
                 l2.initialize(identity, now=live_now)
-                app2, _pub2, opts2 = self._make_app(h2, local_ledger=l2)
+                app2, pub2, opts2 = self._make_app(h2, local_ledger=l2)
                 if scenario == "uncertain-drift-slot":
                     opts2 = replace(opts2, enable_drift_tracking=True)
                 cov = CoverageManifest(
@@ -2616,14 +2701,37 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
                     enumerated_paths=("src/auth.py",),
                     enumeration_complete=True,
                 )
-                clean_r = ReviewResult(
-                    summary="Uncertain effect without active blockers.",
-                    comments=(),
-                    provider="fixture",
-                    review_status="complete",
-                    model="fixture-model",
-                    coverage=cov,
-                )
+                if scenario == "uncertain-drift-slot":
+                    advisory_comment = ReviewComment(
+                        path="src/auth.py",
+                        line=2,
+                        body="Consider structured logging for role checks.",
+                        blocking=False,
+                        effective_blocking=False,
+                        needs_human=False,
+                        severity="low",
+                        symbol="check_role",
+                        defect_kind="observability",
+                    )
+                    clean_r = ReviewResult(
+                        summary="Advisory drift observation without blockers.",
+                        comments=(advisory_comment,),
+                        provider="fixture",
+                        review_status="complete",
+                        model="fixture-model",
+                        coverage=cov,
+                    )
+                    pub_diff = self.DIFF_1
+                else:
+                    clean_r = ReviewResult(
+                        summary="Uncertain effect without active blockers.",
+                        comments=(),
+                        provider="fixture",
+                        review_status="complete",
+                        model="fixture-model",
+                        coverage=cov,
+                    )
+                    pub_diff = self.DIFF_CLEAN
                 key2 = ReviewContextCacheKey(
                     repository="owner/repo",
                     pull_request=1,
@@ -2665,10 +2773,7 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
                         generation=prep2b.record.generation + 1,
                     ),
                 )
-                h2.fail_before_review_post = True
-                with self.assertRaises(
-                    (GitHubPublicationTransientError, ReviewInputError)
-                ):
+                if scenario == "uncertain-drift-slot":
                     app2.publish_review(
                         options=opts2,
                         oidc_token="oidc-unc",
@@ -2679,21 +2784,124 @@ class OrdinaryPublisherArtifactResilienceTests(unittest.TestCase):
                         base_branch="main",
                         base_sha=BASE_SHA,
                         result=clean_r,
-                        diff=self.DIFF_CLEAN,
+                        diff=pub_diff,
                         app_slug="reviewsensei[bot]",
                         convergence_policy=policy,
                         current_key=key2,
                         configuration_context=cfg_ctx,
                         evidence_context=ev_ctx,
                     )
+                else:
+                    h2.fail_before_review_post = True
+                    with self.assertRaises(
+                        (GitHubPublicationTransientError, ReviewInputError)
+                    ):
+                        app2.publish_review(
+                            options=opts2,
+                            oidc_token="oidc-unc",
+                            repository="owner/repo",
+                            repository_id=1,
+                            pull_request=1,
+                            head_sha=HEAD_SHA,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            result=clean_r,
+                            diff=pub_diff,
+                            app_slug="reviewsensei[bot]",
+                            convergence_policy=policy,
+                            current_key=key2,
+                            configuration_context=cfg_ctx,
+                            evidence_context=ev_ctx,
+                        )
                 rec = l2.load(identity, now=live_now).record
                 assert rec is not None
+                if scenario == "uncertain-drift-slot":
+                    from review_sensei_github.artifact_authority import (
+                        _inspect_record_finding_lifecycle,
+                    )
+                    from review_sensei_github.finding_lifecycle import (
+                        _pack_current_journal,
+                        decode_lifecycle_state,
+                        encode_lifecycle_state,
+                        restore_finding_lifecycle,
+                    )
+
+                    from review_sensei.bounded_evidence import EvidenceReadBudget
+                    from review_sensei.finding_drift import (
+                        DriftEvaluationResult,
+                        commit_drift_publication,
+                    )
+                    from review_sensei.finding_lifecycle_store import (
+                        stage_finding_lifecycle,
+                    )
+
+                    loaded2 = l2.load(identity, now=live_now)
+                    _, doc2 = restore_finding_lifecycle(
+                        pub2, l2, identity, loaded=loaded2
+                    )
+                    assert doc2 is not None
+                    decoded2 = decode_lifecycle_state(doc2["lifecycle"]).state
+                    self.assertIsInstance(decoded2, DriftEvaluationResult)
+                    assert isinstance(decoded2, DriftEvaluationResult)
+                    uncertain_drift = commit_drift_publication(
+                        decoded2,
+                        uncertain_threads={
+                            decoded2.inventory.obligations[0].obligation_id: (
+                                "intent:drift-uncertain-1",
+                                None,
+                                _sha("uncertain-drift-slot"),
+                            )
+                        },
+                    )
+                    self.assertTrue(
+                        any(slot.state == "uncertain" for slot in uncertain_drift.slots)
+                    )
+                    self.assertEqual(
+                        len(uncertain_drift.inventory.blocking_obligations), 0
+                    )
+                    # Strip effects & active transaction so refusal proves uncertain
+                    # drift slot detection alone blocks cold reenroll.
+                    assert rec.finding_lifecycle is not None
+                    binding2 = rec.finding_lifecycle["manifest"]["binding"]
+                    clean_doc = {
+                        k: v for k, v in doc2.items() if k != "guarded_publication_pair"
+                    }
+                    clean_doc["schema_version"] = "finding-lifecycle-journal-v2"
+                    clean_doc["accepted_semantic_history"] = doc2.get(
+                        "accepted_semantic_history"
+                    )
+                    clean_doc["lifecycle"] = encode_lifecycle_state(uncertain_drift)
+                    clean_doc["effects"] = []
+                    l2.evidence_budget = EvidenceReadBudget()
+                    staged2 = stage_finding_lifecycle(
+                        l2,
+                        rec,
+                        document=_pack_current_journal(clean_doc),
+                        operation_id=rec.finding_lifecycle["operation_id"],
+                        base_sha=binding2["base_sha"],
+                        head_sha=binding2["head_sha"],
+                        policy_digest=binding2["policy_digest"],
+                        configuration_digest=binding2["configuration_digest"],
+                        item_count=1,
+                    )
+                    rec = _persist_cleared_record(
+                        h2,
+                        staged2,
+                        finding_lifecycle=staged2.finding_lifecycle,
+                    )
                 cold2_ledger = GitHubIssueCommentSessionLedger(
                     h2.http,
                     token="tok-2",
                     app_slug="reviewsensei[bot]",
                     enable_finding_lifecycle_writes=True,
                 )
+                if scenario == "uncertain-drift-slot":
+                    self.assertEqual(
+                        _inspect_record_finding_lifecycle(
+                            cold2_ledger, rec, loaded_status="ok"
+                        ),
+                        (0, True),
+                    )
                 cold2_app = GitHubApplication(
                     http=h2.http,
                     broker=_ArtifactFakeBroker(),  # type: ignore[arg-type]

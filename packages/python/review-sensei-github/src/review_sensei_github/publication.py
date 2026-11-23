@@ -2340,6 +2340,9 @@ class ReviewApprovalFinalizer:
         # Installed only on a single command finalization copy. Other
         # publication/conversation entry points acquire no new authority.
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
+        self._native_finding_receipt_records: dict[
+            tuple[int, int], dict[str, dict[str, object]]
+        ] = {}
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._drift_states: dict[tuple[int, int], DriftEvaluationResult] = {}
         self._artifact_decisions: dict[
@@ -3483,6 +3486,7 @@ class ReviewApprovalFinalizer:
         )
         operation = copy(self)
         for name in (
+            "_native_finding_receipt_records",
             "_active_window_states",
             "_drift_states",
             "_artifact_decisions",
@@ -5089,8 +5093,8 @@ class ReviewApprovalFinalizer:
         held: set[str] = set()
         receipts: tuple[Mapping[str, Any], ...] = ()
         for carrier_name in (
-            "_finding_lifecycle_consumer",
             "_finding_lifecycle_journal",
+            "_finding_lifecycle_consumer",
         ):
             carrier = getattr(self, carrier_name, None)
             reviewer = (
@@ -5098,16 +5102,24 @@ class ReviewApprovalFinalizer:
             )
             reader = getattr(reviewer, "native_finding_receipts", None)
             if callable(reader):
-                receipts = tuple(
+                candidate = tuple(
                     reader(repository_id=repository_id, pull_request=pull_request)
                 )
-                break
+                if candidate:
+                    receipts = candidate
+                    break
         native_reader = getattr(self, "native_finding_receipts", None)
         if not receipts and callable(native_reader):
             receipts = tuple(
                 native_reader(repository_id=repository_id, pull_request=pull_request)
             )
         key = (repository_id, pull_request)
+        if not receipts:
+            receipts = tuple(
+                (getattr(self, "_native_finding_receipt_records", None) or {})
+                .get(key, {})
+                .values()
+            )
         window_state = (getattr(self, "_active_window_states", None) or {}).get(key)
         if window_state is not None and window_state.head_sha == head_sha:
             slot_states = {
@@ -5167,10 +5179,16 @@ class ReviewApprovalFinalizer:
                 ),
                 drift_state,
             )
+            ob_ids = {item.obligation_id for item in drift_state.inventory.obligations}
+            projected_entries = tuple(
+                entry
+                for entry in drift_state.active_entries
+                if entry.obligation_id in ob_ids
+            )
             projected_by_oid = {
                 entry.obligation_id: p_comment
                 for entry, p_comment in zip(
-                    drift_state.active_entries, projected_result.comments, strict=False
+                    projected_entries, projected_result.comments, strict=True
                 )
             }
             drift_slots = {slot.target: slot.state for slot in drift_state.slots}
@@ -6831,6 +6849,9 @@ class ReviewPublisher:
         self._native_finding_receipt_records: dict[
             tuple[int, int], dict[str, dict[str, object]]
         ] = {}
+        self.finalizer._native_finding_receipt_records = (
+            self._native_finding_receipt_records
+        )
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._active_window_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
         self.finalizer._active_window_states = self._active_window_states

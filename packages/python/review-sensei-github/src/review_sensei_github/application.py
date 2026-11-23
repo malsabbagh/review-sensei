@@ -5387,8 +5387,7 @@ class GitHubApplication:
                     "binding"
                 ]
                 is_quarantine_or_historical = (
-                    _capacity_plan is not None
-                    or _quarantine_lifecycle_transfer is not None
+                    _quarantine_lifecycle_transfer is not None
                     or record.quarantine_lineage is not None
                     or any(
                         item.reference.startswith(("quarantine:", "historical:"))
