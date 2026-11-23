@@ -1800,6 +1800,7 @@ class SessionRecord:
         accounting: Mapping[str, object],
         *,
         prior_record: "SessionRecord | None" = None,
+        skipped_failed_ancestors: tuple["SessionRecord", ...] = (),
     ) -> "SessionRecord":
         """Roll over a ceased predecessor proven settled before any external write.
 
@@ -1872,47 +1873,97 @@ class SessionRecord:
                 payload["failed_attempts"] = 1
                 payload["failed_attempts_head_sha"] = tx.head_sha
             if previous.previous_record is None:
-                if prior_record is not None:
+                if prior_record is not None or skipped_failed_ancestors:
                     raise ReviewInputError(
                         "pre-write-settled rollover without previous_record cannot supply prior_record"
                     )
                 payload["completed_initial_reviews"] = 0
                 payload["completed_verification_rounds"] = 0
                 payload["convergence_history"] = None
+                payload["rescan_state"] = None
             else:
-                if not isinstance(prior_record, SessionRecord):
-                    raise ReviewInputError(
-                        "pre-write-settled rollover with previous_record requires authenticated prior_record"
-                    )
                 if (
-                    prior_record.identity() != self.identity()
-                    or prior_record.record_sha256
-                    != previous.previous_record.get("root_sha256")
-                    or prior_record.generation >= self.generation
-                    or prior_record.completed_initial_reviews
-                    > self.completed_initial_reviews
-                    or prior_record.completed_verification_rounds
-                    > self.completed_verification_rounds
+                    not isinstance(skipped_failed_ancestors, tuple)
+                    or len(skipped_failed_ancestors) > 8
                 ):
                     raise ReviewInputError(
-                        "pre-write-settled rollover prior_record conflicts with previous_record"
+                        "pre-write-settled rollover ancestor chain is invalid"
                     )
-                payload["completed_initial_reviews"] = (
-                    prior_record.completed_initial_reviews
-                )
-                payload["completed_verification_rounds"] = (
-                    prior_record.completed_verification_rounds
-                )
-                payload["convergence_history"] = (
-                    _copied_convergence_history(prior_record.convergence_history)
-                    if prior_record.convergence_history is not None
-                    else None
-                )
-                payload["rescan_state"] = (
-                    json.loads(json.dumps(prior_record.rescan_state))
-                    if prior_record.rescan_state is not None
-                    else None
-                )
+                expected_ref: Mapping[str, Any] | None = previous.previous_record
+                child_generation = self.generation
+                for failed_ancestor in skipped_failed_ancestors:
+                    if (
+                        not isinstance(failed_ancestor, SessionRecord)
+                        or not isinstance(expected_ref, Mapping)
+                        or failed_ancestor.identity() != self.identity()
+                        or failed_ancestor.record_sha256
+                        != expected_ref.get("root_sha256")
+                        or failed_ancestor.generation >= child_generation
+                        or failed_ancestor.transaction is None
+                        or failed_ancestor.transaction.phase != "publication_failed"
+                        or failed_ancestor.api_run_accounting is None
+                    ):
+                        raise ReviewInputError(
+                            "pre-write-settled rollover ancestor chain conflicts"
+                        )
+                    ancestor_acc = ApiRunAccounting.from_document(
+                        failed_ancestor.api_run_accounting
+                    )
+                    if ancestor_acc.identity.run_id != expected_ref.get("run_id"):
+                        raise ReviewInputError(
+                            "pre-write-settled rollover ancestor chain run conflicts"
+                        )
+                    expected_ref = ancestor_acc.previous_record
+                    child_generation = failed_ancestor.generation
+                if expected_ref is None:
+                    if prior_record is not None:
+                        raise ReviewInputError(
+                            "pre-write-settled rollover without settled ancestor cannot supply prior_record"
+                        )
+                    payload["completed_initial_reviews"] = 0
+                    payload["completed_verification_rounds"] = 0
+                    payload["convergence_history"] = None
+                    payload["rescan_state"] = None
+                else:
+                    if not isinstance(prior_record, SessionRecord):
+                        raise ReviewInputError(
+                            "pre-write-settled rollover with previous_record requires authenticated prior_record"
+                        )
+                    if (
+                        prior_record.identity() != self.identity()
+                        or prior_record.record_sha256 != expected_ref.get("root_sha256")
+                        or prior_record.generation >= child_generation
+                        or (
+                            prior_record.transaction is not None
+                            and prior_record.transaction.phase == "publication_failed"
+                        )
+                        or any(
+                            prior_record.completed_initial_reviews
+                            > descendant.completed_initial_reviews
+                            or prior_record.completed_verification_rounds
+                            > descendant.completed_verification_rounds
+                            for descendant in (self, *skipped_failed_ancestors)
+                        )
+                    ):
+                        raise ReviewInputError(
+                            "pre-write-settled rollover prior_record conflicts with previous_record"
+                        )
+                    payload["completed_initial_reviews"] = (
+                        prior_record.completed_initial_reviews
+                    )
+                    payload["completed_verification_rounds"] = (
+                        prior_record.completed_verification_rounds
+                    )
+                    payload["convergence_history"] = (
+                        _copied_convergence_history(prior_record.convergence_history)
+                        if prior_record.convergence_history is not None
+                        else None
+                    )
+                    payload["rescan_state"] = (
+                        json.loads(json.dumps(prior_record.rescan_state))
+                        if prior_record.rescan_state is not None
+                        else None
+                    )
         return type(self)._construct(**cast(dict[str, Any], payload))
 
     def _rollover_api_accounting(
@@ -5063,6 +5114,7 @@ def _validate_queue_retention(
     after: SessionRecord,
     *,
     prior_record: SessionRecord | None = None,
+    skipped_failed_ancestors: tuple[SessionRecord, ...] = (),
 ) -> None:
     from .historical_assessments import require_hold_successor
 
@@ -5162,6 +5214,7 @@ def _validate_queue_retention(
                 expected = before.rollover_pre_write_settled_api_accounting(
                     after.api_run_accounting,
                     prior_record=prior_record,
+                    skipped_failed_ancestors=skipped_failed_ancestors,
                 )
             else:
                 expected = before.rollover_api_accounting(after.api_run_accounting)

@@ -4025,6 +4025,34 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
                 "graphql forbidden",
             ),
             (
+                "forbidden_type_with_timeout_message",
+                json_response(
+                    {
+                        "errors": [
+                            {
+                                "type": "FORBIDDEN",
+                                "message": "Request timeout while checking permission",
+                            }
+                        ]
+                    }
+                ),
+                "graphql forbidden",
+            ),
+            (
+                "unauthorized_code_with_rate_limit_message",
+                json_response(
+                    {
+                        "errors": [
+                            {
+                                "extensions": {"code": "UNAUTHORIZED"},
+                                "message": "rate limit authorization check failed",
+                            }
+                        ]
+                    }
+                ),
+                "graphql unauthorized",
+            ),
+            (
                 "mixed_with_fourth_non_transient",
                 json_response(
                     {
@@ -4067,18 +4095,22 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
         from urllib.error import HTTPError
 
         from review_sensei_github.errors import GitHubHTTPTransientError
-        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.http import GitHubHttp, _is_rate_limited_403
 
-        def make_403(*, body: bytes, headers: dict[str, str]):
+        def make_403(*, body: bytes, headers):
+            def opener(request, timeout=None):
+                _ = timeout
+                raise HTTPError(
+                    request.full_url, 403, "Forbidden", headers, BytesIO(body)
+                )
+
+            return GitHubHttp(api_url="https://api.github.test", opener=opener)
+
+        def as_message(headers: dict[str, str]) -> Message:
             msg = Message()
             for key, value in headers.items():
                 msg[key] = value
-
-            def opener(request, timeout=None):
-                _ = timeout
-                raise HTTPError(request.full_url, 403, "Forbidden", msg, BytesIO(body))
-
-            return GitHubHttp(api_url="https://api.github.test", opener=opener)
+            return msg
 
         for label, body, headers in (
             ("retry_after", b'{"message":"nope"}', {"Retry-After": "60"}),
@@ -4095,7 +4127,7 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
             ),
         ):
             with self.subTest(case=label):
-                http = make_403(body=body, headers=headers)
+                http = make_403(body=body, headers=as_message(headers))
                 with self.assertRaises(GitHubHTTPTransientError):
                     http.request("POST", "/graphql", token="tok", body={"query": "{}"})
                 publisher = ReviewPublisher(http=http)
@@ -4137,7 +4169,7 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
         )
         for label, body, headers in non_transient_403_cases:
             with self.subTest(non_transient_case=label):
-                perm_http = make_403(body=body, headers=headers)
+                perm_http = make_403(body=body, headers=as_message(headers))
                 status, payload = perm_http.request(
                     "POST", "/graphql", token="tok", body={"query": "{}"}
                 )
@@ -4156,6 +4188,41 @@ class ReviewThreadLookupClassificationTests(unittest.TestCase):
                     raised.exception, GitHubPublicationTransientError
                 )
                 self.assertIn("http 403", str(raised.exception).lower())
+
+        # Plain dict headers with mixed/lowercase names must be handled case-insensitively.
+        for label, body, headers, expected_transient in (
+            ("dict_lowercase_retry_after", b"{}", {"retry-after": "60"}, True),
+            (
+                "dict_lowercase_ratelimit_zero",
+                b"{}",
+                {"x-ratelimit-remaining": "0"},
+                True,
+            ),
+            (
+                "dict_lowercase_positive_remaining_not_rate_limited",
+                b'{"message":"API rate limit exceeded"}',
+                {"x-ratelimit-remaining": "10"},
+                False,
+            ),
+        ):
+            with self.subTest(dict_header_case=label):
+                self.assertEqual(
+                    _is_rate_limited_403(headers, body.decode("utf-8")),
+                    expected_transient,
+                )
+                dict_http = make_403(body=body, headers=headers)
+                if expected_transient:
+                    with self.assertRaises(GitHubHTTPTransientError):
+                        dict_http.request(
+                            "POST", "/graphql", token="tok", body={"query": "{}"}
+                        )
+                else:
+                    self.assertEqual(
+                        dict_http.request(
+                            "POST", "/graphql", token="tok", body={"query": "{}"}
+                        ),
+                        (403, None),
+                    )
 
 
 if __name__ == "__main__":

@@ -42,7 +42,12 @@ from .api_run_history import (
     inherited_preprovider_reference,
     read_action_result,
 )
-from .api_run_owner import ApiRunActionsEvidence
+from .api_run_owner import (
+    MAX_LATER_ATTEMPT_INSPECTION,
+    ApiRunActionsEvidence,
+    is_terminal_job,
+    later_attempt_proved_no_business_entry,
+)
 from .checkpoint_result_store import CheckpointResultStore
 from .operation_comments import GitHubIssueCommentOperationPort
 from .prior_rescan_publication import admitted_rescan
@@ -2109,12 +2114,13 @@ def _probe_executor_details_readonly(
     except ReviewInputError:
         return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
 
-    if job_conclusion != "success":
-        return ("failed", "unknown", "unknown", "unknown")
-
     try:
         run_doc = run_reader._get(identity, f"/actions/runs/{run_id}")
     except ReviewInputError:
+        # Fail closed as active_or_unconfirmed when a failed attempt's run doc is
+        # unreadable (a later attempt may be active); preserve ceased on success.
+        if job_conclusion != "success":
+            return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
         return ("ceased", "unknown", "unknown", "unknown")
 
     repository = run_doc.get("repository")
@@ -2130,6 +2136,26 @@ def _probe_executor_details_readonly(
     ):
         return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
 
+    if run_doc.get("status") != "completed":
+        return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+
+    if run_attempt > owner.run_attempt:
+        if (
+            not is_terminal_job(run_doc)
+            or run_attempt - owner.run_attempt > MAX_LATER_ATTEMPT_INSPECTION
+        ):
+            return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+        for later_attempt in range(owner.run_attempt + 1, run_attempt + 1):
+            try:
+                later_jobs = run_reader._jobs(identity, later_attempt)
+            except ReviewInputError:
+                return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+            if not later_attempt_proved_no_business_entry(later_jobs):
+                return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+
+    if job_conclusion != "success":
+        return ("failed", "unknown", "unknown", "unknown")
+
     refs = run_doc.get("referenced_workflows")
     observed_sha = "unknown"
     if isinstance(refs, list) and len(refs) == 1 and isinstance(refs[0], dict):
@@ -2139,9 +2165,6 @@ def _probe_executor_details_readonly(
 
     if run_attempt > owner.run_attempt:
         return ("ceased", observed_sha, "unknown", "unknown")
-
-    if run_doc.get("status") != "completed":
-        return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
 
     if (
         tx_head_sha is None
