@@ -45,6 +45,7 @@ def _unique_json_object(pairs):
 
 
 def _header_value(headers: Any, name: str) -> str | None:
+    """Read a header case-insensitively from plain Mappings or .get()-style header objects."""
     if headers is None:
         return None
     if isinstance(headers, Mapping):

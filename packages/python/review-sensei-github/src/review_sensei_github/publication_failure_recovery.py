@@ -728,11 +728,11 @@ def clear_admitted_prior_record(ledger: Any) -> None:
     _ADMITTED_PRIOR_CHAINS.pop(ledger, None)
 
 
-def _archive_part_count(archive_ref: dict[str, Any]) -> int:
+def _archive_part_count(archive_ref: Mapping[str, object]) -> int:
     manifest = archive_ref.get("manifest")
     parts = (
         manifest.get("parts", ())
-        if isinstance(manifest, dict) and isinstance(manifest.get("parts"), list)
+        if isinstance(manifest, Mapping) and isinstance(manifest.get("parts"), list)
         else ()
     )
     return max(1, len(parts))
@@ -799,7 +799,8 @@ def _earlier_settled_effects(
     need_prior_read = prior_record is None
     _protect_tail(
         budget,
-        int(need_prior_read) + len(manifest.get("parts", ())),
+        (_archive_part_count(expected_archive) if need_prior_read else 0)
+        + len(manifest.get("parts", ())),
         record=current,
     )
     try:
@@ -1125,10 +1126,16 @@ def admit_publication_failure_recovery(
                 "prior settled session root exceeds archive walk bound",
                 record=record,
             )
-        if prior_record is not None and (
-            prior_record.completed_initial_reviews > record.completed_initial_reviews
+        # Every speculative publication_failed descendant started from prior_record's
+        # settled counters and can only keep them equal or speculatively increment
+        # them (a later failed partial run may legitimately have lower speculative
+        # counters than an earlier failed complete run, but never below prior_record).
+        if prior_record is not None and any(
+            prior_record.completed_initial_reviews
+            > descendant.completed_initial_reviews
             or prior_record.completed_verification_rounds
-            > record.completed_verification_rounds
+            > descendant.completed_verification_rounds
+            for descendant in (record, *skipped_failed_ancestors)
         ):
             raise _hold(
                 "prior settled session root conflicts with predecessor",

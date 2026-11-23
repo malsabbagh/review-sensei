@@ -726,6 +726,8 @@ class P0LaterAttemptCessationTests(unittest.TestCase):
             "active_or_unconfirmed",
         )
 
+        # later_attempt_proved_no_business_entry distinguishes a writer step that exited
+        # with conclusion "failure" (active_or_unconfirmed) from "skipped" (failed).
         # 4. Attempt 1 failed + Attempt 2 completed and entered writer step -> `active_or_unconfirmed`.
         state["run_status_code"] = 200
         state["run_status"] = "completed"
@@ -756,6 +758,69 @@ class P0LaterAttemptCessationTests(unittest.TestCase):
             )[0],
             "failed",
         )
+
+    def test_inspect_concurrency_posture_reuses_single_jobs_read_on_exclusive_owner(
+        self,
+    ) -> None:
+        calls = {"runs": 0, "jobs": 0}
+        jobs = [
+            {
+                "id": 8801,
+                "run_id": 880,
+                "run_attempt": 1,
+                "name": "ReviewSensei / hosted",
+                "status": "in_progress",
+                "conclusion": None,
+            },
+            {
+                "id": 8802,
+                "run_id": 880,
+                "run_attempt": 1,
+                "name": "ReviewSensei / command",
+                "status": "completed",
+                "conclusion": "skipped",
+            },
+        ]
+
+        def opener(req, timeout: float = 5.0):
+            _ = timeout
+            path = urlsplit(req.full_url).path
+            if path == "/repos/owner/repo/actions/runs/880":
+                calls["runs"] += 1
+                return json_response(
+                    {
+                        "id": 880,
+                        "run_attempt": 1,
+                        "status": "in_progress",
+                        "conclusion": None,
+                        "event": "pull_request",
+                        "repository": {"id": 123, "full_name": "owner/repo"},
+                    }
+                )
+            if path == "/repos/owner/repo/actions/runs/880/attempts/1/jobs":
+                calls["jobs"] += 1
+                return json_response({"total_count": len(jobs), "jobs": jobs})
+            raise AssertionError(path)
+
+        ev = ApiRunActionsEvidence(
+            GitHubHttp(api_url="https://api.github.test", opener=opener),
+            token="actions-read",
+            command_run_id="880",
+            job="hosted",
+        )
+        with patch.object(
+            ev,
+            "current_owner",
+            side_effect=AssertionError("inspect_concurrency_posture must reuse jobs"),
+        ):
+            posture = ev.inspect_concurrency_posture(
+                IDENTITY, attempt=1, event="pull_request"
+            )
+        self.assertEqual(calls, {"runs": 1, "jobs": 1})
+        self.assertTrue(posture.exclusive_active_owner)
+        self.assertFalse(posture.overlapping_active_writers)
+        self.assertEqual(posture.active_writer_jobs, ("ReviewSensei / hosted",))
+        self.assertIsNone(posture.refusal_reason)
 
 
 if __name__ == "__main__":

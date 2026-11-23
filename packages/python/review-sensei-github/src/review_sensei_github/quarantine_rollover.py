@@ -246,9 +246,9 @@ def replace_quarantine_rollover(
             updated = prepare(record)
             # admit_publication_failure_recovery stashes the prior record only while
             # _mutation_active is True inside prepare(); finally clears on failure.
+            require_native_decision(ledger, record, updated)
             admitted_prior = consume_admitted_prior_record(ledger, record)
             admitted_chain = consume_admitted_prior_chain(ledger, record)
-            require_native_decision(ledger, record, updated)
             _validate_queue_retention(
                 record,
                 updated,

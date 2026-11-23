@@ -1937,10 +1937,13 @@ class SessionRecord:
                             prior_record.transaction is not None
                             and prior_record.transaction.phase == "publication_failed"
                         )
-                        or prior_record.completed_initial_reviews
-                        > self.completed_initial_reviews
-                        or prior_record.completed_verification_rounds
-                        > self.completed_verification_rounds
+                        or any(
+                            prior_record.completed_initial_reviews
+                            > descendant.completed_initial_reviews
+                            or prior_record.completed_verification_rounds
+                            > descendant.completed_verification_rounds
+                            for descendant in (self, *skipped_failed_ancestors)
+                        )
                     ):
                         raise ReviewInputError(
                             "pre-write-settled rollover prior_record conflicts with previous_record"

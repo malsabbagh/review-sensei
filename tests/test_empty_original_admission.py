@@ -141,6 +141,8 @@ class EmptyOriginalAdmissionTests(unittest.TestCase):
             _, registration = f.original_body_failure()
             prior = sys.gettrace()
             try:
+                # application.py seals empty_original_admission with require_module_seal(),
+                # so monkey-patching consume is disallowed; trace hook matches above tests.
                 sys.settrace(observe)
                 with registered_resource([registration]):
                     with self.assertRaises(StopAfterConsume):

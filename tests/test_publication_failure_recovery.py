@@ -1864,6 +1864,335 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                         ledger, IDENTITY, bad_manifest, max_generation=3
                     )
 
+        for bad_generation in (-1, True):
+            with self.subTest(bad_generation=bad_generation):
+                bad_binding = {**base_binding, "generation": bad_generation}
+                bad_manifest = {
+                    **valid_manifest,
+                    "binding": bad_binding,
+                }
+                with self.assertRaisesRegex(
+                    ReviewInputError, "partition integer exceeds its contract"
+                ):
+                    _read_cached_manifest_in_memory(
+                        ledger, IDENTITY, bad_manifest, max_generation=3
+                    )
+
+        class _NoProducerLedger:
+            pass
+
+        with self.assertRaisesRegex(
+            ReviewInputError, "finding lifecycle manifest producer is unavailable"
+        ):
+            _read_cached_manifest_in_memory(
+                _NoProducerLedger(), IDENTITY, valid_manifest, max_generation=3
+            )
+
+    def test_admitted_prior_chain_peek_consume_binding_clear_and_hop_bound(self):
+        from review_sensei_github import publication_failure_recovery as pfr
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        http = GitHubHttp(
+            api_url="https://api.github.test",
+            opener=lambda _r, timeout=None: json_response(
+                {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
+            ),
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="tok", app_slug="reviewsensei[bot]"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            f = PublicationFailureRecoveryFixture(directory, limit=512)
+            self.assertEqual(f.invoke(), 0, f.error)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            f.next_review_run(head_sha=HEAD_2)
+
+            def fail_before_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic crash")
+
+            with patch.object(ReviewPublisher, "publish", fail_before_write):
+                self.assertEqual(f.invoke(), 1)
+            r2 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            # 1. Peek is idempotent; wrong record_sha256 returns () without clearing.
+            pfr._ADMITTED_PRIOR_CHAINS[ledger] = (r2.record_sha256, (r1,))
+            self.assertEqual(pfr.peek_admitted_prior_chain(ledger, r1), ())
+            self.assertEqual(pfr.peek_admitted_prior_chain(ledger, r2), (r1,))
+            self.assertEqual(pfr.peek_admitted_prior_chain(ledger, r2), (r1,))
+
+            # 2. Mismatched consume returns () and pops; matched consume returns once then ().
+            self.assertEqual(pfr.consume_admitted_prior_chain(ledger, r1), ())
+            self.assertEqual(pfr.peek_admitted_prior_chain(ledger, r2), ())
+            pfr._ADMITTED_PRIOR_CHAINS[ledger] = (r2.record_sha256, (r1,))
+            self.assertEqual(pfr.consume_admitted_prior_chain(ledger, r2), (r1,))
+            self.assertEqual(pfr.consume_admitted_prior_chain(ledger, r2), ())
+
+            # 3. clear_admitted_prior_record drops both prior record and ancestor chain.
+            pfr._ADMITTED_PRIOR_RECORDS[ledger] = (r2.record_sha256, r1)
+            pfr._ADMITTED_PRIOR_CHAINS[ledger] = (r2.record_sha256, (r1,))
+            pfr.clear_admitted_prior_record(ledger)
+            self.assertIsNone(pfr.consume_admitted_prior_record(ledger, r2))
+            self.assertEqual(pfr.peek_admitted_prior_chain(ledger, r2), ())
+
+            # 4. Hop bound > 8 in SessionRecord.rollover_pre_write_settled_api_accounting refuses.
+            f.next_review_run(head_sha=HEAD_3)
+            self.assertEqual(f.invoke(), 0, f.error)
+            after_rollover = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            candidate_doc = {
+                **copy.deepcopy(after_rollover.api_run_accounting),
+                "completed": [],
+                "blocks": [],
+                "action": None,
+                "analysis_abort": None,
+                "terminal_transaction": None,
+                "prior_nonstartup_liability": 0,
+                "startup_used": [["hosted", 1]],
+            }
+            with self.assertRaisesRegex(
+                ReviewInputError, "pre-write-settled rollover ancestor chain is invalid"
+            ):
+                r2.rollover_pre_write_settled_api_accounting(
+                    candidate_doc,
+                    prior_record=None,
+                    skipped_failed_ancestors=(r2,) * 9,
+                )
+
+    def test_earlier_settled_effects_protects_multipart_expected_archive_and_monotonic_ancestors(
+        self,
+    ):
+        import hashlib
+
+        from review_sensei_github import publication_failure_recovery as pfr
+        from review_sensei_github.api_run_history import RETAINED_CONFIRMATION_TAIL
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.bounded_evidence import (
+            MAX_PART_READS,
+            EvidenceReadBudget,
+            canonical_bytes,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=512)
+            r1 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            def fail_before_external_write(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic pre-write crash")
+
+            f.next_review_run(head_sha=HEAD_2)
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            r2 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+
+            # Part A: _earlier_settled_effects protects multi-part prior_archive_ref reads.
+            three_part_ref = copy.deepcopy(r2.api_run_accounting["previous_record"])
+            three_part_ref["manifest"]["parts"] = [
+                {"storage_id": 101},
+                {"storage_id": 102},
+                {"storage_id": 103},
+            ]
+            current_rec = _replace_finding_lifecycle(r2, r1.finding_lifecycle)
+            manifest_parts = len(
+                current_rec.finding_lifecycle["manifest"].get("parts", ())
+            )
+            underfunded_budget = EvidenceReadBudget()
+            underfunded_budget.calls = (
+                MAX_PART_READS - 4 - RETAINED_CONFIRMATION_TAIL - (manifest_parts + 2)
+            )
+            ledger_stub = object()
+            with patch.object(
+                pfr,
+                "read_previous_run",
+                side_effect=AssertionError("must fail _protect_tail before reading"),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "native effect census is unfunded"
+                ):
+                    pfr._earlier_settled_effects(
+                        ledger_stub,  # type: ignore[arg-type]
+                        IDENTITY,
+                        current_rec,
+                        ApiRunAccounting.from_document(r2.api_run_accounting),
+                        r1.finding_lifecycle["manifest"]["binding"]["head_sha"],
+                        999,
+                        underfunded_budget,
+                        prior_record=None,
+                        prior_archive_ref=three_part_ref,
+                    )
+
+            # Part B: monotonic check across skipped-failed ancestors against prior_record.
+            f.next_review_run(head_sha=HEAD_3)
+            with patch.object(ReviewPublisher, "publish", fail_before_external_write):
+                self.assertEqual(f.invoke(), 1)
+            r3 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            r1_fields = {
+                k: v
+                for k, v in r1.to_dict().items()
+                if k not in {"schema_version", "record_sha256"}
+            }
+            inflated_r1 = SessionRecord._construct(
+                **{
+                    **r1_fields,
+                    "transaction": r1.transaction,
+                    "completed_verification_rounds": r1.completed_verification_rounds
+                    + 1,
+                }
+            )
+            r2_zero_rounds_fields = {
+                k: v
+                for k, v in r2.to_dict().items()
+                if k not in {"schema_version", "record_sha256"}
+            }
+            r2_zero_rounds = SessionRecord._construct(
+                **{
+                    **r2_zero_rounds_fields,
+                    "transaction": r2.transaction,
+                    "completed_verification_rounds": 0,
+                    "api_run_accounting": {
+                        **r2.api_run_accounting,
+                        "previous_record": {
+                            **r2.api_run_accounting["previous_record"],
+                            "root_sha256": inflated_r1.record_sha256,
+                        },
+                    },
+                }
+            )
+            r3_one_round_fields = {
+                k: v
+                for k, v in r3.to_dict().items()
+                if k not in {"schema_version", "record_sha256"}
+            }
+            r3_one_round = SessionRecord._construct(
+                **{
+                    **r3_one_round_fields,
+                    "transaction": r3.transaction,
+                    "completed_verification_rounds": 1,
+                    "api_run_accounting": {
+                        **r3.api_run_accounting,
+                        "previous_record": {
+                            **r3.api_run_accounting["previous_record"],
+                            "root_sha256": r2_zero_rounds.record_sha256,
+                        },
+                    },
+                }
+            )
+            r3_ref = r3_one_round.api_run_accounting["previous_record"]
+            r2_ref = r2_zero_rounds.api_run_accounting["previous_record"]
+            by_key = {
+                (r3_ref["run_id"], r3_ref["root_sha256"]): r2_zero_rounds,
+                (r2_ref["run_id"], r2_ref["root_sha256"]): inflated_r1,
+            }
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=r3_one_round
+            )
+            cid, _, w = _witnesses_from_extra(f.extra_comments)[-1]
+            payload = {
+                **w.to_dict(),
+                "settled_root_sha256": r3_one_round.record_sha256,
+                "settled_generation": r3_one_round.generation,
+            }
+            unsigned = {k: v for k, v in payload.items() if k != "content_sha256"}
+            payload["content_sha256"] = hashlib.sha256(
+                canonical_bytes(unsigned)
+            ).hexdigest()
+            encoded = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            f.extra_comments[cid]["body"] = (
+                "ReviewSensei recorded a pre-external-write failure settlement witness "
+                "(data only; requires independent Actions cessation and native negative census).\n\n"
+                f"```json\n{encoded}\n```\n"
+                f"{SETTLEMENT_WITNESS_MARKER}"
+            )
+            f.select_command("@reviewsensei review status", new_run=True)
+            with patch.object(
+                pfr,
+                "read_previous_run",
+                side_effect=lambda _ledger, _identity, ref: by_key[
+                    (ref["run_id"], ref["root_sha256"])
+                ],
+            ):
+                self.assertNotEqual(f.invoke_command(), 0)
+            self.assertIn(
+                "prior settled session root conflicts with predecessor", f.error
+            )
+
+            # SessionRecord.rollover_pre_write_settled_api_accounting enforces the same check.
+            candidate_doc = {
+                **copy.deepcopy(r3.api_run_accounting),
+                "identity": {"repository_id": 123, "run_id": 9991},
+                "owner": {"run_attempt": 1, "job": "hosted", "generation": 0},
+                "completed": [],
+                "blocks": [],
+                "action": None,
+                "analysis_abort": None,
+                "terminal_transaction": None,
+                "prior_nonstartup_liability": 0,
+                "startup_used": [["hosted", 1]],
+                "previous_record": {
+                    **copy.deepcopy(r3_ref),
+                    "run_id": r3.api_run_accounting["identity"]["run_id"],
+                    "root_sha256": r3_one_round.record_sha256,
+                    "manifest": {
+                        **copy.deepcopy(r3_ref["manifest"]),
+                        "binding": {
+                            **copy.deepcopy(r3_ref["manifest"]["binding"]),
+                            "generation": r3_one_round.generation,
+                        },
+                    },
+                },
+            }
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "pre-write-settled rollover prior_record conflicts with previous_record",
+            ):
+                r3_one_round.rollover_pre_write_settled_api_accounting(
+                    candidate_doc,
+                    prior_record=inflated_r1,
+                    skipped_failed_ancestors=(r2_zero_rounds,),
+                )
+
+            # Positive case: earlier failed ancestor speculatively incremented (+1) while
+            # later failed child remained at prior_record's settled counter (0) -> accepted.
+            r2_one_round = SessionRecord._construct(
+                **{
+                    **r2_zero_rounds_fields,
+                    "transaction": r2.transaction,
+                    "completed_verification_rounds": 1,
+                }
+            )
+            r3_zero_round = SessionRecord._construct(
+                **{
+                    **r3_one_round_fields,
+                    "transaction": r3.transaction,
+                    "completed_verification_rounds": 0,
+                    "api_run_accounting": {
+                        **r3.api_run_accounting,
+                        "previous_record": {
+                            **r3_ref,
+                            "root_sha256": r2_one_round.record_sha256,
+                        },
+                    },
+                }
+            )
+            r3_zero_doc = {
+                **candidate_doc,
+                "previous_record": {
+                    **candidate_doc["previous_record"],
+                    "root_sha256": r3_zero_round.record_sha256,
+                },
+            }
+            accepted_rollover = r3_zero_round.rollover_pre_write_settled_api_accounting(
+                r3_zero_doc,
+                prior_record=r1,
+                skipped_failed_ancestors=(r2_one_round,),
+            )
+            self.assertEqual(accepted_rollover.completed_initial_reviews, 1)
+            self.assertEqual(accepted_rollover.completed_verification_rounds, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

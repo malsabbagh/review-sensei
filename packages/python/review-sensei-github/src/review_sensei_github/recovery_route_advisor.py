@@ -43,9 +43,10 @@ from .api_run_history import (
     read_action_result,
 )
 from .api_run_owner import (
+    MAX_LATER_ATTEMPT_INSPECTION,
     ApiRunActionsEvidence,
-    _later_attempt_proved_no_business_entry,
-    _terminal_job,
+    is_terminal_job,
+    later_attempt_proved_no_business_entry,
 )
 from .checkpoint_result_store import CheckpointResultStore
 from .operation_comments import GitHubIssueCommentOperationPort
@@ -2116,6 +2117,8 @@ def _probe_executor_details_readonly(
     try:
         run_doc = run_reader._get(identity, f"/actions/runs/{run_id}")
     except ReviewInputError:
+        # Fail closed as active_or_unconfirmed when a failed attempt's run doc is
+        # unreadable (a later attempt may be active); preserve ceased on success.
         if job_conclusion != "success":
             return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
         return ("ceased", "unknown", "unknown", "unknown")
@@ -2137,14 +2140,17 @@ def _probe_executor_details_readonly(
         return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
 
     if run_attempt > owner.run_attempt:
-        if not _terminal_job(run_doc) or run_attempt - owner.run_attempt > 4:
+        if (
+            not is_terminal_job(run_doc)
+            or run_attempt - owner.run_attempt > MAX_LATER_ATTEMPT_INSPECTION
+        ):
             return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
         for later_attempt in range(owner.run_attempt + 1, run_attempt + 1):
             try:
                 later_jobs = run_reader._jobs(identity, later_attempt)
             except ReviewInputError:
                 return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
-            if not _later_attempt_proved_no_business_entry(later_jobs):
+            if not later_attempt_proved_no_business_entry(later_jobs):
                 return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
 
     if job_conclusion != "success":

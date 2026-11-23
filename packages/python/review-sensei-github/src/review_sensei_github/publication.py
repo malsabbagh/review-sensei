@@ -270,6 +270,7 @@ def _classify_graphql_errors(errors: object) -> tuple[bool, str]:
             for token in matched_tokens:
                 _add_tag(token)
         elif msg_tag is not None:
+            # _TRANSIENT_GRAPHQL_MESSAGE_FRAGMENTS only matches transient server/gateway errors.
             entry_transient = True
             _add_tag(msg_tag)
         else:
