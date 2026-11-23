@@ -41,7 +41,12 @@ from review_sensei.recovery_context import (
     resolve_recovery_context_store,
 )
 from review_sensei.service import ReviewRun, ReviewService
-from review_sensei.session import SessionIdentity, SessionLedger, SessionRecord
+from review_sensei.session import (
+    LocalSessionLedger,
+    SessionIdentity,
+    SessionLedger,
+    SessionRecord,
+)
 from review_sensei.work_recovery import WorkRecoveryStore
 
 if TYPE_CHECKING:
@@ -114,6 +119,48 @@ def _require_unbound_cli_context_record(record: SessionRecord) -> None:
             "or assume ownership of this retained result",
             refusal_code="absent_context",
         )
+
+
+def _cli_option_present(argv: list[str], name: str) -> bool:
+    return any(arg == name or arg.startswith(name + "=") for arg in argv)
+
+
+def _publish_runtime_only_flags(
+    args: argparse.Namespace, argv: list[str]
+) -> dict[str, bool]:
+    has_custom_stages = bool(
+        getattr(args, "stages_dir", None) is not None
+        or getattr(args, "categories_dir", None) is not None
+        or _cli_option_present(argv, "--stages-dir")
+        or _cli_option_present(argv, "--categories-dir")
+        or os.environ.get("REVIEWSENSEI_STAGES_DIR", "").strip()
+        or os.environ.get("REVIEWSENSEI_CATEGORIES_DIR", "").strip()
+    )
+    has_cli_overrides = bool(
+        any(
+            _cli_option_present(argv, opt)
+            for opt in (
+                "--provider",
+                "--model",
+                "--enable-symbol-context",
+                "--symbol-context-allowed-path",
+                "--symbol-context-max-files",
+                "--symbol-context-max-bytes",
+                "--symbol-context-max-depth",
+                "--orchestrate-large-changes",
+            )
+        )
+        or getattr(args, "enable_symbol_context", False)
+        or getattr(args, "orchestrate_large_changes", False)
+        or bool(getattr(args, "symbol_context_allowed_path", ()) or ())
+        or os.environ.get("REVIEWSENSEI_PROVIDER", "").strip()
+        or os.environ.get("REVIEWSENSEI_MODEL", "").strip()
+        or engine_cli._env_flag("REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT")
+    )
+    return {
+        "custom_stages": has_custom_stages,
+        "cli_overrides": has_cli_overrides,
+    }
 
 
 def _resolve_cli_policy_commit(args: argparse.Namespace) -> str:
@@ -405,6 +452,24 @@ def _github_parser() -> argparse.ArgumentParser:
     review.add_argument("--policy-commit", type=str, default=None)
     review.add_argument("--original-api-limit", type=int, default=None)
     review.add_argument("--prior-consumed-requests", type=int, default=0)
+    review.add_argument("--provider", default=argparse.SUPPRESS)
+    review.add_argument("--model", default=argparse.SUPPRESS)
+    review.add_argument(
+        "--stages-dir",
+        type=Path,
+        default=os.getenv("REVIEWSENSEI_STAGES_DIR") or None,
+    )
+    review.add_argument(
+        "--categories-dir",
+        type=Path,
+        default=os.getenv("REVIEWSENSEI_CATEGORIES_DIR") or None,
+    )
+    review.add_argument("--enable-symbol-context", action="store_true")
+    review.add_argument("--symbol-context-allowed-path", action="append", default=[])
+    review.add_argument("--symbol-context-max-files", type=int, default=16)
+    review.add_argument("--symbol-context-max-bytes", type=int, default=128 * 1024)
+    review.add_argument("--symbol-context-max-depth", type=int, default=1)
+    review.add_argument("--orchestrate-large-changes", action="store_true")
     command = subparsers.add_parser(
         "command",
         help="Apply an authenticated @reviewsensei maintainer command to the session ledger",
@@ -1035,46 +1100,82 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         from review_sensei.bounded_evidence import EvidenceReadBudget
 
         publication_budget = EvidenceReadBudget()
-        if recovery_store is not None:
-            # Inspect the actual retained writer before context reconstruction,
-            # acceptance checkpoint, handoff replacement, or native effects.
-            context_source_ledger: SessionLedger | None = session_ledger
-            if context_source_ledger is None and args.github_session_ledger:
-                from review_sensei_github.session_ledger import (
-                    GitHubIssueCommentSessionLedger,
-                )
+        publish_identity = SessionIdentity(
+            args.repository,
+            args.pull_request,
+            repository_id=args.repository_id,
+        )
+        remote_recovery_phase_only = (
+            recovery_store is None
+            and session_ledger is None
+            and getattr(args, "github_session_ledger", False)
+            and args.reconstruct_contexts
+            and args.recover_retained
+        )
+        # Inspect every loaded session ledger record unconditionally before context
+        # reconstruction, acceptance checkpoint, handoff replacement, or native effects,
+        # closing standalone metered-record bypasses even when --recovery-context-dir is omitted.
+        context_source_ledger: SessionLedger | None = session_ledger
+        if (
+            context_source_ledger is None
+            and args.github_session_ledger
+            and not remote_recovery_phase_only
+        ):
+            from review_sensei_github.session_ledger import (
+                GitHubIssueCommentSessionLedger,
+            )
 
-                context_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
-                    "GH_TOKEN"
-                )
-                if not isinstance(context_token, str) or not context_token.strip():
-                    raise RecoveryRefusalError(
-                        "absent_context: original context ledger is unavailable",
-                        refusal_code="absent_context",
-                    )
+            context_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+            if isinstance(context_token, str) and context_token.strip():
                 context_source_ledger = GitHubIssueCommentSessionLedger(
                     http,
                     token=context_token.strip(),
                     app_slug=args.app_slug,
                     evidence_budget=publication_budget,
                 )
-            if context_source_ledger is not None:
-                context_record = context_source_ledger.load(
-                    SessionIdentity(
-                        args.repository,
-                        args.pull_request,
-                        repository_id=args.repository_id,
-                    )
+            elif recovery_store is not None:
+                raise RecoveryRefusalError(
+                    "absent_context: original context ledger is unavailable",
+                    refusal_code="absent_context",
                 )
-                if (
-                    context_record.status not in {"ok", "migrated"}
-                    or context_record.record is None
-                ):
-                    raise RecoveryRefusalError(
-                        "absent_context: original context ledger is unavailable",
-                        refusal_code="absent_context",
-                    )
+        preloaded_cli_record: SessionRecord | None = None
+        preloaded_cli_metrics: tuple[int, int, int, int, int] | None = None
+        cli_ledger_checked = False
+        if context_source_ledger is not None:
+            # When --recovery-context-dir is omitted, pre-inspecting a local
+            # ledger through a fresh LocalSessionLedger keeps session_ledger's
+            # evidence_budget untouched (important on Windows cold part reads).
+            inspection_ledger: SessionLedger = (
+                LocalSessionLedger(
+                    context_source_ledger.root,
+                    evidence_budget=EvidenceReadBudget(),
+                )
+                if recovery_store is None
+                and isinstance(context_source_ledger, LocalSessionLedger)
+                else context_source_ledger
+            )
+            context_record = inspection_ledger.load(publish_identity)
+            cli_ledger_checked = True
+            if recovery_store is not None and (
+                context_record.status not in {"ok", "migrated"}
+                or context_record.record is None
+            ):
+                raise RecoveryRefusalError(
+                    "absent_context: original context ledger is unavailable",
+                    refusal_code="absent_context",
+                )
+            if context_record.record is not None:
                 _require_unbound_cli_context_record(context_record.record)
+                preloaded_cli_record = context_record.record
+                from review_sensei_github.publication_context_recovery import (
+                    measure_staged_recovery_footprint,
+                )
+
+                preloaded_cli_metrics = measure_staged_recovery_footprint(
+                    context_record.record,
+                    ledger=inspection_ledger,
+                    identity=publish_identity,
+                )
         configuration_context = (
             engine_cli._load_context_document(
                 args.configuration_context,
@@ -1174,15 +1275,48 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     app_slug=args.app_slug,
                     budget=publication_budget,
                 )
+            from review_sensei_github.publication_recovery import (
+                publication_session_ledger,
+            )
+
             with recovery_read as recovery_phase:
+                active_recovery_ledger = (
+                    recovery_phase.ledger
+                    if recovery_phase is not None
+                    else publication_session_ledger(recovery_ledger, publication_budget)
+                )
                 if recovery_phase is not None:
                     recovery_ledger = recovery_phase.ledger
+                    phase_loaded = recovery_phase.ledger.load(publish_identity)
+                    if phase_loaded.record is not None:
+                        _require_unbound_cli_context_record(phase_loaded.record)
+                        preloaded_cli_record = phase_loaded.record
+                        from review_sensei_github.publication_context_recovery import (
+                            measure_staged_recovery_footprint,
+                        )
+
+                        preloaded_cli_metrics = measure_staged_recovery_footprint(
+                            phase_loaded.record,
+                            ledger=recovery_phase.ledger,
+                            identity=publish_identity,
+                        )
+                elif not cli_ledger_checked and preloaded_cli_record is None:
+                    rec_loaded = active_recovery_ledger.load(publish_identity)
+                    if rec_loaded.record is not None:
+                        _require_unbound_cli_context_record(rec_loaded.record)
+                        preloaded_cli_record = rec_loaded.record
+                        from review_sensei_github.publication_context_recovery import (
+                            measure_staged_recovery_footprint,
+                        )
+
+                        preloaded_cli_metrics = measure_staged_recovery_footprint(
+                            rec_loaded.record,
+                            ledger=active_recovery_ledger,
+                            identity=publish_identity,
+                        )
                 if args.reconstruct_contexts:
                     from review_sensei_github.publication_context_recovery import (
                         reconstruct_publication_contexts,
-                    )
-                    from review_sensei_github.publication_recovery import (
-                        publication_session_ledger,
                     )
 
                     cli_original_limit = (
@@ -1193,24 +1327,68 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     cli_prior_consumed = (
                         getattr(args, "prior_consumed_requests", 0) or 0
                     )
+                    cli_provider = (
+                        args.provider
+                        if isinstance(getattr(args, "provider", None), str)
+                        else None
+                    )
+                    cli_model = (
+                        args.model
+                        if isinstance(getattr(args, "model", None), str)
+                        else None
+                    )
+                    symbol_allowed_paths = tuple(
+                        getattr(args, "symbol_context_allowed_path", ()) or ()
+                    )
+                    (
+                        cli_root_bytes,
+                        cli_intermediate_root_bytes,
+                        cli_comment_bytes,
+                        cli_result_part_count,
+                        cli_total_decoded_bytes,
+                    ) = (
+                        preloaded_cli_metrics
+                        if preloaded_cli_metrics is not None
+                        else (4_096, 4_096, 0, 1, 16_384)
+                    )
                     reconstructed = reconstruct_publication_contexts(
                         source_root=args.trusted_context_root,
                         diff=diff,
-                        ledger=(
-                            recovery_phase.ledger
-                            if recovery_phase is not None
-                            else publication_session_ledger(
-                                recovery_ledger, publication_budget
-                            )
-                        ),
-                        identity=SessionIdentity(
-                            args.repository,
-                            args.pull_request,
-                            repository_id=args.repository_id,
-                        ),
+                        ledger=active_recovery_ledger,
+                        identity=publish_identity,
                         base_sha=args.base_sha,
                         head_sha=args.head_sha,
                         policy=convergence_policy,
+                        cli_provider=cli_provider,
+                        cli_model=cli_model,
+                        environ=os.environ,
+                        enable_symbol_context=(
+                            bool(getattr(args, "enable_symbol_context", False))
+                            or engine_cli._env_flag(
+                                "REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT"
+                            )
+                        ),
+                        symbol_context_allowed_paths=symbol_allowed_paths or None,
+                        symbol_context_max_files=(
+                            args.symbol_context_max_files
+                            if _cli_option_present(argv, "--symbol-context-max-files")
+                            else None
+                        ),
+                        symbol_context_max_bytes=(
+                            args.symbol_context_max_bytes
+                            if _cli_option_present(argv, "--symbol-context-max-bytes")
+                            else None
+                        ),
+                        symbol_context_max_depth=(
+                            args.symbol_context_max_depth
+                            if _cli_option_present(argv, "--symbol-context-max-depth")
+                            else None
+                        ),
+                        stages_dir=getattr(args, "stages_dir", None),
+                        categories_dir=getattr(args, "categories_dir", None),
+                        orchestrate_large_changes=bool(
+                            getattr(args, "orchestrate_large_changes", False)
+                        ),
                         recovery_store=recovery_store,
                         policy_commit=(
                             _resolve_cli_policy_commit(args)
@@ -1222,6 +1400,17 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         producer="github-publish-cli",
                         current_run_id=2,
                         attempt=2,
+                        runtime_only_flags=_publish_runtime_only_flags(args, argv),
+                        current_root_sha256=(
+                            preloaded_cli_record.record_sha256
+                            if preloaded_cli_record is not None
+                            else None
+                        ),
+                        current_root_bytes=cli_root_bytes,
+                        intermediate_root_bytes=cli_intermediate_root_bytes,
+                        current_comment_bytes=cli_comment_bytes,
+                        result_part_count=cli_result_part_count,
+                        total_decoded_bytes=cli_total_decoded_bytes,
                         original_api_limit=cli_original_limit,
                         already_consumed_requests=cli_prior_consumed,
                     )
@@ -1254,6 +1443,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     raw_admission_doc = engine_cli._load_context_document(
                         args.admission_context, label="admission context"
                     )
+                    _require_unbound_cli_context_record(loaded_rec.record)
                     rec_accounting_version = _extract_ledger_accounting_version(
                         loaded_rec.record
                     )
@@ -1447,6 +1637,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     )
                 )
                 if loaded_cap.record is not None:
+                    _require_unbound_cli_context_record(loaded_cap.record)
                     capture_accounting_version = _extract_ledger_accounting_version(
                         loaded_cap.record
                     )

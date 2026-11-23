@@ -14,7 +14,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import canonical_bytes
@@ -670,6 +670,11 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 repository=run.identity.repository,
                 actor=actor["login"],
             )
+        from .trust_enrollment import enroll_application_trust_snapshot
+
+        observed_trust = enroll_application_trust_snapshot(
+            app, run, actor_permission=permission
+        )
         quarantine_refusal = None
         historical_refusal = None
         try:
@@ -782,6 +787,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 convergence_policy=resolve_review_convergence_policy(
                     mode=explicit_mode, quality=run.plan.policy.review_quality
                 ),
+                observed_trust=observed_trust,
             )
         if result.evaluation_failed:
             raise ReviewInputError(
@@ -854,6 +860,12 @@ def run_action(
         help="Observe original enrollment with a compatible v4 broker; not continuous trust or effect authorization.",
     )
     parser.add_argument(
+        "--observe-original-actor-role",
+        action="store_true",
+        default=False,
+        help="Opt in to observing the original actor role via v4 broker (requires --enable-current-trust-enrollment); default-off.",
+    )
+    parser.add_argument(
         "--verify-source-before-intent",
         action="store_true",
         default=False,
@@ -909,6 +921,15 @@ def run_action(
     if cancel_on_mutation:
         args.cancel_unstarted_on_source_mutation = True
     with _cross_run_unstarted_rollover_guard(unstarted_recovery) as rollover_service:
+
+        class _ActorRoleKwargs(TypedDict, total=False):
+            observe_original_actor_role: bool
+
+        actor_role_kwargs: _ActorRoleKwargs = (
+            {"observe_original_actor_role": True}
+            if options.observe_original_actor_role
+            else {}
+        )
         run = bootstrap(
             args,
             run_directory=options.run_directory,
@@ -917,6 +938,7 @@ def run_action(
             source=source,
             rollover_service=rollover_service,
             enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+            **actor_role_kwargs,
             command_action=command_action,
         )
     same_run_gate = (

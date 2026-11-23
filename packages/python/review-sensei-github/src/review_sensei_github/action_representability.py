@@ -72,6 +72,16 @@ def _unlisted_snapshot_part_reads(
     return count
 
 
+def _command_target_count(command: MaintainerCommand) -> int:
+    if command.finding_references:
+        return len(command.finding_references)
+    if command.finding_fingerprints:
+        return len(command.finding_fingerprints)
+    if command.finding_reference is not None or command.finding_fingerprint is not None:
+        return 1
+    return 0
+
+
 def _command_pricing(
     caller: Any,
     *,
@@ -79,6 +89,7 @@ def _command_pricing(
     writes_enabled: bool,
     ledger: Any = None,
     current_record: SessionRecord | None = None,
+    finding_count: int = 0,
 ) -> ActionSettlementPricing:
     accounting = caller.accounting
     limit = int(accounting.configuration.limit)
@@ -95,12 +106,18 @@ def _command_pricing(
         business_reqs = 0
         refinalize_reqs = 0
         receipt_reqs = 0
-    elif action in {
-        "accept-risk",
-        "dismiss",
-        "defer",
-        "accept-coverage-uncertainty",
-    }:
+    elif action in {"accept-risk", "dismiss", "defer"}:
+        if finding_count > 0:
+            # Align batch pricing with PR #481 preflight_command_finalization math:
+            # 7 lifecycle calls/finding, 4 + 5*K thread cleanup, and 8 receipt calls.
+            business_reqs = 3 + 7 * finding_count
+            refinalize_reqs = 3 + 4 + 5 * finding_count
+            receipt_reqs = 8
+        else:
+            business_reqs = 3
+            refinalize_reqs = 3
+            receipt_reqs = 2
+    elif action == "accept-coverage-uncertainty":
         business_reqs = 3
         refinalize_reqs = 3
         receipt_reqs = 2
@@ -252,6 +269,7 @@ def guard_current_command_representability(
         writes_enabled=writes_enabled,
         ledger=ledger,
         current_record=current_record,
+        finding_count=_command_target_count(command),
     )
     admitted_action = caller.accounting.action
     if (

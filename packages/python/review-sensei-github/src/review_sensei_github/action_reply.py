@@ -291,6 +291,9 @@ def execute_reply(
         # Broader reassessment may call this same application's publish_review;
         # its prior budget must already be this run's original caller facade.
         app.reviewer.finalizer.evidence_budget = caller.budget_view
+        from .trust_enrollment import enroll_application_trust_snapshot
+
+        observed_trust = enroll_application_trust_snapshot(app, run)
         result = app.generate_and_publish_reply(
             options=GitHubWriteOptions(
                 github_writes=True,
@@ -327,6 +330,7 @@ def execute_reply(
             operation_parts=parts,
             evidence_budget=caller.budget_view,
             current_action=authority,
+            observed_trust=observed_trust,
         )
     if not isinstance(result, ReplyResult):
         raise ReviewInputError("reply result is not a confirmed current outcome")

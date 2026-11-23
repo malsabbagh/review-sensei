@@ -37,6 +37,12 @@ from .provenance_manifest import (
     _reject_secret_or_control,
     prescribe_recovery,
 )
+from .session import (
+    MAX_SESSION_COMMENT_BYTES as MAX_SESSION_COMMENT_BYTES,
+)
+from .session import (
+    MAX_SESSION_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
+)
 
 RECOVERY_CONTEXT_SCHEMA_VERSION = "original-recovery-context-v1"
 RECOVERY_HANDOFF_ENVELOPE_VERSION = "original-recovery-handoff-v1"
@@ -45,7 +51,9 @@ MAX_RECOVERY_HANDOFF_FILES = 8
 MAX_RECOVERY_HANDOFF_TOTAL_BYTES = 65_536
 MAX_RECOVERY_ANCESTOR_DEPTH = 32
 MAX_RECOVERY_RESULT_PARTS = 32
-MAX_SESSION_ROOT_BYTES = 65_536
+# Session root JSON is bounded by MAX_SESSION_RECORD_BYTES (32,768), distinct
+# from the rendered GitHub comment framing ceiling (MAX_SESSION_COMMENT_BYTES = 65,536).
+MAX_SESSION_ROOT_BYTES = MAX_SESSION_RECORD_BYTES
 MAX_DECODED_RESULT_BYTES = 2 * 1024 * 1024
 
 SUPPORTED_WRITER_ACCOUNTING_VERSIONS = frozenset(
@@ -642,6 +650,7 @@ class RecoveryBudgetPricing:
     current_root_bytes: int
     intermediate_root_bytes: int
     total_decoded_bytes: int
+    current_comment_bytes: int = 0
 
     @property
     def required_new_requests(self) -> int:
@@ -666,8 +675,9 @@ class RecoveryBudgetPricing:
         return (
             self.total_projected_requests <= self.original_api_limit
             and self.result_part_read_requests <= MAX_RECOVERY_RESULT_PARTS
-            and self.current_root_bytes <= MAX_SESSION_ROOT_BYTES
-            and self.intermediate_root_bytes <= MAX_SESSION_ROOT_BYTES
+            and self.current_root_bytes <= MAX_SESSION_RECORD_BYTES
+            and self.intermediate_root_bytes <= MAX_SESSION_RECORD_BYTES
+            and self.current_comment_bytes <= MAX_SESSION_COMMENT_BYTES
             and self.total_decoded_bytes <= MAX_DECODED_RESULT_BYTES
         )
 
@@ -741,6 +751,7 @@ def price_recovery_context_admission(
     ancestor_run_ids: Sequence[int] = (),
     current_root_bytes: int = 4_096,
     intermediate_root_bytes: int = 4_096,
+    current_comment_bytes: int = 0,
     result_part_count: int = 1,
     total_decoded_bytes: int = 16_384,
     startup_read_requests: int = 4,
@@ -759,6 +770,7 @@ def price_recovery_context_admission(
     for field_name, num in (
         ("current_root_bytes", current_root_bytes),
         ("intermediate_root_bytes", intermediate_root_bytes),
+        ("current_comment_bytes", current_comment_bytes),
         ("result_part_count", result_part_count),
         ("total_decoded_bytes", total_decoded_bytes),
         ("startup_read_requests", startup_read_requests),
@@ -787,6 +799,7 @@ def price_recovery_context_admission(
         current_root_bytes=current_root_bytes,
         intermediate_root_bytes=intermediate_root_bytes,
         total_decoded_bytes=total_decoded_bytes,
+        current_comment_bytes=current_comment_bytes,
     )
 
     seen_hashes: set[str] = set()
@@ -826,8 +839,9 @@ def price_recovery_context_admission(
 
     if (
         result_part_count > MAX_RECOVERY_RESULT_PARTS
-        or current_root_bytes > MAX_SESSION_ROOT_BYTES
-        or intermediate_root_bytes > MAX_SESSION_ROOT_BYTES
+        or current_root_bytes > MAX_SESSION_RECORD_BYTES
+        or intermediate_root_bytes > MAX_SESSION_RECORD_BYTES
+        or current_comment_bytes > MAX_SESSION_COMMENT_BYTES
         or total_decoded_bytes > MAX_DECODED_RESULT_BYTES
     ):
         return _refusal_decision(
@@ -1009,6 +1023,7 @@ class RecoveryContextStore:
         ancestor_run_ids: Sequence[int] = (),
         current_root_bytes: int = 4_096,
         intermediate_root_bytes: int = 4_096,
+        current_comment_bytes: int = 0,
         result_part_count: int = 1,
         total_decoded_bytes: int = 16_384,
         original_api_limit: int = 512,
@@ -1161,6 +1176,7 @@ class RecoveryContextStore:
             ancestor_run_ids=ancestor_run_ids,
             current_root_bytes=current_root_bytes,
             intermediate_root_bytes=intermediate_root_bytes,
+            current_comment_bytes=current_comment_bytes,
             result_part_count=result_part_count,
             total_decoded_bytes=total_decoded_bytes,
             original_api_limit=original_api_limit,

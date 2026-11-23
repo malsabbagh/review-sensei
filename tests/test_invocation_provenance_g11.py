@@ -630,6 +630,115 @@ class CurrentProcessPackageObservationTests(unittest.TestCase):
             self.assertNotEqual(changed_rows[0]["module_file_sha256"], expected[0])
             self.assertEqual(changed_rows[0]["wheel_sha256"], "unknown")
 
+    def test_attempt_evidence_packet_adapter_and_manifest_module_origin_join(
+        self,
+    ) -> None:
+        from review_sensei_github.historical_completion import (
+            provenance_manifest_from_attempt_packet as reexported_adapter,
+        )
+        from review_sensei_github.recovery_route_advisor import (
+            build_attempt_evidence_packet as build_advisor_packet,
+        )
+        from review_sensei_github.recovery_route_advisor import (
+            provenance_manifest_from_attempt_packet,
+        )
+
+        from review_sensei.session import LocalSessionLedger, SessionIdentity
+
+        self.assertIs(reexported_adapter, provenance_manifest_from_attempt_packet)
+
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        exec_sha = "c" * 40
+        exec_commit = "d" * 40
+        policy_commit = "e" * 40
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            record = LocalSessionLedger(Path(ledger_dir)).initialize(
+                SessionIdentity(
+                    repository="owner/repo",
+                    pull_request=77,
+                    repository_id=9001,
+                )
+            )
+        packet = build_advisor_packet(
+            record,
+            current_base=base_sha,
+            current_head=head_sha,
+            executor_status="qualified_success",
+            executor_sha=exec_sha,
+            executor_commit=exec_commit,
+            installed_core_version="0.8.21",
+            installed_hosted_version="0.3.27",
+        )
+        # Missing original transaction leaves packet.base_sha/head_sha as None;
+        # adapter MUST preserve UNKNOWN_PROVENANCE rather than substituting current_*.
+        manifest = provenance_manifest_from_attempt_packet(packet)
+        self.assertEqual(manifest.repository, "owner/repo")
+        self.assertEqual(manifest.repository_id, 9001)
+        self.assertEqual(manifest.pull_request, 77)
+        self.assertEqual(manifest.base_sha, "unknown")
+        self.assertEqual(manifest.head_sha, "unknown")
+        self.assertEqual(manifest.reusable_workflow_tag_object, exec_sha)
+        self.assertEqual(manifest.reusable_workflow_peeled_commit, exec_commit)
+        self.assertEqual(manifest.selected_executor, f"github-actions:{exec_sha}")
+        self.assertEqual(manifest.installed_core_version, "0.8.21")
+        self.assertEqual(manifest.installed_hosted_version, "0.3.27")
+        self.assertEqual(manifest.frozen_policy_commit, "unknown")
+        self.assertEqual(manifest.frozen_policy_sha256, "unknown")
+        assert manifest.invocation_evidence is not None
+        self.assertEqual(
+            manifest.invocation_evidence.observation_scope, "retained_attempt"
+        )
+        self.assertFalse(manifest.authority)
+        self.assertFalse(manifest.grants_execution_authority)
+        self.assertFalse(manifest.grants_recovery_authority)
+        self.assertFalse(manifest.grants_deployment_proof)
+
+        # Populated original packet fields carry cleanly with policy metadata.
+        policy_digest = "f" * 64
+        rich_packet = replace(
+            packet,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            executor_sha="unknown",
+            executor_commit=exec_commit,
+            policy_commit=policy_commit,
+            policy_digest=policy_digest,
+        )
+        rich_manifest = provenance_manifest_from_attempt_packet(rich_packet)
+        self.assertEqual(rich_manifest.base_sha, "1" * 40)
+        self.assertEqual(rich_manifest.head_sha, "2" * 40)
+        self.assertEqual(
+            rich_manifest.selected_executor, f"github-actions:{exec_commit}"
+        )
+        self.assertEqual(rich_manifest.frozen_policy_commit, policy_commit)
+        self.assertEqual(rich_manifest.frozen_policy_sha256, policy_digest)
+        self.assertEqual(
+            ProvenanceManifest.from_dict(rich_manifest.to_dict(), require_digest=True),
+            rich_manifest,
+        )
+
+        with self.assertRaises(ReviewInputError):
+            provenance_manifest_from_attempt_packet(None)  # type: ignore[arg-type]
+
+        joined = build_provenance_manifest(
+            inspect_module_origins=True,
+            package_inspector=lambda: (
+                InstalledPackageObservation(
+                    distribution="review-sensei",
+                    version="0.8.21",
+                    module_origin="distribution-owned",
+                    module_file_sha256="3" * 64,
+                ),
+            ),
+        )
+        assert joined.invocation_evidence is not None
+        self.assertEqual(
+            joined.invocation_evidence.core_module_origin, "distribution-owned"
+        )
+        self.assertEqual(joined.invocation_evidence.core_module_file_sha256, "3" * 64)
+        self.assertNotIn(str(ROOT), json.dumps(joined.to_dict()))
+
 
 def _fixture_wheel(path, name, package, source, version):
     """Build only the network-free test wheel, not a release qualification build."""
