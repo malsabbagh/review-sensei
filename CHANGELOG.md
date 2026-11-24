@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.8.24 - 2026-11-24
+
+Changes since [v0.8.23](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.23), from [4f4ba153e4f625e29b9daab1ab9fe30fe07913c2](https://github.com/malsabbagh/review-sensei/commit/4f4ba153e4f625e29b9daab1ab9fe30fe07913c2) through [1b66fe7b18b5deaaeadcf0566b678487baa6c1b6](https://github.com/malsabbagh/review-sensei/commit/1b66fe7b18b5deaaeadcf0566b678487baa6c1b6).
+
+Previous annotated tag object: `e487cf73f98d5e8df4004c9d4c4dc7f9ce606d64`.
+
+- docs: record released v0.8.23 ([ed7fc66b17650ada275f0a84a2da37b36e7b1fc8](https://github.com/malsabbagh/review-sensei/commit/ed7fc66b17650ada275f0a84a2da37b36e7b1fc8)).
+- fix: resolve pre-write settlement, GraphQL retry, dictionary recovery, and binary partial bugs \(\#482\) ([da187344663858cc7274570f413be7dd2245f424](https://github.com/malsabbagh/review-sensei/commit/da187344663858cc7274570f413be7dd2245f424)).
+- fix\(recovery,github\): P0 exact-attempt cessation, G08 owner overlap, and PR \#482 follow-ups \(\#483\) ([7473b745926ed1b99c033c351c1f518c5821b29c](https://github.com/malsabbagh/review-sensei/commit/7473b745926ed1b99c033c351c1f518c5821b29c)).
+- Plan byte-aware issue comment pages across receipt and fence paths \(\#488\) ([20f2a74d013383e73a847ad1f21a5b52dfb58f32](https://github.com/malsabbagh/review-sensei/commit/20f2a74d013383e73a847ad1f21a5b52dfb58f32)).
+- fix\(containment,recovery\): harden G02 writer fencing and G03/G29/G30/G31 offline recovery \(\#484\) ([1fa3bcb1b1913013c6b3cdfbd1feb2cb0182a533](https://github.com/malsabbagh/review-sensei/commit/1fa3bcb1b1913013c6b3cdfbd1feb2cb0182a533)).
+- Complete G11 provenance, G12 capacity/interruption, G15 enrollment bridge, and G17 recovery context gaps \(\#485\) ([3853cc9ea66c4f8dd6ef8e8975ba82968e0180e4](https://github.com/malsabbagh/review-sensei/commit/3853cc9ea66c4f8dd6ef8e8975ba82968e0180e4)).
+- fix\(lifecycle\): close G10, G14, and G16 restart, drift, and rollover gaps \(\#486\) ([dc5eea20c6ab53c264ddd43bff0ec52ea20a9b66](https://github.com/malsabbagh/review-sensei/commit/dc5eea20c6ab53c264ddd43bff0ec52ea20a9b66)).
+- Harden G13 accepted history, G27 source lifecycle composition, and G32 unstarted cancellation \(\#487\) ([abe84cf0b7e92dbacb80422a5f31859b115a40c9](https://github.com/malsabbagh/review-sensei/commit/abe84cf0b7e92dbacb80422a5f31859b115a40c9)).
+- fix: allow single-page multi-part lifecycle checkpoints and step-down recovery scans \(\#490\) ([1dd59dbfc95f5565f714ecea30c29aebfad90070](https://github.com/malsabbagh/review-sensei/commit/1dd59dbfc95f5565f714ecea30c29aebfad90070)).
+- fix\(review\): inject batch scope context, boundary-aware subdivision, and rename coverage parity \(\#491\) ([9656084b2fc95ce7138911b3aa3ae1590d859dec](https://github.com/malsabbagh/review-sensei/commit/9656084b2fc95ce7138911b3aa3ae1590d859dec)).
+- fix: close cross-PR cessation, multipage pricing, and reassessment key parity gaps \(\#492\) ([64003470cb226941d8daf279a2e25ff005697323](https://github.com/malsabbagh/review-sensei/commit/64003470cb226941d8daf279a2e25ff005697323)).
+- test\(dist\_safe\): add installed-wheel integrated gap composition contract \(\#493\) ([88390ecfea3c910e04bf619d42ca21f6017eddef](https://github.com/malsabbagh/review-sensei/commit/88390ecfea3c910e04bf619d42ca21f6017eddef)).
+- Qualify Python releases and signed v5 independently of npm \(\#489\) ([1b66fe7b18b5deaaeadcf0566b678487baa6c1b6](https://github.com/malsabbagh/review-sensei/commit/1b66fe7b18b5deaaeadcf0566b678487baa6c1b6)).
+
+## review-sensei-github 0.3.30 - 2026-11-24
+
+- Pin `review-sensei==0.8.24`.
+
 ## 0.8.23 - 2026-11-22
 
 Changes since [v0.8.22](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.22), from [51b1d91f63a0c86f17a0526e1d2f60bcc8dd00ce](https://github.com/malsabbagh/review-sensei/commit/51b1d91f63a0c86f17a0526e1d2f60bcc8dd00ce) through [e016d09abb6e75db321bb4b6e58a5ed593464404](https://github.com/malsabbagh/review-sensei/commit/e016d09abb6e75db321bb4b6e58a5ed593464404).
