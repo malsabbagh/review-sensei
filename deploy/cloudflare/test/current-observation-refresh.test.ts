@@ -19,10 +19,10 @@ async function prepared(purpose: "review" | "command" | "reply", role = true) {
     if (url.hostname === "github.com") return new Response("unavailable", { status: 503 });
     if (url.pathname.endsWith("/git/ref/tags/v5")) return Response.json({ object: { type: "tag", sha: "f".repeat(40) } });
     if (url.pathname.endsWith(`/git/tags/${"f".repeat(40)}`)) return Response.json({ object: { type: "commit", sha: SHA } });
-    if (url.pathname === "/repos/acme/widgets/installation") return state.access ? Response.json({ id: state.installation, repository_selection: state.selection, permissions: { metadata: "read", pull_requests: "write" } }) : new Response(null, { status: 404 });
+    if (url.pathname === "/repos/acme/widgets/installation") return state.access ? Response.json({ id: state.installation, repository_selection: state.selection, permissions: { contents: "read", metadata: "read", pull_requests: "write" } }) : new Response(null, { status: 404 });
     if (url.pathname === "/repos/acme/widgets") return Response.json({ id: 987654321, fork: false, full_name: "acme/widgets", owner: { id: state.ownerId, login: "acme" } });
     if (url.pathname.includes("/collaborators/")) return Response.json({ permission: state.permission, role_name: state.role, user: { id: state.actorId, login: state.actorLogin, type: "User" } });
-    if (url.pathname.endsWith("/access_tokens") && state.tokenPermission !== "write") return Response.json({ token: "synthetic-scoped", permissions: { metadata: "read", pull_requests: state.tokenPermission } });
+    if (url.pathname.endsWith("/access_tokens") && state.tokenPermission !== "write") return Response.json({ token: "synthetic-scoped", permissions: { contents: "read", metadata: "read", pull_requests: state.tokenPermission } });
     return fixture.transport(input, init);
   });
   const issued = await fixture.broker.exchange({ oidc_token: await fixture.oidcToken(), capability: "review_session", session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: { ...fixture.authority(purpose), version: 4 }, ...(role ? { observe_actor_role: true } : {}) });

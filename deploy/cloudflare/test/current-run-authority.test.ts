@@ -254,7 +254,7 @@ describe("v4 observation through production OIDC and HTTP extraction", () => {
       vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
         const response = await fixture.transport(input, init);
         const url = new URL(input instanceof Request ? input.url : String(input));
-        if (url.pathname === "/repos/acme/widgets/installation") return Response.json({ id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "write" } });
+        if (url.pathname === "/repos/acme/widgets/installation") return Response.json({ id: 2468, repository_selection: "selected", permissions: { contents: "read", metadata: "read", pull_requests: "write" } });
         if (url.pathname === "/repos/acme/widgets") return Response.json({ id: 987654321, fork: false, full_name: "acme/widgets", owner: { id: 77, login: "acme" } });
         return response;
       });

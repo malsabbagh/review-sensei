@@ -221,6 +221,8 @@ _TRANSIENT_GRAPHQL_MESSAGE_FRAGMENTS = (
     ("timeout", "timeout"),
 )
 _GRAPHQL_SAFE_TOKEN_RE = re.compile(r"^[A-Z0-9_]{1,48}\Z")
+_GRAPHQL_SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,64}\Z")
 
 
 def _safe_http_error_summary(exc: BaseException) -> str:
@@ -230,21 +232,50 @@ def _safe_http_error_summary(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {detail}"
 
 
+def _sanitize_graphql_path(path: object) -> str | None:
+    if not isinstance(path, list) or not path:
+        return None
+    parts: list[str] = []
+    for segment in path[:16]:
+        if isinstance(segment, str) and _GRAPHQL_SAFE_PATH_SEGMENT_RE.fullmatch(
+            segment
+        ):
+            parts.append(segment)
+        elif type(segment) is int and segment >= 0:
+            if parts:
+                parts[-1] = f"{parts[-1]}[*]"
+            else:
+                parts.append("[*]")
+        else:
+            return None
+    if len(path) > 16:
+        parts.append("...")
+    joined = ".".join(parts)
+    return joined[:120] if joined else None
+
+
 def _classify_graphql_errors(errors: object) -> tuple[bool, str]:
     if not isinstance(errors, list) or not errors:
         return False, f"invalid_errors={type(errors).__name__}"
     tags: list[str] = []
+    paths: list[str] = []
     all_transient = len(errors) <= 32
 
     def _add_tag(tag: str) -> None:
         if len(tags) < 3 and tag not in tags:
             tags.append(tag)
 
+    def _add_path(path_value: object) -> None:
+        sanitized = _sanitize_graphql_path(path_value)
+        if sanitized is not None and len(paths) < 2 and sanitized not in paths:
+            paths.append(sanitized)
+
     for entry in errors[:32]:
         if not isinstance(entry, dict):
             all_transient = False
             _add_tag(f"non_dict_{type(entry).__name__}")
             continue
+        _add_path(entry.get("path"))
         matched_tokens: list[str] = []
         raw_type = entry.get("type")
         if isinstance(raw_type, str) and _GRAPHQL_SAFE_TOKEN_RE.fullmatch(raw_type):
@@ -278,6 +309,8 @@ def _classify_graphql_errors(errors: object) -> tuple[bool, str]:
             _add_tag("unknown_error")
         all_transient = all_transient and entry_transient
     summary = ",".join(tags)[:120] or "unknown_error"
+    if paths:
+        summary = f"{summary}; path={','.join(paths)}"[:200]
     return all_transient, summary
 
 
@@ -286,16 +319,22 @@ def _raise_review_thread_lookup_error(
     status: int,
     payload: object,
     require_graphql_read_message: bool = False,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    req_suffix = (
+        f"; request_id={request_id}"
+        if isinstance(request_id, str) and _SAFE_REQUEST_ID_RE.fullmatch(request_id)
+        else ""
+    )
     if status == 429 or status >= 500:
         raise GitHubPublicationTransientError(
-            f"review thread lookup failed temporarily (http {status})"
+            f"review thread lookup failed temporarily (http {status}{req_suffix})"
         )
     if status in (401, 403):
         if require_graphql_read_message:
             raise GitHubPublicationError(
                 "review thread reconciliation is unavailable; publication "
-                f"requires GraphQL read access to review threads (http {status})"
+                f"requires GraphQL read access to review threads (http {status}{req_suffix})"
             )
         detail = (
             "GraphQL authentication failed"
@@ -303,20 +342,22 @@ def _raise_review_thread_lookup_error(
             else "GraphQL access denied"
         )
         raise GitHubPublicationError(
-            f"review thread lookup failed (http {status}; {detail})"
+            f"review thread lookup failed (http {status}; {detail}{req_suffix})"
         )
     if status < 200 or status >= 300 or not isinstance(payload, dict):
         raise GitHubPublicationError(
-            f"review thread lookup failed (http {status}, payload={type(payload).__name__})"
+            f"review thread lookup failed (http {status}, payload={type(payload).__name__}{req_suffix})"
         )
     errors = payload.get("errors")
     if errors not in (None, []):
         transient, summary = _classify_graphql_errors(errors)
         if transient:
             raise GitHubPublicationTransientError(
-                f"review thread lookup failed temporarily (graphql {summary})"
+                f"review thread lookup failed temporarily (graphql {summary}{req_suffix})"
             )
-        raise GitHubPublicationError(f"review thread lookup failed (graphql {summary})")
+        raise GitHubPublicationError(
+            f"review thread lookup failed (graphql {summary}{req_suffix})"
+        )
     return payload
 
 
@@ -6323,7 +6364,11 @@ class ReviewApprovalFinalizer:
                 raise GitHubPublicationError(
                     f"review thread lookup failed ({_safe_http_error_summary(exc)})"
                 ) from exc
-            payload = _raise_review_thread_lookup_error(status=status, payload=payload)
+            payload = _raise_review_thread_lookup_error(
+                status=status,
+                payload=payload,
+                request_id=getattr(self.http, "last_request_id", None),
+            )
             try:
                 threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
                 nodes = threads["nodes"]
@@ -12406,6 +12451,7 @@ class ReviewPublisher:
                 status=status,
                 payload=payload,
                 require_graphql_read_message=True,
+                request_id=getattr(self.http, "last_request_id", None),
             )
             try:
                 threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
@@ -13161,7 +13207,11 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     f"review thread lookup failed ({_safe_http_error_summary(exc)})"
                 ) from exc
-            payload = _raise_review_thread_lookup_error(status=status, payload=payload)
+            payload = _raise_review_thread_lookup_error(
+                status=status,
+                payload=payload,
+                request_id=getattr(self.http, "last_request_id", None),
+            )
             data = payload.get("data")
             if not isinstance(data, dict):
                 raise GitHubPublicationError("review thread response was invalid")

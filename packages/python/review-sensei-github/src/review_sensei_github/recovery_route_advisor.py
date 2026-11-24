@@ -76,6 +76,7 @@ from .publication_failure_recovery import (
     _is_authenticated_bot_comment,
     iter_step_down_pages,
     parse_settlement_witness_comment,
+    resolve_check_read_token,
 )
 from .publication_recovery import _event_key, _payload
 from .session_ledger import GitHubIssueCommentSessionLedger
@@ -2846,7 +2847,7 @@ def _inspect_pre_write_census_readonly(
 
         for rows in iter_step_down_pages(
             http=http,
-            token=ro_ledger.token,
+            token=resolve_check_read_token(ro_ledger),
             path=check_path,
             deadline=deadline,
             protect_request=lambda: budget.preflight(RETAINED_CONFIRMATION_TAIL + 1),
@@ -2942,6 +2943,12 @@ def _inspect_live_ledger_readonly(
         app_slug=ledger.app_slug,
         evidence_budget=read_budget,
     )
+    check_provider = getattr(ledger, "_quarantine_check_token_provider", None)
+    if callable(check_provider):
+        ro_ledger._quarantine_check_token_provider = check_provider
+    cached_check_token = getattr(ledger, "_cached_check_read_token", None)
+    if isinstance(cached_check_token, str) and cached_check_token.strip():
+        ro_ledger._cached_check_read_token = cached_check_token
     loaded = ro_ledger.load(identity)
     if loaded.status == "missing":
         return (

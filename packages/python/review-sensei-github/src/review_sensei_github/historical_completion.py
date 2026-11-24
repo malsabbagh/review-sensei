@@ -380,6 +380,7 @@ def authenticate_historical_publication(
     result = restore_admitted_result(result, admitted)
     from .historical_projection import historical_projection
     from .publication import ReviewPublisher
+    from .publication_failure_recovery import resolve_check_read_token
 
     projected = historical_projection(result, admitted, identity, policy)
     historical_run = SimpleNamespace(
@@ -397,6 +398,7 @@ def authenticate_historical_publication(
         publisher=ReviewPublisher(http=http),
         http=http,
         token=token,
+        check_token=resolve_check_read_token(ledger),
         identity=identity,
         pull=pull,
         current_base=current_base,

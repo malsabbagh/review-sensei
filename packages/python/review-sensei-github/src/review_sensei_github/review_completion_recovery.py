@@ -360,6 +360,7 @@ def _confirm_native_effects(
     publisher,
     http,
     token,
+    check_token: str | None = None,
     identity,
     pull,
     current_base,
@@ -458,7 +459,10 @@ def _confirm_native_effects(
         result,
         policy=run.plan.policy.reviews,
     )
-    check = _check(http, token, identity, run.head_sha, expected, context.app_slug)
+    resolved_check_token = check_token or token
+    check = _check(
+        http, resolved_check_token, identity, run.head_sha, expected, context.app_slug
+    )
     if evaluate_approval_facts(eligibility.facts).approved:
         marker = approval_marker(
             repository_id=identity.repository_id,
@@ -591,7 +595,12 @@ def _confirm_native_effects(
     if closing != (head, base, threads):
         _refuse("cleanup inventory changed during authentication")
     check_again = _check(
-        http, token, identity, run.head_sha, expected, context.app_slug
+        http,
+        resolved_check_token,
+        identity,
+        run.head_sha,
+        expected,
+        context.app_slug,
     )
     if check_again != check:
         _refuse("required check changed during authentication")

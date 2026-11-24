@@ -348,12 +348,14 @@ or authorize a fresh review, recovery, allowance or policy change.
 
 Capability and setup installation tokens require the returned permission map to
 exactly match the requested map plus GitHub's mandatory `metadata: read`;
-responses that omit metadata fail closed. `review_publish` alone may also
-receive an unrequested `contents: read` because GitHub can return it to allow
-repository-data access while publishing a review. The broker never requests
-that permission, and `review_status`, `inline_reply`, `issue_reply`, and `learning_write`
-reject it if it is returned. This is a narrow compatibility exception, not an
-additional capability grant. The retired Variables scope is not in the
+responses that omit metadata fail closed. `review_publish`, `review_session`,
+`review_status`, `inline_reply`, and `issue_reply` explicitly request read-only
+`contents: read` (never `contents: write`, which remains restricted to
+`thread_resolve` and `learning_write`) so private-repository GraphQL commit
+lookups and repository content reads succeed when GitHub downscopes explicit
+installation token requests. Unrequested `contents: read` grants (for example
+on `check_publish` or `review_actions`) are rejected if returned. The retired
+Variables scope is not in the
 recognized permission set at all: setup provisions no repository variables, so
 nothing requests it, and a token response that still reports it under either
 GitHub spelling (`variables` or `actions_variables`) fails closed as an unknown

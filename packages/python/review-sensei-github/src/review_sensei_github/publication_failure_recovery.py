@@ -33,6 +33,7 @@ from review_sensei.validation import validate_repository_path
 from .api_run_history import RETAINED_CONFIRMATION_TAIL, read_previous_run
 from .checks import REVIEW_CHECK_EXTERNAL_ID, REVIEW_CHECK_NAME
 from .errors import (
+    GitHubBrokerClientError,
     GitHubHTTPError,
     GitHubHTTPResponseTooLargeError,
     GitHubPublicationError,
@@ -87,6 +88,26 @@ _WITNESS_FIELDS = frozenset(
         "content_sha256",
     }
 )
+
+
+def resolve_check_read_token(ledger: Any) -> str:
+    """Return a check-scoped token when available, otherwise fall back cleanly."""
+    cached = getattr(ledger, "_cached_check_read_token", None)
+    if isinstance(cached, str) and cached.strip():
+        return cached
+    provider = getattr(ledger, "_quarantine_check_token_provider", None)
+    if callable(provider):
+        try:
+            issued = provider()
+        except GitHubBrokerClientError:
+            issued = None
+        if isinstance(issued, str) and issued.strip():
+            try:
+                setattr(ledger, "_cached_check_read_token", issued)
+            except AttributeError:
+                pass
+            return issued
+    return str(ledger.token)
 
 
 def _hold(reason: str, *, record: SessionRecord | None = None) -> ReviewInputError:
@@ -1363,9 +1384,10 @@ def admit_publication_failure_recovery(
             if len(seen) != total:
                 raise _hold("native check-run pagination is incomplete", record=record)
 
+        check_read_token = resolve_check_read_token(ledger)
         for rows in iter_step_down_pages(
             http=http,
-            token=ledger.token,
+            token=check_read_token,
             path=path,
             deadline=deadline,
             protect_request=lambda: _protect_tail(budget, 1, record=record),

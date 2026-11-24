@@ -31,8 +31,19 @@ MAX_PAGINATION_ITEMS = MAX_PAGINATION_PAGES * 100
 # GitHub's individual comment/review body limit. Fifty still admits long lists.
 HISTORY_PAGE_SIZES = (100, 50, 25, 10, 5, 1)
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,64}\Z")
 
 Opener = Callable[..., Any]
+
+
+def _safe_request_id(headers: Any) -> str | None:
+    raw = _header_value(headers, "X-GitHub-Request-Id")
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    if not stripped or _SAFE_REQUEST_ID_RE.fullmatch(stripped) is None:
+        return None
+    return stripped
 
 
 def _unique_json_object(pairs):
@@ -286,6 +297,11 @@ class GitHubHttp:
         self.primed_issue_comments: dict[str, list[Any]] = {}
         self._quarantine_capacity_guard: Any = None
         self._controlled_restart_guard: Any = None
+        self._last_request_id: str | None = None
+
+    @property
+    def last_request_id(self) -> str | None:
+        return self._last_request_id
 
     def repository_path(self, repository: str, suffix: str = "") -> str:
         owner, _, name = repository.partition("/")
@@ -303,6 +319,7 @@ class GitHubHttp:
         body: dict[str, object] | None = None,
         timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        self._last_request_id = None
         if not isinstance(path, str) or not path.startswith("/") or "\n" in path:
             raise GitHubHTTPError("GitHub request path is invalid")
         if not isinstance(token, str) or not token.strip():
@@ -344,6 +361,9 @@ class GitHubHttp:
             timeout = min(timeout, timeout_seconds)
         try:
             with self.opener(request, timeout=timeout) as response:
+                self._last_request_id = _safe_request_id(
+                    getattr(response, "headers", None)
+                )
                 raw = response.read(MAX_GITHUB_RESPONSE_BYTES + 1)
                 if not isinstance(raw, (bytes, bytearray)):
                     raise GitHubHTTPError("GitHub response was invalid")
@@ -361,6 +381,7 @@ class GitHubHttp:
                     guard.after_response(method, value)
                 return status, value
         except HTTPError as exc:
+            self._last_request_id = _safe_request_id(exc.headers)
             error_body = self._read_bounded_error_body(exc)
             if exc.code == 403 and _is_rate_limited_403(exc.headers, error_body):
                 raise GitHubHTTPTransientError(
