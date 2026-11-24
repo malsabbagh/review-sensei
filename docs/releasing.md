@@ -11,7 +11,8 @@ runs** from that exact source:
   tarballs and protected npm publication.
 
 Both qualify the prepared receipt, signed tag object, exact source/CI and
-matching core/npm version. The hosted adapter retains its independent version
+their channel’s required checks. The npm publisher also checks all six manifests
+against the signed core version. The hosted adapter retains its independent version
 and `release-github.yml` / `pypi-github` identity. There is no new dispatcher,
 App permission or signing credential. See [ADR 0100](adr/0100-independent-release-channel-runs.md).
 
@@ -21,9 +22,9 @@ workflow retries remain maintainer operations; an ordinary PR grants neither.
 
 For the next complete-evidence library and lasting unified repository pipeline,
 follow [the runtime rollout plan](review-runtime-rollout.md). Its next-version
-candidate must be rechecked against all registries before preparation; `v5`
-promotion follows verified engine and hosted PyPI publication rather than a
-floating install.
+Python candidate must be unused on PyPI and in GitHub before preparation.
+Each npm version is checked against its attested tarball in the npm publisher.
+The v5 owner verifies both Python publications and the installed wheels before promotion.
 
 After a separately authorized signed major-channel move, follow
 [major-channel validation](major-tag-validation.md). The validator binds the
@@ -177,11 +178,14 @@ No draft-read ability is assumed: even a visible draft fails the strict
 published-release validator. The job does not gain Contents write, a new token
 or a cross-run artifact bridge to read unpublished state.
 
-The unchanged npm helper preflights all six packages, publishes missing
+The npm helper preflights all six packages, publishes missing
 platforms first, reads back exact SRI with bounded retry/backoff, then publishes
 the launcher last. Registry HTTP404 can be eventual visibility after successful
 publication: retain the original bundle and let bounded readback finish.
-Existing exact registry entries are skipped; different bytes hold publication.
+The publisher skips existing entries only after exact-byte verification. A definite
+authorization denial or unknown npm exit holds the run. A timeout or recognized
+transport failure permits bounded readback of the original bytes. A conflicting
+digest holds publication.
 The clean Linux consumer installation and `npm audit signatures` remain.
 No rebuild, overwrite, replacement artifact or moved tag repairs partial npm.
 
@@ -264,62 +268,67 @@ channel receipt; its Actions failure is retained. Inspect both run URLs/results
 independently. These operational receipts grant no publication or promotion
 permission and do not replace PyPI/Sigstore verification under ADR0095.
 
+### Standard npm release authentication
+
+Normal Release Marshal preparation, signing and publication do not require a
+local npm account session, `npm login`, `npm whoami`, or a local Trusted Publisher
+registration lookup. Do not add `npm trust list` as a routine release gate or
+stop a normal release because that optional account API returns HTTP401.
+The npm job verifies its existing publisher policy and performs registry
+authorization in Actions. An account audit belongs to the migration procedure below.
+
+Continue using the verified repository/workflow/environment policy:
+`malsabbagh/review-sensei`, `publish-npm.yml`, protected environment `npm` and
+GitHub Actions OIDC Trusted Publishing for all six packages:
+
+- `@reviewsensei/cli`
+- `@reviewsensei/cli-darwin-arm64`
+- `@reviewsensei/cli-darwin-x64`
+- `@reviewsensei/cli-linux-arm64-gnu`
+- `@reviewsensei/cli-linux-x64-gnu`
+- `@reviewsensei/cli-win32-x64`
+
+Signed source, exact candidate CI, Mo's protected publication approval, original
+attested bundle identity, matching published Python release, provenance,
+registry integrity readback and installed consumers remain required. npm itself
+must authorize each actual publication through the existing Actions OIDC
+identity. An OIDC or registry authorization failure fails the publisher; never
+fall back to a local login, personal npm token or changed trust record. Preserve
+the original run and bundle for recovery. Existing exact-byte readback may still
+reconcile an uncertain publish response; it neither grants authorization nor
+permits a second publish request after a denial.
+
 ### Owner migration hold before activation
 
-This PR does **not** change registry trust, credentials, persistent permissions,
-reviewers, environment rules, signing setup or security settings. Before the
-first future release, the owner must verify each of these six existing npm
-packages has Trusted Publishing with repository `malsabbagh/review-sensei`,
-workflow filename **`publish-npm.yml`**, environment **`npm`**, and publish
-permission:
+This separate procedure applies when establishing or changing a publisher's
+repository, workflow, protected environment, provider or publish permission,
+and when retiring an old publisher identity. It is not repeated for ordinary
+releases that keep the established identity. An explicitly requested account
+registration audit is also separate from the standard release path; it is not
+a default Marshal step or an automatic login prompt.
 
-| Package | Current registration inspection | Desired workflow / environment | Change required? |
-| --- | --- | --- | --- |
-| `@reviewsensei/cli` | Read denied: registry HTTP401 on 2026-10-21 | `publish-npm.yml` / `npm` | Unknown until owner reads trust records |
-| `@reviewsensei/cli-darwin-arm64` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
-| `@reviewsensei/cli-darwin-x64` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
-| `@reviewsensei/cli-linux-arm64-gnu` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
-| `@reviewsensei/cli-linux-x64-gnu` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
-| `@reviewsensei/cli-win32-x64` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
+For a planned identity migration or explicitly requested audit, use an existing
+authorized npm account session to inspect `npm trust list PACKAGE --json` for
+each affected package. Compare the actual repository, workflow, environment,
+GitHub provider and publish permission with the proposed identity. A matching
+registration requires no registry change. If lookup is unavailable, report the
+unverified audit or migration prerequisite; do not infer a missing registration.
+Keep a planned migration held until its required evidence is available.
 
-The read-only `npm trust list @reviewsensei/cli --json` call (npm 11.16.0)
-reached `GET /-/package/@reviewsensei%2fcli/trust` and returned HTTP401
-("You must be logged in to publish packages"). This is an npm authentication
-hold, not evidence that any registration is missing. No login, credential,
-trust, permission or security-setting mutation was attempted. The successful
-old `release.yml` publication proves that identity worked for that execution;
-it does not enumerate today's registrations or prove `publish-npm.yml` exists.
+Report each missing or different registration and obtain specific action-time
+owner approval before changing it. Account login, credential setup, trust,
+permission and security-setting changes need their own applicable authority;
+ordinary release approval supplies none. Do not weaken provenance, substitute
+an npm token, change an environment or grant an App more authority. Core PyPI
+stays `release.yml` / `pypi`; hosted PyPI stays `release-github.yml` / `pypi-github`.
 
-Owner checklist, using an existing authorized npm session:
-
-1. Read `npm trust list PACKAGE --json` for **each** row; this operation is
-   [documented as listing trust relationships](https://docs.npmjs.com/cli/v11/commands/npm-trust/).
-2. Compare repository `malsabbagh/review-sensei`, workflow `publish-npm.yml`,
-   protected environment `npm`, GitHub provider and publication permission.
-   Record the existing trust identity and the comparison for every package.
-3. If all six already match, record **no registry change required**. Merely
-   reusing the existing manual workflow's filename is not a security mutation.
-4. If any is absent or mismatched, report the exact current/desired difference,
-   stop activation and obtain specific action-time owner approval before
-   changing that registration. This PR grants no such authority.
-5. Coordinate retirement of the old workflow identities separately, after all
-   old release recovery is complete. Keep the merge/activation hold until the
-   release owner coordinates it.
-
-The existing manual filename may already have a registration; never assume
-that registration is present, complete or grants publication. If a record is
-missing/different, **stop activation** and report that exact package and required
-identity to the owner for a separately authorized registry migration. Do not
-weaken provenance, substitute an npm token, change an environment or grant an
-App more authority. Core PyPI stays `release.yml` / `pypi`; hosted PyPI stays
-`release-github.yml` / `pypi-github`.
-
-Old `release.yml` npm trust and any legacy dispatch authority require an
-owner-reviewed retirement plan only after all old immutable release recovery
-is complete. Merging a workflow does not revoke trust in old signed sources.
-Keep this PR unmerged until the current release owner coordinates that window.
-A rollback before a future release must also restore/reverify the original
-publisher identities; never rerun signing to retrofit an existing release.
+Retire old `release.yml` npm trust or legacy dispatch authority only through a
+separately authorized owner plan after original release recovery is complete.
+A workflow merge does not revoke trust in old signed sources. A topology rollback
+requires restoration and verification of the applicable publisher identities;
+never rerun signing to retrofit an existing release. See
+[ADR 0143](adr/0143-asynchronous-npm-release.md) for the routine-release
+policy and the superseded historical preflight.
 
 ## One-time maintainer setup
 
@@ -443,7 +452,7 @@ frozen release candidate and use an already-authorized existing PR when availabl
    as above, to prepare the engine only. Pass the engine's current version to
    prepare the hosted package only. See [review-sensei-github](#review-sensei-github).
 
-3. Preparation requires full terminal-success **push/main CI on the dispatch SHA**
+3. Preparation requires successful **Python and platform push/main CI on the dispatch SHA**
    before writes. It executes trusted dispatch code and integrates a clean
    disposable worktree at that exact main source. The existing short-lived App
    token is repository-only Contents write/Actions read/Metadata read and is
@@ -483,15 +492,19 @@ frozen release candidate and use an already-authorized existing PR when availabl
    generate notes, version metadata and source docs in this direct App commit,
    without a separate release-notes or generated-docs PR.
 5. Ordinary main CI runs because the push uses the App rather than GITHUB_TOKEN.
-   The preparation workflow waits for **all fifteen exact-head CI jobs**, including
-   native ABI/parity, npm/clean-wheel contracts, Worker and CodeQL. It checks the
-   latest run and newest execution of each job (failed-job retries may retain
-   earlier successful jobs). Missing, skipped, failed, cancelled, racing or timed
-   out checks withhold signing. It re-verifies the parent/file receipt, main SHA,
-   unused tag and all seven registry versions before the handoff. A successful
-   preparation does not publish packages or make new source docs live on Pages.
-6. Complete the existing readers-first, compatibility/canary and protected
-   publication qualification below. To automate the signed tag, complete the
+   The Marshal qualifies the latest exact-main push on the generated SHA. Each
+   Python compatibility, coverage and installed-distribution shard must pass,
+   together with the four compatibility collectors, static quality, package build
+   and verification, schemas/reader checks, Worker and both CodeQL jobs. Missing,
+   skipped, failed or superseded Python evidence withholds signing. Additional
+   unclassified jobs are blocking. The npm build, native matrix, assembly, five
+   installed native consumers and combined branch aggregate are checked in the npm
+   publisher. Branch protection still requires the full `Required checks` result.
+   The signer re-verifies the receipt, exact main SHA, unused selected GitHub tags
+   and releases, and the selected versions on PyPI.
+6. Complete the applicable reader, compatibility and canary checks for the
+   selected Python release. The npm publisher owns its native artifact and
+   registry qualification. To automate the signed tag, complete the
    [dedicated release-key user-run setup](release-signing.md) and dispatch with
    `-f sign_tag=true`. A separate main-only job waits for generated CI, rechecks
    the receipt, source, all unused versions, registered key/email, narrow App
@@ -503,15 +516,13 @@ frozen release candidate and use an already-authorized existing PR when availabl
    the SHA emitted by the successful preparation, and stop if main/CI changed
    or the tag exists.
 
-   The Release source gate verifies the signed remote tag/object, event/local
-   SHA, main ancestry, receipt-bound single-parent allowlisted commit, all
-   versions/docs and terminal exact-head main CI before any docs/Python/native
-   build. It also rechecks Mo's sole-reviewer npm/PyPI environments. Python/npm
-   build from that tagged commit and await **separate publication approvals**.
-   Approval is authorization, not a cryptographic signature. GitHub release
-   assets wait for both package publications; final Pages/snapshot deployment
-   remains bound to successful Release completion. Later snapshot commits do
-   not become a replacement package source.
+   Each publisher verifies the signed tag object, local and event SHA, main
+   ancestry, receipt-bound single-parent commit and its required exact-main CI.
+   Core and hosted use protected PyPI environments. npm independently waits for
+   full native CI, verifies the six manifests and attested tarballs, and uses its
+   protected OIDC publisher after Python succeeds. GitHub release assets follow
+   protected Python publication. Released Pages and the snapshot still require
+   successful Python and npm publication for the same signed source.
 
 For a transient CI issue, rerun the failed CI job, then retry the failed
 `qualify-prepared` job. A new dispatch from unchanged prepared main with the same
@@ -520,8 +531,8 @@ main advanced, select and qualify the new reviewed source; refreshing an unpubli
 same-version preparation retains the existing date and reviewed release notes,
 incorporates any new reviewed Unreleased notes, and generates a new receipt/commit
 and full CI. An all-jobs rerun of an old dispatch stops on stale main; it must not
-silently incorporate another source. Any existing tag or PyPI/npm version stops
-preparation, including partial publications. Recover a tagged release by retrying
+silently incorporate another source. An existing selected GitHub tag, release or PyPI version
+holds preparation. An npm version conflict holds the npm lane. Recover a tagged release by retrying
 its existing jobs/artifacts; never regenerate that version or move the tag.
 
 Offline rendering is optional contributor tooling, not release admission or a
@@ -541,6 +552,45 @@ pending or failed; they do not hold v5. Signed immutable engine source, both
 verified Python publications, workflow drainage, compatible readers, downstream
 tests and the exact old-object lease remain required. This does not change the
 separately authorized active 0.8.4 / 0.3.4 promotion.
+
+### Verify the candidate before an authorized move
+
+From a trusted checkout containing this policy, use the automatic
+`published-cli.yml` run triggered by the exact hosted publishing attempt.
+Install the verifier dependencies in a dedicated environment from
+`requirements/major-tag-validation.txt`. The gate reads the current signed
+v5 object, both signed Python tags, all four PyPI artifacts and their
+provenance, the GitHub release assets, and the retained gate and four CLI
+archives. It compares the two installed wheel hashes and full suite selection
+on Linux and macOS under Python 3.11 and 3.14. A stale attempt, missing
+receipt or unsuccessful Python job stops the command. The fresh output
+directory holds the evidence in `v5-candidate.json`.
+
+The channel owner also needs separate promotion authorization, compatible
+readers, the required canary/downstream evidence and drained writers. With
+those in place, the owner creates and verifies the signed local v5 object
+through the existing signer. In the owner’s publication shell, supply the
+reviewed `qualified_release_sha`, `old_v5_object`, automatic
+`installed_run_id` and a fresh `evidence_directory`. Keep qualification and
+the leased push in the same fail-closed operation:
+
+```bash
+(
+  set -eu
+  new_v5_object=$(git rev-parse --verify 'refs/tags/v5^{tag}')
+  test "$(git for-each-ref --format='%(objectname) %(tag) %(*objecttype)' refs/tags/v5)" = "$new_v5_object v5 commit"
+  git verify-tag "$new_v5_object"
+  test "$(git rev-parse "$new_v5_object^{commit}")" = "$qualified_release_sha"
+  python scripts/qualify_v5_candidate.py --source "$qualified_release_sha" \
+    --old-v5-object "$old_v5_object" --installed-run "$installed_run_id" \
+    --output "$evidence_directory"
+  git push --force-with-lease="refs/tags/v5:$old_v5_object" \
+    https://github.com/malsabbagh/review-sensei.git "$new_v5_object:refs/tags/v5"
+)
+```
+
+Read back the new signed object and peeled source. The [post-move validator](major-tag-validation.md)
+runs independently. A package release grants no approval for this owner operation.
 
 The customer setup contract follows the separate `v5` tag in the public
 `malsabbagh/review-sensei` repository. This tag is not a package-version tag:
@@ -755,12 +805,11 @@ Worker rollback uses the prior recorded deployment.
 
 ## Compatibility manifest and release sequencing
 
-This full-distribution manifest and legacy `v4` serialization contract still
-requires all five publication lanes. It does not represent next-release v5
-admission: use the independently verified Python publication receipt from
-[major-channel validation](major-tag-validation.md) for that channel. Never mark
-an incomplete npm lane complete or fabricate a full-distribution manifest to
-promote v5; preserve its actual partial state for independent recovery.
+The full-distribution manifest and legacy `v4` serialization contract require
+all five publication lanes. Record partial npm publication as partial. Python
+signing and publication use the exact-main Python/platform gates above. For v5,
+use the [pre-move Python candidate gate](#verify-the-candidate-before-an-authorized-move)
+and [post-move validation](major-tag-validation.md).
 
 A supported cutoff binds workflow commit, Python distribution, npm artifacts,
 public schema version, and Worker identity in one compatibility manifest.

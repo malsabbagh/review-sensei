@@ -7,6 +7,8 @@ on:
       - "scripts/major_tag*.py"
       - "scripts/pypi_channel_publication.py"
       - "scripts/dispatch_major_tag_validation.py"
+      - "scripts/qualify_v5_candidate.py"
+      - "tests/test_v5_candidate.py"
       - "scripts/qualify_published_cli.py"
       - "tests/test_major_tag_validation.py"
       - "tests/test_pypi_channel_publication.py"
@@ -22,6 +24,8 @@ on:
       - "scripts/major_tag*.py"
       - "scripts/pypi_channel_publication.py"
       - "scripts/dispatch_major_tag_validation.py"
+      - "scripts/qualify_v5_candidate.py"
+      - "tests/test_v5_candidate.py"
       - "scripts/qualify_published_cli.py"
       - "tests/test_major_tag_validation.py"
       - "tests/test_pypi_channel_publication.py"
@@ -54,6 +58,7 @@ jobs:
       - name: Check mocked event, release, race, artifact and failure contracts
         run: |
           python -m unittest discover -s tests -p test_major_tag_validation.py
+          python -m unittest discover -s tests -p test_v5_candidate.py
           python -m unittest discover -s tests -p test_pypi_channel_publication.py
           python -m unittest discover -s tests/published_cli -p test_bootstrap.py
       - name: Run the actual isolated installed-CLI harness against its immutable baseline

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,7 +17,9 @@ if str(ROOT) not in sys.path:
 
 from scripts.publish_npm_release import (  # noqa: E402
     ALL_PACKAGES,
+    LAUNCHER_PACKAGE,
     PLATFORM_PACKAGES,
+    AmbiguousPublishError,
     IntegrityMismatchError,
     PackumentProbeState,
     PublishError,
@@ -23,6 +27,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     classify_registry_state,
     fetch_registry_package,
     load_integrity_records,
+    main,
     package_action,
     preflight,
     publish_launcher,
@@ -37,6 +42,235 @@ from scripts.publish_npm_release import (  # noqa: E402
 
 
 class PublishNpmReleaseTests(unittest.TestCase):
+    def test_normal_oidc_publish_needs_no_local_npm_account_lookup(self):
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40}
+        )
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        config = self.bundle_dir / "empty.npmrc"
+        config.write_text("")
+        commands = []
+
+        def npm(args, **kwargs):
+            # No trust/login/whoami call or token fallback may precede publishing.
+            self.assertEqual(args[:3], ["npm", "publish", "--ignore-scripts"])
+            self.assertEqual(args[4:], ["--access", "public", "--provenance", "--json"])
+            self.assertTrue(kwargs["check"])
+            self.assertNotIn("NODE_AUTH_TOKEN", os.environ)
+            self.assertNotIn("NPM_TOKEN", os.environ)
+            commands.append(Path(args[3]).name)
+            return subprocess.CompletedProcess(args, 0)
+
+        def registry(package, version):
+            return {
+                "name": package,
+                "version": version,
+                "dist": {"integrity": records[package]["integrity"]},
+            }
+
+        common = ["--bundle-dir", str(self.bundle_dir), "--version", "0.5.0"]
+        with (
+            mock.patch.dict(
+                os.environ, {"NPM_CONFIG_USERCONFIG": str(config)}, clear=True
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.classify_registry_state",
+                return_value="publish",
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=registry,
+            ),
+            mock.patch("scripts.publish_npm_release.subprocess.run", side_effect=npm),
+        ):
+            self.assertEqual(
+                main(["preflight", *common, "--expected-source-sha", "a" * 40]), 0
+            )
+            self.assertEqual(main(["publish-platforms", *common]), 0)
+            self.assertEqual(main(["publish-launcher", *common]), 0)
+        self.assertEqual(
+            commands,
+            [records[p]["file"] for p in (*PLATFORM_PACKAGES, "@reviewsensei/cli")],
+        )
+        self.assertEqual(config.read_text(), "")
+
+    def test_oidc_denial_fails_first_platform_without_login_fallback_or_republish(self):
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40}
+        )
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [{"name": p, "action": "publish"} for p in ALL_PACKAGES],
+        )
+        original = {p.name: p.read_bytes() for p in self.bundle_dir.iterdir()}
+        commands = []
+
+        def denied(args, **kwargs):
+            self.assertEqual(args[:3], ["npm", "publish", "--ignore-scripts"])
+            self.assertIn("--provenance", args)
+            self.assertTrue(kwargs["check"])
+            commands.append(args)
+            # Synthetic registry rejection of the workflow's OIDC identity.
+            raise subprocess.CalledProcessError(
+                1, args, output=b'{"error":{"code":"E403"}}'
+            )
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.subprocess.run", side_effect=denied
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                return_value={
+                    "dist": {"integrity": records[PLATFORM_PACKAGES[0]]["integrity"]}
+                },
+            ) as readback,
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+        ):
+            code = main(
+                [
+                    "publish-platforms",
+                    "--bundle-dir",
+                    str(self.bundle_dir),
+                    "--version",
+                    "0.5.0",
+                    "--readback-attempts",
+                    "1",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(
+            Path(commands[0][3]).name, records[PLATFORM_PACKAGES[0]]["file"]
+        )
+        readback.assert_not_called()
+        sleep.assert_not_called()
+        self.assertEqual(
+            {p.name: p.read_bytes() for p in self.bundle_dir.iterdir()}, original
+        )
+
+    def test_npm_transport_outcome_alone_allows_exact_readback(self):
+        from scripts.publish_npm_release import publish_tarball
+
+        for code, error in [
+            ("ECONNRESET", AmbiguousPublishError),
+            ("E401", PublishError),
+            ("E403", PublishError),
+            ("ENEEDAUTH", PublishError),
+            ("EUNKNOWN", PublishError),
+        ]:
+            failure = subprocess.CalledProcessError(
+                1, ["npm"], output=json.dumps({"error": {"code": code}}).encode()
+            )
+            with (
+                self.subTest(code=code),
+                mock.patch(
+                    "scripts.publish_npm_release.subprocess.run", side_effect=failure
+                ),
+                self.assertRaises(error) as caught,
+            ):
+                publish_tarball(self.bundle_dir / "fixture.tgz")
+            self.assertIs(type(caught.exception), error)
+
+    def test_launcher_reconciles_stderr_transport_once_and_holds_denials(self):
+        version = "0.5.0"
+        package = LAUNCHER_PACKAGE
+        self._write_resume_bundle_files()
+        write_publish_state(
+            self.bundle_dir, version, [{"name": package, "action": "publish"}]
+        )
+        record = load_integrity_records(self.bundle_dir, version)[package]
+        matched = {
+            "name": package,
+            "version": version,
+            "dist": {"integrity": record["integrity"]},
+        }
+        unavailable = HTTPError("https://registry.invalid", 404, "not found", {}, None)
+        transport = b'{"error":{"code":"ECONNRESET","detail":"private diagnostic"}}'
+        denial = b'{"error":{"code":"E403"}}'
+        for name, stdout, stderr, reads, expected_exit in [
+            ("delayed exact match", b"", transport, [unavailable, matched], 0),
+            (
+                "npm log and stderr JSON",
+                b"{}",
+                b"npm ERR! code ECONNRESET\n" + transport + b"\nnpm notice",
+                [matched],
+                0,
+            ),
+            (
+                "mismatched integrity",
+                b"npm notice",
+                transport,
+                [{**matched, "dist": {"integrity": "wrong"}}],
+                1,
+            ),
+            ("wrong package", b"{}", transport, [{**matched, "name": "wrong"}], 1),
+            ("wrong version", None, transport, [{**matched, "version": "0.4.0"}], 1),
+            ("never visible", b"", transport, [unavailable, unavailable], 1),
+            ("stdout denial", denial, transport, [], 1),
+            ("stderr denial", transport, denial, [], 1),
+            ("stderr unknown", transport, b'{"error":{"code":"EUNKNOWN"}}', [], 1),
+            ("invalid error code", transport, b'{"error":{"code":[]}}', [], 1),
+            ("stderr denial diagnostic", transport, b"npm error code E403", [], 1),
+            (
+                "stderr forbidden response",
+                transport,
+                b"npm ERR! 403 Forbidden - PUT",
+                [],
+                1,
+            ),
+            (
+                "split malformed stderr envelope",
+                b"",
+                b'{"error":\nnpm warn unrelated\n{"code":"ECONNRESET"}}',
+                [],
+                1,
+            ),
+            ("plain transport text alone", b"", b"npm ERR! code ECONNRESET", [], 1),
+        ]:
+            failure = subprocess.CalledProcessError(
+                1, ["npm"], output=stdout, stderr=stderr
+            )
+            with (
+                self.subTest(name=name),
+                mock.patch(
+                    "scripts.publish_npm_release.subprocess.run", side_effect=failure
+                ) as publish,
+                mock.patch(
+                    "scripts.publish_npm_release.fetch_registry_package",
+                    return_value=matched,
+                    side_effect=reads or None,
+                ) as registry,
+                mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as messages,
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "publish-launcher",
+                            "--bundle-dir",
+                            str(self.bundle_dir),
+                            "--version",
+                            version,
+                            "--readback-attempts",
+                            "2",
+                        ]
+                    ),
+                    expected_exit,
+                )
+                publish.assert_called_once()
+                self.assertEqual(
+                    publish.call_args.args[0][3],
+                    str((self.bundle_dir / record["file"]).resolve()),
+                )
+                self.assertEqual(
+                    registry.call_args_list, [mock.call(package, version)] * len(reads)
+                )
+                self.assertEqual(sleep.call_count, max(0, len(reads) - 1))
+                self.assertNotIn("private diagnostic", messages.getvalue())
+
     def test_installation_readiness_waits_for_full_packument_without_republishing(self):
         calls = []
 
@@ -107,7 +341,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         for package in ALL_PACKAGES:
             integrity_lines.append(
                 {
-                    "file": f"{package.removeprefix('@reviewsensei/cli-') or 'cli'}-0.5.0.tgz",
+                    "file": f"{package.split('/')[-1].removeprefix('cli-')}-0.5.0.tgz",
                     "name": package,
                     "version": "0.5.0",
                     "sha256": "deadbeef",
@@ -1626,7 +1860,9 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with (
             mock.patch(
                 "scripts.publish_npm_release.publish_tarball",
-                side_effect=PublishError("npm publish failed with exit code 1"),
+                side_effect=AmbiguousPublishError(
+                    "npm publish failed with exit code 1"
+                ),
             ) as publish,
             mock.patch(
                 "scripts.publish_npm_release.read_back_with_retry",
@@ -1659,7 +1895,9 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with (
             mock.patch(
                 "scripts.publish_npm_release.publish_tarball",
-                side_effect=PublishError("npm publish failed with exit code 1"),
+                side_effect=AmbiguousPublishError(
+                    "npm publish failed with exit code 1"
+                ),
             ),
             mock.patch(
                 "scripts.publish_npm_release.read_back_with_retry",
@@ -1695,7 +1933,9 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with (
             mock.patch(
                 "scripts.publish_npm_release.publish_tarball",
-                side_effect=PublishError("npm publish failed with exit code 1"),
+                side_effect=AmbiguousPublishError(
+                    "npm publish failed with exit code 1"
+                ),
             ),
             mock.patch(
                 "scripts.publish_npm_release.read_back_with_retry",

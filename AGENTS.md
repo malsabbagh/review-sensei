@@ -51,8 +51,9 @@ rule, bypass tool/platform policy, or waive repository protections.
 ## Release authority and evidence
 
 Run local implementation tests appropriate to the change. Local release
-qualification is **not required**: complete green required remote CI on the exact
-immutable candidate is authoritative. Do not add a redundant local full-suite or
+qualification is **not required**. The runbook defines the authoritative remote
+CI for each channel on the exact reviewed and generated commits. Source PRs
+retain full branch-protection CI, including the native/npm candidate matrix. Do not add a redundant local full-suite or
 release-build prerequisite, and do not substitute local results for a missing or
 failed remote gate.
 

@@ -1,4 +1,5 @@
 name: Qualify published CLI
+run-name: Qualify published CLI ${{ github.event_name == 'workflow_run' && format('after {0}/{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) || format('manual {0}/{1}', inputs.version, inputs.github_version) }}
 
 on:
   workflow_run:
@@ -51,7 +52,7 @@ jobs:
           CORE_SOURCE: ${{ steps.gate.outputs.core_source_sha }}
           CORE_VERSION: ${{ steps.gate.outputs.version }}
         run: >-
-          python scripts/wait_for_publication.py --workflow release.yml
+          python scripts/wait_for_publication.py --workflow release.yml --installed-core
           --tag "v$CORE_VERSION" --source "$CORE_SOURCE"
           --report "$RUNNER_TEMP/core-publication-readiness.json"
       - name: Recheck both immutable tags and publication attempts after waiting

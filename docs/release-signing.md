@@ -1,10 +1,10 @@
 # Dedicated Release Marshal signing
 
 The Marshal can sign the qualified prepared commit with a dedicated release
-GPG key. Mo still approves the `npm` and `pypi` environment jobs before either
-registry publishes. That approval records authorization; the GPG key creates
-the cryptographic tag signature, and Trusted Publishing creates package
-provenance/attestations. These are separate records.
+GPG key. Mo approves core and hosted Python publication in their respective
+`pypi` and `pypi-github` environments. The independent npm publisher requests
+its own `npm` approval after Python succeeds. The GPG signature binds the tag
+to the source, and Trusted Publishing attests the resulting packages.
 
 ## User-run setup
 
@@ -90,10 +90,12 @@ gh workflow run prepare-release.yml --repo malsabbagh/review-sensei --ref main \
 
 Use the intended release version/date, not these example values blindly.
 `sign_tag=false` (default) retains a manual handoff with no signing-secret use.
-The signing job waits for prepared CI and refreshes receipt/main/CI/unused
-versions, narrow App identity, public-key registration and publication reviewer
-gates. It selects only the dedicated fingerprint, locally verifies that
-signature, pushes a new annotated tag without force, and requires GitHub's
+The signing job refreshes the receipt, main SHA, Python/platform CI, unused
+selected Python versions, narrow App identity, public-key registration and
+PyPI reviewer gates. The receipt covers every prepared file. The npm publisher
+independently checks native CI and its reviewer gate. The signer selects the
+dedicated fingerprint, locally verifies the signature, pushes a new annotated
+tag without force and requires GitHub's
 verified object/source readback. The existing App token pushes one signed core
 tag, triggering independent
 `release.yml` (Python) and `publish-npm.yml` (npm) runs at that exact tag/source;
@@ -127,10 +129,13 @@ publication checks after approval. Timeout or invalid identity holds the
 original bundle without draft-read or Contents write authority. The release becomes public
 after protected PyPI publication; successful Python and npm runs for the same
 signed source are both required for released docs/Pages. Inspect the independent
-channel result artifacts. Complete the [npm publisher identity migration
-hold](releasing.md#owner-migration-hold-before-activation) before any future
-release. If a tag exists, never rerun signing or move/delete it: recover each
-channel in its original run with its original artifacts.
+channel result artifacts. Normal releases follow the
+[account-independent npm authentication policy](releasing.md#standard-npm-release-authentication);
+no local npm login or registration lookup is required. Apply the separate
+[publisher identity migration hold](releasing.md#owner-migration-hold-before-activation)
+when changing or retiring a publisher identity. If a tag exists, never rerun
+signing or move/delete it: recover each channel in its original run with its
+original artifacts.
 An npm approval/readback cannot block a Python finalizer retry once the Python
 run is terminal. Signing failures or a missing approval gate hold publication. If
 rules reject the App's tag write, inspect them separately; no broad tag bypass

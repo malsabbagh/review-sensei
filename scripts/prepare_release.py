@@ -62,24 +62,53 @@ PAYLOAD_PATHS = frozenset(
 ALLOWED_PATHS = PAYLOAD_PATHS | {RECEIPT}
 MAX_NOTE_COMMITS = 256
 MAX_NOTE_BYTES = 256 * 1024
+# Exact job names from ci.yml. The branch-protection aggregate still requires
+# every lane. Release admission can attest the Python/platform jobs while npm
+# is independently waiting, failing, or absent.
+COMPATIBILITY_LANES = (
+    ("3.11", "ubuntu-latest", 8),
+    ("3.12", "windows-latest", 5),
+    ("3.13", "macos-latest", 5),
+    ("3.14", "ubuntu-latest", 8),
+)
 CI_JOBS = frozenset(
-    (
-        "Compatibility (Python 3.11, ubuntu-latest)",
-        "Compatibility (Python 3.12, windows-latest)",
-        "Compatibility (Python 3.13, macos-latest)",
-        "Compatibility (Python 3.14, ubuntu-latest)",
+    {
+        *(
+            f"Compatibility (Python {py}, {os_name})"
+            for py, os_name, _ in COMPATIBILITY_LANES
+        ),
+        *(
+            f"Compatibility shard (Python {py}, {os_name}, {i}/{count})"
+            for py, os_name, count in COMPATIBILITY_LANES
+            for i in range(1, count + 1)
+        ),
+        *(f"Branch coverage shard ({i}/10)" for i in range(1, 11)),
+        *(f"Installed dist-safe shard ({i}/6)" for i in range(1, 7)),
         "Quality gates",
+        "Static quality checks",
         "Schemas and Action pins",
+        "Build distributions",
+        "Verify distributions outside checkout",
         "Build and verify package",
+        "Cloudflare Worker",
+        "CodeQL (python)",
+        "CodeQL (javascript-typescript)",
+    }
+)
+NPM_CI_JOBS = frozenset(
+    {
         "Node launcher and npm package contracts",
         "Linux standalone baseline (linux-arm64-gnu)",
         "Linux standalone baseline (linux-x64-gnu)",
         "Intel macOS standalone ABI and parity",
-        "Cloudflare Worker",
-        "CodeQL (python)",
-        "CodeQL (javascript-typescript)",
-        "Required checks",
-    )
+        "Additional native candidate (darwin-arm64)",
+        "Additional native candidate (win32-x64)",
+        "Assemble exact candidate npm tarballs",
+        *(
+            f"Installed candidate launcher and native ({name.removeprefix('@reviewsensei/cli-')})"
+            for name in versions.NPM_TARGETS
+        ),
+    }
 )
 
 
@@ -449,7 +478,6 @@ def generate(
     inputs(version, date, base)
     safe_paths(root)
     current = versions.project_version(root)
-    versions.validate_npm_manifests(root, current)
     check_site(root)
     # Validate every reviewed marker before modifying the disposable checkout.
     for relative, targets in MARKDOWN_TARGETS.items():
@@ -760,21 +788,73 @@ def unused(version: str) -> None:
     absent_github(f"git/ref/tags/v{version}")
     absent_github(f"releases/tags/v{version}")
     absent_registry(f"https://pypi.org/pypi/review-sensei/{version}/json")
-    for name in (versions.NPM_LAUNCHER_NAME, *versions.NPM_TARGETS):
-        absent_registry(
-            f"https://registry.npmjs.org/{name.replace('/', '%2F')}/{version}"
+
+
+def ci_jobs_ready(run: dict[str, Any], *, npm: bool, active: bool) -> bool:
+    """Require the newest execution of every job belonging to this admission."""
+    attempt = run["run_attempt"]
+    jobs = docs.api_pages(f"actions/runs/{run['id']}/jobs?filter=all", "jobs")
+    if attempt > 1 and not any(job.get("run_attempt") == attempt for job in jobs):
+        if active:
+            return False
+        raise ValueError("current CI attempt has no job evidence")
+    names = {job["name"] for job in jobs}
+    combined = NPM_CI_JOBS | {"Required checks"}
+    required = CI_JOBS | combined if npm else CI_JOBS
+    if not required.issubset(names):
+        if active:
+            return False
+        raise ValueError("exact-head CI is missing required jobs")
+    # Unknown jobs remain blocking. Only explicitly enumerated npm jobs and
+    # their combined branch aggregate are independent of a Python release.
+    selected = names if npm else names - combined
+    for name in selected:
+        matches = [job for job in jobs if job["name"] == name]
+        attempts = [job.get("run_attempt") for job in matches]
+        if any(type(n) is not int or not 1 <= n <= attempt for n in attempts):
+            raise ValueError("CI job attempt identity is invalid")
+        latest = [job for job in matches if job["run_attempt"] == max(attempts)]
+        if len(latest) != 1:
+            raise ValueError("latest exact-head CI job identity is ambiguous")
+        job = latest[0]
+        if active and job.get("status") != "completed":
+            return False
+        if job.get("status") != "completed" or job.get("conclusion") != "success":
+            raise ValueError(f"latest required CI job did not succeed: {name}")
+    if active and attempt > 1:
+        # An all-jobs retry can expose prior successes before replacement
+        # executions have materialized. Use GitHub's current execution view
+        # before admitting an in-flight retry.
+        effective = docs.api_pages(
+            f"actions/runs/{run['id']}/jobs?filter=latest", "jobs"
         )
+        effective_names = [
+            job["name"]
+            for job in effective
+            if job["name"] in selected
+            and type(job.get("run_attempt")) is int
+            and 1 <= job["run_attempt"] <= attempt
+            and job.get("status") == "completed"
+            and job.get("conclusion") == "success"
+        ]
+        if (
+            not any(j.get("run_attempt") == attempt for j in effective)
+            or len(effective_names) != len(selected)
+            or set(effective_names) != selected
+        ):
+            return False
+    return True
 
 
-def ci_once(sha: str) -> dict[str, Any] | None:
+def ci_once(sha: str, *, npm: bool = False) -> dict[str, Any] | None:
     if not docs.SHA.fullmatch(sha):
         raise ValueError("CI requires exact source SHA")
-    runs = docs.api_pages(
-        f"actions/workflows/ci.yml/runs?head_sha={sha}&event=push&branch=main",
-        "workflow_runs",
-    )
+    query = f"actions/workflows/ci.yml/runs?head_sha={sha}&event=push&branch=main"
+    runs = docs.api_pages(query, "workflow_runs")
     if not runs:
         return None
+    if any(type(item.get("id")) is not int or item["id"] < 1 for item in runs):
+        raise ValueError("invalid CI run identity")
     run = max(runs, key=lambda value: value["id"])
     if (
         run.get("head_sha") != sha
@@ -786,36 +866,63 @@ def ci_once(sha: str) -> dict[str, Any] | None:
         or run.get("pull_requests")
     ):
         raise ValueError("CI run does not match the exact main push")
-    if run.get("status") != "completed":
-        return None
-    if run.get("conclusion") != "success":
+    attempt = run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1:
+        raise ValueError("CI run attempt identity is invalid")
+    active = run.get("status") in {
+        "queued",
+        "requested",
+        "waiting",
+        "pending",
+        "in_progress",
+    }
+    if active:
+        if run.get("conclusion") is not None:
+            raise ValueError("active CI run has an unexpected conclusion")
+        if npm or run["status"] != "in_progress":
+            return None
+    elif run.get("status") != "completed" or run.get("conclusion") not in (
+        {"success"} if npm else {"success", "failure"}
+    ):
         raise ValueError("exact-head CI failed; repair/retry CI without tagging")
-    jobs = docs.api_pages(f"actions/runs/{run['id']}/jobs?filter=all", "jobs")
-    names = {job.get("name") for job in jobs}
-    if not CI_JOBS.issubset(names):
-        raise ValueError("exact-head CI is missing required jobs")
-    for name in names:
-        matches = [job for job in jobs if job.get("name") == name]
-        attempts = [job.get("run_attempt") for job in matches]
-        if type(run.get("run_attempt")) is not int or any(
-            type(attempt) is not int or not 1 <= attempt <= run["run_attempt"]
-            for attempt in attempts
-        ):
-            raise ValueError("CI job attempt identity is invalid")
-        latest = [job for job in matches if job["run_attempt"] == max(attempts)]
-        if (
-            len(latest) != 1
-            or latest[0].get("status") != "completed"
-            or latest[0].get("conclusion") != "success"
-        ):
-            raise ValueError("every latest exact-head CI job must succeed")
+
+    if not ci_jobs_ready(run, npm=npm, active=active):
+        return None
     fresh = docs.api(f"actions/runs/{run['id']}")
-    if any(
+    # An independent npm job may finish between reads on the same attempt.
+    finished = (
+        active
+        and fresh.get("status") == "completed"
+        and fresh.get("conclusion") in {"success", "failure"}
+    )
+    if (
+        not finished
+        and (fresh.get("status"), fresh.get("conclusion"))
+        != (run.get("status"), run.get("conclusion"))
+    ) or any(
         fresh.get(key) != run.get(key)
-        for key in ("id", "head_sha", "status", "conclusion", "run_attempt")
+        for key in (
+            "id",
+            "head_sha",
+            "head_branch",
+            "path",
+            "event",
+            "repository",
+            "head_repository",
+            "pull_requests",
+            "run_attempt",
+        )
     ):
         raise ValueError("CI advanced during qualification; retry the check")
-    return run
+    if finished:
+        # The terminal inventory can include jobs created after our active read.
+        # Reapply the same positive contract before accepting its conclusion.
+        ci_jobs_ready(fresh, npm=npm, active=False)
+    latest_runs = docs.api_pages(query, "workflow_runs")
+    latest = max(latest_runs, key=lambda item: item["id"], default={})
+    if (latest.get("id"), latest.get("run_attempt")) != (run["id"], attempt):
+        raise ValueError("CI advanced during qualification; retry the check")
+    return fresh
 
 
 def workflow_context() -> None:
@@ -1024,7 +1131,7 @@ def wait_ci(
     return run
 
 
-def qualify_tag(root: Path, tag: str) -> None:
+def qualify_tag(root: Path, tag: str, *, npm: bool = False) -> None:
     tag_object, sha = docs.tag_identity(tag)
     if (
         git(root, "rev-parse", "HEAD") != sha
@@ -1037,8 +1144,13 @@ def qualify_tag(root: Path, tag: str) -> None:
         raise ValueError("signed tag differs from the prepared version")
     if docs.api(f"compare/{sha}...main").get("status") not in {"ahead", "identical"}:
         raise ValueError("prepared tag source must be on main")
-    if ci_once(sha) is None:
-        raise ValueError("tagged preparation CI is not terminal success")
+    # The signed tag can arrive while the asynchronous native candidate is
+    # still building. Only the npm lane waits for full engineering CI.
+    deadline = time.monotonic() + 3600
+    while ci_once(sha, npm=npm) is None:
+        if not npm or time.monotonic() >= deadline:
+            raise ValueError("tagged preparation lacks successful required CI jobs")
+        time.sleep(min(15, max(0, deadline - time.monotonic())))
     if docs.tag_identity(tag) != (tag_object, sha):
         raise ValueError("release tag identity changed during qualification")
 
@@ -1132,13 +1244,15 @@ def main() -> int:
             )
         elif args.command == "wait-ci":
             run = wait_ci(TRUSTED_ROOT, args.sha, args.timeout, args.version, args.date)
-            print(f"Exact source {args.sha}: CI {run['id']} completed successfully")
+            print(
+                f"Exact source {args.sha}: required Python and platform jobs passed in CI {run['id']} (whole run: {run['status']}/{run['conclusion']})."
+            )
             summary = os.environ.get("GITHUB_STEP_SUMMARY")
             if args.version and summary:
                 with Path(summary).open("a", encoding="utf-8") as handle:
                     handle.write(
                         f"## Prepared v{args.version}\n\nSource: `{args.sha}`. "
-                        f"[Full exact-head CI](https://github.com/{docs.REPOSITORY}/actions/runs/{run['id']}) passed.\n\n"
+                        f"[Required Python and platform CI jobs](https://github.com/{docs.REPOSITORY}/actions/runs/{run['id']}) passed (whole run: {run['status']}/{run['conclusion']}).\n\n"
                         "This qualification created no tag or package. Complete "
                         "readers-first qualification before signing. With `sign_tag=true`, "
                         "the separate job signs this exact source using only the dedicated "

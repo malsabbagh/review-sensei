@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,13 @@ WORKFLOWS = {
     "release.yml": ("v", "Publish to PyPI with Trusted Publishing"),
     "release-github.yml": ("github-v", "Publish review-sensei-github to PyPI"),
     "publish-npm.yml": ("v", "Publish npm packages with Trusted Publishing"),
+}
+# SHA-256 of each released combined workflow with the six required Python jobs.
+# Source changes, including the independent Python recorder, take the strict path.
+COMBINED_CORE_WORKFLOWS = {
+    "6280758294de3c8b87681d4ca286cbd9a01f91101879f22f46126de1be3945a8",  # v0.6.19
+    "5a58d00d1f50c64706c363307a6d4f9378c1214bec3e553aa6fabc417a85b417",  # v0.7.1
+    "5eeefb5ed7c1e2b7eae14ab6b98dc8e9326a512167e865cd33694519f97b7ef5",  # v0.8.5
 }
 MAX_WAIT = 90 * 60
 INTERVAL = 30
@@ -183,6 +191,32 @@ def wait_for_publication(
         sleep(min(INTERVAL, remaining))
 
 
+def combined_core_publication(tag: str, source: str) -> dict | None:
+    """Bind installed verification of an immutable combined-era core to Python jobs."""
+    import pypi_channel_publication as pypi
+    import release_docs as docs
+    from major_tag_gate import source_file
+
+    match = docs.TAG.fullmatch(tag)
+    if not match or not docs.SHA.fullmatch(source):
+        raise ValueError("installed verification requires an exact core tag and source")
+    if not (0, 6, 19) <= tuple(map(int, match.groups())) <= (0, 8, 8):
+        return None
+    workflow = source_file(source, ".github/workflows/release.yml")
+    if hashlib.sha256(workflow).hexdigest() not in COMBINED_CORE_WORKFLOWS:
+        return None
+    proof = pypi.publication_run(
+        source, tag, "release.yml", pypi.ENGINE_JOBS, pypi.PUBLISH_JOB
+    )
+    original = publication_run("release.yml", tag, source)
+    if not original or (original["id"], original["run_attempt"]) != (
+        proof["run_id"],
+        proof["run_attempt"],
+    ):
+        raise ValueError("combined core Python publication changed")
+    return {**proof, "mode": "combined-core-python"}
+
+
 def wait_for_pages_publication(
     core_run_id: int,
     tag: str,
@@ -238,7 +272,9 @@ def main() -> int:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--pages-core-run-id", type=int)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--pages-core-run-id", type=int)
+    mode.add_argument("--installed-core", action="store_true")
     args = parser.parse_args()
     report = {
         "status": "ERROR",
@@ -247,7 +283,17 @@ def main() -> int:
         "source": args.source,
     }
     try:
-        if args.pages_core_run_id is None:
+        if args.installed_core:
+            if args.workflow != "release.yml":
+                raise ValueError(
+                    "installed core verification requires the core workflow"
+                )
+            proof = combined_core_publication(args.tag, args.source)
+            if proof is None:
+                wait_for_publication(args.workflow, args.tag, args.source, report)
+            else:
+                report.update(proof, status="PASS")
+        elif args.pages_core_run_id is None:
             wait_for_publication(args.workflow, args.tag, args.source, report)
         elif args.workflow == "publish-npm.yml":
             wait_for_pages_publication(

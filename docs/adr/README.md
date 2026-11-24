@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0143](0143-asynchronous-npm-release.md) | Proposed | Qualify Python and signed v5 independently of asynchronous npm | User-directed release policy correction | Exact Python and installed qualification, protected OIDC npm and independent Pages |
 | [0142](0142-prospective-pre-entry-abort-close-witness.md) | Proposed | Match one original paid pre-entry abort close to exact native storage | G29; follow-up to PR #468 | Unconnected candidate; no dispatch, settlement or admission authority |
 | [0141](0141-cold-namespace-deadline-ceiling.md) | Proposed | Enforce a narrower future deadline representation in the original cold namespace | Issue pending; PR #462 | Existing receipts, funding and bounds unchanged; no execution authority |
 | [0140](0140-self-contained-lifecycle-prefix-codec.md) | Proposed | Self-contained immutable lifecycle prefix with independently bounded suffix | Issue pending; PR #462 | Pure codec only; runtime custody and activation remain pending |

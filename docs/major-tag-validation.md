@@ -2,7 +2,11 @@
 
 `major-tag-validation.yml` validates a public workflow channel without moving
 tags, publishing packages, invoking providers or writing to PRs. It reuses the
-exact installed-PyPI qualifier from `published-cli.yml`.
+exact installed-PyPI qualifier from `published-cli.yml`. Before a future v5
+move, the owner runs the [candidate gate](releasing.md#verify-the-candidate-before-an-authorized-move)
+against the recorded old object and the automatic installed-Python receipts.
+That receipt is scoped to the old-object lease. Post-move rechecks and workflow
+outputs require evidence for the promoted tag object.
 
 ## Admission and integrity
 
@@ -14,7 +18,7 @@ time: GitHub can omit events for pushes containing more than three tags.
 
 The gate uses the existing `release_docs.py` GitHub-verified annotated-signature
 policy. Lightweight and nested tags fail. The major object's peeled source
-must match the event. Its exact stable immutable release tag, package/site/npm
+must match the event. Its exact stable immutable release tag, Python and site
 manifests, published GitHub release, authoritative release binding, asset
 digests and successful source-bound Python release jobs must agree. Overall
 Release success and npm assembly/publication are not admission requirements. Channel numbers
@@ -52,6 +56,10 @@ agree; both verified wheel hashes are passed into the installed CLI lanes.
 Missing Python artifacts, invalid provenance, a failed latest required Python
 job, or a source mismatch refuses eligibility even if npm succeeds. A pending
 or failed npm job remains independent, with its original status unchanged.
+For a reused core from the combined-workflow era (0.6.19–0.8.8), installed
+qualification checks the six Python jobs and original publisher execution in
+the signed core's known workflow. Split releases still require the complete
+Python run, including its result recorder. Pages uses its own full-distribution gate.
 See [ADR 0095](adr/0095-pypi-qualified-major-channel.md) for next-release rollout.
 
 Tagged workflow files are parsed as bounded data and never executed by this

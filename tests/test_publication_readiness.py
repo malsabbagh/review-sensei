@@ -1,6 +1,7 @@
 """Publication readiness waits without publishing or relaxing identity checks."""
 
 import contextlib
+import hashlib
 import io
 import sys
 import tempfile
@@ -355,6 +356,119 @@ class PagesPublicationReadinessTests(unittest.TestCase):
             wait_pages.assert_not_called()
             wait_python.assert_not_called()
             self.assertIn('"status": "ERROR"', report.read_text())
+
+
+class InstalledCoreReadinessTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_pypi_publication_attempts import captured_publication_case
+
+        self.run, self.jobs, self.publisher, _ = captured_publication_case()
+        self.originals = [self.run]
+        self.source = self.run["head_sha"]
+        data = b"reviewed historical combined workflow"
+        self.workflow = self.enterContext(
+            patch("major_tag_gate.source_file", return_value=data)
+        )
+        self.enterContext(
+            patch.object(
+                readiness, "COMBINED_CORE_WORKFLOWS", {hashlib.sha256(data).hexdigest()}
+            )
+        )
+        self.enterContext(
+            patch(
+                "release_docs.api_pages",
+                side_effect=lambda path, key: (
+                    [self.run] if key == "workflow_runs" else self.jobs
+                ),
+            )
+        )
+        self.enterContext(patch("release_docs.api", side_effect=lambda path: self.run))
+        self.enterContext(
+            patch.object(
+                readiness, "pages", side_effect=lambda path, key: self.originals
+            )
+        )
+
+    def proof(self):
+        return readiness.combined_core_publication("v0.8.6", self.source)
+
+    def test_absent_pending_and_failed_npm_preserve_original_python_execution(self):
+        python_jobs = [
+            j
+            for j in self.jobs
+            if "npm" not in j["name"].lower() and "native" not in j["name"].lower()
+        ]
+        npm = {"name": "Publish npm packages with Trusted Publishing"}
+        for status, conclusion, extra in [
+            ("completed", "failure", []),
+            ("in_progress", None, [{**npm, "status": "in_progress"}]),
+            (
+                "completed",
+                "failure",
+                [{**npm, "status": "completed", "conclusion": "failure"}],
+            ),
+        ]:
+            with self.subTest(status=status, npm=extra):
+                self.run.update(status=status, conclusion=conclusion)
+                self.jobs = python_jobs + extra
+                proof = self.proof()
+                self.assertEqual(proof["mode"], "combined-core-python")
+                self.assertEqual(proof["run_attempt"], 3)
+                self.assertEqual(proof["publication_job_id"], self.publisher["id"])
+                self.assertEqual(proof["publication_attempt"], 2)
+
+    def test_historical_core_still_requires_all_python_jobs_and_one_stable_original(
+        self,
+    ):
+        self.originals = [self.run, self.run]
+        with self.assertRaisesRegex(ValueError, "one original"):
+            self.proof()
+        self.originals = [{**self.run, "run_attempt": self.run["run_attempt"] + 1}]
+        with self.assertRaisesRegex(ValueError, "changed"):
+            self.proof()
+        self.originals = [self.run]
+        finalizer = "Create GitHub release assets"
+        self.jobs = [j for j in self.jobs if j["name"] != finalizer]
+        with self.assertRaisesRegex(ValueError, "missing"):
+            self.proof()
+        self.jobs.append(job(attempt=3, name=finalizer, conclusion="failure"))
+        with self.assertRaisesRegex(ValueError, "did not succeed"):
+            self.proof()
+
+    def test_split_unknown_and_new_workflows_keep_terminal_python_readiness(self):
+        self.assertIsNone(readiness.combined_core_publication("v0.8.24", self.source))
+        self.workflow.assert_not_called()
+        self.workflow.return_value = b"changed source"
+        self.assertIsNone(self.proof())
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "wait_for_publication.py",
+                        "--workflow",
+                        "release.yml",
+                        "--tag",
+                        "v0.8.6",
+                        "--source",
+                        self.source,
+                        "--installed-core",
+                        "--report",
+                        str(report),
+                    ],
+                ),
+                patch.object(
+                    readiness,
+                    "wait_for_publication",
+                    side_effect=readiness.PublicationTimeout,
+                ) as strict,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(readiness.main(), 1)
+            strict.assert_called_once()
+            self.assertIn("publication-timeout", report.read_text())
 
 
 if __name__ == "__main__":

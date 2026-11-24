@@ -71,8 +71,8 @@ def private_file(path: Path, value: str) -> None:
         handle.write(value)
 
 
-def check_gates() -> None:
-    for name in ("npm", "pypi"):
+def check_gates(*, setup: bool = False) -> None:
+    for name in ("pypi", "npm") if setup else ("pypi",):
         value = api(f"repos/{REPOSITORY}/environments/{name}")
         reviewers = [
             rule.get("reviewers", [])
@@ -147,7 +147,7 @@ def setup(backup: Path, email: str | None) -> dict[str, str]:
         raise ValueError(
             "signing email must already be verified on Mo's GitHub account"
         )
-    check_gates()
+    check_gates(setup=True)
     existing = json.loads(
         command(["gh", "api", "--paginate", "--slurp", "user/gpg_keys"])
     )
