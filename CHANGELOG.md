@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.8.25 - 2026-11-24
+
+Changes since [v0.8.24](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.24), from [fa17524bda0ed310ada7e1ee849ba660341eae57](https://github.com/malsabbagh/review-sensei/commit/fa17524bda0ed310ada7e1ee849ba660341eae57) through [1ddee6d7ad66061193825787d346e23f18d559f0](https://github.com/malsabbagh/review-sensei/commit/1ddee6d7ad66061193825787d346e23f18d559f0).
+
+Previous annotated tag object: `1941f6ace7a8c8d8c4ee1efa083b03b6694eb85a`.
+
+- docs: record released v0.8.24 ([44475ff5df8d0b146407b0e2c0bff6a9380ecced](https://github.com/malsabbagh/review-sensei/commit/44475ff5df8d0b146407b0e2c0bff6a9380ecced)).
+- fix: private-repo capability scopes, check-read token propagation, and GraphQL diagnostics \(\#499\) ([1ddee6d7ad66061193825787d346e23f18d559f0](https://github.com/malsabbagh/review-sensei/commit/1ddee6d7ad66061193825787d346e23f18d559f0)).
+
+## review-sensei-github 0.3.31 - 2026-11-24
+
+- Pin `review-sensei==0.8.25`.
+
 ## 0.8.24 - 2026-11-24
 
 Changes since [v0.8.23](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.23), from [4f4ba153e4f625e29b9daab1ab9fe30fe07913c2](https://github.com/malsabbagh/review-sensei/commit/4f4ba153e4f625e29b9daab1ab9fe30fe07913c2) through [1b66fe7b18b5deaaeadcf0566b678487baa6c1b6](https://github.com/malsabbagh/review-sensei/commit/1b66fe7b18b5deaaeadcf0566b678487baa6c1b6).
