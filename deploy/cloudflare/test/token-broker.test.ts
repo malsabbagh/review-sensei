@@ -83,14 +83,14 @@ describe("current token broker authorization", () => {
     expect(github.capabilityToken).not.toHaveBeenCalled(); expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
   it.each([
-    [undefined, "review_publish", { pull_requests: "write" }, true, "review"],
-    ["review_publish", "review_publish", { pull_requests: "write" }, true, "review"],
+    [undefined, "review_publish", { contents: "read", pull_requests: "write" }, false, "review"],
+    ["review_publish", "review_publish", { contents: "read", pull_requests: "write" }, false, "review"],
     ["thread_resolve", "thread_resolve", { contents: "write", pull_requests: "write" }, false, "command"],
     ["check_publish", "check_publish", { checks: "write" }, false, "reply"],
     ["review_actions", "review_actions", { actions: "read" }, false, "review"],
-    ["review_status", "review_status", { pull_requests: "read" }, false, "review"],
-    ["inline_reply", "inline_reply", { pull_requests: "write" }, false, "reply"],
-    ["issue_reply", "issue_reply", { pull_requests: "write" }, false, "command"],
+    ["review_status", "review_status", { contents: "read", pull_requests: "read" }, false, "review"],
+    ["inline_reply", "inline_reply", { contents: "read", pull_requests: "write" }, false, "reply"],
+    ["issue_reply", "issue_reply", { contents: "read", pull_requests: "write" }, false, "command"],
     ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false, "review"],
   ] as const)("maps %s to exact returned scope with current purpose", async (capability, returned, permissions, contents, purpose) => {
     const { broker, github } = harness();
@@ -210,8 +210,8 @@ describe("opt-in v4 current observations", () => {
   function observedHarness() {
     const h = harness();
     const observed = {
-      installationObservationFor: vi.fn(async () => ({ id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "write" } })),
-      capabilityTokenObservation: vi.fn(async () => ({ token: "observed-token", permissions: { metadata: "read", pull_requests: "write" } })),
+      installationObservationFor: vi.fn(async () => ({ id: 2468, repository_selection: "selected", permissions: { contents: "read", metadata: "read", pull_requests: "write" } })),
+      capabilityTokenObservation: vi.fn(async () => ({ token: "observed-token", permissions: { contents: "read", metadata: "read", pull_requests: "write" } })),
     };
     Object.assign(h.github, observed);
     h.github.repositoryInfo.mockResolvedValue({ id: 987654321, fork: false, full_name: "acme/widgets", owner_id: 987, owner_login: "acme" } as never);
@@ -224,8 +224,8 @@ describe("opt-in v4 current observations", () => {
     expect(result.session_attestation?.current_observation).toEqual({
       schema_version: "current-observation-v1",
       repository: { id: 987654321, full_name: "acme/widgets", owner_id: 987, owner_login: "acme", fork: false },
-      installation: { id: 2468, repository_selection: "selected", repository_access: true, permissions: { metadata: "read", pull_requests: "write" } },
-      capability: { name: "review_session", permissions: { metadata: "read", pull_requests: "write" } },
+      installation: { id: 2468, repository_selection: "selected", repository_access: true, permissions: { contents: "read", metadata: "read", pull_requests: "write" } },
+      capability: { name: "review_session", permissions: { contents: "read", metadata: "read", pull_requests: "write" } },
       actor: { id: 12345678, login: "octocat", source_association: null },
     });
     expect(observed.installationObservationFor).toHaveBeenCalledTimes(1);

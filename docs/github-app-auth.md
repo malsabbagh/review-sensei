@@ -178,14 +178,14 @@ approval; hosted 0.3.15 does not enable it.
 
 | Capability | GitHub installation permission |
 | --- | --- |
-| `review_publish` | `pull_requests: write` |
+| `review_publish` | `contents: read`, `pull_requests: write` |
 | `thread_resolve` | `contents: write`, `pull_requests: write` |
-| `review_status` | `pull_requests: read` |
+| `review_status` | `contents: read`, `pull_requests: read` |
 | `review_actions` | `actions: read` |
 | `check_publish` | `checks: write` |
-| `review_session` | `pull_requests: write` |
-| `inline_reply` | `pull_requests: write` |
-| `issue_reply` | `pull_requests: write` |
+| `review_session` | `contents: read`, `pull_requests: write` |
+| `inline_reply` | `contents: read`, `pull_requests: write` |
+| `issue_reply` | `contents: read`, `pull_requests: write` |
 | `learning_write` | `contents: write`, `pull_requests: write` |
 
 The proposed `thread_resolve` token is selected only for the authenticated
@@ -212,7 +212,7 @@ capability. Because a required check is matched to its producing App, an adminis
 check required, and GitHub does not run required checks on App-authored pull
 requests, so those are reported as `app_authored` instead of gated. The
 `review_session` capability (the durable session ledger, ADR 0050) asks for no
-permission beyond `pull_requests: write`; no capability here is a
+permission beyond `contents: read` and `pull_requests: write`; no capability here is a
 review-dismissal or branch-protection capability. Authenticated abandoned
 analysis recovery lazily exchanges `review_actions` for live Actions proofs;
 it requires the installation to accept Actions read and a reviewed broker
@@ -260,7 +260,7 @@ The broker accepts `pull_request`, `workflow_dispatch`, `issue_comment`, and
 `pull_request_review_comment` only, on either `github-hosted` or `self-hosted`
 runner environments. The inline and issue reply capabilities also create and
 delete the App's temporary `eyes` reaction on the corresponding source comment;
-both remain limited to `pull_requests: write`. An AI reply may explicitly mark
+both remain limited to `contents: read` and `pull_requests: write`. An AI reply may explicitly mark
 an addressed ReviewSensei-owned inline thread for resolution; the same
 `inline_reply` capability performs the bounded GraphQL resolution mutation
 after exact-head revalidation. Human roots and issue comments are never

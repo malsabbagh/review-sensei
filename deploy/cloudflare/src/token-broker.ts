@@ -18,7 +18,7 @@ import {
 const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CAPABILITIES = {
-  review_publish: { "pull_requests": "write" },
+  review_publish: { contents: "read", "pull_requests": "write" },
   // GitHub thread resolution also needs repository write authority. Keep it
   // separate from ordinary review publication. Admission below derives the
   // installation and single repository from verified OIDC identity, never a
@@ -29,16 +29,17 @@ const CAPABILITIES = {
   // capability from review publication so a broker that has not been granted
   // it still publishes reviews and withholds approval instead.
   check_publish: { checks: "write" },
-  // Session authority is separate from publication authority, but it asks for
-  // no extra GitHub permission: the durable session is an issue comment, so
-  // pull-request write is sufficient. ADR 0022/0006 register the App without
-  // Checks: write, and only the check_publish capability above requests it.
-  review_session: { "pull_requests": "write" },
-  review_status: { "pull_requests": "read" },
+  // Session authority is separate from publication authority. It never writes
+  // repository contents, and requests contents:read so private-repository
+  // GraphQL thread/review commit lookups can resolve Commit { oid }. ADR
+  // 0022/0006 register the App without Checks: write, and only check_publish
+  // requests it.
+  review_session: { contents: "read", "pull_requests": "write" },
+  review_status: { contents: "read", "pull_requests": "read" },
   // Recovery proof reads cannot mutate reviews, checks, contents or sessions.
   review_actions: { actions: "read" },
-  inline_reply: { "pull_requests": "write" },
-  issue_reply: { "pull_requests": "write" },
+  inline_reply: { contents: "read", "pull_requests": "write" },
+  issue_reply: { contents: "read", "pull_requests": "write" },
   learning_write: { contents: "write", "pull_requests": "write" },
 } as const;
 const REPOSITORY_METADATA_PERMISSIONS = { metadata: "read" } as const;
@@ -101,13 +102,11 @@ const RECOGNIZED_ACCEPTABLE_RISK = new RegExp(
 
 type Capability = keyof typeof CAPABILITIES;
 
-// GitHub may return contents:read alongside review publication's requested
-// pull-request write scope so the token can read repository data for the
-// review. This is a narrow acceptance rule for GitHub's returned scope, not a
-// broker request for an additional permission; reply capabilities reject it.
-// This policy overlay is keyed by Capability (the keys of CAPABILITIES above),
-// so a new capability must explicitly opt in here before it can accept it.
-const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>(["review_publish"]);
+// All capabilities that read repository data or Commit { oid } on private
+// repositories now explicitly request contents:read in CAPABILITIES above.
+// Leave this compatibility set empty so unrequested contents:read grants
+// (e.g. on check_publish or review_actions) continue to fail closed.
+const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>();
 
 interface BrokerBody {
   oidc_token?: unknown;

@@ -530,6 +530,7 @@ class GitHubIssueCommentSessionLedger:
         self._reuse_listed_parts = False
         self._quarantine_origin_reader: Any | None = None
         self._quarantine_check_token_provider: Callable[[], str] | None = None
+        self._cached_check_read_token: str | None = None
         self._quarantine_rollover_snapshot: Any | None = None
         self._quarantine_creation_slot: Any | None = None
         self._quarantine_policy_branch: str | None = None
