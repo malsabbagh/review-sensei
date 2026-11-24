@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.publish_npm_release import (  # noqa: E402
     ALL_PACKAGES,
+    LAUNCHER_PACKAGE,
     PLATFORM_PACKAGES,
     AmbiguousPublishError,
     IntegrityMismatchError,
@@ -172,6 +173,103 @@ class PublishNpmReleaseTests(unittest.TestCase):
             ):
                 publish_tarball(self.bundle_dir / "fixture.tgz")
             self.assertIs(type(caught.exception), error)
+
+    def test_launcher_reconciles_stderr_transport_once_and_holds_denials(self):
+        version = "0.5.0"
+        package = LAUNCHER_PACKAGE
+        self._write_resume_bundle_files()
+        write_publish_state(
+            self.bundle_dir, version, [{"name": package, "action": "publish"}]
+        )
+        record = load_integrity_records(self.bundle_dir, version)[package]
+        matched = {
+            "name": package,
+            "version": version,
+            "dist": {"integrity": record["integrity"]},
+        }
+        unavailable = HTTPError("https://registry.invalid", 404, "not found", {}, None)
+        transport = b'{"error":{"code":"ECONNRESET","detail":"private diagnostic"}}'
+        denial = b'{"error":{"code":"E403"}}'
+        for name, stdout, stderr, reads, expected_exit in [
+            ("delayed exact match", b"", transport, [unavailable, matched], 0),
+            (
+                "npm log and stderr JSON",
+                b"{}",
+                b"npm ERR! code ECONNRESET\n" + transport + b"\nnpm notice",
+                [matched],
+                0,
+            ),
+            (
+                "mismatched integrity",
+                b"npm notice",
+                transport,
+                [{**matched, "dist": {"integrity": "wrong"}}],
+                1,
+            ),
+            ("wrong package", b"{}", transport, [{**matched, "name": "wrong"}], 1),
+            ("wrong version", None, transport, [{**matched, "version": "0.4.0"}], 1),
+            ("never visible", b"", transport, [unavailable, unavailable], 1),
+            ("stdout denial", denial, transport, [], 1),
+            ("stderr denial", transport, denial, [], 1),
+            ("stderr unknown", transport, b'{"error":{"code":"EUNKNOWN"}}', [], 1),
+            ("invalid error code", transport, b'{"error":{"code":[]}}', [], 1),
+            ("stderr denial diagnostic", transport, b"npm error code E403", [], 1),
+            (
+                "stderr forbidden response",
+                transport,
+                b"npm ERR! 403 Forbidden - PUT",
+                [],
+                1,
+            ),
+            (
+                "split malformed stderr envelope",
+                b"",
+                b'{"error":\nnpm warn unrelated\n{"code":"ECONNRESET"}}',
+                [],
+                1,
+            ),
+            ("plain transport text alone", b"", b"npm ERR! code ECONNRESET", [], 1),
+        ]:
+            failure = subprocess.CalledProcessError(
+                1, ["npm"], output=stdout, stderr=stderr
+            )
+            with (
+                self.subTest(name=name),
+                mock.patch(
+                    "scripts.publish_npm_release.subprocess.run", side_effect=failure
+                ) as publish,
+                mock.patch(
+                    "scripts.publish_npm_release.fetch_registry_package",
+                    return_value=matched,
+                    side_effect=reads or None,
+                ) as registry,
+                mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as messages,
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "publish-launcher",
+                            "--bundle-dir",
+                            str(self.bundle_dir),
+                            "--version",
+                            version,
+                            "--readback-attempts",
+                            "2",
+                        ]
+                    ),
+                    expected_exit,
+                )
+                publish.assert_called_once()
+                self.assertEqual(
+                    publish.call_args.args[0][3],
+                    str((self.bundle_dir / record["file"]).resolve()),
+                )
+                self.assertEqual(
+                    registry.call_args_list, [mock.call(package, version)] * len(reads)
+                )
+                self.assertEqual(sleep.call_count, max(0, len(reads) - 1))
+                self.assertNotIn("private diagnostic", messages.getvalue())
 
     def test_installation_readiness_waits_for_full_packument_without_republishing(self):
         calls = []

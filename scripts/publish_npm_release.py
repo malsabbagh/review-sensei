@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,16 @@ DEFAULT_READBACK_INITIAL_DELAY_SECONDS = 2.0
 DEFAULT_READBACK_MAX_DELAY_SECONDS = 30.0
 DEFAULT_PREFLIGHT_404_ATTEMPTS = 3
 DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
+NPM_PUBLISH_TRANSPORT_CODES = {
+    "ECONNRESET",
+    "EPIPE",
+    "ETIMEDOUT",
+    "ESOCKETTIMEDOUT",
+    "E500",
+    "E502",
+    "E503",
+    "E504",
+}
 BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
 BUNDLE_METADATA_MAX_BYTES = 4096
 BUNDLE_TARBALL_MAX_BYTES = 256 * 1024 * 1024
@@ -725,6 +736,50 @@ def wait_for_installation_metadata(
     )
 
 
+def _ambiguous_npm_publish_failure(failure: subprocess.CalledProcessError) -> bool:
+    """Require a structured transport error and honor denials on either stream."""
+    transport_error = False
+    for output in (failure.stdout, failure.stderr):
+        if not output:
+            continue
+        if isinstance(output, bytes):
+            output = output.decode("utf-8-sig", errors="replace")
+        # npm can log a code alongside the JSON. Text may veto reconciliation,
+        # but only an error envelope from --json can authorize an exact readback.
+        for code, status in re.findall(
+            r"^npm (?:error|ERR!) (?:code (\S+)|([45]\d\d)\b)", output, re.MULTILINE
+        ):
+            if (code or f"E{status}") not in NPM_PUBLISH_TRANSPORT_CODES:
+                return False
+        # A log line may surround the JSON, but cannot stitch together a
+        # malformed envelope. Accept only one contiguous non-log document.
+        documents = [
+            part
+            for part in re.split(
+                r"^npm (?:error|ERR!|warn|WARN|notice)(?:[ \t].*)?\r?$",
+                output,
+                flags=re.MULTILINE,
+            )
+            if part.strip()
+        ]
+        if len(documents) > 1:
+            return False
+        if not documents:
+            continue
+        try:
+            response = json.loads(documents[0])
+        except ValueError:
+            continue
+        if not isinstance(response, dict) or "error" not in response:
+            continue
+        error = response["error"]
+        code = error.get("code") if isinstance(error, dict) else None
+        if not isinstance(code, str) or code not in NPM_PUBLISH_TRANSPORT_CODES:
+            return False
+        transport_error = True
+    return transport_error
+
+
 def publish_tarball(
     tarball: Path,
     *,
@@ -752,24 +807,7 @@ def publish_tarball(
             f"npm publish timed out after {timeout_seconds:.0f}s for {tarball.name}"
         ) from exc
     except subprocess.CalledProcessError as exc:
-        # npm --json exposes the error code without putting registry or OIDC
-        # diagnostics in a receipt. A denial or unknown exit holds the lane.
-        try:
-            response = json.loads(exc.stdout or b"{}")
-        except (ValueError, UnicodeError):
-            response = {}
-        details = response.get("error") if isinstance(response, dict) else None
-        code = details.get("code") if isinstance(details, dict) else None
-        if isinstance(code, str) and code in {
-            "ECONNRESET",
-            "EPIPE",
-            "ETIMEDOUT",
-            "ESOCKETTIMEDOUT",
-            "E500",
-            "E502",
-            "E503",
-            "E504",
-        }:
+        if _ambiguous_npm_publish_failure(exc):
             raise AmbiguousPublishError(
                 f"npm publish transport failed for {tarball.name}"
             ) from None
