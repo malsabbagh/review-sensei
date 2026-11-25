@@ -2706,10 +2706,10 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
     ):
         if configuration.is_declared(field_path):
             rows.append(f"{field_path.removeprefix('advanced.')}: {value}")
-    supplemental = getattr(
-        advanced.context, "supplemental_documents", SupplementalDocumentsSection()
-    )
-    if not supplemental.version_only_action_updates or configuration.is_declared(
+    supplemental = advanced.context.supplemental_documents
+    if supplemental.version_only_action_updates != _DEFAULT_FIELD_VALUES[
+        "advanced.context.supplemental_documents.version_only_action_updates"
+    ] or configuration.is_declared(
         "advanced.context.supplemental_documents.version_only_action_updates"
     ):
         state = "true" if supplemental.version_only_action_updates else "false"

@@ -105,6 +105,11 @@ def _seed_dist_safe_repo(tmp: Path) -> Path:
         encoding="utf-8",
         newline="\n",
     )
+    (root / "docs" / "adr" / "0033-protection-and-findings-gates.md").write_text(
+        "# ADR 0033: Protection and findings gates\nEnforce branch protection gates.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     (root / ".github" / "workflows" / "ci.yml").write_text(
         "name: CI\n"
         "on: [push, pull_request]\n"
@@ -166,6 +171,14 @@ class InstalledVersionOnlyDocScopeContractTests(unittest.TestCase):
                 diff_analysis=analysis,
                 document_policy=SupplementalDocumentPolicy(),
             )
+            scoped_with_guidance = build_review_context_selection(
+                DEFAULT_CATEGORY_CATALOG.categories,
+                changed_paths=analysis.changed_paths,
+                context_store=RepositoryContextStore(repo_root),
+                changed_lines=analysis.changed_lines,
+                diff_analysis=analysis,
+                document_policy=policy,
+            )
             ordinary = build_review_context_selection(
                 DEFAULT_CATEGORY_CATALOG.categories,
                 changed_paths=analysis.changed_paths,
@@ -177,6 +190,7 @@ class InstalledVersionOnlyDocScopeContractTests(unittest.TestCase):
                 ),
             )
             scoped_arch = scoped.lens_contexts[0]
+            guided_arch = scoped_with_guidance.lens_contexts[0]
             ordinary_arch = ordinary.lens_contexts[0]
             assert isinstance(scoped_arch.document_selection, DocumentSelectionReport)
             assert isinstance(ordinary_arch.document_selection, DocumentSelectionReport)
@@ -186,6 +200,13 @@ class InstalledVersionOnlyDocScopeContractTests(unittest.TestCase):
             self.assertEqual(ordinary_arch.document_selection.policy, POLICY)
             self.assertLess(len(scoped_arch.documents), len(ordinary_arch.documents))
             scoped_paths = {doc.path for doc in scoped_arch.documents}
+            guided_paths = {doc.path for doc in guided_arch.documents}
+            self.assertNotIn(
+                "docs/adr/0033-protection-and-findings-gates.md", scoped_paths
+            )
+            self.assertIn(
+                "docs/adr/0033-protection-and-findings-gates.md", guided_paths
+            )
             self.assertIn("AGENTS.md", scoped_paths)
             self.assertIn(
                 "docs/adr/0009-ci-quality-supply-chain-gates.md", scoped_paths

@@ -51,6 +51,7 @@ _ACTION_IDENTITY = re.compile(
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _SEMVER_TAG = re.compile(r"^v?[0-9]+(?:\.[0-9]+){0,2}(?:-[0-9A-Za-z.-]+)?$")
 _YAML_KEY_LINE = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(.*)$")
+_BLOCK_SCALAR_HEADER = re.compile(r"^[|>](?:[+-][1-9]?|[1-9][+-]?)?$")
 _DISALLOWED_GIT_HEADERS = (
     "old mode ",
     "new mode ",
@@ -419,6 +420,51 @@ def _parse_action_spec(spec: str) -> tuple[str, str, str] | None:
     return None
 
 
+def _scan_yaml_flow_and_quote(
+    text: str, open_quote: str | None, flow_depth: int
+) -> tuple[str | None, int] | None:
+    i = 0
+    n = len(text)
+    can_start_quote = flow_depth > 0
+    if open_quote is None and flow_depth == 0:
+        stripped = text.lstrip(" ")
+        can_start_quote = stripped.startswith(("'", '"'))
+    while i < n:
+        ch = text[i]
+        if open_quote == "'":
+            if ch == "'":
+                if i + 1 < n and text[i + 1] == "'":
+                    i += 2
+                    continue
+                open_quote = None
+                can_start_quote = flow_depth > 0
+        elif open_quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                open_quote = None
+                can_start_quote = flow_depth > 0
+        else:
+            if ch == "#" and (i == 0 or text[i - 1].isspace()):
+                break
+            if can_start_quote and ch in {"'", '"'}:
+                open_quote = ch
+                can_start_quote = False
+            elif ch in "{[":
+                flow_depth += 1
+                can_start_quote = True
+            elif ch in "}]":
+                flow_depth -= 1
+                if flow_depth < 0:
+                    return None
+                can_start_quote = flow_depth > 0
+            elif flow_depth > 0:
+                can_start_quote = ch.isspace() or ch in {",", ":", "[", "{"}
+        i += 1
+    return open_quote, flow_depth
+
+
 def _verify_yaml_step_ancestry(
     lines: Sequence[str],
     target_idx: int,
@@ -427,53 +473,169 @@ def _verify_yaml_step_ancestry(
     starts_with_dash: bool,
     require_jobs: bool,
 ) -> bool:
-    min_indent = change_indent
-    saw_step_item = starts_with_dash
-    saw_steps = False
-    for idx in range(target_idx - 1, -1, -1):
+    """Verify top-down that ``lines[target_idx]`` sits directly in a ``jobs.<id>.steps`` step."""
+    if target_idx < 0 or target_idx >= len(lines):
+        return False
+
+    # Each stack frame is (indent, key, is_list_item, empty_mapping_value).
+    stack: list[tuple[int, str, bool, bool]] = []
+    block_scalar_parent_indent: int | None = None
+    open_quote: str | None = None
+    flow_depth = 0
+
+    for idx in range(target_idx + 1):
         raw = lines[idx]
-        if "\t" in raw[: len(raw) - len(raw.lstrip(" \t"))]:
+        leading = len(raw) - len(raw.lstrip(" \t"))
+        if "\t" in raw[:leading]:
             return False
         stripped = raw.lstrip(" ")
-        if not stripped or stripped.startswith("#"):
-            continue
         indent = len(raw) - len(stripped)
-        if indent >= min_indent:
-            continue
-        first_enclosing = min_indent == change_indent
-        min_indent = indent
-        is_list_item = stripped == "-" or stripped.startswith("- ")
-        if first_enclosing and not saw_step_item:
-            if not is_list_item:
+
+        if block_scalar_parent_indent is not None:
+            if not stripped:
+                if idx == target_idx:
+                    return False
+                continue
+            if indent > block_scalar_parent_indent:
+                if idx == target_idx:
+                    return False
+                continue
+            block_scalar_parent_indent = None
+
+        if not stripped or (open_quote is None and stripped.startswith("#")):
+            if idx == target_idx:
                 return False
-            saw_step_item = True
-        normalized = stripped
-        while normalized == "-" or normalized.startswith("- "):
-            normalized = normalized[1:].lstrip(" ")
-        if not normalized:
             continue
+
+        if open_quote is not None or flow_depth > 0:
+            if idx == target_idx:
+                return False
+            scanned = _scan_yaml_flow_and_quote(stripped, open_quote, flow_depth)
+            if scanned is None:
+                return False
+            open_quote, flow_depth = scanned
+            continue
+
+        if indent == 0 and stripped in {"---", "..."}:
+            if idx == target_idx:
+                return False
+            stack.clear()
+            continue
+
+        is_list_item = stripped == "-" or stripped.startswith("- ")
+
+        # Pop closed scopes before inspecting the current line.
+        while stack:
+            top_indent, _top_key, top_is_item, top_empty = stack[-1]
+            if top_indent > indent:
+                stack.pop()
+            elif top_indent == indent:
+                if is_list_item and top_empty and not top_is_item:
+                    # Flush sequence under an empty-value mapping key (e.g. `steps:\n- uses:`).
+                    break
+                stack.pop()
+            else:
+                break
+
+        if idx == target_idx:
+            break
+
+        normalized = stripped[1:].lstrip(" ") if is_list_item else stripped
+        # Reject nested sequences (`- - ...`) as ambiguous step structure.
+        if normalized == "-" or normalized.startswith("- "):
+            return False
+        if not normalized:
+            if is_list_item:
+                stack.append((indent, "-", True, True))
+            continue
+        if normalized.startswith("#"):
+            if is_list_item:
+                stack.append((indent, "-", True, True))
+            continue
+
+        if _BLOCK_SCALAR_HEADER.fullmatch(_strip_yaml_comment(normalized)):
+            block_scalar_parent_indent = indent
+            continue
+
         key_match = _YAML_KEY_LINE.fullmatch(normalized)
         if key_match is None:
-            return False
+            scanned = _scan_yaml_flow_and_quote(stripped, open_quote, flow_depth)
+            if scanned is None:
+                return False
+            open_quote, flow_depth = scanned
+            continue
+
         key = key_match.group(1).lower()
         rest_no_comment = _strip_yaml_comment(key_match.group(2))
-        if (
-            rest_no_comment in {"|", "|-", "|+", ">", ">-", ">+"}
-            or rest_no_comment.startswith(("|", ">"))
-            or rest_no_comment.endswith((" |", " |-", " |+", " >", " >-", " >+"))
+        if _BLOCK_SCALAR_HEADER.fullmatch(rest_no_comment):
+            block_scalar_parent_indent = indent
+            stack.append((indent, key, is_list_item, False))
+            continue
+
+        scanned = _scan_yaml_flow_and_quote(key_match.group(2), None, 0)
+        if scanned is None:
+            return False
+        open_quote, flow_depth = scanned
+        empty_value = rest_no_comment == "" and open_quote is None and flow_depth == 0
+        stack.append((indent, key, is_list_item, empty_value))
+
+    if starts_with_dash:
+        if require_jobs:
+            if len(stack) != 3:
+                return False
+            jobs_frame, job_frame, steps_frame = stack
+            return (
+                jobs_frame[0] == 0
+                and jobs_frame[1] == "jobs"
+                and not jobs_frame[2]
+                and jobs_frame[3]
+                and not job_frame[2]
+                and job_frame[3]
+                and job_frame[1] not in _FORBIDDEN_STEP_ANCESTOR_KEYS
+                and steps_frame[1] == "steps"
+                and not steps_frame[2]
+                and steps_frame[3]
+                and steps_frame[0] <= change_indent
+            )
+        return (
+            len(stack) >= 1
+            and stack[-1][1] == "steps"
+            and not stack[-1][2]
+            and stack[-1][3]
+            and stack[-1][0] <= change_indent
+        )
+
+    if require_jobs:
+        if len(stack) != 4:
+            return False
+        jobs_frame, job_frame, steps_frame, item_frame = stack
+        if not (
+            jobs_frame[0] == 0
+            and jobs_frame[1] == "jobs"
+            and not jobs_frame[2]
+            and jobs_frame[3]
+            and not job_frame[2]
+            and job_frame[3]
+            and job_frame[1] not in _FORBIDDEN_STEP_ANCESTOR_KEYS
+            and steps_frame[1] == "steps"
+            and not steps_frame[2]
+            and steps_frame[3]
         ):
             return False
-        if key in _FORBIDDEN_STEP_ANCESTOR_KEYS:
-            return False
-        if key == "steps" and not saw_steps:
-            if rest_no_comment or not saw_step_item:
-                return False
-            saw_steps = True
-            if not require_jobs:
-                return True
-        elif saw_steps and key == "jobs" and indent == 0:
-            return not rest_no_comment
-    return False
+        return (
+            item_frame[2]
+            and item_frame[0] < change_indent
+            and item_frame[1] not in _FORBIDDEN_STEP_ANCESTOR_KEYS
+        )
+    return (
+        len(stack) >= 2
+        and stack[-2][1] == "steps"
+        and not stack[-2][2]
+        and stack[-2][3]
+        and stack[-1][2]
+        and stack[-1][0] < change_indent
+        and stack[-1][1] not in _FORBIDDEN_STEP_ANCESTOR_KEYS
+    )
 
 
 def _load_trusted_workflow_lines(

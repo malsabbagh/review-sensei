@@ -966,6 +966,477 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                     environ={},
                 )
 
+    def test_top_down_yaml_ancestry_and_block_scalar_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            wf = root / ".github" / "workflows" / "w.yml"
+            wf.parent.mkdir(parents=True)
+
+            # RS-7C68F8: Nested list under a step's custom mapping is rejected.
+            wf.write_text(
+                "name: CI\n"
+                "on: [push]\n"
+                "jobs:\n"
+                "  build:\n"
+                "    steps:\n"
+                "      - name: Sibling\n"
+                "        custom_map:\n"
+                "        - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            nested_diff = (
+                "diff --git a/.github/workflows/w.yml b/.github/workflows/w.yml\n"
+                "--- a/.github/workflows/w.yml\n"
+                "+++ b/.github/workflows/w.yml\n"
+                "@@ -6,3 +6,3 @@\n"
+                "       - name: Sibling\n"
+                "         custom_map:\n"
+                "-        - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                "+        - uses: actions/checkout@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea\n"
+            )
+            c_nested = classify_supplemental_scope(
+                analyze_diff(nested_diff),
+                policy=SupplementalDocumentPolicy(),
+                context_root=root,
+            )
+            self.assertEqual(c_nested.kind, "ordinary")
+            self.assertEqual(c_nested.reason, "unverified-step-context")
+
+            # RS-C19E7A: Block scalar inside the same step mapping is rejected.
+            wf.write_text(
+                "name: CI\n"
+                "on: [push]\n"
+                "jobs:\n"
+                "  build:\n"
+                "    steps:\n"
+                "      - name: Scripted\n"
+                "        run: >2-\n"
+                "          echo start\n"
+                "          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            scalar_diff = (
+                "diff --git a/.github/workflows/w.yml b/.github/workflows/w.yml\n"
+                "--- a/.github/workflows/w.yml\n"
+                "+++ b/.github/workflows/w.yml\n"
+                "@@ -7,3 +7,3 @@\n"
+                "         run: >2-\n"
+                "           echo start\n"
+                "-          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                "+          - uses: actions/checkout@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea\n"
+            )
+            c_scalar = classify_supplemental_scope(
+                analyze_diff(scalar_diff),
+                policy=SupplementalDocumentPolicy(),
+                context_root=root,
+            )
+            self.assertEqual(c_scalar.kind, "ordinary")
+            self.assertEqual(c_scalar.reason, "unverified-step-context")
+
+            # Valid: flush-indented `steps:\n- uses:` and real sibling step after `run: |`.
+            wf.write_text(
+                "name: CI\n"
+                "on: [push]\n"
+                "jobs:\n"
+                "  build:\n"
+                "    steps:\n"
+                "    - name: First\n"
+                "      run: |\n"
+                "        echo ok\n"
+                "    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                "    - name: Second\n"
+                "      id: s2\n"
+                "      uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            valid_diff = (
+                "diff --git a/.github/workflows/w.yml b/.github/workflows/w.yml\n"
+                "--- a/.github/workflows/w.yml\n"
+                "+++ b/.github/workflows/w.yml\n"
+                "@@ -8,5 +8,5 @@\n"
+                "         echo ok\n"
+                "-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                "+    - uses: actions/checkout@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea\n"
+                "     - name: Second\n"
+                "       id: s2\n"
+                "-      uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066\n"
+                "+      uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea\n"
+            )
+            c_valid = classify_supplemental_scope(
+                analyze_diff(valid_diff),
+                policy=SupplementalDocumentPolicy(),
+                context_root=root,
+            )
+            self.assertEqual(c_valid.kind, "version-only-github-action-update")
+            self.assertEqual(
+                c_valid.updated_actions,
+                ("actions/checkout", "github/codeql-action/init"),
+            )
+
+    def test_scoped_partial_continue_and_legacy_fallback_without_scoped_lenses(
+        self,
+    ) -> None:
+        # RS-1515BD: Scoped partial-continue reservation matches on current_matched.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            root = _seed_source_root(tmp, version_only_action_updates=True)
+            (root / ".reviewsensei.yml").write_text(
+                "schema: 1\n"
+                "inference:\n"
+                "  backend: local-ollama\n"
+                "  model: qwen3.5:4b\n"
+                "advanced:\n"
+                "  large_changes:\n"
+                "    orchestrate: true\n"
+                "  resources:\n"
+                "    max_provider_calls: 8\n"
+                "  context:\n"
+                "    supplemental_documents:\n"
+                "      version_only_action_updates: true\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            parts = [_PR497_PATCH.read_text(encoding="utf-8")]
+            for idx in range(1, 17):
+                wf_name = f"wf_{idx}.yml"
+                (root / ".github" / "workflows" / wf_name).write_text(
+                    f"name: WF {idx}\n"
+                    "on: [push]\n"
+                    "jobs:\n"
+                    "  lint:\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    steps:\n"
+                    "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.1.0\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                parts.append(
+                    f"diff --git a/.github/workflows/{wf_name} b/.github/workflows/{wf_name}\n"
+                    "index 11111111..22222222 100644\n"
+                    f"--- a/.github/workflows/{wf_name}\n"
+                    f"+++ b/.github/workflows/{wf_name}\n"
+                    "@@ -4,4 +4,4 @@ jobs:\n"
+                    "   lint:\n"
+                    "     runs-on: ubuntu-latest\n"
+                    "     steps:\n"
+                    "-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.1.0\n"
+                    "+      - uses: actions/checkout@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.1.1\n"
+                )
+            diff_file = tmp / "nine-workflows.patch"
+            diff_file.write_text("".join(parts), encoding="utf-8", newline="\n")
+            fixture_resp = tmp / "resp.json"
+            fixture_resp.write_text(
+                '{"summary": "Chunk clean.", "comments": []}',
+                encoding="utf-8",
+                newline="\n",
+            )
+            ledger_dir = tmp / "ledger"
+            out1 = tmp / "out1.json"
+            out2 = tmp / "out2.json"
+            out3 = tmp / "out3.json"
+            sel1 = tmp / "sel1.json"
+            sel2 = tmp / "sel2.json"
+            sel3 = tmp / "sel3.json"
+            small_limits = ReviewLimits(
+                max_diff_bytes=64 * 1024,
+                max_diff_lines=1600,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            )
+            base_args = [
+                "--diff",
+                str(diff_file),
+                "--context-root",
+                str(root),
+                "--config",
+                str(root / ".reviewsensei.yml"),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(fixture_resp),
+                "--repository",
+                "owner/repo",
+                "--pull-request",
+                "497",
+                "--base-sha",
+                _BASE_SHA,
+                "--head-sha",
+                _HEAD_SHA,
+                "--transaction",
+                "--session-ledger",
+                str(ledger_dir),
+                "--orchestrate-large-changes",
+                "--format",
+                "json",
+                "--no-learning-proposals",
+            ]
+            err1 = io.StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err1),
+            ):
+                rc1 = cli.main(
+                    [
+                        *base_args,
+                        "--context-selection-output",
+                        str(sel1),
+                        "--output",
+                        str(out1),
+                    ]
+                )
+            self.assertEqual(rc1, 2, err1.getvalue())
+            res1 = ReviewResult.from_dict(json.loads(out1.read_text(encoding="utf-8")))
+            assert res1.transaction is not None
+            complete_review_publication(
+                LocalSessionLedger(ledger_dir),
+                SessionIdentity("owner/repo", 497),
+                res1.transaction,
+                published=True,
+            )
+
+            # Second window produces partial-continue reservation on scoped context.
+            err2 = io.StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err2),
+            ):
+                rc2 = cli.main(
+                    [
+                        *base_args,
+                        "--context-selection-output",
+                        str(sel2),
+                        "--output",
+                        str(out2),
+                    ]
+                )
+            self.assertEqual(rc2, 2, err2.getvalue())
+            res2 = ReviewResult.from_dict(json.loads(out2.read_text(encoding="utf-8")))
+            self.assertEqual(res2.review_status, "partial")
+            assert res2.transaction is not None
+            self.assertNotEqual(
+                res2.transaction.reservation_id, res1.transaction.reservation_id
+            )
+            complete_review_publication(
+                LocalSessionLedger(ledger_dir),
+                SessionIdentity("owner/repo", 497),
+                res2.transaction,
+                published=True,
+            )
+
+            # Third window must match the scoped partial-continue reservation without triggering legacy fallback.
+            err3 = io.StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err3),
+            ):
+                rc3 = cli.main(
+                    [
+                        *base_args,
+                        "--context-selection-output",
+                        str(sel3),
+                        "--output",
+                        str(out3),
+                    ]
+                )
+            self.assertEqual(rc3, 0, err3.getvalue())
+            res3 = ReviewResult.from_dict(json.loads(out3.read_text(encoding="utf-8")))
+            self.assertEqual(res3.review_status, "complete")
+            self.assertEqual(
+                json.loads(sel3.read_text(encoding="utf-8"))[0]["policy"],
+                VERSION_ONLY_ACTION_POLICY,
+            )
+
+        # RS-E61701: Legacy recovery fallback triggers even when selection lenses hold legacy policy.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            root = _seed_source_root(tmp, version_only_action_updates=False)
+            diff_text = _PR497_PATCH.read_text(encoding="utf-8")
+            ledger = LocalSessionLedger(tmp / "ledger")
+            identity = SessionIdentity(repository="owner/repo", pull_request=497)
+            policy = ReviewConvergencePolicy()
+            configuration = parse_configuration_text(
+                (root / ".reviewsensei.yml").read_text(encoding="utf-8"), root=root
+            )
+            work_policy = review_work_policy_digest(
+                configuration.advanced.review_work,
+                _default_budget(configuration),
+                decision=configuration.decision,
+            )
+            analysis = analyze_diff(diff_text)
+            legacy_sel = build_review_context_selection(
+                DEFAULT_CATEGORY_CATALOG.categories,
+                changed_paths=analysis.changed_paths,
+                context_store=RepositoryContextStore(root),
+                changed_lines=analysis.changed_lines,
+                diff_analysis=None,
+                document_policy=SupplementalDocumentPolicy(
+                    version_only_action_updates=False
+                ),
+            )
+            _, tx_provider, tx_model = _resolve_recovery_inference(
+                configuration, cli_provider=None, cli_model=None, environ={}
+            )
+            stage_id, cat_pol = transaction_stage_identity(DEFAULT_STAGES)
+            cfg_digest = ReviewTransaction.compute_configuration_digest(
+                build_transaction_configuration_context(
+                    provider=tx_provider,
+                    model=tx_model,
+                    stages=stage_id,
+                    category_policy=cat_pol,
+                    publication_mode=policy.mode,
+                    orchestration_enabled=False,
+                    work_policy_digest=work_policy,
+                )
+            )
+            ev_digest = ReviewTransaction.compute_evidence_digest(
+                {"evidence_policy": "legacy", "snapshot_sha256": None}
+            )
+            legacy_key = build_review_context_cache_key(
+                ReviewRequest(
+                    diff=diff_text,
+                    repository="owner/repo",
+                    pull_request_number=497,
+                    model="llama3.2:latest",
+                    active_category_ids=legacy_sel.active_category_ids,
+                    lens_contexts=legacy_sel.lens_contexts,
+                    source_context=legacy_sel.source_context,
+                    base_sha=_BASE_SHA,
+                    head_sha=_LEGACY_HEAD_SHA,
+                    work_policy_digest=work_policy,
+                ),
+                provider_name="ollama",
+                stages=DEFAULT_STAGES,
+                profile="default",
+                effective_model="llama3.2:latest",
+                stage_provider_bindings={
+                    s.name: ("ollama", "llama3.2:latest") for s in DEFAULT_STAGES
+                },
+            )
+            assert legacy_key is not None
+            legacy_prefix = (
+                "publish:"
+                + legacy_key.digest()
+                + ":"
+                + policy.digest()
+                + ":"
+                + cfg_digest
+                + ":"
+                + ev_digest
+            )
+            legacy_res = session_reservation_id(
+                repository="owner/repo",
+                pull_request=497,
+                head_sha=_LEGACY_HEAD_SHA,
+                kind=legacy_prefix,
+            )
+            tx = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id=legacy_res,
+                base_sha=_BASE_SHA,
+                head_sha=_LEGACY_HEAD_SHA,
+                configuration_digest=cfg_digest,
+                evidence_digest=ev_digest,
+            )
+            reviewed_cov = CoverageManifest(
+                enumeration_complete=True,
+                enumerated_paths=(".github/workflows/ci.yml",),
+                files=(
+                    FileCoverage(
+                        path=".github/workflows/ci.yml",
+                        outcome="reviewed",
+                    ),
+                ),
+                hunks=(
+                    HunkCoverage(
+                        index=1,
+                        path=".github/workflows/ci.yml",
+                        outcome="reviewed",
+                    ),
+                ),
+            )
+            partial = ReviewResult(
+                summary="Partial.",
+                comments=(),
+                provider="ollama",
+                model="llama3.2:latest",
+                review_status="partial",
+                coverage=reviewed_cov,
+                transaction=tx.transaction,
+                work_policy_digest=work_policy,
+            )
+            tx_cp = checkpoint_review_analysis(ledger, identity, tx, partial)
+            rec = complete_review_publication(
+                ledger, identity, tx_cp.transaction, published=True
+            )
+            # Re-bind under partial-continue reservation on retry under toggled policy.
+            partial_res = session_reservation_id(
+                repository="owner/repo",
+                pull_request=497,
+                head_sha=_LEGACY_HEAD_SHA,
+                kind=legacy_prefix
+                + f":partial-continue:{rec.failed_attempts}:{rec.generation}",
+            )
+            tx2 = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id=partial_res,
+                base_sha=_BASE_SHA,
+                head_sha=_LEGACY_HEAD_SHA,
+                configuration_digest=cfg_digest,
+                evidence_digest=ev_digest,
+            )
+            clean = replace(
+                partial,
+                review_status="complete",
+                coverage=reviewed_cov,
+                transaction=tx2.transaction,
+            )
+            legacy_baseline = ReviewBaseline(
+                cache_key=legacy_key,
+                policy_digest=policy.digest(),
+                complete=True,
+                coverage_complete=True,
+                generation=tx2.record.generation + 1,
+                findings=(),
+                reviewed_paths=(".github/workflows/ci.yml",),
+            )
+            checkpoint_review_analysis(
+                ledger, identity, tx2, clean, baseline=legacy_baseline
+            )
+            (root / ".reviewsensei.yml").write_text(
+                (root / ".reviewsensei.yml")
+                .read_text(encoding="utf-8")
+                .replace(
+                    "version_only_action_updates: false",
+                    "version_only_action_updates: true",
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            recovered = reconstruct_publication_contexts(
+                source_root=root,
+                diff=diff_text,
+                ledger=ledger,
+                identity=identity,
+                base_sha=_BASE_SHA,
+                head_sha=_LEGACY_HEAD_SHA,
+                policy=policy,
+                environ={},
+            )
+            self.assertEqual(recovered.current_key, legacy_key)
+
 
 def _default_budget(configuration):
     from review_sensei.cli import _configured_resource_budget

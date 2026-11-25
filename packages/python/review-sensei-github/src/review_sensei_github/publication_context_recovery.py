@@ -38,11 +38,7 @@ from review_sensei.context import (
 )
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diff import analyze_diff
-from review_sensei.document_context import (
-    VERSION_ONLY_ACTION_POLICY,
-    DocumentSelectionReport,
-    SupplementalDocumentPolicy,
-)
+from review_sensei.document_context import SupplementalDocumentPolicy
 from review_sensei.errors import ContextLoadError, ReviewInputError
 from review_sensei.learnings import load_repository_learnings
 from review_sensei.models import (
@@ -743,18 +739,21 @@ def reconstruct_publication_contexts(
                 "original admission context is unavailable",
                 refusal_code="absent_context",
             )
-        candidate_reservation = session_reservation_id(
-            repository=identity.repository,
-            pull_request=identity.pull_request,
-            head_sha=head_sha,
-            kind="publish:"
+        reservation_kind = (
+            "publish:"
             + candidate_key.digest()
             + ":"
             + policy.digest()
             + ":"
             + configuration_digest
             + ":"
-            + evidence_digest,
+            + evidence_digest
+        )
+        candidate_reservation = session_reservation_id(
+            repository=identity.repository,
+            pull_request=identity.pull_request,
+            head_sha=head_sha,
+            kind=reservation_kind,
         )
         candidate_quarantine = False
         if record.quarantine_lineage is not None and transaction is not None:
@@ -778,17 +777,38 @@ def reconstruct_publication_contexts(
             ]
             if len(receipts) == 1:
                 candidate_reservation = transaction.reservation_id
+        if (
+            transaction is not None
+            and candidate_reservation != transaction.reservation_id
+            and record.failed_attempts > 0
+            and record.failed_attempts_head_sha == head_sha
+        ):
+            base_gen = min(record.generation, transaction.generation)
+            top_gen = max(record.generation, transaction.generation)
+            candidate_generations = tuple(range(max(0, base_gen - 3), top_gen + 1))
+            for failed_idx in range(1, record.failed_attempts + 1):
+                for gen in candidate_generations:
+                    partial_res = session_reservation_id(
+                        repository=identity.repository,
+                        pull_request=identity.pull_request,
+                        head_sha=head_sha,
+                        kind=(
+                            reservation_kind + f":partial-continue:{failed_idx}:{gen}"
+                        ),
+                    )
+                    if (
+                        partial_res == transaction.reservation_id
+                        and record.last_committed_reservation_id == partial_res
+                    ):
+                        candidate_reservation = partial_res
+                        break
+                if candidate_reservation == transaction.reservation_id:
+                    break
         return candidate_key, candidate_reservation, candidate_quarantine
 
     key, reservation, quarantine_full_analysis = _bind_selection(selection)
-    uses_scoped_documents = any(
-        isinstance(lens.document_selection, DocumentSelectionReport)
-        and lens.document_selection.policy == VERSION_ONLY_ACTION_POLICY
-        for lens in selection.lens_contexts
-    )
     if (
-        uses_scoped_documents
-        and document_policy.version_only_action_updates
+        document_policy.version_only_action_updates
         and transaction is not None
         and (
             record.last_committed_reservation_id != reservation
@@ -804,7 +824,7 @@ def reconstruct_publication_contexts(
                 source_context_policy=source_context_policy,
                 snapshot=context_snapshot,
                 changed_lines=analysis.changed_lines,
-                diff_analysis=analysis,
+                diff_analysis=None,
                 document_policy=SupplementalDocumentPolicy(
                     version_only_action_updates=False,
                     guidance_paths=document_policy.guidance_paths,
