@@ -38,6 +38,11 @@ from review_sensei.context import (
 )
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diff import analyze_diff
+from review_sensei.document_context import (
+    VERSION_ONLY_ACTION_POLICY,
+    DocumentSelectionReport,
+    SupplementalDocumentPolicy,
+)
 from review_sensei.errors import ContextLoadError, ReviewInputError
 from review_sensei.learnings import load_repository_learnings
 from review_sensei.models import (
@@ -672,6 +677,7 @@ def reconstruct_publication_contexts(
             max_depth=symbol_context_max_depth,
         )
     )
+    document_policy = SupplementalDocumentPolicy.from_configuration(configuration)
     try:
         selection = build_review_context_selection(
             catalog,
@@ -681,41 +687,13 @@ def reconstruct_publication_contexts(
             source_context_policy=source_context_policy,
             snapshot=context_snapshot,
             changed_lines=analysis.changed_lines,
+            diff_analysis=analysis,
+            document_policy=document_policy,
         )
     except ContextLoadError as exc:
         raise RecoveryRefusalError(
             f"absent_context: {exc}", refusal_code="absent_context"
         ) from exc
-    key = build_review_context_cache_key(
-        ReviewRequest(
-            diff=diff,
-            repository=identity.repository,
-            pull_request_number=identity.pull_request,
-            model=model,
-            learnings=learnings,
-            active_category_ids=selection.active_category_ids,
-            lens_contexts=selection.lens_contexts,
-            source_context=selection.source_context,
-            untrusted_head_sha=untrusted_head_sha,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            work_policy_digest=work_policy,
-        ),
-        provider_name=settings.name,
-        stages=effective_stages,
-        profile="default",
-        effective_model=model,
-        stage_provider_bindings={
-            stage.name: (settings.name, model) for stage in effective_stages
-        }
-        if model is not None
-        else None,
-    )
-    if key is None:
-        raise RecoveryRefusalError(
-            "original admission context is unavailable",
-            refusal_code="absent_context",
-        )
     if preloaded_record is not None:
         record = preloaded_record
     else:
@@ -731,41 +709,122 @@ def reconstruct_publication_contexts(
         reconstructed_configuration
     )
     evidence_digest = ReviewTransaction.compute_evidence_digest(evidence)
-    reservation = session_reservation_id(
-        repository=identity.repository,
-        pull_request=identity.pull_request,
-        head_sha=head_sha,
-        kind="publish:"
-        + key.digest()
-        + ":"
-        + policy.digest()
-        + ":"
-        + configuration_digest
-        + ":"
-        + evidence_digest,
-    )
-    quarantine_full_analysis = False
-    if record.quarantine_lineage is not None and transaction is not None:
-        from review_sensei.quarantine_lineage import full_analysis_reservation
 
-        full_reservation = full_analysis_reservation(
-            record.quarantine_lineage["scope_sha256"], reservation
+    def _bind_selection(
+        candidate_selection: review_sensei.context.ReviewContextSelection,
+    ) -> tuple[ReviewContextCacheKey, str, bool]:
+        candidate_key = build_review_context_cache_key(
+            ReviewRequest(
+                diff=diff,
+                repository=identity.repository,
+                pull_request_number=identity.pull_request,
+                model=model,
+                learnings=learnings,
+                active_category_ids=candidate_selection.active_category_ids,
+                lens_contexts=candidate_selection.lens_contexts,
+                source_context=candidate_selection.source_context,
+                untrusted_head_sha=untrusted_head_sha,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                work_policy_digest=work_policy,
+            ),
+            provider_name=settings.name,
+            stages=effective_stages,
+            profile="default",
+            effective_model=model,
+            stage_provider_bindings={
+                stage.name: (settings.name, model) for stage in effective_stages
+            }
+            if model is not None
+            else None,
         )
-        if transaction.reservation_id == full_reservation:
-            reservation = full_reservation
-            quarantine_full_analysis = True
-    if record.rescan_state is not None and transaction is not None:
-        # The consumed request derives a distinct transaction reservation from
-        # this independently reconstructed ordinary context. A successor may
-        # recover that exact recorded binding, never infer a new rescan grant.
-        receipts = [
-            item
-            for item in cast(list[dict[str, Any]], record.rescan_state["receipts"])
-            if item["ordinary_reservation"] == reservation
-            and item["reservation"] == transaction.reservation_id
-        ]
-        if len(receipts) == 1:
-            reservation = transaction.reservation_id
+        if candidate_key is None:
+            raise RecoveryRefusalError(
+                "original admission context is unavailable",
+                refusal_code="absent_context",
+            )
+        candidate_reservation = session_reservation_id(
+            repository=identity.repository,
+            pull_request=identity.pull_request,
+            head_sha=head_sha,
+            kind="publish:"
+            + candidate_key.digest()
+            + ":"
+            + policy.digest()
+            + ":"
+            + configuration_digest
+            + ":"
+            + evidence_digest,
+        )
+        candidate_quarantine = False
+        if record.quarantine_lineage is not None and transaction is not None:
+            from review_sensei.quarantine_lineage import full_analysis_reservation
+
+            full_reservation = full_analysis_reservation(
+                record.quarantine_lineage["scope_sha256"], candidate_reservation
+            )
+            if transaction.reservation_id == full_reservation:
+                candidate_reservation = full_reservation
+                candidate_quarantine = True
+        if record.rescan_state is not None and transaction is not None:
+            # The consumed request derives a distinct transaction reservation from
+            # this independently reconstructed ordinary context. A successor may
+            # recover that exact recorded binding, never infer a new rescan grant.
+            receipts = [
+                item
+                for item in cast(list[dict[str, Any]], record.rescan_state["receipts"])
+                if item["ordinary_reservation"] == candidate_reservation
+                and item["reservation"] == transaction.reservation_id
+            ]
+            if len(receipts) == 1:
+                candidate_reservation = transaction.reservation_id
+        return candidate_key, candidate_reservation, candidate_quarantine
+
+    key, reservation, quarantine_full_analysis = _bind_selection(selection)
+    uses_scoped_documents = any(
+        isinstance(lens.document_selection, DocumentSelectionReport)
+        and lens.document_selection.policy == VERSION_ONLY_ACTION_POLICY
+        for lens in selection.lens_contexts
+    )
+    if (
+        uses_scoped_documents
+        and document_policy.version_only_action_updates
+        and transaction is not None
+        and (
+            record.last_committed_reservation_id != reservation
+            or transaction.reservation_id != reservation
+        )
+    ):
+        try:
+            legacy_selection = build_review_context_selection(
+                catalog,
+                changed_paths=analysis.changed_paths,
+                learnings=learnings,
+                context_store=RepositoryContextStore(source_root),
+                source_context_policy=source_context_policy,
+                snapshot=context_snapshot,
+                changed_lines=analysis.changed_lines,
+                diff_analysis=analysis,
+                document_policy=SupplementalDocumentPolicy(
+                    version_only_action_updates=False,
+                    guidance_paths=document_policy.guidance_paths,
+                ),
+            )
+        except ContextLoadError as exc:
+            raise RecoveryRefusalError(
+                f"absent_context: {exc}", refusal_code="absent_context"
+            ) from exc
+        legacy_key, legacy_reservation, legacy_quarantine = _bind_selection(
+            legacy_selection
+        )
+        if (
+            record.last_committed_reservation_id == legacy_reservation
+            and transaction.reservation_id == legacy_reservation
+        ):
+            selection = legacy_selection
+            key = legacy_key
+            reservation = legacy_reservation
+            quarantine_full_analysis = legacy_quarantine
     if (
         record.repository_id not in {None, identity.repository_id}
         or transaction is None

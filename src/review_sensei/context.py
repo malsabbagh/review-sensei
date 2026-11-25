@@ -11,7 +11,11 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from .diff import DiffAnalysis
+    from .document_context import SupplementalDocumentPolicy
 
 from .errors import ContextLoadError, ReviewInputError
 from .learnings import LearningStore
@@ -737,7 +741,7 @@ def admit_prompt_context(
                     documents=tuple(
                         doc for doc in context.documents if doc.path not in omitted
                     ),
-                    document_selection=DocumentSelectionReport(decisions),
+                    document_selection=replace(report, decisions=decisions),
                 )
             )
         return replace(request, lens_contexts=tuple(contexts))
@@ -2724,6 +2728,8 @@ def build_review_context_selection(
     source_context_policy: SymbolAwareContextPolicy | None = None,
     snapshot: ContextSnapshot | None = None,
     changed_lines: Mapping[str, Iterable[int]] | None = None,
+    diff_analysis: DiffAnalysis | None = None,
+    document_policy: SupplementalDocumentPolicy | None = None,
 ) -> ReviewContextSelection:
     """Resolve applicable lenses and their bounded learnings/documents.
 
@@ -2751,7 +2757,15 @@ def build_review_context_selection(
     relevant_learnings = LearningStore(learnings).for_paths(paths)
     active_ids: list[str] = []
     lens_contexts: list[ReviewLensContext] = []
-    from .document_context import select_documents
+    from .diff import DiffAnalysis
+    from .document_context import SupplementalDocumentPolicy, select_documents
+
+    if diff_analysis is not None and not isinstance(diff_analysis, DiffAnalysis):
+        raise ContextLoadError("diff analysis is invalid")
+    if document_policy is not None and not isinstance(
+        document_policy, SupplementalDocumentPolicy
+    ):
+        raise ContextLoadError("supplemental document policy is invalid")
 
     applicable = tuple(
         category
@@ -2765,6 +2779,8 @@ def build_review_context_selection(
             context_store,
             tuple(category for category in applicable if category.uses_context),
             paths,
+            diff_analysis=diff_analysis,
+            document_policy=document_policy,
         )
         if context_store is not None
         else {}
