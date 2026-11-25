@@ -30,6 +30,7 @@ from review_sensei.errors import ReviewInputError  # noqa: E402
 from review_sensei.models import ReviewComment, ReviewResult  # noqa: E402
 
 HEAD = "b" * 40
+_network = None
 
 
 class InstalledStalledGuidanceContractTests(unittest.TestCase):
@@ -205,4 +206,5 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
-    _network.stop()
+    if _network is not None:
+        _network.stop()

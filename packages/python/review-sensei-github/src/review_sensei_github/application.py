@@ -4405,8 +4405,10 @@ class GitHubApplication:
                     if getattr(exc, "http_status", None) == 403:
                         status_lookup_error = status_lookup_error or exc
         response_loss_hold = (
-            self.reviewer._response_loss_holds.get(
-                (repository_id, pull_request, head_sha)
+            self.reviewer.response_loss_hold(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
             )
             if isinstance(self.reviewer, ReviewPublisher)
             else None

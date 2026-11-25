@@ -20,8 +20,12 @@ from review_sensei_github import (
     PublicationResult,
     ReviewPublisher,
 )
+from review_sensei_github.cli import (
+    _maybe_write_step_summary_for_error,
+)
 from review_sensei_github.cli import main as github_main
 from review_sensei_github.errors import (
+    GitHubHTTPTransientError,
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
@@ -32,6 +36,8 @@ from review_sensei_github.operation_diagnostics import (
 )
 from review_sensei_github.rescan import event_requests_remaining
 from review_sensei_github.review_guidance import (
+    _clean_text,
+    extract_forbidden_lookup,
     resolve_next_action_guidance,
 )
 from review_sensei_github.review_run import _get as review_run_get
@@ -55,7 +61,9 @@ from review_sensei.disposition import (
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult, ReviewTransaction
-from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
+from review_sensei.presentation import NO_REQUIRED_FIXES_STATE, ReviewSummaryView
+from review_sensei.providers.base import ReviewProvider
+from review_sensei.service import ReviewService
 from review_sensei.session import (
     LocalSessionLedger,
     SessionIdentity,
@@ -784,6 +792,14 @@ class StalledReviewGuidanceTests(unittest.TestCase):
             f"/pulls/{IDENTITY.pull_request}", startup_guidance.failed_lookup or ""
         )
         self.assertNotIn("retry", startup_guidance.next_action.lower())
+        with tempfile.TemporaryDirectory() as tmp2:
+            startup_summary = Path(tmp2) / "startup-summary.md"
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(startup_summary)}):
+                _maybe_write_step_summary_for_error(startup_ctx.exception)
+            written_startup = startup_summary.read_text(encoding="utf-8")
+            self.assertIn(f"/pulls/{IDENTITY.pull_request}", written_startup)
+            self.assertIn("HTTP 403", written_startup)
+            self.assertNotIn("retry", written_startup.lower())
 
     def test_acceptance_crash_after_github_accept_and_edge_cases(self):
         # 1a. Qualifying clean commit: crash right after GitHub accepts POST /reviews,
@@ -823,9 +839,6 @@ class StalledReviewGuidanceTests(unittest.TestCase):
         retained = checkpoint_review_analysis(
             self.ledger, IDENTITY, tx, clean_result, baseline=baseline_clean
         )
-        budget = ResourceBudget(max_provider_calls=4)
-        tracker = ResourceBudgetTracker(budget)
-        tracker.record_call("prompt", "response")
 
         state = _SimulatedGitHub()
         state.crash_after_review_post = True
@@ -872,10 +885,27 @@ class StalledReviewGuidanceTests(unittest.TestCase):
         )
         self.assertIsNotNone(restored_result)
         app2 = _make_app(state, fresh_ledger)
-        with patch(
-            "review_sensei.service.ReviewService.review",
-            side_effect=AssertionError(
-                "model analysis must not re-run on crash restart"
+        with (
+            patch.object(
+                ReviewService,
+                "review",
+                side_effect=AssertionError(
+                    "model analysis must not re-run on crash restart"
+                ),
+            ),
+            patch.object(
+                ReviewService,
+                "run",
+                side_effect=AssertionError(
+                    "model analysis must not re-run on crash restart"
+                ),
+            ),
+            patch.object(
+                ReviewProvider,
+                "complete",
+                side_effect=AssertionError(
+                    "provider must not be called on crash restart"
+                ),
             ),
         ):
             restarted = app2.publish_review(
@@ -897,7 +927,6 @@ class StalledReviewGuidanceTests(unittest.TestCase):
                 configuration_context=CONFIGURATION,
                 evidence_context=EVIDENCE,
             )
-        self.assertEqual(tracker.provider_calls, 1)
         self.assertEqual(restarted.status, "already_published")
         non_approve_reviews = [r for r in state.reviews if r["state"] != "APPROVED"]
         approve_reviews = [r for r in state.reviews if r["state"] == "APPROVED"]
@@ -1126,8 +1155,10 @@ class StalledReviewGuidanceTests(unittest.TestCase):
             head_sha=HEAD,
             record=ledger_unv.load(IDENTITY).record,
             retained_result=retained_unv,
-            response_loss_hold=app_unv.reviewer._response_loss_holds.get(
-                (IDENTITY.repository_id, IDENTITY.pull_request, HEAD)
+            response_loss_hold=app_unv.reviewer.response_loss_hold(
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD,
             ),
             error=ctx_unv.exception,
         )
@@ -1191,3 +1222,41 @@ class StalledReviewGuidanceTests(unittest.TestCase):
         self.assertIsNone(evidence_exhausted_guidance.command)
         self.assertIn("preserved", evidence_exhausted_guidance.blocker or "")
         self.assertIn("preserve", evidence_exhausted_guidance.next_action)
+
+    def test_transient_403_and_error_classification_boundaries(self):
+        # Transient / rate-limit 403 must never be misclassified as a static permission 403
+        # even if its __cause__ mentions "HTTP 403".
+        try:
+            try:
+                raise RuntimeError("upstream returned HTTP 403 primary rate limit")
+            except RuntimeError as inner:
+                raise GitHubHTTPTransientError(
+                    "GitHub rate limit exceeded (HTTP 403)"
+                ) from inner
+        except GitHubHTTPTransientError as rate_exc:
+            self.assertIsNone(extract_forbidden_lookup(error=rate_exc))
+            rate_guidance = resolve_next_action_guidance(head_sha=HEAD, error=rate_exc)
+            self.assertNotEqual(rate_guidance.state, "lookup_forbidden_hold")
+
+        # Generic substrings containing "caller api" or "allowance" must not trigger budget_exhausted.
+        non_budget = ReviewInputError("caller API version mismatch; no allowance field")
+        non_budget_guidance = resolve_next_action_guidance(
+            head_sha=HEAD, error=non_budget
+        )
+        self.assertEqual(non_budget_guidance.state, "publication_failed_hold")
+
+        # Explicit caller API budget exhaustion IS classified as budget_exhausted.
+        caller_budget = ReviewInputError("caller API request budget exhausted")
+        self.assertEqual(
+            resolve_next_action_guidance(head_sha=HEAD, error=caller_budget).state,
+            "budget_exhausted",
+        )
+
+        # Empty/whitespace next_action_text normalizes to None; small max_bytes never overflows.
+        view = ReviewSummaryView(
+            state=NO_REQUIRED_FIXES_STATE, head_sha=HEAD, next_action_text="   "
+        )
+        self.assertIsNone(view.next_action_text)
+        for limit in (0, 1, 2, 3, 4, 8):
+            truncated = _clean_text("éclairabcdef", max_bytes=limit)
+            self.assertLessEqual(len(truncated.encode("utf-8")), limit)

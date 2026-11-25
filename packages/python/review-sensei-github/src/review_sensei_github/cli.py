@@ -32,6 +32,7 @@ from review_sensei_github.observed import run_observed_review_sequence
 from review_sensei_github.openrouter_workflow import emit_hosted_openrouter_resolution
 from review_sensei_github.review_guidance import (
     extract_forbidden_lookup,
+    is_step_summary_written,
     resolve_next_action_guidance,
     write_publication_failure_step_summary,
 )
@@ -271,7 +272,7 @@ def _setup(arguments: list[str]) -> int:
 
 
 def _maybe_write_step_summary_for_error(error: BaseException) -> None:
-    if getattr(error, "_step_summary_written", False):
+    if is_step_summary_written(error):
         return
     try:
         if extract_forbidden_lookup(error=error) is not None or isinstance(
@@ -279,9 +280,12 @@ def _maybe_write_step_summary_for_error(error: BaseException) -> None:
         ):
             guidance = resolve_next_action_guidance(head_sha=None, error=error)
             write_publication_failure_step_summary(guidance)
-    except Exception:
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
         # Never mask the primary CLI error if step-summary formatting fails.
-        pass
+        print(
+            f"review-sensei: step summary skipped ({type(exc).__name__})",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

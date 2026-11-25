@@ -726,6 +726,8 @@ class ReviewSummaryView:
             object.__setattr__(self, "optional", pure_optional)
         if len(self.optional) > _HIGHLIGHTED_OPTIONAL_LIMIT:
             raise ReviewInputError("review summary highlights too many optional items")
+        if self.next_action_text is not None and not self.next_action_text.strip():
+            object.__setattr__(self, "next_action_text", None)
         if (
             isinstance(self.omitted_explanations, bool)
             or not isinstance(self.omitted_explanations, int)

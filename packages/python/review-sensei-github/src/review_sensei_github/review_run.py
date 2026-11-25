@@ -69,6 +69,7 @@ from .publication import PublicationResult, ReviewPublisher
 from .quarantine_capacity import _install_guarded_ledger_replaces
 from .review_finalization_diagnostics import close_not_entered, close_review_run
 from .review_guidance import (
+    mark_step_summary_written,
     resolve_next_action_guidance,
     write_publication_failure_step_summary,
 )
@@ -1316,12 +1317,10 @@ class ReviewRun:
             lifecycle_diagnostics.publication(outcome)
             publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
             response_loss_hold = (
-                application.reviewer._response_loss_holds.get(
-                    (
-                        self.identity.repository_id,
-                        self.identity.pull_request,
-                        self.head_sha,
-                    )
+                application.reviewer.response_loss_hold(
+                    repository_id=self.identity.repository_id,
+                    pull_request=self.identity.pull_request,
+                    head_sha=self.head_sha,
                 )
                 if isinstance(application.reviewer, ReviewPublisher)
                 and type(self.identity.repository_id) is int
@@ -1359,7 +1358,7 @@ class ReviewRun:
                 head_sha=self.head_sha,
                 diagnostic=cast(str | None, outcome["diagnostic"]),
             )
-            setattr(pub_error, "_step_summary_written", True)
+            mark_step_summary_written(pub_error)
             raise
         lifecycle_diagnostics.publication(
             {
@@ -1440,12 +1439,10 @@ class ReviewRun:
         )
         if exit_code != 0:
             response_loss_hold = (
-                application.reviewer._response_loss_holds.get(
-                    (
-                        self.identity.repository_id,
-                        self.identity.pull_request,
-                        self.head_sha,
-                    )
+                application.reviewer.response_loss_hold(
+                    repository_id=self.identity.repository_id,
+                    pull_request=self.identity.pull_request,
+                    head_sha=self.head_sha,
                 )
                 if isinstance(application.reviewer, ReviewPublisher)
                 and type(self.identity.repository_id) is int
@@ -1466,13 +1463,15 @@ class ReviewRun:
                 ),
                 reviews_policy=self.plan.policy.reviews,
             )
+            summary_diagnostic = publication.diagnostic or (
+                terminal_reason if isinstance(terminal_reason, str) else None
+            )
             write_publication_failure_step_summary(
                 guidance,
                 repository=self.identity.repository,
                 pull_request=self.identity.pull_request,
                 head_sha=self.head_sha,
-                diagnostic=publication.diagnostic
-                or (terminal_reason if isinstance(terminal_reason, str) else None),
+                diagnostic=summary_diagnostic,
             )
         return exit_code
 

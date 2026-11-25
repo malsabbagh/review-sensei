@@ -94,10 +94,14 @@ def _short_sha(value: str | None) -> str:
 
 def _clean_text(value: str, *, max_bytes: int = 320) -> str:
     collapsed = " ".join(str(value).split())
-    limit = max(3, int(max_bytes))
+    limit = int(max_bytes)
+    if limit <= 0:
+        return ""
     encoded = collapsed.encode("utf-8")
     if len(encoded) <= limit:
         return collapsed
+    if limit <= 3:
+        return "." * limit
     target = limit - 3
     chars: list[str] = []
     used = 0
@@ -232,9 +236,8 @@ def extract_forbidden_lookup(
         if isinstance(
             current, (GitHubHTTPTransientError, GitHubPublicationTransientError)
         ):
-            # Rate-limited 403 is surfaced as transient; do not classify as static permission 403.
-            current = current.__cause__
-            continue
+            # Rate-limited 403 is surfaced as transient; never misclassify as static permission 403.
+            return None
         status = getattr(current, "http_status", None)
         failed_lookup = getattr(current, "failed_lookup", None)
         if status == 403:
@@ -278,8 +281,10 @@ def _is_budget_exhausted_error(error: BaseException | None) -> str | None:
         for needle, label in (
             ("partition shared request budget exhausted", "evidence read budget"),
             ("review scan shared budget exhausted", "evidence read budget"),
-            ("caller api", "caller API request budget"),
-            ("allowance", "caller API request allowance"),
+            ("caller api request budget", "caller API request budget"),
+            ("caller api budget", "caller API request budget"),
+            ("request allowance exhausted", "caller API request allowance"),
+            ("allowance exhausted", "caller API request allowance"),
             ("budget exhausted", "review budget"),
             ("pagination exhausted", "GitHub pagination budget"),
         ):
@@ -629,7 +634,7 @@ def resolve_next_action_guidance(
         or (
             isinstance(prior_head_sha, str)
             and isinstance(head_sha, str)
-            and _SHA_HEX.fullmatch(head_sha) is not None
+            and bool(_SHA_HEX.fullmatch(head_sha))
             and prior_head_sha != head_sha
         )
     ):
@@ -789,32 +794,33 @@ def resolve_next_action_guidance(
             )
         if not coverage_accepted:
             reviewed, total, sample_paths = text_remaining
-            cmd = f"@reviewsensei review remaining commit {head_sha}"
             remaining_count = total - reviewed
-            sample_note = (
-                f" (including {', '.join(f'`{sanitize_finding_markdown(p)}`' for p in sample_paths)})"
-                if sample_paths
-                else ""
-            )
-            return NextActionGuidance(
-                schema_version="1.0",
-                state="remaining_text_coverage",
-                completed=completed,
-                blocker=(
-                    f"Reviewable text remains unreviewed on commit `{short}` "
-                    f"({remaining_count} unit(s) remaining{sample_note})."
-                ),
-                next_action=(
-                    f"Comment `{cmd}` to authorize one bounded analysis window "
-                    "for the remaining reviewable text on this commit."
-                ),
-                command=cmd,
-                requires_model_call=True,
-                model_call_note=(
-                    "Requires model calls (authorizes one bounded analysis window "
-                    "within the configured review budget)"
-                ),
-            )
+            if remaining_count > 0:
+                cmd = f"@reviewsensei review remaining commit {head_sha}"
+                sample_note = (
+                    f" (including {', '.join(f'`{sanitize_finding_markdown(p)}`' for p in sample_paths)})"
+                    if sample_paths
+                    else ""
+                )
+                return NextActionGuidance(
+                    schema_version="1.0",
+                    state="remaining_text_coverage",
+                    completed=completed,
+                    blocker=(
+                        f"Reviewable text remains unreviewed on commit `{short}` "
+                        f"({remaining_count} unit(s) remaining{sample_note})."
+                    ),
+                    next_action=(
+                        f"Comment `{cmd}` to authorize one bounded analysis window "
+                        "for the remaining reviewable text on this commit."
+                    ),
+                    command=cmd,
+                    requires_model_call=True,
+                    model_call_note=(
+                        "Requires model calls (authorizes one bounded analysis window "
+                        "within the configured review budget)"
+                    ),
+                )
 
     # 7. Non-text / media-only partial coverage.
     if retained_result is not None and retained_result.coverage_only_partial:
@@ -1179,6 +1185,22 @@ def write_publication_failure_step_summary(
         return True
     except OSError:
         return False
+
+
+_STEP_SUMMARY_WRITTEN_ATTR = "_step_summary_written"
+
+
+def mark_step_summary_written(error: BaseException) -> None:
+    """Record on ``error`` that its Actions step summary was already emitted."""
+    try:
+        setattr(error, _STEP_SUMMARY_WRITTEN_ATTR, True)
+    except AttributeError:
+        pass
+
+
+def is_step_summary_written(error: BaseException) -> bool:
+    """Return True when a handler already wrote the Actions step summary for ``error``."""
+    return bool(getattr(error, _STEP_SUMMARY_WRITTEN_ATTR, False))
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
