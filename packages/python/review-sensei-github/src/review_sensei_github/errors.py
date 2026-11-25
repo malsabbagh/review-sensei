@@ -132,6 +132,17 @@ class GitHubHTTPError(ReviewSenseiError):
 
     error_category = "github_http"
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        http_status: int | None = None,
+        failed_lookup: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.failed_lookup = failed_lookup
+
 
 class GitHubHTTPResponseTooLargeError(GitHubHTTPError):
     """Raised when a GitHub response exceeds the transport byte ceiling."""
@@ -194,6 +205,19 @@ class GitHubPublicationError(ReviewSenseiError):
     """Raised when a validated review cannot be published."""
 
     error_category = "github_publication"
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        http_status: int | None = None,
+        failed_lookup: str | None = None,
+        operation_diagnostics: object | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.failed_lookup = failed_lookup
+        self.operation_diagnostics = operation_diagnostics
 
 
 class GitHubPublicationTransientError(GitHubPublicationError):

@@ -85,11 +85,11 @@ def _issued(value: Any) -> bool:
 
 
 def result_document(value: Any) -> dict[str, Any]:
-    """The exact retained public result, excluding its completion witness."""
+    """The exact retained public result, excluding its completion and guidance witnesses."""
     return {
         item.name: asdict_value(getattr(value, item.name))
         for item in fields(value)
-        if item.name != "finalization_completion"
+        if item.name not in {"finalization_completion", "next_action_guidance"}
     }
 
 

@@ -68,6 +68,10 @@ from .learning_pr import LearningPRPublisher
 from .publication import PublicationResult, ReviewPublisher
 from .quarantine_capacity import _install_guarded_ledger_replaces
 from .review_finalization_diagnostics import close_not_entered, close_review_run
+from .review_guidance import (
+    resolve_next_action_guidance,
+    write_publication_failure_step_summary,
+)
 from .run_authority import request_authority
 from .session_ledger import GitHubIssueCommentSessionLedger
 
@@ -1283,7 +1287,7 @@ class ReviewRun:
                 changed_paths=analysis.changed_paths,
                 observed_trust=observed_trust,
             )
-        except ReviewSenseiError:
+        except ReviewSenseiError as pub_error:
             # A durable native intent may stop a later effect before the
             # publisher returns. Preserve an outcome without promoting the
             # attempted publication or its journal into a confirmed receipt.
@@ -1311,6 +1315,51 @@ class ReviewRun:
             }
             lifecycle_diagnostics.publication(outcome)
             publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
+            response_loss_hold = (
+                application.reviewer._response_loss_holds.get(
+                    (
+                        self.identity.repository_id,
+                        self.identity.pull_request,
+                        self.head_sha,
+                    )
+                )
+                if isinstance(application.reviewer, ReviewPublisher)
+                and type(self.identity.repository_id) is int
+                else None
+            )
+            guidance = resolve_next_action_guidance(
+                head_sha=self.head_sha,
+                retained_result=analysis.result,
+                approval_progress=(
+                    observed.approval_progress
+                    if isinstance(observed, PublicationResult)
+                    else None
+                ),
+                operation_diagnostics=(
+                    observed.operation_diagnostics
+                    if isinstance(observed, PublicationResult)
+                    else None
+                ),
+                publication=observed
+                if isinstance(observed, PublicationResult)
+                else None,
+                response_loss_hold=response_loss_hold,
+                error=pub_error,
+                reconciled_review_id=confirmed_review,
+                auto_approve=(
+                    self.restart_id is None
+                    and self.plan.policy.reviews == "auto-approve"
+                ),
+                reviews_policy=self.plan.policy.reviews,
+            )
+            write_publication_failure_step_summary(
+                guidance,
+                repository=self.identity.repository,
+                pull_request=self.identity.pull_request,
+                head_sha=self.head_sha,
+                diagnostic=cast(str | None, outcome["diagnostic"]),
+            )
+            setattr(pub_error, "_step_summary_written", True)
             raise
         lifecycle_diagnostics.publication(
             {
@@ -1381,7 +1430,7 @@ class ReviewRun:
         lifecycle_diagnostics.publication(outcome)
         lifecycle_diagnostics.phase("outcome_write")
         publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
-        return (
+        exit_code = (
             0
             if published
             and accounting_terminal
@@ -1389,12 +1438,57 @@ class ReviewRun:
             and publication.diagnostic not in _NON_ZERO_CLOSED_DIAGNOSTICS
             else 1
         )
+        if exit_code != 0:
+            response_loss_hold = (
+                application.reviewer._response_loss_holds.get(
+                    (
+                        self.identity.repository_id,
+                        self.identity.pull_request,
+                        self.head_sha,
+                    )
+                )
+                if isinstance(application.reviewer, ReviewPublisher)
+                and type(self.identity.repository_id) is int
+                else None
+            )
+            guidance = resolve_next_action_guidance(
+                head_sha=self.head_sha,
+                retained_result=analysis.result,
+                approval_progress=publication.approval_progress,
+                operation_diagnostics=publication.operation_diagnostics,
+                publication=publication,
+                response_loss_hold=response_loss_hold,
+                reconciled_review_id=publication.review_id,
+                check_rejection=check_rejection,
+                auto_approve=(
+                    self.restart_id is None
+                    and self.plan.policy.reviews == "auto-approve"
+                ),
+                reviews_policy=self.plan.policy.reviews,
+            )
+            write_publication_failure_step_summary(
+                guidance,
+                repository=self.identity.repository,
+                pull_request=self.identity.pull_request,
+                head_sha=self.head_sha,
+                diagnostic=publication.diagnostic
+                or (terminal_reason if isinstance(terminal_reason, str) else None),
+            )
+        return exit_code
 
 
 def _get(http: GitHubHttp, path: str, token: str) -> dict[str, Any]:
     status, value = http.request("GET", path, token=token)
     if status != 200 or not isinstance(value, dict):
-        raise ReviewInputError("authenticated review startup evidence is unavailable")
+        exc = ReviewInputError("authenticated review startup evidence is unavailable")
+        if status == 403:
+            setattr(exc, "http_status", 403)
+            setattr(
+                exc,
+                "failed_lookup",
+                f"GET {path.split('?', 1)[0]} (HTTP 403)",
+            )
+        raise exc
     return value
 
 
