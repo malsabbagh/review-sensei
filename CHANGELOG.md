@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.8.26 - 2026-11-25
+
+Changes since [v0.8.25](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.25), from [9ced89b99d5a25158acbd27fda53f3c696841076](https://github.com/malsabbagh/review-sensei/commit/9ced89b99d5a25158acbd27fda53f3c696841076) through [e8631447482de45ca39c4eef1e817d752da48187](https://github.com/malsabbagh/review-sensei/commit/e8631447482de45ca39c4eef1e817d752da48187).
+
+Previous annotated tag object: `3b7babd71c7fc678847754b8114a0bab92f6b335`.
+
+- chore\(deps\): bump actions/create-github-app-token from 3.3.0 to 3.4.0 \(\#498\) ([6a799ca8976526a7e2ea8616b8651badfc42515c](https://github.com/malsabbagh/review-sensei/commit/6a799ca8976526a7e2ea8616b8651badfc42515c)).
+- chore\(deps\): bump coverage from 7.17.3 to 7.17.4 \(\#496\) ([54543d8805a7a6633cf7a40130ab88e903c55488](https://github.com/malsabbagh/review-sensei/commit/54543d8805a7a6633cf7a40130ab88e903c55488)).
+- chore\(deps\): bump ruff from 0.17.5 to 0.17.6 \(\#495\) ([30aaaf3fdc334a17a973bced20d82186ee41a79d](https://github.com/malsabbagh/review-sensei/commit/30aaaf3fdc334a17a973bced20d82186ee41a79d)).
+- chore\(deps\): bump the codeql-action group with 2 updates \(\#497\) ([cd241ffed04f7b4441d5fb3baf3584dd98a92b48](https://github.com/malsabbagh/review-sensei/commit/cd241ffed04f7b4441d5fb3baf3584dd98a92b48)).
+- chore\(deps\): bump pyyaml from 6.0.3 to 6.0.4 \(\#494\) ([e8631447482de45ca39c4eef1e817d752da48187](https://github.com/malsabbagh/review-sensei/commit/e8631447482de45ca39c4eef1e817d752da48187)).
+
+## review-sensei-github 0.3.32 - 2026-11-25
+
+- Pin `review-sensei==0.8.26`.
+
 ## 0.8.25 - 2026-11-24
 
 Changes since [v0.8.24](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.24), from [fa17524bda0ed310ada7e1ee849ba660341eae57](https://github.com/malsabbagh/review-sensei/commit/fa17524bda0ed310ada7e1ee849ba660341eae57) through [1ddee6d7ad66061193825787d346e23f18d559f0](https://github.com/malsabbagh/review-sensei/commit/1ddee6d7ad66061193825787d346e23f18d559f0).
