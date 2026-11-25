@@ -124,31 +124,41 @@ def _seed_source_root(tmp: Path, *, version_only_action_updates: bool) -> Path:
     (root / "docs" / "architecture").mkdir(parents=True)
     (root / ".github" / "workflows").mkdir(parents=True)
     (root / "AGENTS.md").write_text(
-        "# Pinned Agent Rules\nMust hold.\n", encoding="utf-8"
+        "# Pinned Agent Rules\nMust hold.\n", encoding="utf-8", newline="\n"
     )
     (root / "docs" / "architecture.md").write_text(
-        "# General Architecture\nLarge system narrative.\n", encoding="utf-8"
+        "# General Architecture\nLarge system narrative.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     (root / "docs" / "architecture" / "mandatory-rules.md").write_text(
-        "# Core Rules\nGeneral architecture rules.\n", encoding="utf-8"
+        "# Core Rules\nGeneral architecture rules.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     (root / "docs" / "adr" / "0001-unrelated.md").write_text(
-        "# ADR 0001: Provider Neutral Engine\nUnrelated.\n", encoding="utf-8"
+        "# ADR 0001: Provider Neutral Engine\nUnrelated.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     (root / "docs" / "adr" / "0009-ci-quality-supply-chain-gates.md").write_text(
         "# ADR 0009: CI quality and supply-chain gates\nPin GitHub Actions SHAs.\n",
         encoding="utf-8",
+        newline="\n",
     )
     (
         root / "docs" / "adr" / "0011-portable-immutable-github-actions-workflow.md"
     ).write_text(
         "# ADR 0011: Portable immutable GitHub Actions workflow\nKeep pins immutable.\n",
         encoding="utf-8",
+        newline="\n",
     )
     (
         root / "docs" / "adr" / "0059-dependency-review-and-partial-publication.md"
     ).write_text(
-        "# ADR 0059: Dependency review\nVerify dependency updates.\n", encoding="utf-8"
+        "# ADR 0059: Dependency review\nVerify dependency updates.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     shutil.copy2(
         _REPO_ROOT / ".github" / "workflows" / "ci.yml",
@@ -168,6 +178,7 @@ def _seed_source_root(tmp: Path, *, version_only_action_updates: bool) -> Path:
         "    supplemental_documents:\n"
         f"      version_only_action_updates: {flag}\n",
         encoding="utf-8",
+        newline="\n",
     )
     return root
 
@@ -410,6 +421,7 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                 "          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
                 "          echo done\n",
                 encoding="utf-8",
+                newline="\n",
             )
             diff_text = (
                 "diff --git a/.github/workflows/w.yml b/.github/workflows/w.yml\n"
@@ -622,6 +634,7 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                 "    supplemental_documents:\n"
                 "      version_only_action_updates: false\n",
                 encoding="utf-8",
+                newline="\n",
             )
             parts = [_PR497_PATCH.read_text(encoding="utf-8")]
             for idx in range(1, 9):
@@ -636,7 +649,7 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                     "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.1.0\n"
                 )
                 (root / ".github" / "workflows" / wf_name).write_text(
-                    wf_text, encoding="utf-8"
+                    wf_text, encoding="utf-8", newline="\n"
                 )
                 parts.append(
                     f"diff --git a/.github/workflows/{wf_name} b/.github/workflows/{wf_name}\n"
@@ -651,10 +664,12 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                     "+      - uses: actions/checkout@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.1.1\n"
                 )
             diff_file = tmp / "nine-workflows.patch"
-            diff_file.write_text("".join(parts), encoding="utf-8")
+            diff_file.write_text("".join(parts), encoding="utf-8", newline="\n")
             fixture_resp = tmp / "resp.json"
             fixture_resp.write_text(
-                '{"summary": "Chunk clean.", "comments": []}', encoding="utf-8"
+                '{"summary": "Chunk clean.", "comments": []}',
+                encoding="utf-8",
+                newline="\n",
             )
             ledger_dir = tmp / "ledger"
             out1 = tmp / "out1.json"
@@ -694,11 +709,12 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                 "json",
                 "--no-learning-proposals",
             ]
+            err1 = io.StringIO()
             with (
                 patch.dict(os.environ, {}, clear=True),
                 patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
                 redirect_stdout(io.StringIO()),
-                redirect_stderr(io.StringIO()),
+                redirect_stderr(err1),
             ):
                 rc1 = cli.main(
                     [
@@ -709,7 +725,8 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                         str(out1),
                     ]
                 )
-            self.assertEqual(rc1, 2)
+            self.assertEqual(rc1, 2, err1.getvalue())
+            self.assertTrue(out1.exists(), err1.getvalue())
             res1 = ReviewResult.from_dict(json.loads(out1.read_text(encoding="utf-8")))
             self.assertEqual(res1.review_status, "partial")
             assert res1.coverage is not None
@@ -741,6 +758,7 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                     "version_only_action_updates: true",
                 ),
                 encoding="utf-8",
+                newline="\n",
             )
             orig_complete = FixtureProvider.complete
             calls_run2 = 0
@@ -750,12 +768,13 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                 calls_run2 += 1
                 return orig_complete(self_prov, request)
 
+            err2 = io.StringIO()
             with (
                 patch.dict(os.environ, {}, clear=True),
                 patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
                 patch.object(FixtureProvider, "complete", _counting_complete),
                 redirect_stdout(io.StringIO()),
-                redirect_stderr(io.StringIO()),
+                redirect_stderr(err2),
             ):
                 rc2 = cli.main(
                     [
@@ -766,8 +785,9 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                         str(out2),
                     ]
                 )
-            self.assertEqual(rc2, 0)
+            self.assertEqual(rc2, 0, err2.getvalue())
             self.assertEqual(calls_run2, 1)
+            self.assertTrue(out2.exists(), err2.getvalue())
             res2 = ReviewResult.from_dict(json.loads(out2.read_text(encoding="utf-8")))
             self.assertEqual(res2.review_status, "complete")
             assert res2.coverage is not None
@@ -910,6 +930,7 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
                     "version_only_action_updates: true",
                 ),
                 encoding="utf-8",
+                newline="\n",
             )
             recovered = reconstruct_publication_contexts(
                 source_root=root,
@@ -930,7 +951,9 @@ class VersionOnlyDependencyScopeTests(unittest.TestCase):
             )
 
             # Tampered / mismatched pinned context document refuses recovery.
-            (root / "AGENTS.md").write_text("# Tampered Rules\n", encoding="utf-8")
+            (root / "AGENTS.md").write_text(
+                "# Tampered Rules\n", encoding="utf-8", newline="\n"
+            )
             with self.assertRaises(RecoveryRefusalError):
                 reconstruct_publication_contexts(
                     source_root=root,
