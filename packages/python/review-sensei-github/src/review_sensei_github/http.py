@@ -621,9 +621,20 @@ class GitHubHttp:
                     "GitHub pagination exhausted its time budget"
                 )
             if status == 404:
-                raise GitHubHTTPError("GitHub pagination target was not found")
+                raise GitHubHTTPError(
+                    "GitHub pagination target was not found", http_status=404
+                )
+            if status == 403:
+                lookup_path = path.split("?", 1)[0]
+                raise GitHubHTTPError(
+                    "GitHub pagination request was rejected (http 403)",
+                    http_status=403,
+                    failed_lookup=f"GET {lookup_path}",
+                )
             if status < 200 or status >= 300:
-                raise GitHubHTTPError("GitHub pagination request was rejected")
+                raise GitHubHTTPError(
+                    "GitHub pagination request was rejected", http_status=status
+                )
             if not isinstance(body, list):
                 raise GitHubHTTPError("GitHub pagination response was invalid")
             if len(body) > page_size:

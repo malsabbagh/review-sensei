@@ -155,6 +155,12 @@ from .http import (
 from .native_union import NATIVE_UNION_FRAME_RESERVE
 from .operation_diagnostics import OperationDiagnostics, OperationObserver
 from .qualification import TrustedOpenRouterQualification
+from .review_guidance import (
+    STALLED_BODY_STATES,
+    NextActionGuidance,
+    render_next_action_markdown,
+    resolve_next_action_guidance,
+)
 from .thread_resolution import graphql_app_author
 from .trust_transitions import (
     AuthenticatedTrustMigration,
@@ -331,10 +337,13 @@ def _raise_review_thread_lookup_error(
             f"review thread lookup failed temporarily (http {status}{req_suffix})"
         )
     if status in (401, 403):
+        lookup = "review thread lookup (POST /graphql ReviewThreads)"
         if require_graphql_read_message:
             raise GitHubPublicationError(
                 "review thread reconciliation is unavailable; publication "
-                f"requires GraphQL read access to review threads (http {status}{req_suffix})"
+                f"requires GraphQL read access to review threads (http {status}{req_suffix})",
+                http_status=status,
+                failed_lookup=f"{lookup} (HTTP {status})" if status == 403 else None,
             )
         detail = (
             "GraphQL authentication failed"
@@ -342,7 +351,9 @@ def _raise_review_thread_lookup_error(
             else "GraphQL access denied"
         )
         raise GitHubPublicationError(
-            f"review thread lookup failed (http {status}; {detail}{req_suffix})"
+            f"review thread lookup failed (http {status}; {detail}{req_suffix})",
+            http_status=status,
+            failed_lookup=f"{lookup} (HTTP {status})" if status == 403 else None,
         )
     if status < 200 or status >= 300 or not isinstance(payload, dict):
         raise GitHubPublicationError(
@@ -969,6 +980,7 @@ class AssembledReview:
     requests_changes: bool
     compact_references: bool = False
     literal_malformed_fences: bool = False
+    next_action_text: str | None = None
 
 
 def _render_assembled_summary(
@@ -1012,6 +1024,7 @@ def _render_assembled_summary(
             placement_note=assembled.placement_note,
             reason=assembled.reason,
             omitted_explanations=len(omitted_identifiers),
+            next_action_text=assembled.next_action_text,
         ),
         compact_references=assembled.compact_references,
     )
@@ -1806,6 +1819,9 @@ class PublicationResult:
     transaction_id: str | None = None
     generation: int | None = None
     operation_diagnostics: OperationDiagnostics | None = None
+    next_action_guidance: NextActionGuidance | None = field(
+        default=None, compare=False, repr=False
+    )
     finalization_completion: FinalizationCompletion | None = field(
         default=None, compare=False, repr=False
     )
@@ -4866,6 +4882,7 @@ class ReviewApprovalFinalizer:
                 review_id=finalized.review_id,
                 thread_resolution=thread_res,
                 approval_progress=progress,
+                operation_diagnostics=finalized.operation_diagnostics,
             )
         return replace(
             finalized,
@@ -4918,9 +4935,18 @@ class ReviewApprovalFinalizer:
                 raise GitHubPublicationError(rejected)
             raise GitHubPublicationTransientError(transient)
         if status == 404:
-            raise GitHubPublicationError("review target was not found")
+            raise GitHubPublicationError("review target was not found", http_status=404)
         if status == 403:
-            raise GitHubPublicationError(permission)
+            lookup_label = (
+                f"approval review submission (POST /pulls/{pull_request}/reviews, HTTP 403)"
+                if event == "APPROVE"
+                else f"pull request review submission (POST /pulls/{pull_request}/reviews, HTTP 403)"
+            )
+            raise GitHubPublicationError(
+                permission,
+                http_status=403,
+                failed_lookup=lookup_label,
+            )
         raise GitHubPublicationError(rejected)
 
     def _load_head_reviews(
@@ -4995,7 +5021,9 @@ class ReviewApprovalFinalizer:
             ) from exc
         except GitHubHTTPError as exc:
             raise GitHubPublicationError(
-                "review decision reconciliation failed"
+                "review decision reconciliation failed",
+                http_status=getattr(exc, "http_status", None),
+                failed_lookup=getattr(exc, "failed_lookup", None),
             ) from exc
 
     def _preflight(
@@ -5013,7 +5041,13 @@ class ReviewApprovalFinalizer:
             token=token,
         )
         if status == 404:
-            raise GitHubPublicationError("review target was not found")
+            raise GitHubPublicationError("review target was not found", http_status=404)
+        if status == 403:
+            raise GitHubPublicationError(
+                "approval finalization preflight failed (http 403)",
+                http_status=403,
+                failed_lookup=f"pull request metadata lookup (GET /pulls/{pull_request}, HTTP 403)",
+            )
         if status < 200 or status >= 300:
             raise GitHubPublicationError("approval finalization preflight failed")
         return self._preflight_payload(
@@ -9325,7 +9359,11 @@ class ReviewPublisher:
         if diagnostic is None and finalized.status == "approval_withheld":
             diagnostic = finalized.diagnostic
         publication = PublicationResult(
-            status="already_published", diagnostic=diagnostic
+            status="already_published",
+            review_id=self._confirmed_review_id,
+            diagnostic=diagnostic,
+            approval_progress=finalized.approval_progress,
+            operation_diagnostics=finalized.operation_diagnostics,
         )
         if (
             check_diagnostic is None
@@ -9626,11 +9664,26 @@ class ReviewPublisher:
                 observed_artifacts=observed_artifacts,
                 archive_chain=archive_chain,
             )
-            return (
+            publication = (
                 publication
                 if self._defer_thread_cleanup
                 else self._finish_thread_cleanup(publication)
             )
+            response_loss_hold = self._response_loss_holds.get(
+                (repository_id, pull_request, head_sha)
+            )
+            guidance = resolve_next_action_guidance(
+                head_sha=head_sha,
+                retained_result=result,
+                approval_progress=publication.approval_progress,
+                operation_diagnostics=publication.operation_diagnostics,
+                publication=publication,
+                response_loss_hold=response_loss_hold,
+                reconciled_review_id=self._confirmed_review_id or publication.review_id,
+                auto_approve=auto_approve,
+                reviews_policy=reviews_policy,
+            )
+            return replace(publication, next_action_guidance=guidance)
         finally:
             from . import adjacent_publication_preflight
 
@@ -10767,7 +10820,10 @@ class ReviewPublisher:
                         input_key=window_input_key,
                         review_id=self._confirmed_review_id,
                     )
-                    return PublicationResult(status="already_published")
+                    return PublicationResult(
+                        status="already_published",
+                        review_id=self._confirmed_review_id,
+                    )
             elif retained_eligibility is not None:
                 if result_states:
                     current = persisted_eligibility
@@ -10841,7 +10897,10 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                             coverage_uncertainty_accepted=window_coverage_accepted,
                         )
-                    return PublicationResult(status="already_published")
+                    return PublicationResult(
+                        status="already_published",
+                        review_id=self._confirmed_review_id,
+                    )
             elif not supersedes_prior_clean_review:
                 if "APPROVED" in identity_states:
                     self._commit_active_window_success(
@@ -10853,7 +10912,10 @@ class ReviewPublisher:
                         input_key=window_input_key,
                         review_id=self._confirmed_review_id,
                     )
-                    return PublicationResult(status="already_published")
+                    return PublicationResult(
+                        status="already_published",
+                        review_id=self._confirmed_review_id,
+                    )
                 if identity_states & {"COMMENTED", "CHANGES_REQUESTED"}:
                     self._commit_active_window_success(
                         repository_id=repository_id,
@@ -10883,7 +10945,10 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                             coverage_uncertainty_accepted=window_coverage_accepted,
                         )
-                    return PublicationResult(status="already_published")
+                    return PublicationResult(
+                        status="already_published",
+                        review_id=self._confirmed_review_id,
+                    )
         except _NativeReplayAuthorityError:
             self._complete_failed_check(
                 check_token=check_token,
@@ -10899,7 +10964,17 @@ class ReviewPublisher:
                 "review reconciliation failed temporarily"
             ) from exc
         except GitHubHTTPError as exc:
-            raise GitHubPublicationError("review reconciliation failed") from exc
+            status_code = getattr(exc, "http_status", None)
+            lookup = getattr(exc, "failed_lookup", None) or (
+                f"pull request reviews lookup (GET /pulls/{pull_request}/reviews, HTTP 403)"
+                if status_code == 403
+                else None
+            )
+            raise GitHubPublicationError(
+                "review reconciliation failed",
+                http_status=status_code,
+                failed_lookup=lookup,
+            ) from exc
 
         # Marker pagination can span multiple network requests. Re-read the
         # authoritative PR immediately before publication so a changed head,
@@ -11778,6 +11853,7 @@ class ReviewPublisher:
                     require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
+                    review_id=self._confirmed_review_id,
                     coverage_uncertainty_accepted=window_coverage_accepted,
                 )
             self._commit_active_window_uncertain(
@@ -11905,7 +11981,11 @@ class ReviewPublisher:
                 policy=effective_policy,
                 transient=False,
             )
-            raise GitHubPublicationError("review publication lacks permission")
+            raise GitHubPublicationError(
+                "review publication lacks permission",
+                http_status=403,
+                failed_lookup=f"pull request review submission (POST /pulls/{pull_request}/reviews, HTTP 403)",
+            )
         if status == 422:
             # An HTTP 422 is ambiguous. It is not evidence that a line was an
             # invalid inline location. Reconcile the exact review, then the
@@ -11980,6 +12060,7 @@ class ReviewPublisher:
                 check_diagnostic=check_diagnostic,
                 status="already_published",
                 coverage_uncertainty_accepted=window_coverage_accepted,
+                review_id=self._confirmed_review_id,
             )
         if status == 409 or status == 429 or status >= 500:
             if self._reconcile_marker(
@@ -12035,6 +12116,7 @@ class ReviewPublisher:
                     require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
+                    review_id=self._confirmed_review_id,
                     coverage_uncertainty_accepted=window_coverage_accepted,
                 )
             self._commit_active_window_uncertain(
@@ -12137,6 +12219,8 @@ class ReviewPublisher:
             status=status,
             review_id=review_id,
             diagnostic=diagnostic,
+            approval_progress=finalized.approval_progress,
+            operation_diagnostics=finalized.operation_diagnostics,
         )
         if (
             check_diagnostic is None
@@ -12658,6 +12742,16 @@ class ReviewPublisher:
         state, reason = _review_summary_state(
             result, policy=convergence_policy, auto_approve=auto_approve
         )
+        body_guidance = resolve_next_action_guidance(
+            head_sha=head_sha,
+            retained_result=result,
+            auto_approve=auto_approve,
+        )
+        next_action_text = (
+            render_next_action_markdown(body_guidance)
+            if body_guidance.state in STALLED_BODY_STATES
+            else None
+        )
         return AssembledReview(
             literal_malformed_fences=literal_malformed_fences,
             inline_comments=tuple(prepared_comments),
@@ -12678,6 +12772,7 @@ class ReviewPublisher:
             body_explanations=tuple(explanations),
             inline_blocker_instances=tuple(inline_blockers),
             requests_changes=requests_changes,
+            next_action_text=next_action_text,
         )
 
     def _conversation_resolution_facts(
@@ -12779,9 +12874,15 @@ class ReviewPublisher:
         else:
             status, payload = selected
         if status == 404:
-            raise GitHubPublicationError("review target was not found")
+            raise GitHubPublicationError("review target was not found", http_status=404)
+        if status == 403:
+            raise GitHubPublicationError(
+                "review preflight failed",
+                http_status=403,
+                failed_lookup=f"pull request metadata lookup (GET /pulls/{pull_request}, HTTP 403)",
+            )
         if status < 200 or status >= 300:
-            raise GitHubPublicationError("review preflight failed")
+            raise GitHubPublicationError("review preflight failed", http_status=status)
         trust_dec = self.finalizer._evaluate_live_pr_trust_boundary(
             payload,
             repository=repository,
@@ -13291,8 +13392,6 @@ class ReviewPublisher:
                     marker=marker,
                     app_slug=app_slug,
                 )
-            if not response_lost:
-                return matched
             matching_reviews = [
                 rev
                 for rev in self._last_review_payload
@@ -13304,6 +13403,16 @@ class ReviewPublisher:
                 and isinstance(rev.get("body"), str)
                 and marker in rev["body"]
             ]
+            if not response_lost:
+                if (
+                    matched
+                    and self._confirmed_review_id is None
+                    and matching_reviews
+                    and type(matching_reviews[0].get("id")) is int
+                    and matching_reviews[0]["id"] > 0
+                ):
+                    self._confirmed_review_id = matching_reviews[0]["id"]
+                return matched
             if not matched or not matching_reviews:
                 observed_item = ObservedGitHubArtifact(
                     artifact_kind="native_review_summary",
@@ -13354,6 +13463,13 @@ class ReviewPublisher:
                 decision=decision,
             )
             if decision.verdict == "reconciled":
+                if (
+                    self._confirmed_review_id is None
+                    and matching_reviews
+                    and type(matching_reviews[0].get("id")) is int
+                    and matching_reviews[0]["id"] > 0
+                ):
+                    self._confirmed_review_id = matching_reviews[0]["id"]
                 if repository_id is not None:
                     self._response_loss_holds.pop(
                         (repository_id, pull_request, head_sha), None
@@ -13369,7 +13485,17 @@ class ReviewPublisher:
                 "review reconciliation failed temporarily"
             ) from exc
         except GitHubHTTPError as exc:
-            raise GitHubPublicationError("review reconciliation failed") from exc
+            status_code = getattr(exc, "http_status", None)
+            lookup = getattr(exc, "failed_lookup", None) or (
+                f"pull request reviews lookup (GET /pulls/{pull_request}/reviews, HTTP 403)"
+                if status_code == 403
+                else None
+            )
+            raise GitHubPublicationError(
+                "review reconciliation failed",
+                http_status=status_code,
+                failed_lookup=lookup,
+            ) from exc
 
     def http_get(self, path: str, *, token: str) -> tuple[int, Any]:
         return self.http.request("GET", path, token=token)

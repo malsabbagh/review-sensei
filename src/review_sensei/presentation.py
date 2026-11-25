@@ -710,6 +710,7 @@ class ReviewSummaryView:
     placement_note: str | None = None
     reason: str | None = None
     omitted_explanations: int = 0
+    next_action_text: str | None = None
 
     def __post_init__(self) -> None:
         if self.state not in _HEADING_STATES:
@@ -725,6 +726,8 @@ class ReviewSummaryView:
             object.__setattr__(self, "optional", pure_optional)
         if len(self.optional) > _HIGHLIGHTED_OPTIONAL_LIMIT:
             raise ReviewInputError("review summary highlights too many optional items")
+        if self.next_action_text is not None and not self.next_action_text.strip():
+            object.__setattr__(self, "next_action_text", None)
         if (
             isinstance(self.omitted_explanations, bool)
             or not isinstance(self.omitted_explanations, int)
@@ -748,6 +751,7 @@ def build_review_summary_view(
     reason: str | None = None,
     omitted_explanations: int = 0,
     literal_malformed_fences: bool = False,
+    next_action_text: str | None = None,
 ) -> ReviewSummaryView:
     """Order and bound summary content deterministically before rendering."""
 
@@ -775,6 +779,7 @@ def build_review_summary_view(
         placement_note=placement_note,
         reason=reason,
         omitted_explanations=omitted_explanations,
+        next_action_text=next_action_text,
     )
 
 
@@ -863,7 +868,9 @@ def render_review_summary(
         [
             "",
             "### Next action",
-            _next_action(
+            view.next_action_text
+            if view.next_action_text is not None
+            else _next_action(
                 state=view.state,
                 required=view.required,
                 decisions=view.decisions,

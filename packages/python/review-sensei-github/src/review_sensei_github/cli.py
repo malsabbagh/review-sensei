@@ -27,8 +27,15 @@ from review_sensei_github.commands import (
     run_host_plan,
 )
 from review_sensei_github.doctor import with_github_checks
+from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.observed import run_observed_review_sequence
 from review_sensei_github.openrouter_workflow import emit_hosted_openrouter_resolution
+from review_sensei_github.review_guidance import (
+    extract_forbidden_lookup,
+    is_step_summary_written,
+    resolve_next_action_guidance,
+    write_publication_failure_step_summary,
+)
 
 _PUBLIC = (
     "review",
@@ -264,6 +271,23 @@ def _setup(arguments: list[str]) -> int:
         return 2
 
 
+def _maybe_write_step_summary_for_error(error: BaseException) -> None:
+    if is_step_summary_written(error):
+        return
+    try:
+        if extract_forbidden_lookup(error=error) is not None or isinstance(
+            error, GitHubPublicationError
+        ):
+            guidance = resolve_next_action_guidance(head_sha=None, error=error)
+            write_publication_failure_step_summary(guidance)
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        # Never mask the primary CLI error if step-summary formatting fails.
+        print(
+            f"review-sensei: step summary skipped ({type(exc).__name__})",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         with _sigterm_as_keyboard_interrupt():
@@ -314,6 +338,7 @@ def _main(argv: list[str] | None = None) -> int:
                 )
             except (OSError, ValueError, ReviewSenseiError) as error:
                 diagnostic.failed(error)
+                _maybe_write_step_summary_for_error(error)
                 print(f"review-sensei: {error}", file=sys.stderr)
                 return diagnostic.returned(1)
     if command.startswith("-") or command in {"publish", "reply", "command"}:
@@ -329,6 +354,7 @@ def _main(argv: list[str] | None = None) -> int:
                 )
             except (OSError, ValueError, ReviewSenseiError) as error:
                 diagnostic.failed(error)
+                _maybe_write_step_summary_for_error(error)
                 print(f"review-sensei: {error}", file=sys.stderr)
                 return diagnostic.returned(1)
     if command == "review":

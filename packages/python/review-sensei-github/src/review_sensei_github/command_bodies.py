@@ -1712,6 +1712,45 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     run_id=1,
                     attempt=1,
                 )
+
+        def _emit_publication_failure_guidance(
+            *,
+            diagnostic: str | None,
+            error: BaseException | None = None,
+            publication: object | None = None,
+        ) -> None:
+            from review_sensei_github.review_guidance import (
+                mark_step_summary_written,
+                resolve_next_action_guidance,
+                write_publication_failure_step_summary,
+            )
+
+            guidance = (
+                getattr(publication, "next_action_guidance", None)
+                if publication is not None
+                else None
+            ) or resolve_next_action_guidance(
+                head_sha=args.head_sha,
+                retained_result=result,
+                approval_progress=getattr(publication, "approval_progress", None),
+                operation_diagnostics=getattr(
+                    publication, "operation_diagnostics", None
+                ),
+                publication=publication,
+                error=error,
+                auto_approve=args.enable_auto_approve,
+                reviews_policy=getattr(args, "reviews_policy", None),
+            )
+            write_publication_failure_step_summary(
+                guidance,
+                repository=args.repository,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+                diagnostic=diagnostic,
+            )
+            if error is not None:
+                mark_step_summary_written(error)
+
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(
@@ -1747,6 +1786,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 **identity,
             )
             engine_cli.emit_host_outcome(outcome, output_path=args.outcome)
+            _emit_publication_failure_guidance(diagnostic=outcome.diagnostic, error=exc)
             print(f"review-sensei: {exc}", file=sys.stderr)
             print(outcome.status)
             return engine_cli.run_outcome_exit_code(outcome.status)
@@ -1757,6 +1797,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 **identity,
             )
             engine_cli.emit_host_outcome(outcome, output_path=args.outcome)
+            _emit_publication_failure_guidance(diagnostic=outcome.diagnostic, error=exc)
             print(f"review-sensei: {exc}", file=sys.stderr)
             print(outcome.status)
             return engine_cli.run_outcome_exit_code(outcome.status)
@@ -1791,6 +1832,23 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             review_outcome, review_result=result, **identity
         )
         engine_cli.emit_host_outcome(outcome, output_path=args.outcome)
+        review_diag = getattr(review_outcome, "diagnostic", None)
+        if getattr(review_outcome, "status", None) in {
+            "publication_incomplete",
+            "publication_failed",
+            "gate_reevaluation_failed",
+        } or review_diag in {
+            "check_access_denied",
+            "check_permission",
+            "check_publication_failed",
+            "check_reconciliation_failed",
+            "publication_ambiguous",
+            "publication_failed",
+        }:
+            _emit_publication_failure_guidance(
+                diagnostic=review_diag or outcome.diagnostic,
+                publication=review_outcome,
+            )
         if getattr(review_outcome, "thread_resolution", None) == "unconfirmed":
             print(
                 "review-sensei: old-thread cleanup is unconfirmed or incomplete; "

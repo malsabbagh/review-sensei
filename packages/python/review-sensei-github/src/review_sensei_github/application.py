@@ -32,7 +32,7 @@ from review_sensei.convergence import (
 from review_sensei.conversation import ConversationService
 from review_sensei.coverage import coverage_approval_state
 from review_sensei.diff import analyze_diff
-from review_sensei.disposition import MaintainerCommand
+from review_sensei.disposition import MaintainerCommand, MaintainerCommandResult
 from review_sensei.errors import ReviewInputError
 from review_sensei.finding_drift import (
     DriftEvaluationResult,
@@ -66,6 +66,7 @@ from review_sensei.session import (
     SessionLedger,
     SessionLoadError,
     SessionLoadReason,
+    SessionRecord,
     admission_diagnostic,
     blocker_set_digest,
     complete_review_publication,
@@ -446,6 +447,7 @@ class GitHubApplication:
         self.http = http
         self.reviewer = reviewer
         self._last_publication_result: PublicationResult | None = None
+        self._last_publication_context: tuple[str, int, str] | None = None
         self.learner = learner
         self.replier = replier
         self.session_ledger = session_ledger
@@ -1205,6 +1207,7 @@ class GitHubApplication:
     ) -> PublicationResult:
         # Diagnostic receipt only; never reused as publication or funding authority.
         self._last_publication_result = None
+        self._last_publication_context = None
         reviewer = self.reviewer
         resume_thread_cleanup = (
             isinstance(reviewer, ReviewPublisher) and options.complete_inventory
@@ -2983,6 +2986,7 @@ class GitHubApplication:
             # Keep the exact returned native receipt for truthful failure output
             # if subsequent durable bookkeeping cannot complete. Not authority.
             self._last_publication_result = publication
+            self._last_publication_context = (repository, pull_request, head_sha)
         except BaseException as publication_error:
             if lifecycle_custody_lost:
                 # Another writer owns this selected root. Neither a diagnostic
@@ -3260,6 +3264,7 @@ class GitHubApplication:
                 except BaseException:
                     pass
         self._last_publication_result = completed
+        self._last_publication_context = (repository, pull_request, head_sha)
         return completed
 
     def _publish_human_file_request(
@@ -4305,7 +4310,128 @@ class GitHubApplication:
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
+        if command.action == "status":
+            result = self._enrich_status_guidance(
+                result=result,
+                record=_record,
+                ledger=ledger,
+                identity=identity,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                review_result=review_result,
+                reviews_policy=reviews_policy,
+                lifecycle_document=lifecycle_document,
+            )
         return result
+
+    def _enrich_status_guidance(
+        self,
+        *,
+        result: MaintainerCommandResult,
+        record: SessionRecord | None,
+        ledger: object,
+        identity: SessionIdentity,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        review_result: object | None,
+        reviews_policy: str | None,
+        lifecycle_document: Mapping[str, object] | None,
+    ) -> MaintainerCommandResult:
+        """Append read-only next-action guidance using existing evidence without writes or model calls."""
+        from review_sensei.disposition import (
+            FindingDisposition,
+            decode_session_dispositions,
+            session_dispositions,
+        )
+
+        from .api_run_requests import ApiRunSessionLedger
+        from .errors import GitHubHTTPError
+        from .review_guidance import (
+            render_status_guidance_lines,
+            resolve_next_action_guidance,
+        )
+
+        last_pub = (
+            self._last_publication_result
+            if getattr(self, "_last_publication_context", None)
+            == (repository, pull_request, head_sha)
+            else None
+        )
+        status_lookup_error: BaseException | None = None
+        dispositions: tuple[FindingDisposition, ...] = ()
+        is_metered_ledger = isinstance(ledger, ApiRunSessionLedger)
+        if isinstance(record, SessionRecord):
+            try:
+                if is_metered_ledger:
+                    snap = record.disposition_snapshot
+                    manifest = (
+                        snap.get("state_manifest")
+                        if isinstance(snap, Mapping)
+                        else None
+                    )
+                    if snap is None:
+                        dispositions = decode_session_dispositions(record.dispositions)
+                    elif (
+                        isinstance(manifest, Mapping)
+                        and manifest.get("storage") == "inline"
+                    ):
+                        dispositions = session_dispositions(record, ledger=ledger)
+                else:
+                    dispositions = session_dispositions(record, ledger=ledger)
+            except (GitHubHTTPError, GitHubPublicationError) as exc:
+                if getattr(exc, "http_status", None) == 403:
+                    status_lookup_error = exc
+        retained_result = (
+            review_result if isinstance(review_result, ReviewResult) else None
+        )
+        if retained_result is None and not is_metered_ledger:
+            loader = getattr(ledger, "load_retained_checkpoint_result", None)
+            if callable(loader):
+                try:
+                    loaded_cp = loader(
+                        identity,
+                        transaction=record.transaction
+                        if isinstance(record, SessionRecord)
+                        else None,
+                        head_sha=head_sha,
+                    )
+                    if isinstance(loaded_cp, ReviewResult):
+                        retained_result = loaded_cp
+                except (GitHubHTTPError, GitHubPublicationError) as exc:
+                    if getattr(exc, "http_status", None) == 403:
+                        status_lookup_error = status_lookup_error or exc
+        response_loss_hold = (
+            self.reviewer.response_loss_hold(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if isinstance(self.reviewer, ReviewPublisher)
+            else None
+        )
+        guidance = resolve_next_action_guidance(
+            head_sha=head_sha,
+            record=record if isinstance(record, SessionRecord) else None,
+            retained_result=retained_result,
+            approval_progress=getattr(last_pub, "approval_progress", None),
+            operation_diagnostics=getattr(last_pub, "operation_diagnostics", None),
+            publication=last_pub,
+            response_loss_hold=response_loss_hold,
+            error=status_lookup_error,
+            dispositions=dispositions,
+            auto_approve=reviews_policy in {None, "auto-approve"},
+            reviews_policy=reviews_policy,
+            ledger=None if is_metered_ledger else ledger,
+            lifecycle_document=lifecycle_document,
+        )
+        return replace(
+            result,
+            summary=f"{result.summary}\n{render_status_guidance_lines(guidance)}",
+        )
 
     def _check_capability(
         self,
