@@ -685,9 +685,11 @@ class StalledReviewGuidanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             diff_file = tmp_path / "pr.diff"
-            diff_file.write_text(SMALL_DIFF, encoding="utf-8")
+            diff_file.write_text(SMALL_DIFF, encoding="utf-8", newline="\n")
             result_file = tmp_path / "result.json"
-            result_file.write_text(json.dumps(result.to_dict()), encoding="utf-8")
+            result_file.write_text(
+                json.dumps(result.to_dict()), encoding="utf-8", newline="\n"
+            )
             summary_file = tmp_path / "step-summary.md"
 
             http = GitHubHttp(
@@ -704,7 +706,10 @@ class StalledReviewGuidanceTests(unittest.TestCase):
                 session_ledger=None,
             )
             with (
-                patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary_file)}),
+                patch.dict(
+                    os.environ,
+                    {"GITHUB_STEP_SUMMARY": str(summary_file), "GITHUB_RUN_ID": ""},
+                ),
                 patch(
                     "review_sensei_github.BrokerClient",
                     return_value=_Broker(),
