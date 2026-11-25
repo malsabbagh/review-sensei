@@ -36,11 +36,17 @@ from .configuration import (
 from .context import (
     ContextSnapshot,
     RepositoryContextStore,
+    ReviewContextSelection,
     SymbolAwareContextPolicy,
     build_review_context_selection,
 )
 from .diff import analyze_diff
-from .errors import ReviewInputError, ReviewSenseiError
+from .document_context import (
+    VERSION_ONLY_ACTION_POLICY,
+    DocumentSelectionReport,
+    SupplementalDocumentPolicy,
+)
+from .errors import ContextLoadError, ReviewInputError, ReviewSenseiError
 from .failure_observation import (
     exception_kind as _exception_kind,
 )
@@ -3310,6 +3316,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 )
             snapshot = ContextSnapshot(base_sha, kind="base")
             untrusted_head_sha = resolved_head_sha
+        document_policy = SupplementalDocumentPolicy.from_configuration(
+            work_configuration
+        )
         context_selection = build_review_context_selection(
             service.review_categories,
             changed_paths=changed_paths,
@@ -3318,45 +3327,62 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             source_context_policy=source_policy,
             snapshot=snapshot,
             changed_lines=analysis.changed_lines,
+            diff_analysis=analysis,
+            document_policy=document_policy,
         )
-        from .document_context import DocumentSelectionReport
 
-        document_reports = []
-        for lens in context_selection.lens_contexts:
-            report = lens.document_selection
-            if isinstance(report, DocumentSelectionReport):
-                metadata = report.to_prompt_dict()
-                document_reports.append(
-                    {
-                        "category_id": lens.category_id,
-                        **metadata,
-                        "inventory": [item.to_dict() for item in report.decisions],
-                    }
-                )
-                if metadata["omitted"] or metadata["summarized"]:
-                    print(
-                        "review-sensei: document-context "
-                        + json.dumps(
-                            {
-                                "category_id": lens.category_id,
-                                **{
-                                    key: metadata[key]
-                                    for key in (
-                                        "policy",
-                                        "discovered",
-                                        "selected",
-                                        "summarized",
-                                        "omitted",
-                                        "inventory_sha256",
-                                        "omission_reasons",
-                                    )
-                                },
-                            },
-                            ensure_ascii=True,
-                            sort_keys=True,
-                        ),
-                        file=sys.stderr,
+        def _collect_document_reports(
+            selection: ReviewContextSelection,
+        ) -> list[dict[str, object]]:
+            reports: list[dict[str, object]] = []
+            for lens in selection.lens_contexts:
+                report = lens.document_selection
+                if isinstance(report, DocumentSelectionReport):
+                    metadata = report.to_prompt_dict()
+                    reports.append(
+                        {
+                            "category_id": lens.category_id,
+                            **metadata,
+                            "inventory": [item.to_dict() for item in report.decisions],
+                        }
                     )
+            return reports
+
+        def _uses_version_only_document_scope(
+            selection: ReviewContextSelection,
+        ) -> bool:
+            return any(
+                isinstance(lens.document_selection, DocumentSelectionReport)
+                and lens.document_selection.policy == VERSION_ONLY_ACTION_POLICY
+                for lens in selection.lens_contexts
+            )
+
+        document_reports = _collect_document_reports(context_selection)
+        for report_entry in document_reports:
+            if report_entry["omitted"] or report_entry["summarized"]:
+                print(
+                    "review-sensei: document-context "
+                    + json.dumps(
+                        {
+                            "category_id": report_entry["category_id"],
+                            **{
+                                key: report_entry[key]
+                                for key in (
+                                    "policy",
+                                    "discovered",
+                                    "selected",
+                                    "summarized",
+                                    "omitted",
+                                    "inventory_sha256",
+                                    "omission_reasons",
+                                )
+                            },
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
         if args.context_selection_output is not None:
             args.context_selection_output.write_text(
                 json.dumps(document_reports, ensure_ascii=True, indent=2) + "\n",
@@ -3469,6 +3495,184 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         and loaded.record is not None
                     ):
                         prior = loaded.record
+                        if (
+                            (rescan_request is None or remaining_requested)
+                            and document_policy.version_only_action_updates
+                            and _uses_version_only_document_scope(context_selection)
+                            and prior.transaction is not None
+                            and prior.transaction.base_sha == effective_base_sha
+                            and prior.transaction.head_sha == head_sha
+                            and prior.transaction.policy_digest == policy.digest()
+                            and prior.transaction.configuration_digest
+                            == transaction_configuration_digest
+                            and prior.transaction.evidence_digest
+                            == transaction_evidence_digest
+                        ):
+                            tx_prior = prior.transaction
+                            try:
+                                prior_baseline = read_session_baseline(ledger, prior)
+                            except ReviewInputError:
+                                prior_baseline = None
+
+                            def _matches_prior_reservation(
+                                candidate_key: object,
+                                candidate_reservation: str,
+                                candidate_prefix: str,
+                            ) -> bool:
+                                matched = (
+                                    tx_prior.reservation_id == candidate_reservation
+                                    or (
+                                        prior.last_committed_reservation_id
+                                        == candidate_reservation
+                                    )
+                                    or (
+                                        prior_baseline is not None
+                                        and prior_baseline.cache_key == candidate_key
+                                    )
+                                )
+                                if not matched and prior.quarantine_lineage is not None:
+                                    from .quarantine_lineage import (
+                                        full_analysis_reservation,
+                                    )
+
+                                    matched = tx_prior.reservation_id == (
+                                        full_analysis_reservation(
+                                            prior.quarantine_lineage["scope_sha256"],
+                                            candidate_reservation,
+                                        )
+                                    )
+                                if not matched and prior.rescan_state is not None:
+                                    raw_receipts = prior.rescan_state.get("receipts")
+                                    if isinstance(raw_receipts, list):
+                                        matched = any(
+                                            isinstance(item, dict)
+                                            and item.get("ordinary_reservation")
+                                            == candidate_reservation
+                                            and item.get("reservation")
+                                            == tx_prior.reservation_id
+                                            for item in raw_receipts
+                                        )
+                                if (
+                                    not matched
+                                    and prior.failed_attempts > 0
+                                    and prior.failed_attempts_head_sha == head_sha
+                                ):
+                                    base_gen = min(
+                                        prior.generation, tx_prior.generation
+                                    )
+                                    top_gen = max(prior.generation, tx_prior.generation)
+                                    candidate_generations = tuple(
+                                        range(max(0, base_gen - 3), top_gen + 1)
+                                    )
+                                    matched = any(
+                                        session_reservation_id(
+                                            repository=args.repository,
+                                            pull_request=args.pull_request,
+                                            head_sha=head_sha,
+                                            kind=(
+                                                candidate_prefix
+                                                + f":partial-continue:{failed_idx}:{gen}"
+                                            ),
+                                        )
+                                        in {
+                                            tx_prior.reservation_id,
+                                            prior.last_committed_reservation_id,
+                                        }
+                                        for failed_idx in range(
+                                            1, prior.failed_attempts + 1
+                                        )
+                                        for gen in candidate_generations
+                                    )
+                                return matched
+
+                            current_prefix = (
+                                "publish:"
+                                + current_key.digest()
+                                + ":"
+                                + policy.digest()
+                                + ":"
+                                + transaction_configuration_digest
+                                + ":"
+                                + transaction_evidence_digest
+                            )
+                            current_matched = _matches_prior_reservation(
+                                current_key, reservation, current_prefix
+                            )
+                            if not current_matched:
+                                try:
+                                    legacy_selection = build_review_context_selection(
+                                        service.review_categories,
+                                        changed_paths=changed_paths,
+                                        learnings=learnings,
+                                        context_store=context_store,
+                                        source_context_policy=source_policy,
+                                        snapshot=snapshot,
+                                        changed_lines=analysis.changed_lines,
+                                        diff_analysis=None,
+                                        document_policy=SupplementalDocumentPolicy(
+                                            version_only_action_updates=False,
+                                            guidance_paths=document_policy.guidance_paths,
+                                        ),
+                                    )
+                                except ContextLoadError:
+                                    legacy_selection = None
+                                if legacy_selection is not None:
+                                    legacy_request = replace(
+                                        request,
+                                        active_category_ids=legacy_selection.active_category_ids,
+                                        lens_contexts=legacy_selection.lens_contexts,
+                                        source_context=legacy_selection.source_context,
+                                    )
+                                    legacy_key = service.context_cache_key(
+                                        _checkpoint_cache_request(
+                                            legacy_request,
+                                            base_sha=resolved_base_sha,
+                                            head_sha=resolved_head_sha,
+                                        ),
+                                        profile=effective_profile,
+                                    )
+                                    if legacy_key is not None:
+                                        legacy_prefix = (
+                                            "publish:"
+                                            + legacy_key.digest()
+                                            + ":"
+                                            + policy.digest()
+                                            + ":"
+                                            + transaction_configuration_digest
+                                            + ":"
+                                            + transaction_evidence_digest
+                                        )
+                                        legacy_reservation = session_reservation_id(
+                                            repository=args.repository,
+                                            pull_request=args.pull_request,
+                                            head_sha=head_sha,
+                                            kind=legacy_prefix,
+                                        )
+                                        legacy_matched = _matches_prior_reservation(
+                                            legacy_key,
+                                            legacy_reservation,
+                                            legacy_prefix,
+                                        )
+                                        if legacy_matched:
+                                            context_selection = legacy_selection
+                                            request = legacy_request
+                                            current_key = legacy_key
+                                            reservation = legacy_reservation
+                                            if (
+                                                args.context_selection_output
+                                                is not None
+                                            ):
+                                                args.context_selection_output.write_text(
+                                                    json.dumps(
+                                                        _collect_document_reports(
+                                                            context_selection
+                                                        ),
+                                                        ensure_ascii=True,
+                                                        indent=2,
+                                                    )
+                                                    + "\n",
+                                                    encoding="utf-8",
+                                                )
                         if prior_committed_transaction is None:
                             prior_committed_transaction = prior.transaction
                         history = prior.convergence_history

@@ -125,7 +125,7 @@ ADVANCED_FIELDS = (
 )
 ENDPOINT_FIELDS = ("base_url", "allow_custom_endpoint", "credential_env")
 ROUTING_FIELDS = ("upstream_provider",)
-CONTEXT_FIELDS = ("symbol_context",)
+CONTEXT_FIELDS = ("symbol_context", "supplemental_documents")
 SYMBOL_CONTEXT_FIELDS = (
     "enabled",
     "allowed_paths",
@@ -133,6 +133,11 @@ SYMBOL_CONTEXT_FIELDS = (
     "max_bytes",
     "max_depth",
 )
+SUPPLEMENTAL_DOCUMENTS_FIELDS = (
+    "version_only_action_updates",
+    "guidance_paths",
+)
+SUPPLEMENTAL_GUIDANCE_PATHS_CEILING = 64
 EGRESS_FIELDS = ("allow_data_egress",)
 LARGE_CHANGE_FIELDS = ("orchestrate",)
 RESOURCE_FIELDS = ("timeout_seconds", "max_provider_calls", "review_deadline_seconds")
@@ -414,8 +419,17 @@ class SymbolContextSection:
 
 
 @dataclass(frozen=True)
+class SupplementalDocumentsSection:
+    version_only_action_updates: bool = True
+    guidance_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ContextSection:
     symbol_context: SymbolContextSection = field(default_factory=SymbolContextSection)
+    supplemental_documents: SupplementalDocumentsSection = field(
+        default_factory=SupplementalDocumentsSection
+    )
 
 
 @dataclass(frozen=True)
@@ -1361,6 +1375,41 @@ def _build_context(
             )
             for item in allowed_paths_value
         )
+    supplemental_mapping = _mapping_field(
+        mapping.get("supplemental_documents"),
+        "advanced.context.supplemental_documents",
+        source=source,
+        fail=fail,
+    )
+    _reject_unknown_fields(
+        supplemental_mapping,
+        ("advanced", "context", "supplemental_documents"),
+        lines,
+        source=source,
+        supported=SUPPLEMENTAL_DOCUMENTS_FIELDS,
+    )
+    guidance_paths_value = supplemental_mapping.get("guidance_paths")
+    guidance_paths: tuple[str, ...] = ()
+    if guidance_paths_value is not None:
+        if not isinstance(guidance_paths_value, list):
+            raise fail(
+                "advanced.context.supplemental_documents.guidance_paths",
+                "must be a sequence of repository-relative paths",
+            )
+        if len(guidance_paths_value) > SUPPLEMENTAL_GUIDANCE_PATHS_CEILING:
+            raise fail(
+                "advanced.context.supplemental_documents.guidance_paths",
+                f"exceeds the maximum of {SUPPLEMENTAL_GUIDANCE_PATHS_CEILING} guidance paths",
+            )
+        normalized_guidance = tuple(
+            _validate_allowed_path(
+                item,
+                fail=fail,
+                field_path="advanced.context.supplemental_documents.guidance_paths",
+            ).replace("\\", "/")
+            for item in guidance_paths_value
+        )
+        guidance_paths = tuple(dict.fromkeys(normalized_guidance))
     return ContextSection(
         symbol_context=SymbolContextSection(
             enabled=_bool_field(
@@ -1391,7 +1440,16 @@ def _build_context(
                 ceiling=SYMBOL_CONTEXT_MAX_DEPTH_CEILING,
                 fail=fail,
             ),
-        )
+        ),
+        supplemental_documents=SupplementalDocumentsSection(
+            version_only_action_updates=_bool_field(
+                supplemental_mapping.get("version_only_action_updates"),
+                "advanced.context.supplemental_documents.version_only_action_updates",
+                True,
+                fail=fail,
+            ),
+            guidance_paths=guidance_paths,
+        ),
     )
 
 
@@ -2648,6 +2706,18 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
     ):
         if configuration.is_declared(field_path):
             rows.append(f"{field_path.removeprefix('advanced.')}: {value}")
+    supplemental = advanced.context.supplemental_documents
+    if supplemental.version_only_action_updates != _DEFAULT_FIELD_VALUES[
+        "advanced.context.supplemental_documents.version_only_action_updates"
+    ] or configuration.is_declared(
+        "advanced.context.supplemental_documents.version_only_action_updates"
+    ):
+        state = "true" if supplemental.version_only_action_updates else "false"
+        rows.append(
+            f"context.supplemental_documents.version_only_action_updates: {state}"
+        )
+    for path in supplemental.guidance_paths:
+        rows.append(f"context.supplemental_documents.guidance_paths: {path}")
     if advanced.egress.allow_data_egress:
         rows.append("egress.allow_data_egress: true")
     if advanced.large_changes.orchestrate:
@@ -2693,6 +2763,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "advanced.context.symbol_context.max_files": SYMBOL_CONTEXT_MAX_FILES_CEILING,
     "advanced.context.symbol_context.max_bytes": SYMBOL_CONTEXT_MAX_BYTES_CEILING,
     "advanced.context.symbol_context.max_depth": SYMBOL_CONTEXT_MAX_DEPTH_CEILING,
+    "advanced.context.supplemental_documents.version_only_action_updates": True,
     "advanced.egress.allow_data_egress": False,
     "advanced.large_changes.orchestrate": False,
     "advanced.resources.timeout_seconds": ("packaged default for the selected backend"),
@@ -2750,7 +2821,9 @@ __all__ = [
     "ResourceSection",
     "RoutingSection",
     "STAGES_DIRECTORY_NAME",
+    "SUPPLEMENTAL_DOCUMENTS_FIELDS",
     "SUPPORTED_SCHEMA_VERSION",
+    "SupplementalDocumentsSection",
     "SymbolContextSection",
     "backend_defaults",
     "customization_directories",
