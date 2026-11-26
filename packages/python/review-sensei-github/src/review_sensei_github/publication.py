@@ -411,6 +411,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
               path
               line
               commit { oid }
+              originalCommit { oid }
               pullRequestReview { databaseId }
               author { login __typename ... on Bot { databaseId } }
             }
@@ -1488,6 +1489,42 @@ class NativeFindingReceipt:
         ).hexdigest()
 
 
+def _root_matches_native_head(root: Mapping[str, Any], expected_head_sha: Any) -> bool:
+    """Verify a GraphQL comment root matches its receipt's native head commit.
+
+    GitHub advances ``commit.oid`` on untouched earlier-head threads when later
+    commits are pushed, while ``originalCommit.oid`` retains the commit where the
+    comment was created. Accept ``originalCommit`` when present (ensuring any
+    present ``commit`` is still a valid commit OID object), and fall back to
+    ``commit`` only when ``originalCommit`` is omitted by legacy fixtures.
+    """
+    if (
+        not isinstance(root, Mapping)
+        or not isinstance(expected_head_sha, str)
+        or GIT_SHA_HEX.fullmatch(expected_head_sha) is None
+    ):
+        return False
+    expected = {"oid": expected_head_sha}
+    original_commit = root.get("originalCommit")
+    commit = root.get("commit")
+    if original_commit is not None:
+        if (
+            not isinstance(original_commit, Mapping)
+            or set(original_commit) != {"oid"}
+            or original_commit["oid"] != expected_head_sha
+        ):
+            return False
+        if commit is not None and (
+            not isinstance(commit, Mapping)
+            or set(commit) != {"oid"}
+            or not isinstance(commit["oid"], str)
+            or GIT_SHA_HEX.fullmatch(commit["oid"]) is None
+        ):
+            return False
+        return True
+    return isinstance(commit, Mapping) and dict(commit) == expected
+
+
 def _native_finding_receipts_from_nodes(
     nodes: Sequence[Mapping[str, Any]],
     *,
@@ -1555,7 +1592,7 @@ def _native_finding_receipts_from_nodes(
                 and (root.get("path"), root.get("line"))
                 != expected_anchors.get(instance)
             )
-            or root.get("commit") != {"oid": native_head}
+            or not _root_matches_native_head(root, native_head)
             or root.get("pullRequestReview") != {"databaseId": native_review}
             or (
                 existing is not None
@@ -8318,7 +8355,7 @@ class ReviewPublisher:
                 or root.get("databaseId") != binding.comment_id
                 or root.get("pullRequestReview")
                 != {"databaseId": previous["review_id"]}
-                or root.get("commit") != {"oid": previous["native_head_sha"]}
+                or not _root_matches_native_head(root, previous["native_head_sha"])
                 or author.get("databaseId") != context["producer_id"]
                 or not graphql_app_author(author, context["app_slug"])
                 or root.get("edited_by_human") is True

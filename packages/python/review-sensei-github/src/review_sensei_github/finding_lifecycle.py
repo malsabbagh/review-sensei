@@ -6590,6 +6590,8 @@ class FindingLifecycleJournal:
             return None
         receipt = matching[0]
         author = comment.get("author")
+        from .publication import _root_matches_native_head
+
         if (
             comment.get("databaseId") != receipt["comment_id"]
             or not isinstance(comment.get("body"), str)
@@ -6597,7 +6599,7 @@ class FindingLifecycleJournal:
             != receipt["body_sha256"]
             or comment.get("edited_by_human") is True
             or comment.get("pullRequestReview") != {"databaseId": receipt["review_id"]}
-            or comment.get("commit") != {"oid": receipt["native_head_sha"]}
+            or not _root_matches_native_head(comment, receipt["native_head_sha"])
             or not isinstance(author, dict)
             or author.get("databaseId") != receipt["producer_id"]
             or author.get("__typename") != "Bot"
