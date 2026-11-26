@@ -635,7 +635,11 @@ class DefaultHumanInventoryReader:
                 and isinstance(item.get("body"), str)
             }
             for receipt in receipts:
-                companion_body = by_review_id[receipt.review_id]
+                companion_body = by_review_id.get(receipt.review_id)
+                if companion_body is None:
+                    raise ReviewInputError(
+                        "default human inventory visible prose review is missing"
+                    )
                 for instance in receipt.instances:
                     if instance in verified_companion_bodies:
                         raise ReviewInputError(

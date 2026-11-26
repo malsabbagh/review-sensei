@@ -2371,127 +2371,129 @@ class GitHubApplication:
                     from .lifecycle_admission import initial_check_effects
 
                     available_admission = admitted_inventory_store.read_available()
-                    if (
-                        available_admission is None
-                        and getattr(
-                            admitted_inventory_store,
-                            "_last_read_saw_producer_intent",
-                            True,
-                        )
-                        and lifecycle_record is not None
-                        and lifecycle_record.finding_lifecycle is not None
-                    ):
-                        from .quarantine_action import _current_publication_digest
-
-                        projected_digest = _current_publication_digest(
-                            ledger, lifecycle_record
-                        )
-                        if projected_digest != context.publication_digest:
-                            projected_store = HumanInventoryStore(
-                                transport,
-                                token,
-                                ledger,
-                                replace(context, publication_digest=projected_digest),
-                            )
-                            projected_admission = projected_store.read_available()
-                            if projected_admission is not None:
-                                from .publication import parse_finding_index
-
-                                projected_index = parse_finding_index(
-                                    projected_admission[1]["finding_index"],
-                                    repository_id=context.repository_id,
-                                    pull_request=context.pull_request,
-                                    head_sha=context.head_sha,
-                                )
-                                if projected_index is not None:
-                                    by_inst = {
-                                        e.instance: e for e in projected_index.entries
-                                    }
-                                    by_fp = {
-                                        e.lifecycle: e
-                                        for e in projected_index.entries
-                                        if e.lifecycle is not None
-                                    }
-                                    result = replace(
-                                        result,
-                                        comments=tuple(
-                                            replace(
-                                                comment,
-                                                effective_blocking=matched.blocking,
-                                                needs_human=matched.needs_human,
-                                            )
-                                            if (
-                                                matched := by_inst.get(
-                                                    finding_instance_fingerprint(
-                                                        comment
-                                                    )
-                                                )
-                                                or by_fp.get(
-                                                    finding_lifecycle_for_comment(
-                                                        comment
-                                                    ).fingerprint
-                                                )
-                                            )
-                                            is not None
-                                            else comment
-                                            for comment in result.comments
-                                        ),
-                                    )
-                                    available_admission = projected_admission
-                    elif available_admission is not None:
+                    if available_admission is not None:
                         result = restore_admitted_document(
                             result, admitted_inventory_store, available_admission[1]
                         )
-                    if available_admission is not None:
-                        pass
-                    elif (
-                        validated_transaction_recovery
-                        and 0 < len(result.comments) <= 2
-                        and lifecycle_document is not None
-                        and lifecycle_record is not None
-                        and lifecycle_record.finding_lifecycle is not None
-                        and lifecycle_record.transaction is not None
-                        and transaction_record is not None
-                        and transaction_record.transaction is not None
-                        and transaction_record.finding_lifecycle
-                        == lifecycle_record.finding_lifecycle
-                        and transaction_record.transaction.result_sha256
-                        == result.content_digest()
-                        and lifecycle_record.transaction.logical_identity_matches(
-                            transaction_record.transaction
-                        )
-                        and lifecycle_record.transaction.result_sha256
-                        == transaction_record.transaction.result_sha256
-                        and result.transaction is not None
-                        and result.transaction.logical_identity_matches(
-                            transaction_record.transaction
-                        )
-                        and not lifecycle_document["unknown_trust_effect"]
-                        and not lifecycle_document["native_receipts"]
-                        and initial_check_effects(
-                            lifecycle_document["effects"], repository
-                        )
-                    ):
-                        from review_sensei.finding_lifecycle import (
-                            decode_lifecycle_state,
-                        )
-
-                        from .lifecycle_admission import (
-                            restore_original_lifecycle_admission,
-                        )
-
-                        result = restore_original_lifecycle_admission(
-                            result,
-                            decode_lifecycle_state(
-                                lifecycle_document["lifecycle"]
-                            ).state,
-                            head_sha=head_sha,
-                            base_sha=base_sha,
-                        )
                     else:
-                        raise ReviewInputError(
-                            "complete publication admission evidence is missing; retain the original result and do not infer clean obligations"
-                        )
+                        if (
+                            getattr(
+                                admitted_inventory_store,
+                                "_last_read_saw_producer_intent",
+                                True,
+                            )
+                            and lifecycle_record is not None
+                            and lifecycle_record.finding_lifecycle is not None
+                        ):
+                            from .quarantine_action import _current_publication_digest
+
+                            projected_digest = _current_publication_digest(
+                                ledger, lifecycle_record
+                            )
+                            if projected_digest != context.publication_digest:
+                                projected_store = HumanInventoryStore(
+                                    transport,
+                                    token,
+                                    ledger,
+                                    replace(
+                                        context, publication_digest=projected_digest
+                                    ),
+                                )
+                                projected_admission = projected_store.read_available()
+                                if projected_admission is not None:
+                                    from .publication import parse_finding_index
+
+                                    projected_index = parse_finding_index(
+                                        projected_admission[1]["finding_index"],
+                                        repository_id=context.repository_id,
+                                        pull_request=context.pull_request,
+                                        head_sha=context.head_sha,
+                                    )
+                                    if projected_index is not None:
+                                        by_inst = {
+                                            e.instance: e
+                                            for e in projected_index.entries
+                                        }
+                                        by_fp = {
+                                            e.lifecycle: e
+                                            for e in projected_index.entries
+                                            if e.lifecycle is not None
+                                        }
+                                        result = replace(
+                                            result,
+                                            comments=tuple(
+                                                replace(
+                                                    comment,
+                                                    effective_blocking=matched.blocking,
+                                                    needs_human=matched.needs_human,
+                                                )
+                                                if (
+                                                    matched := by_inst.get(
+                                                        finding_instance_fingerprint(
+                                                            comment
+                                                        )
+                                                    )
+                                                    or by_fp.get(
+                                                        finding_lifecycle_for_comment(
+                                                            comment
+                                                        ).fingerprint
+                                                    )
+                                                )
+                                                is not None
+                                                else comment
+                                                for comment in result.comments
+                                            ),
+                                        )
+                                        available_admission = projected_admission
+                        if available_admission is None:
+                            if (
+                                validated_transaction_recovery
+                                and 0 < len(result.comments) <= 2
+                                and lifecycle_document is not None
+                                and lifecycle_record is not None
+                                and lifecycle_record.finding_lifecycle is not None
+                                and lifecycle_record.transaction is not None
+                                and transaction_record is not None
+                                and transaction_record.transaction is not None
+                                and transaction_record.finding_lifecycle
+                                == lifecycle_record.finding_lifecycle
+                                and transaction_record.transaction.result_sha256
+                                == result.content_digest()
+                                and lifecycle_record.transaction.logical_identity_matches(
+                                    transaction_record.transaction
+                                )
+                                and lifecycle_record.transaction.result_sha256
+                                == transaction_record.transaction.result_sha256
+                                and result.transaction is not None
+                                and result.transaction.logical_identity_matches(
+                                    transaction_record.transaction
+                                )
+                                and not lifecycle_document["unknown_trust_effect"]
+                                and not lifecycle_document["native_receipts"]
+                                and initial_check_effects(
+                                    lifecycle_document["effects"], repository
+                                )
+                            ):
+                                from review_sensei.finding_lifecycle import (
+                                    decode_lifecycle_state,
+                                )
+
+                                from .lifecycle_admission import (
+                                    restore_original_lifecycle_admission,
+                                )
+
+                                result = restore_original_lifecycle_admission(
+                                    result,
+                                    decode_lifecycle_state(
+                                        lifecycle_document["lifecycle"]
+                                    ).state,
+                                    head_sha=head_sha,
+                                    base_sha=base_sha,
+                                )
+                            else:
+                                raise ReviewInputError(
+                                    "complete publication admission evidence is missing; retain the original result and do not infer clean obligations"
+                                )
                     admission_recovery_held = False
             prepared_publishable: PublishableReview | None = None
             if (

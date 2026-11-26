@@ -32,7 +32,7 @@ from review_sensei.finding_lifecycle import (
 from review_sensei.finding_lifecycle_store import _sizing_producer
 from review_sensei.session import SessionIdentity
 
-from .errors import GitHubHTTPError, GitHubPublicationError
+from .errors import GitHubHTTPError
 from .thread_resolution import graphql_app_author
 
 VERSION = "finding-lifecycle-journal-v1"
@@ -6338,11 +6338,7 @@ class FindingLifecycleJournal:
                                         producer_id=producer_id,
                                     )
                                 )
-                            except (
-                                GitHubHTTPError,
-                                GitHubPublicationError,
-                                ReviewInputError,
-                            ):
+                            except GitHubHTTPError:
                                 companions = {}
                             for instance, item in explanations.items():
                                 if (

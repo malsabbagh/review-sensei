@@ -8,6 +8,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from urllib.parse import urlparse, urlsplit
 
 from default_human_inventory_contract import (
@@ -24,6 +25,7 @@ from default_human_inventory_contract import (
 )
 from fake_github_http import json_response
 from review_sensei_github import (
+    GitHubHTTPError,
     GitHubPublicationError,
     GitHubWriteOptions,
     ReviewPublisher,
@@ -33,12 +35,16 @@ from review_sensei_github.default_human_inventory import (
     build_human_inventory_context,
 )
 from review_sensei_github.default_human_reader import DefaultHumanInventoryReader
+from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
 from review_sensei_github.prose_publication import CommentReviewProseStore
 from review_sensei_github.publication import (
     MAX_PUBLISHED_REVIEW_BODY_BYTES,
+    AssembledReview,
+    BodyExplanation,
     PublicationLimitError,
     _disposition_frame_reserve,
     _framed_review_body,
+    _render_visible_prose_directory,
     approval_eligibility_from_body,
     approval_eligibility_marker,
     fit_assembled_review,
@@ -1100,3 +1106,284 @@ class VisibleProseOverflowTests(unittest.TestCase):
             )
             self.assertIsNone(store.read_available())
             self.assertFalse(store._last_read_saw_producer_intent)
+
+    def test_default_human_reader_raises_review_input_error_when_companion_review_missing_from_lookup(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_dir = Path(directory) / "ledger"
+            init_ledger = LocalSessionLedger(ledger_dir)
+            result, key = _body_placed_result(
+                init_ledger,
+                count=32,
+                body_padding=2300,
+                blocker_count=1,
+                human_count=2,
+            )
+            state = _VisibleProseOverflowState(result.comments)
+            options = GitHubWriteOptions(
+                github_writes=True,
+                auto_review=True,
+                complete_inventory=True,
+                allow_visible_prose_overflow=True,
+            )
+            pub = application(state, LocalSessionLedger(ledger_dir)).publish_review(
+                options=options,
+                oidc_token="synthetic",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD,
+                base_sha=BASE,
+                base_branch="main",
+                result=result,
+                diff=state.diff,
+                app_slug=APP,
+                convergence_policy=POLICY,
+                current_key=key,
+                configuration_context=CONFIGURATION,
+                evidence_context=EVIDENCE,
+                blocker_candidates=_blocker_candidates(result.comments),
+            )
+            self.assertEqual(pub.status, "published")
+            main_review, _index, _bodies = _expected_body_explanations(
+                result, state.reviews
+            )
+            comp_idx = next(
+                i
+                for i, r in enumerate(state.reviews)
+                if r["id"] != main_review["id"]
+                and "## ReviewSensei finding explanations — part " in r["body"]
+            )
+            state.reviews.pop(comp_idx)
+
+            with (
+                mock.patch.object(
+                    CommentReviewProseStore,
+                    "_revalidate_listing",
+                    return_value=None,
+                ),
+                self.assertRaises(GitHubPublicationError) as err,
+            ):
+                application(
+                    state, LocalSessionLedger(ledger_dir)
+                ).reviewer.finalizer.load_eligibility(
+                    token="synthetic-read",
+                    repository=IDENTITY.repository,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    require_valid=True,
+                    validate_visible_prose=True,
+                )
+            self.assertIsInstance(err.exception.__cause__, ReviewInputError)
+            self.assertIn(
+                "default human inventory visible prose review is missing",
+                str(err.exception.__cause__),
+            )
+
+    def test_render_visible_prose_directory_escapes_identifiers_and_validates_sha256(
+        self,
+    ):
+        comment = ReviewComment(
+            path="docs/operations.md",
+            line=None,
+            side="FILE",
+            body="Validate request inputs cleanly.",
+            severity="medium",
+            blocking=False,
+        )
+        instance = finding_instance_fingerprint(comment)
+        view = build_finding_view(
+            comment,
+            fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
+            identifier="RS-1|break`cell\r\n<script>alert(1)</script>",
+            placement="body",
+        )
+        explanation = BodyExplanation(
+            instance=instance,
+            severity="medium",
+            obligatory=False,
+            view=view,
+            path=comment.path,
+        )
+        parts = prepare_body_explanation_prose_parts(
+            (replace(explanation, view=replace(view, identifier="RS-1")),),
+            head_sha=HEAD,
+        )
+        directory = _render_visible_prose_directory(
+            parts, (explanation,), review_ids=(12345,)
+        )
+        table_rows = [
+            line for line in directory.splitlines() if line.startswith("| 1 of 1 ")
+        ]
+        self.assertEqual(len(table_rows), 1)
+        row = table_rows[0]
+        self.assertIn(
+            r"RS-1\|break\`cell  &lt;script&gt;alert(1)&lt;/script&gt;",
+            row,
+        )
+        self.assertNotIn("<script>", row)
+        bad_part = replace(parts[0], body=parts[0].body)
+        with mock.patch.object(
+            type(bad_part), "sha256", new_callable=mock.PropertyMock, return_value="zzz"
+        ):
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "visible prose directory metadata is invalid"
+            ):
+                _render_visible_prose_directory(
+                    (bad_part,), (explanation,), review_ids=(12345,)
+                )
+
+    def test_finding_lifecycle_readback_fails_closed_on_companion_prose_integrity_error(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_dir = Path(directory) / "ledger"
+            init_ledger = LocalSessionLedger(ledger_dir)
+            result, key = _body_placed_result(
+                init_ledger,
+                count=32,
+                body_padding=2300,
+                blocker_count=1,
+                human_count=2,
+            )
+            state = _VisibleProseOverflowState(result.comments)
+            options = GitHubWriteOptions(
+                github_writes=True,
+                auto_review=True,
+                complete_inventory=True,
+                allow_visible_prose_overflow=True,
+            )
+            app = application(state, LocalSessionLedger(ledger_dir))
+            pub = app.publish_review(
+                options=options,
+                oidc_token="synthetic",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD,
+                base_sha=BASE,
+                base_branch="main",
+                result=result,
+                diff=state.diff,
+                app_slug=APP,
+                convergence_policy=POLICY,
+                current_key=key,
+                configuration_context=CONFIGURATION,
+                evidence_context=EVIDENCE,
+                blocker_candidates=_blocker_candidates(result.comments),
+            )
+            self.assertEqual(pub.status, "published")
+            main_review, index, _bodies = _expected_body_explanations(
+                result, state.reviews
+            )
+            comp_idx = next(
+                i
+                for i, r in enumerate(state.reviews)
+                if r["id"] != main_review["id"]
+                and "## ReviewSensei finding explanations — part " in r["body"]
+            )
+            instances = [finding_instance_fingerprint(c) for c in result.comments]
+            identifiers = assign_finding_identifiers(instances)
+            body_explanations = tuple(
+                BodyExplanation(
+                    instance=inst,
+                    severity=comment.severity,
+                    obligatory=bool(comment.effective_blocking),
+                    view=build_finding_view(
+                        comment,
+                        fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
+                        identifier=identifiers[inst],
+                        placement="body",
+                    ),
+                    path=comment.path,
+                )
+                for comment, inst in zip(result.comments, instances, strict=True)
+            )
+            assembled = AssembledReview(
+                inline_comments=(),
+                index_entries=index.entries,
+                head_sha=HEAD,
+                state="clean",
+                reason=None,
+                overview="summary",
+                coverage_line=None,
+                required_views=(),
+                optional_views=(),
+                limitations=(),
+                placement_note=None,
+                body_explanations=body_explanations,
+                inline_blocker_instances=(),
+                requests_changes=False,
+                offloaded_body_instances=frozenset(
+                    item.instance for item in body_explanations
+                ),
+            )
+            app.reviewer._native_finding_context = {
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "head_sha": HEAD,
+                "base_sha": BASE,
+                "producer_id": state.app_user["id"],
+                "assembled": assembled,
+            }
+            journal = FindingLifecycleJournal(
+                app.reviewer,
+                LocalSessionLedger(ledger_dir),
+                IDENTITY,
+                operation_id="op-1",
+                base_sha=BASE,
+                head_sha=HEAD,
+                policy_digest=POLICY.digest(),
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    CONFIGURATION
+                ),
+                app_slug=APP,
+                review_token="synthetic",
+            )
+            effect = {
+                "method": "POST",
+                "path": f"/repos/{IDENTITY.repository}/pulls/{IDENTITY.pull_request}/reviews",
+                "request": {
+                    "commit_id": HEAD,
+                    "event": "REQUEST_CHANGES",
+                    "body": main_review["body"],
+                },
+                "status": "confirmed",
+                "response": [200, {"id": main_review["id"]}],
+            }
+
+            with mock.patch.object(
+                app.reviewer,
+                "_verified_companion_prose_bodies",
+                side_effect=GitHubHTTPError("transient outage", http_status=502),
+            ):
+                degraded = journal._readback(
+                    app.reviewer.http, effect, token="synthetic"
+                )
+                self.assertEqual(degraded[0], 200)
+                self.assertEqual(
+                    app.reviewer._native_finding_receipt_records.get(
+                        (IDENTITY.repository_id, IDENTITY.pull_request), {}
+                    ),
+                    {},
+                )
+
+            original_body = state.reviews[comp_idx]["body"]
+            state.reviews[comp_idx]["body"] = original_body + " tampered"
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "visible prose receipt body changed"
+            ):
+                journal._readback(app.reviewer.http, effect, token="synthetic")
+
+            state.reviews[comp_idx]["body"] = original_body
+            state.reviews[comp_idx]["user"] = {
+                "id": 999_999,
+                "login": "foreign[bot]",
+                "type": "Bot",
+            }
+            with self.assertRaisesRegex(
+                ReviewInputError, "visible prose placement or owner conflicts"
+            ):
+                journal._readback(app.reviewer.http, effect, token="synthetic")

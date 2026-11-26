@@ -1012,6 +1012,19 @@ class AssembledReview:
     visible_prose_directory: str | None = None
 
 
+def _escape_markdown_table_cell(text: str) -> str:
+    """Neutralize markdown table, backtick, newline, and HTML delimiters."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def _render_visible_prose_directory(
     parts: Sequence[FindingProsePart],
     explanations: Sequence[BodyExplanation],
@@ -1021,7 +1034,10 @@ def _render_visible_prose_directory(
     """Render a compact pointer table linking each companion prose review."""
     if len(parts) != len(review_ids):
         raise GitHubPublicationError("visible prose directory parts mismatch")
-    id_by_instance = {item.instance: item.view.identifier for item in explanations}
+    id_by_instance = {
+        item.instance: _escape_markdown_table_cell(item.view.identifier)
+        for item in explanations
+    }
     lines = [
         "### Full finding explanations",
         "",
@@ -1031,6 +1047,15 @@ def _render_visible_prose_directory(
         "| --- | --- | --- | --- |",
     ]
     for part, review_id in zip(parts, review_ids, strict=True):
+        sha256 = part.sha256
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+            or type(review_id) is not int
+            or review_id <= 0
+        ):
+            raise GitHubPublicationError("visible prose directory metadata is invalid")
         finding_ids = ", ".join(
             id_by_instance[instance]
             for instance in part.instances
@@ -1039,7 +1064,7 @@ def _render_visible_prose_directory(
         lines.append(
             f"| {part.index + 1} of {part.count} "
             f"| [Part {part.index + 1}](#pullrequestreview-{review_id}) "
-            f"| `{part.sha256}` | {finding_ids} |"
+            f"| `{sha256}` | {finding_ids} |"
         )
     directory = "\n".join(lines)
     if "<!-- reviewsensei:" in directory:
@@ -2936,7 +2961,9 @@ class ReviewApprovalFinalizer:
                 by_review_id[receipt.review_id] = readback.body
         verified: dict[str, tuple[int, str, str]] = {}
         for receipt in receipts:
-            companion_body = by_review_id[receipt.review_id]
+            companion_body = by_review_id.get(receipt.review_id)
+            if companion_body is None:
+                raise GitHubPublicationError("visible prose review is missing")
             for instance in receipt.instances:
                 if instance in verified:
                     raise GitHubPublicationError("visible prose instance duplicated")
