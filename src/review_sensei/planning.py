@@ -8,7 +8,7 @@ those per-request limits or silently truncating work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .budgets import EffectiveWorkBudget
 from .coverage import (
@@ -144,6 +144,100 @@ class WorkBatch:
 
 
 @dataclass(frozen=True)
+class HunkLineRange:
+    """Line span of one rejected diff hunk or canonical hunk segment."""
+
+    path: str
+    hunk_index: int
+    old_start: int
+    old_end: int
+    new_start: int
+    new_end: int
+
+    def format_compact(self) -> str:
+        return (
+            f"{self.path} hunk #{self.hunk_index} "
+            f"(-{self.old_start}..{self.old_end}/+{self.new_start}..{self.new_end})"
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "hunk_index": self.hunk_index,
+            "old_start": self.old_start,
+            "old_end": self.old_end,
+            "new_start": self.new_start,
+            "new_end": self.new_end,
+        }
+
+
+@dataclass(frozen=True)
+class PromptOverflowDetail:
+    """Structured prompt-admission failure telemetry for one requirement."""
+
+    requirement_identity: str
+    reason: str
+    prompt_ceiling_bytes: int | None = None
+    rendered_prompt_bytes: int | None = None
+    over_budget_bytes: int | None = None
+    mandatory_doc_bytes: int | None = None
+    mandatory_doc_paths: tuple[str, ...] = ()
+    evidence_bytes: int | None = None
+    framing_bytes: int | None = None
+    clamped_by_legacy_48k: bool = False
+    rejected_paths: tuple[str, ...] = ()
+    hunk_indexes: tuple[int, ...] = ()
+    hunk_ranges: tuple[HunkLineRange, ...] = ()
+    subdivision_stop_reason: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "requirement_identity": self.requirement_identity,
+            "reason": self.reason,
+            "prompt_ceiling_bytes": self.prompt_ceiling_bytes,
+            "rendered_prompt_bytes": self.rendered_prompt_bytes,
+            "over_budget_bytes": self.over_budget_bytes,
+            "mandatory_doc_bytes": self.mandatory_doc_bytes,
+            "mandatory_doc_paths": list(self.mandatory_doc_paths),
+            "evidence_bytes": self.evidence_bytes,
+            "framing_bytes": self.framing_bytes,
+            "clamped_by_legacy_48k": self.clamped_by_legacy_48k,
+            "rejected_paths": list(self.rejected_paths),
+            "hunk_indexes": list(self.hunk_indexes),
+            "hunk_ranges": [item.to_dict() for item in self.hunk_ranges],
+            "subdivision_stop_reason": self.subdivision_stop_reason,
+        }
+
+
+def _hunk_line_ranges_for_records(
+    records: Sequence[EvidenceRecord],
+) -> tuple[HunkLineRange, ...]:
+    ranges: list[HunkLineRange] = []
+    for rec in records:
+        if rec.analysis is None:
+            continue
+        for hunk in rec.analysis.hunk_records:
+            hunk_idx = (
+                rec.fragment.source_hunk_index
+                if rec.fragment is not None
+                else hunk.index
+            )
+            old_end = hunk.old_start + max(0, hunk.old_count - 1)
+            new_end = hunk.new_start + max(0, hunk.new_count - 1)
+            ranges.append(
+                HunkLineRange(
+                    path=rec.path,
+                    hunk_index=hunk_idx,
+                    old_start=hunk.old_start,
+                    old_end=old_end,
+                    new_start=hunk.new_start,
+                    new_end=new_end,
+                )
+            )
+    return tuple(ranges)
+
+
+@dataclass(frozen=True)
 class ReviewWorkPlan:
     mode: str
     bundle: EvidenceBundle
@@ -152,6 +246,7 @@ class ReviewWorkPlan:
     unprocessed: tuple[tuple[str, str], ...]
     authority_digest: str = ""
     budget_digest: str = ""
+    unprocessed_diagnostics: tuple[PromptOverflowDetail, ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in {"discovery", "reassessment"} or not isinstance(
@@ -219,6 +314,7 @@ def plan_work(
     max_batches: int = 8,
     correction: str = "",
     authority_digest: str = "",
+    subdivision_stop_reasons: Mapping[str, str] | None = None,
 ) -> ReviewWorkPlan:
     """Pack both modes with one deterministic, rendered-request admission loop.
 
@@ -263,8 +359,10 @@ def plan_work(
     )
     batches: list[WorkBatch] = []
     unprocessed: list[tuple[str, str]] = []
+    unprocessed_diagnostics: list[PromptOverflowDetail] = []
     current: tuple[WorkRequirement, ...] = ()
     failure_reason = "required-evidence-oversized"
+    last_overflow: object | None = None
     planning_expired = False
 
     def batch_for(candidates: tuple[WorkRequirement, ...]) -> WorkBatch:
@@ -278,7 +376,8 @@ def plan_work(
         return WorkBatch(mode, candidates, selected)
 
     def fits(candidates: tuple[WorkRequirement, ...]) -> bool:
-        nonlocal failure_reason, planning_expired
+        nonlocal failure_reason, last_overflow, planning_expired
+        last_overflow = None
         if planning_expired:
             failure_reason = "planning-deadline-exceeded"
             return False
@@ -296,6 +395,7 @@ def plan_work(
         except ReviewInputError as exc:
             if exc.error_category == "mandatory_context_oversized":
                 failure_reason = "mandatory-context-and-evidence-oversized"
+                last_overflow = exc
             elif exc.error_category == "planning_deadline_exhausted":
                 failure_reason = "planning-deadline-exceeded"
                 planning_expired = True
@@ -308,6 +408,61 @@ def plan_work(
             raise ReviewInputError("work renderer must return a ProviderRequest")
         prompt = request.prompt + ("\n\n" + correction if correction else "")
         return budgets.fits_prompt(prompt, output_tokens=request.max_output_tokens)
+
+    def _overflow_detail(item: WorkRequirement, reason: str) -> PromptOverflowDetail:
+        item_records = tuple(
+            records[key] for key in item.evidence_ids if key in records
+        )
+        default_ceiling, default_clamped = budgets.effective_prompt_ceiling_bytes(
+            output_tokens=budgets.max_output_tokens
+        )
+        raw_ceiling = getattr(last_overflow, "prompt_ceiling_bytes", None)
+        ceiling = raw_ceiling if isinstance(raw_ceiling, int) else default_ceiling
+        rendered = getattr(last_overflow, "rendered_prompt_bytes", None)
+        over_budget = getattr(last_overflow, "over_budget_bytes", None)
+        if (
+            over_budget is None
+            and isinstance(rendered, int)
+            and isinstance(ceiling, int)
+        ):
+            over_budget = max(0, rendered - ceiling)
+        raw_evidence = getattr(last_overflow, "evidence_bytes", None)
+        evidence_bytes = (
+            raw_evidence
+            if isinstance(raw_evidence, int)
+            else sum(utf8_size(rec.diff, label="evidence diff") for rec in item_records)
+        )
+        raw_mandatory = getattr(last_overflow, "mandatory_doc_bytes", None)
+        raw_mandatory_paths = getattr(last_overflow, "mandatory_doc_paths", ())
+        raw_framing = getattr(last_overflow, "framing_bytes", None)
+        raw_clamped = getattr(last_overflow, "clamped_by_legacy_48k", None)
+        clamped = bool(raw_clamped) if raw_clamped is not None else default_clamped
+        stop_reason = None
+        if subdivision_stop_reasons:
+            for eid in item.evidence_ids:
+                if eid in subdivision_stop_reasons:
+                    stop_reason = subdivision_stop_reasons[eid]
+                    break
+        return PromptOverflowDetail(
+            requirement_identity=item.identity,
+            reason=reason,
+            prompt_ceiling_bytes=ceiling,
+            rendered_prompt_bytes=rendered if isinstance(rendered, int) else None,
+            over_budget_bytes=over_budget if isinstance(over_budget, int) else None,
+            mandatory_doc_bytes=raw_mandatory
+            if isinstance(raw_mandatory, int)
+            else None,
+            mandatory_doc_paths=tuple(raw_mandatory_paths)
+            if raw_mandatory_paths
+            else (),
+            evidence_bytes=evidence_bytes,
+            framing_bytes=raw_framing if isinstance(raw_framing, int) else None,
+            clamped_by_legacy_48k=clamped,
+            rejected_paths=tuple(dict.fromkeys(rec.path for rec in item_records)),
+            hunk_indexes=item.hunk_indexes,
+            hunk_ranges=_hunk_line_ranges_for_records(item_records),
+            subdivision_stop_reason=stop_reason,
+        )
 
     def flush() -> None:
         nonlocal current
@@ -335,6 +490,8 @@ def plan_work(
             continue
         if not fits((item,)):
             unprocessed.append((item.identity, failure_reason))
+            if failure_reason == "mandatory-context-and-evidence-oversized":
+                unprocessed_diagnostics.append(_overflow_detail(item, failure_reason))
             continue
         if current and not fits(current + (item,)):
             flush()
@@ -348,6 +505,7 @@ def plan_work(
         tuple(sorted(unprocessed)),
         authority_digest,
         budgets.digest,
+        tuple(sorted(unprocessed_diagnostics, key=lambda d: d.requirement_identity)),
     )
 
 
@@ -405,6 +563,7 @@ def plan_continuation(
         tuple(sorted((*remaining.unprocessed, *deferred.items()))),
         previous.authority_digest,
         budgets.digest,
+        remaining.unprocessed_diagnostics,
     )
 
 
@@ -1203,7 +1362,9 @@ def apply_chunk_outcomes(
 
 __all__ = [
     "DEFAULT_TOTAL_WORK_BUDGET",
+    "HunkLineRange",
     "LargeChangePlan",
+    "PromptOverflowDetail",
     "ReviewWorkPlan",
     "WorkBatch",
     "WorkRequirement",

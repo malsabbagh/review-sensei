@@ -38,6 +38,7 @@ COVERAGE_REASONS = frozenset(
         "provider-call-budget",
         "incomplete-enumeration",
         "cross-file-relationship",
+        "verified-generated-mirror",
         "deleted",
         "renamed",
     }

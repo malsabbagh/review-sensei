@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from .budgets import ProviderCapabilities, ReviewWorkBudgets
 from .concurrency import ReviewConcurrencyPlan
+from .configuration import GeneratedMirrorRule
 from .context import (
     PROMPT_CONTEXT_POLICY,
     FindingLifecycle,
@@ -348,6 +349,7 @@ def review_work_policy_digest(
     capabilities: ProviderCapabilities | None = None,
     *,
     decision: DecisionConfiguration | None = None,
+    generated_mirrors: Sequence[GeneratedMirrorRule] = (),
 ) -> str | None:
     """Compute review configuration identity without constructing a provider."""
 
@@ -356,7 +358,12 @@ def review_work_policy_digest(
 
         return digest(
             {
-                "review": review_work_policy_digest(work_budgets, budget, capabilities),
+                "review": review_work_policy_digest(
+                    work_budgets,
+                    budget,
+                    capabilities,
+                    generated_mirrors=generated_mirrors,
+                ),
                 "decision": decision.digest(),
             }
         )
@@ -365,17 +372,18 @@ def review_work_policy_digest(
     from .evidence import evidence_digest
     from .hunk_subdivision import HUNK_SUBDIVISION_POLICY
 
-    return evidence_digest(
-        {
-            "mechanism": "unified:v1",
-            "hunk_subdivision_policy": HUNK_SUBDIVISION_POLICY,
-            "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
-            "prompt_context_policy": PROMPT_CONTEXT_POLICY,
-            "budgets": asdict(work_budgets),
-            "resource_budget": asdict(budget),
-            "capabilities": asdict(capabilities) if capabilities else None,
-        }
-    )
+    payload: dict[str, object] = {
+        "mechanism": "unified:v1",
+        "hunk_subdivision_policy": HUNK_SUBDIVISION_POLICY,
+        "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
+        "prompt_context_policy": PROMPT_CONTEXT_POLICY,
+        "budgets": asdict(work_budgets),
+        "resource_budget": asdict(budget),
+        "capabilities": asdict(capabilities) if capabilities else None,
+    }
+    if generated_mirrors:
+        payload["generated_mirrors"] = [asdict(rule) for rule in generated_mirrors]
+    return evidence_digest(payload)
 
 
 class ReviewService:
@@ -392,6 +400,7 @@ class ReviewService:
             self.budget,
             self.capabilities,
             decision=self.decision_configuration,
+            generated_mirrors=self.generated_mirrors,
         )
 
     def __init__(
@@ -407,6 +416,7 @@ class ReviewService:
         capabilities: ProviderCapabilities | None = None,
         decision_provider: ReviewDecisionProvider | None = None,
         decision_configuration: DecisionConfiguration | None = None,
+        generated_mirrors: Sequence[GeneratedMirrorRule] = (),
     ) -> None:
         self.decision_configuration = decision_configuration or DecisionConfiguration()
         self.decision_provider = decision_provider
@@ -431,6 +441,13 @@ class ReviewService:
         self.cache = cache
         self.work_budgets = work_budgets or ReviewWorkBudgets()
         self.capabilities = capabilities
+        self.generated_mirrors = tuple(generated_mirrors)
+        if any(
+            not isinstance(rule, GeneratedMirrorRule) for rule in self.generated_mirrors
+        ):
+            raise ReviewInputError(
+                "generated_mirrors must contain only GeneratedMirrorRule values"
+            )
         if not isinstance(self.work_budgets, ReviewWorkBudgets) or (
             capabilities is not None
             and not isinstance(capabilities, ProviderCapabilities)

@@ -494,7 +494,7 @@ class DiscoverySubdivisionTests(unittest.TestCase):
             service.run(ReviewRequest(diff=record.diff, work_policy_digest=previous))
         self.assertFalse(provider.requests)
 
-    def test_all_stages_use_one_subdivision_allowance(self):
+    def test_each_stage_uses_its_own_subdivision_allowance(self):
         record, provider, service = self.fixture()
         stages = (service.stages[0], replace(service.stages[0], name="second"))
         service = ReviewService(
@@ -503,13 +503,21 @@ class DiscoverySubdivisionTests(unittest.TestCase):
             budget=service.budget,
             work_budgets=service.work_budgets,
         )
-        allowance = SubdivisionAllowance(remaining=2)
+        allowances: list[SubdivisionAllowance] = []
+
+        def make_allowance() -> SubdivisionAllowance:
+            allowance = SubdivisionAllowance(remaining=2)
+            allowances.append(allowance)
+            return allowance
+
         with patch(
-            "review_sensei.discovery_work.SubdivisionAllowance", return_value=allowance
+            "review_sensei.discovery_work.SubdivisionAllowance",
+            side_effect=make_allowance,
         ) as construct:
             run = service.run(ReviewRequest(diff=record.diff))
-        construct.assert_called_once_with()
-        self.assertEqual(allowance.remaining, 0)
+        self.assertEqual(construct.call_count, 2)
+        self.assertEqual(len(allowances), 2)
+        self.assertTrue(all(item.remaining == 0 for item in allowances))
         self.assertEqual(run.outcome.status, "partial")
         self.assertFalse(run.result.coverage.fully_reviewed)
         self.assertLessEqual(len(provider.requests), service.budget.max_provider_calls)

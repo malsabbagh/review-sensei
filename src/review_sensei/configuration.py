@@ -122,7 +122,20 @@ ADVANCED_FIELDS = (
     "large_changes",
     "resources",
     "review_work",
+    "generated_mirrors",
 )
+GENERATED_MIRROR_RULE_FIELDS = (
+    "canonical_sources",
+    "mirror_paths",
+    "generator_sources",
+    "generator_command",
+    "timeout_seconds",
+)
+GENERATED_MIRROR_MAX_RULES = 16
+GENERATED_MIRROR_MAX_PATHS = 64
+GENERATED_MIRROR_MAX_COMMAND_TOKENS = 32
+GENERATED_MIRROR_DEFAULT_TIMEOUT_SECONDS = 30
+GENERATED_MIRROR_MAX_TIMEOUT_SECONDS = 120
 ENDPOINT_FIELDS = ("base_url", "allow_custom_endpoint", "credential_env")
 ROUTING_FIELDS = ("upstream_provider",)
 CONTEXT_FIELDS = ("symbol_context", "supplemental_documents")
@@ -450,6 +463,43 @@ class ResourceSection:
 
 
 @dataclass(frozen=True)
+class GeneratedMirrorRule:
+    name: str
+    canonical_sources: tuple[str, ...]
+    mirror_paths: tuple[str, ...]
+    generator_sources: tuple[str, ...]
+    generator_command: tuple[str, ...]
+    timeout_seconds: int = GENERATED_MIRROR_DEFAULT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        def _fail(field_path: str, message: str) -> ConfigurationError:
+            return ConfigurationError(f"{field_path} {message}", field=field_path)
+
+        (
+            _,
+            norm_canonical,
+            norm_mirror,
+            norm_generator,
+            norm_command,
+            norm_timeout,
+        ) = _validate_generated_mirror_rule_fields(
+            name=self.name,
+            canonical_sources=self.canonical_sources,
+            mirror_paths=self.mirror_paths,
+            generator_sources=self.generator_sources,
+            generator_command=self.generator_command,
+            timeout_seconds=self.timeout_seconds,
+            field_prefix=f"advanced.generated_mirrors.{self.name}",
+            fail=_fail,
+        )
+        object.__setattr__(self, "canonical_sources", norm_canonical)
+        object.__setattr__(self, "mirror_paths", norm_mirror)
+        object.__setattr__(self, "generator_sources", norm_generator)
+        object.__setattr__(self, "generator_command", norm_command)
+        object.__setattr__(self, "timeout_seconds", norm_timeout)
+
+
+@dataclass(frozen=True)
 class AdvancedSection:
     endpoint: EndpointSection = field(default_factory=EndpointSection)
     routing: RoutingSection = field(default_factory=RoutingSection)
@@ -458,6 +508,7 @@ class AdvancedSection:
     large_changes: LargeChangeSection = field(default_factory=LargeChangeSection)
     resources: ResourceSection = field(default_factory=ResourceSection)
     review_work: ReviewWorkBudgets = field(default_factory=ReviewWorkBudgets)
+    generated_mirrors: tuple[GeneratedMirrorRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1276,6 +1327,9 @@ def _build_advanced(
         review_work=_build_review_work(
             mapping.get("review_work"), lines, source=source, fail=fail
         ),
+        generated_mirrors=_build_generated_mirrors(
+            mapping.get("generated_mirrors"), lines, source=source, fail=fail
+        ),
     )
 
 
@@ -1594,6 +1648,338 @@ def _build_resources(
         max_provider_calls=max_provider_calls,
         review_deadline_seconds=review_deadline_seconds,
     )
+
+
+_SHELL_EXECUTABLES = frozenset({"sh", "bash", "zsh", "cmd", "powershell", "pwsh"})
+_SCRIPT_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".rb",
+        ".pl",
+        ".ps1",
+        ".bat",
+        ".cmd",
+    }
+)
+
+
+def _normalize_mirror_repo_path(
+    item: Any, *, field_path: str, fail: Any, allow_leading_dot_slash: bool = False
+) -> str:
+    if not isinstance(item, str) or not item.strip():
+        raise fail(field_path, "must contain non-empty repository-relative paths")
+    if len(item.encode("utf-8", errors="strict")) > 256:
+        raise fail(field_path, "path exceeds the supported size")
+    if any(ord(char) < 32 or ord(char) == 127 for char in item):
+        raise fail(field_path, "paths must not contain control characters")
+    if (
+        item.startswith("/")
+        or item.startswith("\\")
+        or (len(item) >= 2 and item[1] == ":")
+    ):
+        raise fail(field_path, "paths must be repository-relative")
+    normalized = item.replace("\\", "/")
+    if allow_leading_dot_slash:
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+    normalized = normalized.rstrip("/")
+    if not normalized:
+        raise fail(field_path, "must contain non-empty repository-relative paths")
+    parts = normalized.split("/")
+    if any(part in {"", ".", "..", ".git"} for part in parts):
+        raise fail(
+            field_path,
+            "paths must be canonical repository-relative paths without traversal or .git",
+        )
+    return normalized
+
+
+def _mirror_paths_overlap(first: str, second: str) -> bool:
+    return (
+        first == second
+        or first.startswith(second + "/")
+        or second.startswith(first + "/")
+    )
+
+
+def _mirror_path_covered_by(path: str, allowed_roots: Sequence[str]) -> bool:
+    return any(
+        _mirror_paths_overlap(path, root)
+        and (path == root or path.startswith(root + "/"))
+        for root in allowed_roots
+    )
+
+
+def _validate_generated_mirror_path_list(
+    value: Any, *, field_path: str, fail: Any
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise fail(
+            field_path,
+            f"must be a sequence of 1..{GENERATED_MIRROR_MAX_PATHS} repository-relative paths",
+        )
+    if len(value) > GENERATED_MIRROR_MAX_PATHS:
+        raise fail(
+            field_path,
+            f"exceeds the maximum of {GENERATED_MIRROR_MAX_PATHS} paths",
+        )
+    normalized = tuple(
+        _normalize_mirror_repo_path(item, field_path=field_path, fail=fail)
+        for item in value
+    )
+    return tuple(dict.fromkeys(normalized))
+
+
+def _is_shell_wrapper_command(tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return False
+    index = 0
+    exe = Path(tokens[0].replace("\\", "/")).name.lower().removesuffix(".exe")
+    if exe == "env":
+        index = 1
+        while index < len(tokens) and (
+            tokens[index].startswith("-") or "=" in tokens[index]
+        ):
+            index += 1
+        if index >= len(tokens):
+            return False
+        exe = Path(tokens[index].replace("\\", "/")).name.lower().removesuffix(".exe")
+    if exe not in _SHELL_EXECUTABLES:
+        return False
+    for arg in tokens[index + 1 :]:
+        lowered = arg.lower()
+        if lowered in {"-c", "/c", "-command", "-encodedcommand", "-enc"}:
+            return True
+        if (
+            lowered.startswith("-")
+            and not lowered.startswith("--")
+            and "c" in lowered[1:]
+        ):
+            return True
+    return False
+
+
+def _validate_generated_mirror_command(
+    value: Any,
+    *,
+    field_path: str,
+    canonical_sources: Sequence[str],
+    mirror_paths: Sequence[str],
+    generator_sources: Sequence[str],
+    fail: Any,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise fail(
+            field_path,
+            f"must be a sequence of 1..{GENERATED_MIRROR_MAX_COMMAND_TOKENS} scalar argv tokens",
+        )
+    if len(value) > GENERATED_MIRROR_MAX_COMMAND_TOKENS:
+        raise fail(
+            field_path,
+            f"exceeds the maximum of {GENERATED_MIRROR_MAX_COMMAND_TOKENS} argv tokens",
+        )
+    tokens: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise fail(field_path, "must contain non-empty string argv tokens")
+        if len(item.encode("utf-8", errors="strict")) > MAX_SCALAR_BYTES:
+            raise fail(field_path, "argv token exceeds the supported size")
+        if any(ord(char) < 32 or ord(char) == 127 for char in item):
+            raise fail(field_path, "argv tokens must not contain control characters")
+        tokens.append(item)
+    if _is_shell_wrapper_command(tokens):
+        raise fail(
+            field_path,
+            "shell wrapper commands (-c / /c) are not permitted; pass argv directly",
+        )
+    for idx, token in enumerate(tokens):
+        candidate = token
+        if idx > 0 and token.startswith("--") and "=" in token:
+            candidate = token.split("=", 1)[1]
+        elif idx > 0 and token.startswith("-"):
+            continue
+        is_abs = (
+            candidate.startswith("/")
+            or candidate.startswith("\\")
+            or (len(candidate) >= 2 and candidate[1] == ":")
+        )
+        has_sep = "/" in candidate or "\\" in candidate
+        is_dot = candidate.startswith(".")
+        has_script_ext = (
+            Path(candidate.replace("\\", "/")).suffix.lower() in _SCRIPT_EXTENSIONS
+        )
+        if idx == 0 and is_abs:
+            # Allow an absolute interpreter path (e.g. /usr/bin/python3),
+            # while rejecting repo-external script paths later.
+            continue
+        if has_sep or is_dot or has_script_ext:
+            normalized = _normalize_mirror_repo_path(
+                candidate,
+                field_path=field_path,
+                fail=fail,
+                allow_leading_dot_slash=True,
+            )
+            if idx == 0:
+                if not _mirror_path_covered_by(normalized, generator_sources):
+                    raise fail(
+                        field_path,
+                        f"relative executable '{normalized}' must be covered by generator_sources",
+                    )
+            else:
+                covered_by_data = not has_script_ext and (
+                    _mirror_path_covered_by(normalized, canonical_sources)
+                    or _mirror_path_covered_by(normalized, mirror_paths)
+                )
+                if not covered_by_data and not _mirror_path_covered_by(
+                    normalized, generator_sources
+                ):
+                    raise fail(
+                        field_path,
+                        f"relative script token '{normalized}' must be covered by generator_sources",
+                    )
+    return tuple(tokens)
+
+
+def _validate_generated_mirror_rule_fields(
+    *,
+    name: Any,
+    canonical_sources: Any,
+    mirror_paths: Any,
+    generator_sources: Any,
+    generator_command: Any,
+    timeout_seconds: Any,
+    field_prefix: str,
+    fail: Any,
+) -> tuple[
+    str, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], int
+]:
+    if not isinstance(name, str) or not _KEY_PATTERN.fullmatch(name):
+        raise fail(
+            field_prefix,
+            "rule name must use lower-case letters, digits, and underscores",
+        )
+    norm_canonical = _validate_generated_mirror_path_list(
+        canonical_sources, field_path=f"{field_prefix}.canonical_sources", fail=fail
+    )
+    norm_mirror = _validate_generated_mirror_path_list(
+        mirror_paths, field_path=f"{field_prefix}.mirror_paths", fail=fail
+    )
+    norm_generator = _validate_generated_mirror_path_list(
+        generator_sources, field_path=f"{field_prefix}.generator_sources", fail=fail
+    )
+    for m_path in norm_mirror:
+        for c_path in norm_canonical:
+            if _mirror_paths_overlap(m_path, c_path):
+                raise fail(
+                    f"{field_prefix}.mirror_paths",
+                    f"mirror path '{m_path}' must be disjoint from canonical_sources '{c_path}'",
+                )
+        for g_path in norm_generator:
+            if _mirror_paths_overlap(m_path, g_path):
+                raise fail(
+                    f"{field_prefix}.mirror_paths",
+                    f"mirror path '{m_path}' must be disjoint from generator_sources '{g_path}'",
+                )
+    norm_command = _validate_generated_mirror_command(
+        generator_command,
+        field_path=f"{field_prefix}.generator_command",
+        canonical_sources=norm_canonical,
+        mirror_paths=norm_mirror,
+        generator_sources=norm_generator,
+        fail=fail,
+    )
+    norm_timeout = _positive_int_field(
+        timeout_seconds,
+        f"{field_prefix}.timeout_seconds",
+        GENERATED_MIRROR_DEFAULT_TIMEOUT_SECONDS,
+        ceiling=GENERATED_MIRROR_MAX_TIMEOUT_SECONDS,
+        fail=fail,
+    )
+    return (
+        name,
+        norm_canonical,
+        norm_mirror,
+        norm_generator,
+        norm_command,
+        norm_timeout,
+    )
+
+
+def _build_generated_mirrors(
+    value: Any, lines: Mapping[str, int], *, source: str, fail: Any
+) -> tuple[GeneratedMirrorRule, ...]:
+    if value is None:
+        return ()
+    mapping = _mapping_field(
+        value, "advanced.generated_mirrors", source=source, fail=fail
+    )
+    if len(mapping) > GENERATED_MIRROR_MAX_RULES:
+        raise fail(
+            "advanced.generated_mirrors",
+            f"exceeds the maximum of {GENERATED_MIRROR_MAX_RULES} rules",
+        )
+    rules: list[GeneratedMirrorRule] = []
+    seen_mirror_paths: list[tuple[str, str]] = []
+    for rule_name, raw_rule in mapping.items():
+        if not isinstance(rule_name, str) or not _KEY_PATTERN.fullmatch(rule_name):
+            raise fail(
+                "advanced.generated_mirrors",
+                f"rule name '{rule_name}' must use lower-case letters, digits, and underscores",
+            )
+        field_prefix = f"advanced.generated_mirrors.{rule_name}"
+        if raw_rule is None:
+            raise fail(field_prefix, "must be a mapping")
+        rule_mapping = _mapping_field(raw_rule, field_prefix, source=source, fail=fail)
+        _reject_unknown_fields(
+            rule_mapping,
+            ("advanced", "generated_mirrors", rule_name),
+            lines,
+            source=source,
+            supported=GENERATED_MIRROR_RULE_FIELDS,
+        )
+        (
+            _,
+            norm_canonical,
+            norm_mirror,
+            norm_generator,
+            norm_command,
+            norm_timeout,
+        ) = _validate_generated_mirror_rule_fields(
+            name=rule_name,
+            canonical_sources=rule_mapping.get("canonical_sources"),
+            mirror_paths=rule_mapping.get("mirror_paths"),
+            generator_sources=rule_mapping.get("generator_sources"),
+            generator_command=rule_mapping.get("generator_command"),
+            timeout_seconds=rule_mapping.get("timeout_seconds"),
+            field_prefix=field_prefix,
+            fail=fail,
+        )
+        for m_path in norm_mirror:
+            for prior_rule, prior_path in seen_mirror_paths:
+                if _mirror_paths_overlap(m_path, prior_path):
+                    raise fail(
+                        f"{field_prefix}.mirror_paths",
+                        f"mirror path '{m_path}' overlaps rule '{prior_rule}' path '{prior_path}'",
+                    )
+            seen_mirror_paths.append((rule_name, m_path))
+        rules.append(
+            GeneratedMirrorRule(
+                name=rule_name,
+                canonical_sources=norm_canonical,
+                mirror_paths=norm_mirror,
+                generator_sources=norm_generator,
+                generator_command=norm_command,
+                timeout_seconds=norm_timeout,
+            )
+        )
+    return tuple(rules)
 
 
 def _bounded_echo(value: str) -> str:
@@ -2740,6 +3126,20 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
             rows.append(
                 f"review_work.{field_name}: {getattr(advanced.review_work, field_name)}"
             )
+    for rule in advanced.generated_mirrors:
+        for path in rule.canonical_sources:
+            rows.append(f"generated_mirrors.{rule.name}.canonical_sources: {path}")
+        for path in rule.mirror_paths:
+            rows.append(f"generated_mirrors.{rule.name}.mirror_paths: {path}")
+        for path in rule.generator_sources:
+            rows.append(f"generated_mirrors.{rule.name}.generator_sources: {path}")
+        rows.append(
+            f"generated_mirrors.{rule.name}.generator_command: "
+            + " ".join(rule.generator_command)
+        )
+        rows.append(
+            f"generated_mirrors.{rule.name}.timeout_seconds: {rule.timeout_seconds}"
+        )
     return rows
 
 
@@ -2771,6 +3171,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "advanced.resources.review_deadline_seconds": (
         DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS // 1000
     ),
+    "advanced.generated_mirrors": "none",
     **{
         f"advanced.review_work.{name}": getattr(ReviewWorkBudgets(), name)
         for name in REVIEW_WORK_FIELDS
@@ -2805,7 +3206,9 @@ __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "EgressSection",
     "EndpointSection",
+    "GENERATED_MIRROR_RULE_FIELDS",
     "GITHUB_FIELDS",
+    "GeneratedMirrorRule",
     "GitHubSection",
     "InferenceSection",
     "LargeChangeSection",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -16,11 +17,12 @@ from .context import (
     admit_prompt_context,
     stage_applies_to_paths,
 )
-from .diff import analyze_diff
+from .diff import DiffFileRecord, analyze_diff
 from .document_context import DocumentSelectionReport
 from .errors import ReviewFormatError, ReviewInputError
 from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
 from .execution import CompletedBatch, execute_plan
+from .generated_mirrors import VerifiedMirrorAttestation, mirror_path_matches
 from .hunk_subdivision import (
     HUNK_SUBDIVISION_POLICY,
     SubdivisionAllowance,
@@ -37,6 +39,7 @@ from .models import (
 from .outcomes import ResourceBudgetTracker
 from .planning import (
     MAX_RELATED_PATHS,
+    PromptOverflowDetail,
     WorkBatch,
     WorkRequirement,
     _bounded_scope_manifest,
@@ -189,8 +192,10 @@ def _batch_scope_items(batch: WorkBatch) -> tuple[str, ...]:
 
 def context_admission_document(
     entries: list[dict[str, object]],
+    *,
+    overflow_diagnostics: Sequence[dict[str, object]] = (),
 ) -> dict[str, object] | None:
-    if not entries:
+    if not entries and not overflow_diagnostics:
         return None
     originals: dict[str, object] = {}
     batches = []
@@ -211,11 +216,14 @@ def context_admission_document(
                 )
             }
         )
-    return {
+    document: dict[str, object] = {
         "policy": PROMPT_CONTEXT_POLICY,
         "original_inventories": list(originals.values()),
         "batches": batches,
     }
+    if overflow_diagnostics:
+        document["overflow_diagnostics"] = list(overflow_diagnostics)
+    return document
 
 
 def discover(
@@ -273,11 +281,12 @@ def discover(
     )
     file_outcomes: dict[str, tuple[str, str | None]] = {}
     hunk_outcomes: dict[int, tuple[str, str | None]] = {}
-    records = []
+    initial_classification: dict[int, tuple[str, str | None]] = {}
     for record in analysis.file_records:
         outcome, reason = _classify_file(
             record, analysis=analysis, limits=request.limits
         )
+        initial_classification[id(record)] = (outcome, reason)
         for path in record.coverage_paths:
             file_outcomes[path] = (
                 ("reviewed", None) if outcome == "reviewable" else (outcome, reason)
@@ -286,6 +295,67 @@ def discover(
             hunk_outcomes[hunk.index] = (
                 ("reviewed", None) if outcome == "reviewable" else (outcome, reason)
             )
+
+    def _record_all_paths_match(
+        record: DiffFileRecord, prefixes: Sequence[str]
+    ) -> bool:
+        return bool(record.coverage_paths) and all(
+            any(mirror_path_matches(path, prefix) for prefix in prefixes)
+            for path in record.coverage_paths
+        )
+
+    def _record_any_path_match(record: DiffFileRecord, prefixes: Sequence[str]) -> bool:
+        return any(
+            mirror_path_matches(path, prefix)
+            for path in record.coverage_paths
+            for prefix in prefixes
+        )
+
+    deferred_mirrors: list[
+        tuple[
+            VerifiedMirrorAttestation,
+            tuple[DiffFileRecord, ...],
+            tuple[DiffFileRecord, ...],
+        ]
+    ] = []
+    deferred_mirror_ids: set[int] = set()
+    for attestation in request.verified_mirrors:
+        if not attestation.verified:
+            continue
+        dep_prefixes = (*attestation.canonical_sources, *attestation.generator_sources)
+        dep_records = tuple(
+            record
+            for record in analysis.file_records
+            if _record_any_path_match(record, dep_prefixes)
+        )
+        if not all(
+            initial_classification.get(id(dep), ("unsupported", None))[0]
+            == "reviewable"
+            for dep in dep_records
+        ):
+            continue
+        mirror_records = tuple(
+            record
+            for record in analysis.file_records
+            if _record_all_paths_match(record, attestation.mirror_paths)
+            and initial_classification.get(id(record), ("unsupported", None))[0]
+            == "reviewable"
+        )
+        if not mirror_records:
+            continue
+        for mirror_record in mirror_records:
+            deferred_mirror_ids.add(id(mirror_record))
+            for path in mirror_record.coverage_paths:
+                file_outcomes[path] = ("unsupported", "cross-file-relationship")
+            for hunk in mirror_record.hunks:
+                hunk_outcomes[hunk.index] = ("unsupported", "cross-file-relationship")
+        deferred_mirrors.append((attestation, mirror_records, dep_records))
+
+    records = []
+    for record in analysis.file_records:
+        if id(record) in deferred_mirror_ids:
+            continue
+        outcome, reason = initial_classification[id(record)]
         if outcome == "reviewable":
             if prior_reviewed_files or prior_reviewed_hunks:
                 paths_done = bool(record.coverage_paths) and all(
@@ -314,6 +384,7 @@ def discover(
     comment_stage = False
     scope_wave_used = not allow_expansion
     context_diagnostics: list[dict[str, object]] = []
+    overflow_details: list[PromptOverflowDetail] = []
     refusal_reasons: dict[str, int] = {}
     mandatory_refused_documents: dict[str, int] = {}
     context_enabled = any(
@@ -332,7 +403,6 @@ def discover(
             evidence_confirmed=(),
         )
 
-    subdivision_allowance = SubdivisionAllowance()
     active_stage_count = sum(
         1
         for candidate_stage in service.stages
@@ -363,6 +433,8 @@ def discover(
                 actual_failure = True
             continue
         comment_stage = comment_stage or "comments" in stage.outputs
+        subdivision_allowance = SubdivisionAllowance()
+        unadmitted_stop_reasons: dict[str, str] = {}
         stage_provider = service._provider_for_stage(stage, default=provider)
         if service.capabilities is not None:
             selected_model = (
@@ -402,14 +474,22 @@ def discover(
                 request, diff=batch.diff_context, orchestrate_large_changes=False
             )
             batch_analysis = analyze_diff(batch.diff_context, limits=request.limits)
+            max_other_paths_bytes = (
+                min(2048, max(512, budgets.batch_prompt_bytes // 16))
+                if budgets.batch_prompt_bytes <= 65_536
+                else min(8192, max(512, budgets.batch_prompt_bytes // 4))
+            )
             scope_note = _batch_scope_note(
                 batch,
                 changed_paths=analysis.changed_paths,
-                max_other_paths_bytes=min(
-                    8192, max(512, budgets.batch_prompt_bytes // 4)
-                ),
+                max_other_paths_bytes=max_other_paths_bytes,
             )
             batch_frame_bytes = frame_bytes + len(scope_note.encode("utf-8"))
+            prompt_ceiling_bytes, clamped_by_legacy_48k = (
+                budgets.effective_prompt_ceiling_bytes(
+                    output_tokens=budgets.max_output_tokens
+                )
+            )
             admission = admit_prompt_context(
                 batch_request,
                 active_category_ids=tuple(category.id for category in categories),
@@ -435,6 +515,9 @@ def discover(
                     output_tokens=budgets.max_output_tokens,
                 ),
                 before_probe=check_deadline,
+                prompt_ceiling_bytes=prompt_ceiling_bytes,
+                extra_prompt_bytes=correction_bytes,
+                clamped_by_legacy_48k=clamped_by_legacy_48k,
             )
             if len(admissions) >= 8:
                 admissions.pop(next(iter(admissions)))
@@ -527,6 +610,7 @@ def discover(
                             admit=admit_fragment,
                             before_probe=check_deadline,
                             allowance=subdivision_allowance,
+                            unadmitted_reasons=unadmitted_stop_reasons,
                         )
                     evidence.extend(parts)
                     requirements.extend(fragment_requirement(piece) for piece in parts)
@@ -558,6 +642,7 @@ def discover(
                     ],
                 }
             ),
+            subdivision_stop_reasons=unadmitted_stop_reasons,
         )
         batch_labels: dict[str, str] = {}
         if len(plan.batches) > 1:
@@ -815,10 +900,17 @@ def discover(
         failed = failed or bool(execution.pending)
         for _, reason in execution.pending:
             refusal_reasons[reason] = refusal_reasons.get(reason, 0) + 1
-        if any(
-            reason == "mandatory-context-and-evidence-oversized"
-            for _, reason in execution.pending
-        ):
+        pending_overflow_ids = {
+            identity
+            for identity, reason in execution.pending
+            if reason == "mandatory-context-and-evidence-oversized"
+        }
+        if pending_overflow_ids:
+            overflow_details.extend(
+                detail
+                for detail in plan.unprocessed_diagnostics
+                if detail.requirement_identity in pending_overflow_ids
+            )
             category_ids = {category.id for category in categories}
             for context in request.lens_contexts:
                 if context.category_id not in category_ids:
@@ -861,6 +953,25 @@ def discover(
     _reconcile_file_outcomes_from_hunks(
         analysis, file_outcomes=file_outcomes, hunk_outcomes=hunk_outcomes
     )
+    for _, mirror_records, dep_records in deferred_mirrors:
+        deps_reviewed = not skipped_applicable_stage and all(
+            all(
+                file_outcomes.get(path, ("unsupported", None))[0] == "reviewed"
+                for path in dep.coverage_paths
+            )
+            and all(
+                hunk_outcomes.get(hunk.index, ("unsupported", None))[0] == "reviewed"
+                for hunk in dep.hunks
+            )
+            for dep in dep_records
+        )
+        if not deps_reviewed:
+            continue
+        for mirror_record in mirror_records:
+            for path in mirror_record.coverage_paths:
+                file_outcomes[path] = ("reviewed", "verified-generated-mirror")
+            for hunk in mirror_record.hunks:
+                hunk_outcomes[hunk.index] = ("reviewed", "verified-generated-mirror")
     coverage = _coverage_for(
         analysis,
         file_outcomes=file_outcomes,
@@ -886,7 +997,10 @@ def discover(
     status = "partial" if failed or not coverage.fully_reviewed else "complete"
     if not comment_stage and not skipped_applicable_stage:
         status = "summary-only"
-    context_admission = context_admission_document(context_diagnostics)
+    overflow_diagnostic_dicts = tuple(detail.to_dict() for detail in overflow_details)
+    context_admission = context_admission_document(
+        context_diagnostics, overflow_diagnostics=overflow_diagnostic_dicts
+    )
     refusal_summary = (
         "\n\nRequired work pending: "
         + "; ".join(
@@ -896,8 +1010,107 @@ def discover(
         if refusal_reasons
         else ""
     )
+    max_refusal_bytes = max(
+        256, PENDING_APPENDIX_RESERVE - CONTEXT_DIGEST_LINE_BYTES - 180
+    )
+    if overflow_details:
+        primary = max(
+            overflow_details,
+            key=lambda item: (
+                item.over_budget_bytes if item.over_budget_bytes is not None else -1,
+                item.rendered_prompt_bytes
+                if item.rendered_prompt_bytes is not None
+                else -1,
+            ),
+        )
+        if (
+            primary.rendered_prompt_bytes is not None
+            and primary.prompt_ceiling_bytes is not None
+        ):
+            overage = (
+                primary.over_budget_bytes
+                if primary.over_budget_bytes is not None
+                else max(
+                    0, primary.rendered_prompt_bytes - primary.prompt_ceiling_bytes
+                )
+            )
+            budget_parts: list[str] = [f"+{overage} overage"]
+            if primary.evidence_bytes is not None:
+                budget_parts.append(f"evidence {primary.evidence_bytes} bytes")
+            if primary.framing_bytes is not None:
+                budget_parts.append(f"framing {primary.framing_bytes} bytes")
+            if primary.clamped_by_legacy_48k:
+                budget_parts.append("legacy 48 KiB ceiling")
+            line = (
+                f"\nPrompt budget overflow: rendered {primary.rendered_prompt_bytes} bytes "
+                f"> {primary.prompt_ceiling_bytes}-byte ceiling ({'; '.join(budget_parts)})."
+            )
+            if len((refusal_summary + line).encode("utf-8")) <= max_refusal_bytes:
+                refusal_summary += line
     if mandatory_refused_documents:
-        refusal_summary += f"\nMandatory document overflow: {len(mandatory_refused_documents)} unique document(s), {sum(mandatory_refused_documents.values())} UTF-8 payload bytes."
+        doc_line = (
+            f"\nMandatory doc payload: {len(mandatory_refused_documents)} unique document(s), "
+            f"{sum(mandatory_refused_documents.values())} UTF-8 payload bytes (payload size, not overage)."
+        )
+        if len((refusal_summary + doc_line).encode("utf-8")) <= max_refusal_bytes:
+            refusal_summary += doc_line
+    elif overflow_details:
+        doc_paths = tuple(
+            dict.fromkeys(
+                path
+                for detail in overflow_details
+                for path in detail.mandatory_doc_paths
+            )
+        )
+        max_doc_bytes = max(
+            (detail.mandatory_doc_bytes or 0 for detail in overflow_details),
+            default=0,
+        )
+        if doc_paths or max_doc_bytes:
+            doc_line = (
+                f"\nMandatory doc payload: {len(doc_paths)} unique document(s), "
+                f"{max_doc_bytes} UTF-8 payload bytes (payload size, not overage)."
+            )
+            if len((refusal_summary + doc_line).encode("utf-8")) <= max_refusal_bytes:
+                refusal_summary += doc_line
+    if overflow_details:
+        unit_labels: list[str] = []
+        for detail in overflow_details:
+            stop_suffix = (
+                f" [{detail.subdivision_stop_reason}]"
+                if detail.subdivision_stop_reason
+                else ""
+            )
+            if detail.hunk_ranges:
+                for hunk_range in detail.hunk_ranges:
+                    unit_labels.append(hunk_range.format_compact() + stop_suffix)
+            elif detail.rejected_paths:
+                for path in detail.rejected_paths:
+                    unit_labels.append(f"{path}{stop_suffix}")
+            else:
+                unit_labels.append(f"{detail.requirement_identity}{stop_suffix}")
+        deduped_labels = list(dict.fromkeys(unit_labels))
+        prefix = "\nRejected units: "
+        accepted_labels: list[str] = []
+        for idx, label in enumerate(deduped_labels):
+            remaining = len(deduped_labels) - (idx + 1)
+            candidate_items = [*accepted_labels, label]
+            suffix = f" (+{remaining} more)." if remaining > 0 else "."
+            candidate_line = prefix + "; ".join(candidate_items) + suffix
+            if (
+                len((refusal_summary + candidate_line).encode("utf-8"))
+                > max_refusal_bytes
+            ):
+                if accepted_labels:
+                    more = len(deduped_labels) - len(accepted_labels)
+                    refusal_summary += (
+                        prefix + "; ".join(accepted_labels) + f" (+{more} more)."
+                    )
+                break
+            accepted_labels.append(label)
+        else:
+            if accepted_labels:
+                refusal_summary += prefix + "; ".join(accepted_labels) + "."
     no_progress_detected = False
     has_prior_partial = (
         prior_partial is not None
@@ -924,12 +1137,14 @@ def discover(
                 "or @reviewsensei pause."
             )
     try:
+        default_summary = (
+            "Review complete."
+            if not failed and coverage.fully_reviewed
+            else "Review work could not be completed within the configured bounds."
+        )
         result = service._finalize_result(
             request,
-            summary=(
-                "\n\n".join(summaries)
-                or "Review work could not be completed within the configured bounds."
-            )
+            summary=("\n\n".join(summaries) or default_summary)
             + _context_digest_line(context_admission)
             + refusal_summary,
             comments=tuple(comments),

@@ -572,6 +572,30 @@ PROMPT_CONTEXT_POLICY = "whole-supplemental-rendered-v1"
 class PromptContextOverflow(ReviewInputError):
     error_category = "mandatory_context_oversized"
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        diagnostic: str | None = None,
+        rendered_prompt_bytes: int | None = None,
+        prompt_ceiling_bytes: int | None = None,
+        over_budget_bytes: int | None = None,
+        mandatory_doc_bytes: int | None = None,
+        mandatory_doc_paths: tuple[str, ...] = (),
+        evidence_bytes: int | None = None,
+        framing_bytes: int | None = None,
+        clamped_by_legacy_48k: bool = False,
+    ) -> None:
+        super().__init__(message, diagnostic=diagnostic)
+        self.rendered_prompt_bytes = rendered_prompt_bytes
+        self.prompt_ceiling_bytes = prompt_ceiling_bytes
+        self.over_budget_bytes = over_budget_bytes
+        self.mandatory_doc_bytes = mandatory_doc_bytes
+        self.mandatory_doc_paths = tuple(mandatory_doc_paths)
+        self.evidence_bytes = evidence_bytes
+        self.framing_bytes = framing_bytes
+        self.clamped_by_legacy_48k = bool(clamped_by_legacy_48k)
+
 
 class PromptContextDeadline(ReviewInputError):
     error_category = "planning_deadline_exhausted"
@@ -650,6 +674,9 @@ def admit_prompt_context(
     render: Callable[[ReviewRequest], str],
     fits: Callable[[str], bool],
     before_probe: Callable[[], None] | None = None,
+    prompt_ceiling_bytes: int | None = None,
+    extra_prompt_bytes: int = 0,
+    clamped_by_legacy_48k: bool = False,
 ) -> PromptContextAdmission:
     """Remove whole supplemental documents until the actual rendered frame fits.
 
@@ -668,6 +695,7 @@ def admit_prompt_context(
     optional: dict[str, tuple[int, int, int, int]] = {}
     mandatory: set[str] = set()
     payloads: dict[str, str] = {}
+    doc_sizes: dict[str, int] = {}
     for context in request.lens_contexts:
         if context.category_id not in active:
             continue
@@ -701,6 +729,7 @@ def admit_prompt_context(
                 raise ReviewInputError(
                     "prompt context contains conflicting document payloads"
                 )
+            doc_sizes[document.path] = len(document.content.encode("utf-8"))
             decision = by_path.get(document.path)
             if decision is None or decision.reason == "pinned":
                 mandatory.add(document.path)
@@ -746,14 +775,20 @@ def admit_prompt_context(
             )
         return replace(request, lens_contexts=tuple(contexts))
 
+    last_failed_prompt: str | None = None
+
     def probe(count: int) -> tuple[ReviewRequest, str] | None:
+        nonlocal last_failed_prompt
         if before_probe is not None:
             before_probe()
         omitted.clear()
         omitted.update(candidates[:count])
         selected = selected_request()
         prompt = render(selected)
-        return (selected, prompt) if fits(prompt) else None
+        if fits(prompt):
+            return (selected, prompt)
+        last_failed_prompt = prompt
+        return None
 
     # Omitting another whole document never grows the rendered frame, so the
     # fewest lowest-ranked omissions that fit are found by bisection: at most
@@ -774,8 +809,36 @@ def admit_prompt_context(
             omitted.clear()
             omitted.update(candidates[:high])
     if found is None:
+        rendered_bytes = (
+            len(last_failed_prompt.encode("utf-8")) + max(0, extra_prompt_bytes)
+            if last_failed_prompt is not None
+            else None
+        )
+        evidence_bytes = len(request.diff.encode("utf-8"))
+        mandatory_paths = tuple(sorted(mandatory))
+        mandatory_bytes = sum(
+            doc_sizes[path] for path in mandatory_paths if path in doc_sizes
+        )
+        framing_bytes = (
+            max(0, rendered_bytes - evidence_bytes - mandatory_bytes)
+            if rendered_bytes is not None
+            else None
+        )
+        over_budget_bytes = (
+            max(0, rendered_bytes - prompt_ceiling_bytes)
+            if rendered_bytes is not None and prompt_ceiling_bytes is not None
+            else None
+        )
         raise PromptContextOverflow(
-            "mandatory context and complete evidence exceed the rendered prompt budget"
+            "mandatory context and complete evidence exceed the rendered prompt budget",
+            rendered_prompt_bytes=rendered_bytes,
+            prompt_ceiling_bytes=prompt_ceiling_bytes,
+            over_budget_bytes=over_budget_bytes,
+            mandatory_doc_bytes=mandatory_bytes,
+            mandatory_doc_paths=mandatory_paths,
+            evidence_bytes=evidence_bytes,
+            framing_bytes=framing_bytes,
+            clamped_by_legacy_48k=clamped_by_legacy_48k,
         )
     selected, prompt = found
     reports = tuple(

@@ -635,8 +635,31 @@ def classify_mandatory_prompt_overflow(
 
     mandatory_docs = tuple(sorted(mandatory_sizes))
     payload_bytes = sum(mandatory_sizes.values())
+    if not mandatory_docs and error is not None and error.mandatory_doc_paths:
+        mandatory_docs = tuple(error.mandatory_doc_paths)
+        if error.mandatory_doc_bytes is not None:
+            payload_bytes = error.mandatory_doc_bytes
     observed_bytes = (
         rendered_prompt_bytes if rendered_prompt_bytes is not None else payload_bytes
+    )
+    effective_rendered = (
+        rendered_prompt_bytes
+        if rendered_prompt_bytes is not None
+        else (error.rendered_prompt_bytes if error is not None else None)
+    )
+    effective_ceiling = (
+        error.prompt_ceiling_bytes
+        if error is not None and error.prompt_ceiling_bytes is not None
+        else max_prompt_bytes
+    )
+    overage_bytes = (
+        error.over_budget_bytes
+        if error is not None and error.over_budget_bytes is not None
+        else (
+            max(0, effective_rendered - effective_ceiling)
+            if effective_rendered is not None and effective_rendered > effective_ceiling
+            else None
+        )
     )
     primary_path = mandatory_docs[0] if len(mandatory_docs) == 1 else None
     doc_label = (
@@ -644,24 +667,32 @@ def classify_mandatory_prompt_overflow(
         if mandatory_docs
         else "required instructions and complete diff evidence"
     )
+    if len(doc_label.encode("utf-8")) > 512:
+        doc_label = f"{len(mandatory_docs)} mandatory document(s)"
+    size_parts = [f"mandatory payload {payload_bytes} UTF-8 bytes"]
+    if effective_rendered is not None:
+        size_parts.append(f"rendered {effective_rendered} bytes")
+    if overage_bytes is not None:
+        size_parts.append(f"+{overage_bytes} overage")
+    diagnostic = (
+        f"Mandatory prompt context ({doc_label}; {', '.join(size_parts)}) "
+        f"exceeds the {effective_ceiling}-byte rendered prompt ceiling; "
+        "mandatory rules and diff evidence are never truncated. "
+        "Narrow the change/pinned rules on a new head or run "
+        "@reviewsensei accept-coverage-uncertainty --reason <reason>"
+    )
     unit = IndivisibleWorkUnit(
         unit_kind="mandatory_prompt_overflow",
         path=primary_path,
         hunk_index=None,
         unit_bytes=observed_bytes,
-        limit_bytes=max_prompt_bytes,
+        limit_bytes=effective_ceiling,
         coverage_outcome="unsupported",
         coverage_reason="chunk-preflight-failed",
         indivisible=True,
         mandatory_documents=mandatory_docs,
         permitted_routes=("split_oversized_change", "accept_coverage_uncertainty"),
-        diagnostic=(
-            f"Mandatory prompt context ({doc_label}; {observed_bytes} UTF-8 bytes) "
-            f"exceeds the {max_prompt_bytes}-byte rendered prompt ceiling; "
-            "mandatory rules and diff evidence are never truncated. "
-            "Narrow the change/pinned rules on a new head or run "
-            "@reviewsensei accept-coverage-uncertainty --reason <reason>"
-        ),
+        diagnostic=diagnostic,
     )
     tokens = incomplete_coverage_from_result(result) if result is not None else ()
     return IndivisibleWorkReport(
@@ -690,6 +721,10 @@ def classify_work_plan_unprocessed(
     _positive_int(max_prompt_bytes, label="max_prompt_bytes")
 
     by_id = {req.identity: req for req in work_plan.requirements}
+    detail_by_id = {
+        detail.requirement_identity: detail
+        for detail in work_plan.unprocessed_diagnostics
+    }
     records = work_plan.bundle.by_id()
     classified: list[IndivisibleWorkUnit] = []
 
@@ -728,26 +763,92 @@ def classify_work_plan_unprocessed(
             else None
         )
         if reason == "mandatory-context-and-evidence-oversized":
+            detail = detail_by_id.get(identity)
+            effective_ceiling = (
+                detail.prompt_ceiling_bytes
+                if detail is not None and detail.prompt_ceiling_bytes is not None
+                else max_prompt_bytes
+            )
+            rendered = detail.rendered_prompt_bytes if detail is not None else None
+            overage = (
+                detail.over_budget_bytes
+                if detail is not None and detail.over_budget_bytes is not None
+                else (
+                    max(0, rendered - effective_ceiling)
+                    if rendered is not None and rendered > effective_ceiling
+                    else None
+                )
+            )
+            range_labels: list[str] = []
+            if detail is not None and detail.hunk_ranges:
+                range_labels = [hr.format_compact() for hr in detail.hunk_ranges[:3]]
+                if len(detail.hunk_ranges) > 3:
+                    range_labels.append(f"+{len(detail.hunk_ranges) - 3} more")
+            else:
+                for rec in matched_records:
+                    if rec.analysis is None:
+                        continue
+                    for hunk in rec.analysis.hunk_records:
+                        hunk_idx = (
+                            rec.fragment.source_hunk_index
+                            if rec.fragment is not None
+                            else hunk.index
+                        )
+                        old_end = hunk.old_start + max(0, hunk.old_count - 1)
+                        new_end = hunk.new_start + max(0, hunk.new_count - 1)
+                        range_labels.append(
+                            f"{rec.path} hunk #{hunk_idx} (-{hunk.old_start}..{old_end}/+{hunk.new_start}..{new_end})"
+                        )
+                        if len(range_labels) >= 3:
+                            break
+                    if len(range_labels) >= 3:
+                        break
+            budget_details: list[str] = []
+            if rendered is not None:
+                budget_details.append(f"rendered {rendered} bytes")
+            budget_details.append(f"{effective_ceiling}-byte ceiling")
+            if overage is not None:
+                budget_details.append(f"+{overage} overage")
+            if detail is not None and detail.mandatory_doc_bytes is not None:
+                budget_details.append(
+                    f"mandatory payload {detail.mandatory_doc_bytes} bytes"
+                )
+            if detail is not None and detail.subdivision_stop_reason:
+                budget_details.append(f"stop={detail.subdivision_stop_reason}")
+            range_text = f" [{'; '.join(range_labels)}]" if range_labels else ""
+            diagnostic = (
+                f"Requirement {identity}{range_text} failed rendered prompt admission "
+                f"({', '.join(budget_details)}) without truncating mandatory context; "
+                "split the unit or run "
+                "@reviewsensei accept-coverage-uncertainty --reason <reason>"
+            )
+            if len(diagnostic.encode("utf-8")) > 2048:
+                diagnostic = (
+                    f"Requirement {identity} failed rendered prompt admission "
+                    f"({', '.join(budget_details)}) without truncating mandatory context; "
+                    "split the unit or run "
+                    "@reviewsensei accept-coverage-uncertainty --reason <reason>"
+                )
             classified.append(
                 IndivisibleWorkUnit(
                     unit_kind="mandatory_prompt_overflow",
                     path=primary_path,
                     hunk_index=primary_hunk,
-                    unit_bytes=evidence_bytes,
-                    limit_bytes=max_prompt_bytes,
+                    unit_bytes=rendered if rendered is not None else evidence_bytes,
+                    limit_bytes=effective_ceiling,
                     coverage_outcome="unsupported",
                     coverage_reason="chunk-preflight-failed",
                     indivisible=True,
+                    mandatory_documents=(
+                        detail.mandatory_doc_paths
+                        if detail is not None and detail.mandatory_doc_paths
+                        else ()
+                    ),
                     permitted_routes=(
                         "split_oversized_change",
                         "accept_coverage_uncertainty",
                     ),
-                    diagnostic=(
-                        f"Requirement {identity} failed rendered prompt admission "
-                        f"against {max_prompt_bytes}-byte ceiling without truncating "
-                        "mandatory context; split the unit or run "
-                        "@reviewsensei accept-coverage-uncertainty --reason <reason>"
-                    ),
+                    diagnostic=diagnostic,
                 )
             )
         elif reason == "provider-call-budget":

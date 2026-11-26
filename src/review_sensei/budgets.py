@@ -223,6 +223,36 @@ class EffectiveWorkBudget:
 
         return evidence_digest(asdict(self))
 
+    def effective_prompt_ceiling_bytes(
+        self, *, output_tokens: int | None = None
+    ) -> tuple[int, bool]:
+        """Return ``(ceiling_bytes, clamped_by_legacy_48k)`` for rendered prompts."""
+        if self.provider_qualified and self.capabilities is not None:
+            effective_output = (
+                self.max_output_tokens if output_tokens is None else output_tokens
+            )
+            reserved = (
+                self.capabilities.max_output_tokens
+                if effective_output is None
+                else effective_output
+            )
+            _positive(
+                reserved, self.capabilities.max_output_tokens, "reserved output tokens"
+            )
+            margin = max(512, (self.capabilities.context_tokens + 19) // 20)
+            cap_ceiling = max(
+                0,
+                self.capabilities.context_tokens
+                - self.capabilities.framing_tokens
+                - reserved
+                - margin,
+            )
+            return min(self.batch_prompt_bytes, cap_ceiling), False
+        return (
+            self.batch_prompt_bytes,
+            self.batch_prompt_bytes == LEGACY_ASSESSMENT_PROMPT_BYTES,
+        )
+
     def fits_prompt(self, prompt: str, *, output_tokens: int | None = None) -> bool:
         if utf8_size(prompt, label="work prompt") > self.batch_prompt_bytes:
             return False
