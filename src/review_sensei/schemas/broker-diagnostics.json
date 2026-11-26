@@ -473,5 +473,20 @@
     "stage": "request_validation",
     "action": "check_request",
     "hint": "The downward-only request deadline was invalid. Inspect the original request without extending or retrying it automatically."
+  },
+  "broker_writer_ownership_invalid": {
+    "stage": "writer_ownership",
+    "action": "check_request",
+    "hint": "Writer ownership request was invalid. Provide valid v6 writer ownership fields bound to the current run and pull request."
+  },
+  "broker_stale_writer_rejected": {
+    "stage": "writer_ownership",
+    "action": "check_session",
+    "hint": "Writer ownership was rejected because the run, attempt, epoch, or pull request state is stale or superseded."
+  },
+  "broker_writer_ownership_unverified": {
+    "stage": "writer_ownership",
+    "action": "retry_later",
+    "hint": "Authoritative writer ownership could not be verified against GitHub. Retry later or inspect the original attempt."
   }
 }

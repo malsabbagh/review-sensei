@@ -9,6 +9,7 @@ without ever starting a fresh model call as a recovery fallback.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ from .v6_transport import (
 )
 
 DEFAULT_MUTATION_SANITY_MAX_WRITES = 16
+_SHA1_40_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class StaleWriterOwnershipError(ReviewInputError):
@@ -191,6 +193,59 @@ class _ThrottlePausedSignal(Exception):
         self.outcome = outcome
 
 
+def _require_authoritative_int(
+    mapping: Mapping[str, Any], *keys: str, field_label: str
+) -> int:
+    for key in keys:
+        if key in mapping:
+            value = mapping[key]
+            if type(value) is not int or value <= 0:
+                raise StaleWriterOwnershipError(
+                    f"authoritative writer fence field {field_label!r} must be a positive integer",
+                    diagnostic="v6_stale_or_unverified_writer",
+                )
+            return value
+    raise StaleWriterOwnershipError(
+        f"authoritative writer fence missing required {field_label!r}",
+        diagnostic="v6_stale_or_unverified_writer",
+    )
+
+
+def _require_authoritative_str(
+    mapping: Mapping[str, Any], *keys: str, field_label: str
+) -> str:
+    for key in keys:
+        if key in mapping:
+            value = mapping[key]
+            if (
+                type(value) is not str
+                or not value.strip()
+                or "\n" in value
+                or "\r" in value
+            ):
+                raise StaleWriterOwnershipError(
+                    f"authoritative writer fence field {field_label!r} must be a non-empty string",
+                    diagnostic="v6_stale_or_unverified_writer",
+                )
+            return value
+    raise StaleWriterOwnershipError(
+        f"authoritative writer fence missing required {field_label!r}",
+        diagnostic="v6_stale_or_unverified_writer",
+    )
+
+
+def _require_authoritative_sha(
+    mapping: Mapping[str, Any], *keys: str, field_label: str
+) -> str:
+    value = _require_authoritative_str(mapping, *keys, field_label=field_label)
+    if _SHA1_40_RE.fullmatch(value) is None:
+        raise StaleWriterOwnershipError(
+            f"authoritative writer fence field {field_label!r} must be a 40-hex lowercase SHA",
+            diagnostic="v6_stale_or_unverified_writer",
+        )
+    return value
+
+
 def verify_writer_ownership(
     proof: WriterOwnershipProof,
     *,
@@ -198,19 +253,35 @@ def verify_writer_ownership(
     live_pull_request: int,
     live_pr_head_sha: str,
     active_writer_epoch: int,
-    pr_state: str = "open",
+    pr_state: str = "",
     active_run_id: int | None = None,
     active_run_attempt: int | None = None,
     run_status: str | None = None,
+    verified_by_broker: bool | None = None,
 ) -> None:
     """Fail closed unless ``proof`` proves exclusive ownership against live PR state."""
 
     if not isinstance(proof, WriterOwnershipProof):
         raise TypeError("proof must be a WriterOwnershipProof")
-    if not proof.verified_by_broker:
+    if proof.verified_by_broker is not True:
         raise StaleWriterOwnershipError(
             f"writer ownership proof for {proof.operation_id!r} was not verified by broker",
             diagnostic="v6_unverified_writer_proof",
+        )
+    if verified_by_broker is not True:
+        raise StaleWriterOwnershipError(
+            f"authoritative broker fence for {proof.operation_id!r} was not verified",
+            diagnostic="v6_unverified_writer_proof",
+        )
+    if (
+        type(live_repository_id) is not int
+        or live_repository_id <= 0
+        or type(live_pull_request) is not int
+        or live_pull_request <= 0
+    ):
+        raise StaleWriterOwnershipError(
+            "authoritative live repository_id and pull_request must be positive integers",
+            diagnostic="v6_stale_or_unverified_writer",
         )
     if (
         proof.repository_id != live_repository_id
@@ -222,39 +293,67 @@ def verify_writer_ownership(
             f"repo={proof.repository_id}/pr={proof.pull_request}",
             diagnostic="v6_writer_target_mismatch",
         )
+    if type(pr_state) is not str or not pr_state.strip():
+        raise StaleWriterOwnershipError(
+            "authoritative PR state is missing or invalid",
+            diagnostic="v6_stale_or_unverified_writer",
+        )
     if pr_state.lower() != "open":
         raise StaleWriterOwnershipError(
             f"refusing write to non-open PR state {pr_state!r}",
             diagnostic="v6_pr_not_open",
+        )
+    if (
+        type(live_pr_head_sha) is not str
+        or _SHA1_40_RE.fullmatch(live_pr_head_sha) is None
+    ):
+        raise StaleWriterOwnershipError(
+            "authoritative live PR head SHA is missing or invalid",
+            diagnostic="v6_stale_or_unverified_writer",
         )
     if proof.pr_head_sha != live_pr_head_sha:
         raise StaleWriterOwnershipError(
             f"stale writer head SHA {proof.pr_head_sha} != live {live_pr_head_sha}",
             diagnostic="v6_stale_writer_head",
         )
+    if type(active_writer_epoch) is not int or active_writer_epoch <= 0:
+        raise StaleWriterOwnershipError(
+            "authoritative writer epoch must be a positive integer",
+            diagnostic="v6_stale_or_unverified_writer",
+        )
     if proof.writer_epoch != active_writer_epoch:
         raise StaleWriterOwnershipError(
             f"superseded writer epoch {proof.writer_epoch} != active {active_writer_epoch}",
             diagnostic="v6_superseded_writer_epoch",
         )
-    if active_run_id is not None and proof.run_id != active_run_id:
+    if type(active_run_id) is not int or active_run_id <= 0:
+        raise StaleWriterOwnershipError(
+            "authoritative active_run_id is missing or invalid",
+            diagnostic="v6_stale_or_unverified_writer",
+        )
+    if proof.run_id != active_run_id:
         raise StaleWriterOwnershipError(
             f"superseded writer run_id {proof.run_id} != active {active_run_id}",
             diagnostic="v6_superseded_writer_run",
         )
-    if active_run_attempt is not None and proof.run_attempt != active_run_attempt:
+    if type(active_run_attempt) is not int or active_run_attempt <= 0:
+        raise StaleWriterOwnershipError(
+            "authoritative active_run_attempt is missing or invalid",
+            diagnostic="v6_stale_or_unverified_writer",
+        )
+    if proof.run_attempt != active_run_attempt:
         raise StaleWriterOwnershipError(
             f"superseded writer run_attempt {proof.run_attempt} != active {active_run_attempt}",
             diagnostic="v6_superseded_writer_attempt",
         )
-    if run_status is not None and run_status.lower() in {
-        "completed",
-        "cancelled",
-        "failure",
-        "timed_out",
-    }:
+    if type(run_status) is not str or not run_status.strip():
         raise StaleWriterOwnershipError(
-            f"writer run {proof.run_id} is already terminal ({run_status})",
+            "authoritative writer run status is missing or invalid",
+            diagnostic="v6_stale_or_unverified_writer",
+        )
+    if run_status != "in_progress":
+        raise StaleWriterOwnershipError(
+            f"writer run {proof.run_id} is not in_progress ({run_status!r})",
             diagnostic="v6_terminal_writer_run",
         )
 
@@ -497,18 +596,50 @@ class V6RecoveryEngine:
         proof = request.ownership_proof
         if self.broker_fence_verifier is not None:
             fence = self.broker_fence_verifier(proof)
+            if not isinstance(fence, Mapping):
+                raise StaleWriterOwnershipError(
+                    "authoritative broker fence response must be a mapping",
+                    diagnostic="v6_stale_or_unverified_writer",
+                )
+            if fence.get("verified_by_broker") is not True:
+                raise StaleWriterOwnershipError(
+                    "authoritative broker fence failed to confirm verified_by_broker=True",
+                    diagnostic="v6_stale_or_unverified_writer",
+                )
             verify_writer_ownership(
                 proof,
-                live_repository_id=int(
-                    fence.get("repository_id", request.repository_id)
+                live_repository_id=_require_authoritative_int(
+                    fence, "repository_id", field_label="repository_id"
                 ),
-                live_pull_request=int(fence.get("pull_request", request.pull_request)),
-                live_pr_head_sha=str(fence["pr_head_sha"]),
-                active_writer_epoch=int(fence["active_writer_epoch"]),
-                pr_state=str(fence.get("pr_state", "open")),
-                active_run_id=fence.get("active_run_id"),
-                active_run_attempt=fence.get("active_run_attempt"),
-                run_status=fence.get("run_status"),
+                live_pull_request=_require_authoritative_int(
+                    fence, "pull_request", field_label="pull_request"
+                ),
+                live_pr_head_sha=_require_authoritative_sha(
+                    fence, "pr_head_sha", "head_sha", field_label="pr_head_sha"
+                ),
+                active_writer_epoch=_require_authoritative_int(
+                    fence,
+                    "authoritative_writer_epoch",
+                    "active_writer_epoch",
+                    "writer_epoch",
+                    field_label="writer_epoch",
+                ),
+                pr_state=_require_authoritative_str(
+                    fence, "pr_state", "state", field_label="pr_state"
+                ),
+                active_run_id=_require_authoritative_int(
+                    fence, "active_run_id", "run_id", "id", field_label="active_run_id"
+                ),
+                active_run_attempt=_require_authoritative_int(
+                    fence,
+                    "active_run_attempt",
+                    "run_attempt",
+                    field_label="active_run_attempt",
+                ),
+                run_status=_require_authoritative_str(
+                    fence, "run_status", "status", field_label="run_status"
+                ),
+                verified_by_broker=True,
             )
             return
 
@@ -547,35 +678,69 @@ class V6RecoveryEngine:
                 now_epoch=ts,
             ),
         )
-        pr_body = pr_resp.body if isinstance(pr_resp.body, Mapping) else {}
-        run_body = run_resp.body if isinstance(run_resp.body, Mapping) else {}
+        if pr_resp.status != 200 or not isinstance(pr_resp.body, Mapping):
+            raise StaleWriterOwnershipError(
+                f"authoritative PR fence lookup failed (status={pr_resp.status})",
+                diagnostic="v6_stale_or_unverified_writer",
+            )
+        if run_resp.status != 200 or not isinstance(run_resp.body, Mapping):
+            raise StaleWriterOwnershipError(
+                f"authoritative writer run lookup failed (status={run_resp.status})",
+                diagnostic="v6_stale_or_unverified_writer",
+            )
+        pr_body = pr_resp.body
+        run_body = run_resp.body
+        if (
+            "verified_by_broker" in run_body
+            and run_body["verified_by_broker"] is not True
+        ):
+            raise StaleWriterOwnershipError(
+                "authoritative writer run response reported verified_by_broker is not True",
+                diagnostic="v6_stale_or_unverified_writer",
+            )
         raw_head = pr_body.get("head")
-        head_info: Mapping[str, Any] = raw_head if isinstance(raw_head, Mapping) else {}
         raw_base = pr_body.get("base")
-        base_info: Mapping[str, Any] = raw_base if isinstance(raw_base, Mapping) else {}
-        raw_base_repo = base_info.get("repo")
-        base_repo: Mapping[str, Any] = (
-            raw_base_repo if isinstance(raw_base_repo, Mapping) else {}
-        )
-        live_repo_id = base_repo.get("id", request.repository_id)
-        live_head_sha = str(head_info.get("sha", ""))
-        pr_state = str(pr_body.get("state", "open"))
-        active_epoch = run_body.get("writer_epoch", proof.writer_epoch)
-        active_run_id = run_body.get("active_run_id", run_body.get("id"))
-        active_attempt = run_body.get("run_attempt")
-        run_status = run_body.get("status")
+        raw_base_repo = raw_base.get("repo") if isinstance(raw_base, Mapping) else None
+        if not isinstance(raw_head, Mapping) or not isinstance(raw_base_repo, Mapping):
+            raise StaleWriterOwnershipError(
+                "authoritative PR fence response missing head or base.repo metadata",
+                diagnostic="v6_stale_or_unverified_writer",
+            )
         verify_writer_ownership(
             proof,
-            live_repository_id=int(live_repo_id),
-            live_pull_request=request.pull_request,
-            live_pr_head_sha=live_head_sha,
-            active_writer_epoch=int(active_epoch),
-            pr_state=pr_state,
-            active_run_id=(int(active_run_id) if type(active_run_id) is int else None),
-            active_run_attempt=(
-                int(active_attempt) if type(active_attempt) is int else None
+            live_repository_id=_require_authoritative_int(
+                raw_base_repo, "id", field_label="base.repo.id"
             ),
-            run_status=str(run_status) if run_status is not None else None,
+            live_pull_request=request.pull_request,
+            live_pr_head_sha=_require_authoritative_sha(
+                raw_head, "sha", field_label="head.sha"
+            ),
+            active_writer_epoch=_require_authoritative_int(
+                run_body,
+                "authoritative_writer_epoch",
+                "writer_epoch",
+                field_label="writer_epoch",
+            ),
+            pr_state=_require_authoritative_str(
+                pr_body, "state", field_label="pr.state"
+            ),
+            active_run_id=_require_authoritative_int(
+                run_body, "active_run_id", "id", field_label="active_run_id"
+            ),
+            active_run_attempt=_require_authoritative_int(
+                run_body,
+                "active_run_attempt",
+                "run_attempt",
+                field_label="active_run_attempt",
+            ),
+            run_status=_require_authoritative_str(
+                run_body, "status", field_label="status"
+            ),
+            verified_by_broker=(
+                run_body["verified_by_broker"]
+                if "verified_by_broker" in run_body
+                else proof.verified_by_broker
+            ),
         )
 
     def _throttled_page_executor(

@@ -289,7 +289,23 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     failure = error;
     outcome = "refused";
     const message = error instanceof Error ? error.message : "";
-    const status = message === "configuration_unavailable" || temporaryWorkflowLookup(error) || temporaryPullRequestLookup(error) ? 503 : 403;
+    const hasV6Ownership =
+      typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      (body as Record<string, unknown>).v6_writer_ownership !== undefined;
+    const status =
+      message === "broker_writer_ownership_invalid"
+        ? 400
+        : message === "broker_stale_writer_rejected" ||
+            (hasV6Ownership && message === "broker_session_head_rejected")
+          ? 409
+          : message === "configuration_unavailable" ||
+              message === "broker_writer_ownership_unverified" ||
+              temporaryWorkflowLookup(error) ||
+              temporaryPullRequestLookup(error)
+            ? 503
+            : 403;
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
     const lookup =

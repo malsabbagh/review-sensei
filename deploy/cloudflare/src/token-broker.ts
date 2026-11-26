@@ -14,6 +14,11 @@ import {
   publicWorkflowTagFromJobRef,
   validatePublicWorkflowTag,
 } from "./setup-content";
+import {
+  parseV6WriterOwnershipRequest,
+  verifyAuthoritativeV6WriterOwnership,
+  type V6AuthoritativeWriterProof,
+} from "./v6-writer-ownership";
 
 const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -107,6 +112,14 @@ type Capability = keyof typeof CAPABILITIES;
 // Leave this compatibility set empty so unrequested contents:read grants
 // (e.g. on check_publish or review_actions) continue to fail closed.
 const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>();
+const V6_WRITER_OWNERSHIP_CAPABILITIES = new Set<Capability>([
+  "review_publish",
+  "review_session",
+  "check_publish",
+  "inline_reply",
+  "issue_reply",
+  "thread_resolve",
+]);
 
 interface BrokerBody {
   oidc_token?: unknown;
@@ -116,6 +129,7 @@ interface BrokerBody {
   release_only?: unknown;
   observe_actor_role?: unknown;
   control_budget?: unknown;
+  v6_writer_ownership?: unknown;
 }
 
 interface SessionScope {
@@ -307,6 +321,7 @@ export class TokenBroker {
     app_id?: number;
     release_only?: true;
     reservation_owner?: { run_id: string; head_sha: string };
+    v6_writer_ownership_proof?: V6AuthoritativeWriterProof;
   }> {
     if (!isObject(body) || typeof body.oidc_token !== "string" || body.oidc_token.length === 0) {
       throw new Error("broker_request_invalid");
@@ -320,9 +335,6 @@ export class TokenBroker {
       (isObject(body.session) && Object.hasOwn(body.session, "app_id"))) {
       throw new Error("broker_request_invalid");
     }
-    // This identity belongs to the configured App, never an Actions event or
-    // caller assertion. Validate it before authentication or token issuance.
-    const appId = requested === "review_session" ? configuredAppId(this.env) : undefined;
     if (requested !== "review_session" && body.session !== undefined) {
       throw new Error("broker_session_invalid");
     }
@@ -332,6 +344,20 @@ export class TokenBroker {
     ) {
       throw new Error("broker_session_invalid");
     }
+    const v6OwnershipRequest = body.v6_writer_ownership === undefined
+      ? undefined
+      : parseV6WriterOwnershipRequest(body.v6_writer_ownership);
+    if (
+      v6OwnershipRequest !== undefined &&
+      (!V6_WRITER_OWNERSHIP_CAPABILITIES.has(requested) || body.release_only === true)
+    ) {
+      throw new Error("broker_writer_ownership_invalid");
+    }
+    // This identity belongs to the configured App, never an Actions event or
+    // caller assertion. Validate it before authentication or token issuance.
+    const appId = requested === "review_session" || v6OwnershipRequest !== undefined
+      ? configuredAppId(this.env)
+      : undefined;
     const claims = await verifyOidcAssertion(body.oidc_token, {
       audience: "sts.reviewsensei.dev",
       issuer: "https://token.actions.githubusercontent.com",
@@ -340,6 +366,14 @@ export class TokenBroker {
     });
     // Reject obsolete or wrong-purpose authority before requesting installation tokens.
     const requestedAuthority = bindRunAuthority(body.session_attestation, claims);
+    if (
+      v6OwnershipRequest !== undefined &&
+      (v6OwnershipRequest.repository_id !== requestedAuthority.repository_id ||
+        v6OwnershipRequest.pull_request !== requestedAuthority.pull_request ||
+        v6OwnershipRequest.head_sha !== requestedAuthority.head_sha)
+    ) {
+      throw new Error("broker_writer_ownership_invalid");
+    }
     if (requestedAuthority.version === 4 && (requested !== "review_session" || body.release_only === true)) throw new Error("broker_current_observation_scope_unsupported");
     if (body.observe_actor_role !== undefined && (body.observe_actor_role !== true || requestedAuthority.version !== 4 || requested !== "review_session" || body.release_only === true)) throw new Error("broker_current_observation_scope_unsupported");
     authorizeRunCapability(requestedAuthority, requested);
@@ -392,18 +426,46 @@ export class TokenBroker {
     const validationToken = hasPullScope ? token : await github.capabilityToken(
       installationId, claims.repository, CAPABILITIES.review_status,
     );
-    const reserveAfterHead =
-      (requestedAuthority.purpose === "review" ? 0 : 1) +
-      (requestedAuthority.version === 4 && body.observe_actor_role === true ? 1 : 0) +
-      (requestedSession !== undefined && body.release_only !== true ? 1 : 0);
-    const headClient = typeof github.withHeadReserve === "function"
-      ? github.withHeadReserve(reserveAfterHead)
-      : github;
-    const currentHead = await headClient.pullRequestHead(
-      claims.repository, requestedAuthority.pull_request, validationToken,
-    );
-    if (currentHead !== requestedAuthority.head_sha && body.release_only !== true) {
-      throw new Error("broker_session_head_rejected");
+    let v6OwnershipProof: V6AuthoritativeWriterProof | undefined;
+    if (v6OwnershipRequest === undefined) {
+      const reserveAfterHead =
+        (requestedAuthority.purpose === "review" ? 0 : 1) +
+        (requestedAuthority.version === 4 && body.observe_actor_role === true ? 1 : 0) +
+        (requestedSession !== undefined && body.release_only !== true ? 1 : 0);
+      const headClient = typeof github.withHeadReserve === "function"
+        ? github.withHeadReserve(reserveAfterHead)
+        : github;
+      const currentHead = await headClient.pullRequestHead(
+        claims.repository, requestedAuthority.pull_request, validationToken,
+      );
+      if (currentHead !== requestedAuthority.head_sha && body.release_only !== true) {
+        throw new Error("broker_session_head_rejected");
+      }
+    } else {
+      let actionsToken: string;
+      try {
+        actionsToken = await github.capabilityToken(
+          installationId,
+          claims.repository,
+          CAPABILITIES.review_actions,
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /^(broker_control_|broker_request_|configuration_)/.test(error.message)
+        ) {
+          throw error;
+        }
+        throw new Error("broker_writer_ownership_unverified");
+      }
+      v6OwnershipProof = await verifyAuthoritativeV6WriterOwnership(github, {
+        repository: claims.repository,
+        request: v6OwnershipRequest,
+        claims,
+        appId: appId!,
+        pullToken: validationToken,
+        actionsToken,
+      });
     }
     const attestation = await authorizeRunSource(
       github, requestedAuthority, claims, validationToken, recognizedCommand,
@@ -445,9 +507,15 @@ export class TokenBroker {
           session_attestation: attestation,
           app_id: appId,
           reservation_owner: { run_id: claims.run_id, head_sha: requestedSession.head_sha },
+          ...(v6OwnershipProof === undefined ? {} : { v6_writer_ownership_proof: v6OwnershipProof }),
       };
     }
-    return { ...receipt(), token, capability: requested };
+    return {
+      ...receipt(),
+      token,
+      capability: requested,
+      ...(v6OwnershipProof === undefined ? {} : { v6_writer_ownership_proof: v6OwnershipProof }),
+    };
   }
 
   /** Verify an opaque broker grant before a hosted session-ledger mutation. */

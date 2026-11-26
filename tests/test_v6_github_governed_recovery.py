@@ -32,6 +32,7 @@ from review_sensei_github.v6_recovery_engine import (
     RecoveryRequest,
     StaleWriterOwnershipError,
     V6RecoveryEngine,
+    verify_writer_ownership,
 )
 from review_sensei_github.v6_recovery_ledger import (
     INTENT_SCHEMA,
@@ -96,6 +97,24 @@ def _make_proof(
         pr_head_sha=head_sha,
         verified_by_broker=verified_by_broker,
     )
+
+
+def _authoritative_fence(
+    _proof: WriterOwnershipProof,
+    *,
+    active_writer_epoch: int = 1,
+) -> dict[str, Any]:
+    return {
+        "repository_id": 101,
+        "pull_request": 12,
+        "pr_head_sha": HEAD_SHA,
+        "active_writer_epoch": active_writer_epoch,
+        "pr_state": "open",
+        "active_run_id": 5001,
+        "active_run_attempt": 1,
+        "run_status": "in_progress",
+        "verified_by_broker": True,
+    }
 
 
 def _make_unresolved_record(
@@ -658,6 +677,7 @@ class RecoveryEngineTests(unittest.TestCase):
                         "run_attempt": 1,
                         "status": "in_progress",
                         "writer_epoch": 2,
+                        "verified_by_broker": True,
                     },
                 )
             raise AssertionError(f"stale writer must never reach mutation: {call}")
@@ -720,13 +740,7 @@ class RecoveryEngineTests(unittest.TestCase):
         )
         engine = V6RecoveryEngine(
             client,
-            broker_fence_verifier=lambda proof: {
-                "repository_id": 101,
-                "pull_request": 12,
-                "pr_head_sha": HEAD_SHA,
-                "active_writer_epoch": 1,
-                "pr_state": "open",
-            },
+            broker_fence_verifier=_authoritative_fence,
         )
         request = RecoveryRequest(
             owner="octo",
@@ -824,12 +838,7 @@ class RecoveryEngineTests(unittest.TestCase):
                 workflow_token_transport=ScriptedTransport(wf_handler_inline),
                 broker_app_transport=app_transport_inline,
             ),
-            broker_fence_verifier=lambda proof: {
-                "repository_id": 101,
-                "pull_request": 12,
-                "pr_head_sha": HEAD_SHA,
-                "active_writer_epoch": 1,
-            },
+            broker_fence_verifier=_authoritative_fence,
         )
         req = RecoveryRequest(
             owner="octo",
@@ -900,12 +909,7 @@ class RecoveryEngineTests(unittest.TestCase):
                 workflow_token_transport=ScriptedTransport(wf_handler_restart),
                 broker_app_transport=app_transport_restart,
             ),
-            broker_fence_verifier=lambda proof: {
-                "repository_id": 101,
-                "pull_request": 12,
-                "pr_head_sha": HEAD_SHA,
-                "active_writer_epoch": 1,
-            },
+            broker_fence_verifier=_authoritative_fence,
         )
         outcome_restart = engine_restart.recover_and_publish(req)
         self.assertIsInstance(outcome_restart, RecoveryCompleted)
@@ -1024,12 +1028,7 @@ class RecoveryEngineTests(unittest.TestCase):
                 broker_app_transport=app_transport,
             ),
             mutation_bound=MutationSanityBound(max_writes=2),
-            broker_fence_verifier=lambda proof: {
-                "repository_id": 101,
-                "pull_request": 12,
-                "pr_head_sha": HEAD_SHA,
-                "active_writer_epoch": 1,
-            },
+            broker_fence_verifier=_authoritative_fence,
         )
         req = RecoveryRequest(
             owner="octo",
@@ -1090,12 +1089,7 @@ class RecoveryEngineTests(unittest.TestCase):
             sleeper=slept.append,
             max_in_job_sleep_seconds=60.0,
             remaining_job_seconds=600.0,
-            broker_fence_verifier=lambda proof: {
-                "repository_id": 101,
-                "pull_request": 12,
-                "pr_head_sha": HEAD_SHA,
-                "active_writer_epoch": 1,
-            },
+            broker_fence_verifier=_authoritative_fence,
         )
         req = RecoveryRequest(
             owner="octo",
@@ -1450,3 +1444,227 @@ class RecoveryEngineTests(unittest.TestCase):
         self.assertEqual(hold_ambig.blocker, "ambiguous_write_outcome")
         self.assertTrue(hold_ambig.zero_model_calls_started)
         self.assertEqual([c["method"] for c in app_ambig_transport.calls], ["GET"])
+
+    def test_verify_writer_ownership_fails_closed_on_missing_or_unverified_fields(
+        self,
+    ) -> None:
+        proof = _make_proof(epoch=1)
+        # Valid authoritative call succeeds.
+        verify_writer_ownership(
+            proof,
+            live_repository_id=101,
+            live_pull_request=12,
+            live_pr_head_sha=HEAD_SHA,
+            active_writer_epoch=1,
+            pr_state="open",
+            active_run_id=5001,
+            active_run_attempt=1,
+            run_status="in_progress",
+            verified_by_broker=True,
+        )
+
+        invalid_kwargs: list[tuple[str, dict[str, Any]]] = [
+            ("missing_active_run_id", {"active_run_id": None}),
+            ("missing_active_run_attempt", {"active_run_attempt": None}),
+            ("missing_run_status", {"run_status": None}),
+            ("completed_run_status", {"run_status": "completed"}),
+            ("queued_run_status", {"run_status": "queued"}),
+            ("missing_verified_by_broker", {"verified_by_broker": None}),
+            ("false_verified_by_broker", {"verified_by_broker": False}),
+            ("empty_pr_state", {"pr_state": ""}),
+            ("closed_pr_state", {"pr_state": "closed"}),
+        ]
+        for label, overrides in invalid_kwargs:
+            with self.subTest(case=label):
+                kwargs: dict[str, Any] = {
+                    "live_repository_id": 101,
+                    "live_pull_request": 12,
+                    "live_pr_head_sha": HEAD_SHA,
+                    "active_writer_epoch": 1,
+                    "pr_state": "open",
+                    "active_run_id": 5001,
+                    "active_run_attempt": 1,
+                    "run_status": "in_progress",
+                    "verified_by_broker": True,
+                }
+                kwargs.update(overrides)
+                with self.assertRaises(StaleWriterOwnershipError):
+                    verify_writer_ownership(proof, **kwargs)
+
+    def test_write_boundary_fails_closed_when_authoritative_fields_missing_or_non_200(
+        self,
+    ) -> None:
+        unresolved = _make_unresolved_record()
+        unresolved_comment = {
+            "id": 100,
+            "body": format_v6_record_marker(unresolved),
+            **_app_meta(),
+        }
+
+        def wf_handler(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if "/issues/12/comments" in call["path"]:
+                return 200, {"X-RateLimit-Remaining": "999"}, [unresolved_comment]
+            if "/pulls/12/reviews" in call["path"]:
+                return 200, {"X-RateLimit-Remaining": "998"}, []
+            raise AssertionError(f"unexpected workflow call {call}")
+
+        valid_pr: dict[str, Any] = {
+            "state": "open",
+            "head": {"sha": HEAD_SHA},
+            "base": {"repo": {"id": 101}},
+        }
+        valid_run: dict[str, Any] = {
+            "id": 5001,
+            "run_attempt": 1,
+            "status": "in_progress",
+            "writer_epoch": 1,
+            "verified_by_broker": True,
+        }
+
+        cases: list[tuple[str, tuple[int, Any], tuple[int, Any]]] = [
+            (
+                "missing_writer_epoch",
+                (200, valid_pr),
+                (200, {k: v for k, v in valid_run.items() if k != "writer_epoch"}),
+            ),
+            (
+                "missing_active_run_id",
+                (200, valid_pr),
+                (200, {k: v for k, v in valid_run.items() if k != "id"}),
+            ),
+            (
+                "missing_run_attempt",
+                (200, valid_pr),
+                (200, {k: v for k, v in valid_run.items() if k != "run_attempt"}),
+            ),
+            (
+                "missing_run_status",
+                (200, valid_pr),
+                (200, {k: v for k, v in valid_run.items() if k != "status"}),
+            ),
+            (
+                "non_in_progress_run_status_completed",
+                (200, valid_pr),
+                (200, {**valid_run, "status": "completed"}),
+            ),
+            (
+                "non_in_progress_run_status_queued",
+                (200, valid_pr),
+                (200, {**valid_run, "status": "queued"}),
+            ),
+            (
+                "verified_by_broker_false",
+                (200, valid_pr),
+                (200, {**valid_run, "verified_by_broker": False}),
+            ),
+            (
+                "invalid_authoritative_writer_epoch",
+                (200, valid_pr),
+                (200, {**valid_run, "authoritative_writer_epoch": None}),
+            ),
+            (
+                "missing_base_repo_id",
+                (200, {**valid_pr, "base": {"repo": {}}}),
+                (200, valid_run),
+            ),
+            (
+                "missing_pr_state",
+                (200, {k: v for k, v in valid_pr.items() if k != "state"}),
+                (200, valid_run),
+            ),
+            (
+                "invalid_head_sha",
+                (200, {**valid_pr, "head": {"sha": "not-a-sha"}}),
+                (200, valid_run),
+            ),
+            ("non_200_pr_lookup", (404, {"message": "Not Found"}), (200, valid_run)),
+            ("non_200_run_lookup", (200, valid_pr), (500, {"message": "Error"})),
+            ("non_mapping_pr_body", (200, ["bad"]), (200, valid_run)),
+            ("non_mapping_run_body", (200, valid_pr), (200, "bad")),
+        ]
+
+        req = RecoveryRequest(
+            owner="octo",
+            repo="repo",
+            repository_id=101,
+            pull_request=12,
+            operation_id="op-1",
+            ownership_proof=_make_proof(epoch=1),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+        )
+
+        for label, pr_outcome, run_outcome in cases:
+            with self.subTest(case=label):
+                app_calls: list[dict[str, Any]] = []
+
+                def app_handler(
+                    call: dict[str, Any],
+                    *,
+                    pr_res: tuple[int, Any] = pr_outcome,
+                    run_res: tuple[int, Any] = run_outcome,
+                    recorded: list[dict[str, Any]] = app_calls,
+                ) -> tuple[int, dict[str, str], Any]:
+                    recorded.append(call)
+                    if (
+                        call["method"] == "GET"
+                        and call["path"] == "/repos/octo/repo/pulls/12"
+                    ):
+                        return pr_res[0], {"X-RateLimit-Remaining": "4999"}, pr_res[1]
+                    if (
+                        call["method"] == "GET"
+                        and call["path"] == "/repos/octo/repo/actions/runs/5001"
+                    ):
+                        return run_res[0], {"X-RateLimit-Remaining": "4998"}, run_res[1]
+                    raise AssertionError(
+                        f"fail-closed fence must emit 0 writes: {call}"
+                    )
+
+                engine = V6RecoveryEngine(
+                    DualCredentialGitHubClient(
+                        workflow_token_transport=ScriptedTransport(wf_handler),
+                        broker_app_transport=ScriptedTransport(app_handler),
+                    )
+                )
+                with self.assertRaises(StaleWriterOwnershipError):
+                    engine.recover_and_publish(req)
+                self.assertTrue(all(c["method"] == "GET" for c in app_calls))
+
+        # Also prove broker_fence_verifier fails closed if any authoritative field is omitted.
+        base_fence = _authoritative_fence(_make_proof(epoch=1))
+        for missing_key in (
+            "repository_id",
+            "pull_request",
+            "pr_state",
+            "active_run_id",
+            "active_run_attempt",
+            "run_status",
+            "verified_by_broker",
+        ):
+            with self.subTest(fence_missing=missing_key):
+                app_never = ScriptedTransport(
+                    lambda call: (500, {}, {"message": f"must not mutate: {call}"})
+                )
+                incomplete_fence = {
+                    k: v for k, v in base_fence.items() if k != missing_key
+                }
+
+                def _return_incomplete(
+                    _proof: WriterOwnershipProof,
+                    *,
+                    payload: Mapping[str, Any] = incomplete_fence,
+                ) -> Mapping[str, Any]:
+                    return payload
+
+                engine_fence = V6RecoveryEngine(
+                    DualCredentialGitHubClient(
+                        workflow_token_transport=ScriptedTransport(wf_handler),
+                        broker_app_transport=app_never,
+                    ),
+                    broker_fence_verifier=_return_incomplete,
+                )
+                with self.assertRaises(StaleWriterOwnershipError):
+                    engine_fence.recover_and_publish(req)
+                self.assertEqual(app_never.calls, [])

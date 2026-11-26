@@ -422,6 +422,7 @@ class SimulatedGitHubPR:
                     "run_attempt": self.active_run_attempt,
                     "status": self.run_status,
                     "writer_epoch": self.active_writer_epoch,
+                    "verified_by_broker": True,
                 },
             )
 
@@ -1082,6 +1083,101 @@ class V6ReleaseGateTests(unittest.TestCase):
         self.assertEqual(summary.completed_operations, ("op-active",))
         self.assertEqual(summary.unreconciled_intents, (pending_intent,))
         self.assertEqual(summary.conflicting_records, ())
+
+    def test_gate_5_authoritative_fence_fails_closed_on_omitted_or_unverified_fields(
+        self,
+    ) -> None:
+        pr = SimulatedGitHubPR(active_writer_epoch=1, active_run_id=5001)
+        unresolved = _make_unresolved_record(operation_id="op-gate5-fail-closed")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        snapshot_before = [dict(c) for c in pr.comments]
+
+        def drop_pr_key(key: str) -> TransportInterceptor:
+            def _intercept(
+                call: dict[str, Any], default_fn: Callable[[], Any]
+            ) -> tuple[int, Mapping[str, str], Any]:
+                status, headers, body = default_fn()
+                if (
+                    call["method"] == "GET"
+                    and call["path"] == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}"
+                    and isinstance(body, dict)
+                ):
+                    mutated = dict(body)
+                    if key == "base.repo.id":
+                        mutated["base"] = {"repo": {}}
+                    else:
+                        mutated.pop(key, None)
+                    return status, headers, mutated
+                return status, headers, body
+
+            return _intercept
+
+        def override_run(
+            *,
+            remove_key: str | None = None,
+            updates: Mapping[str, Any] | None = None,
+            status_code: int | None = None,
+        ) -> TransportInterceptor:
+            def _intercept(
+                call: dict[str, Any], default_fn: Callable[[], Any]
+            ) -> tuple[int, Mapping[str, str], Any]:
+                status, headers, body = default_fn()
+                if (
+                    call["method"] == "GET"
+                    and f"/repos/{OWNER}/{REPO}/actions/runs/" in call["path"]
+                ):
+                    if status_code is not None:
+                        return status_code, headers, {"message": "error"}
+                    if isinstance(body, dict):
+                        mutated = dict(body)
+                        if remove_key is not None:
+                            mutated.pop(remove_key, None)
+                        if updates is not None:
+                            mutated.update(updates)
+                        return status, headers, mutated
+                return status, headers, body
+
+            return _intercept
+
+        def non_200_pr(
+            call: dict[str, Any], default_fn: Callable[[], Any]
+        ) -> tuple[int, Mapping[str, str], Any]:
+            status, headers, body = default_fn()
+            if (
+                call["method"] == "GET"
+                and call["path"] == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}"
+            ):
+                return 404, headers, {"message": "Not Found"}
+            return status, headers, body
+
+        interceptors: list[tuple[str, TransportInterceptor]] = [
+            ("omit_writer_epoch", override_run(remove_key="writer_epoch")),
+            ("omit_active_run_id", override_run(remove_key="id")),
+            ("omit_run_attempt", override_run(remove_key="run_attempt")),
+            ("omit_run_status", override_run(remove_key="status")),
+            ("omit_base_repo_id", drop_pr_key("base.repo.id")),
+            ("omit_pr_state", drop_pr_key("state")),
+            (
+                "verified_by_broker_false",
+                override_run(updates={"verified_by_broker": False}),
+            ),
+            ("run_status_completed", override_run(updates={"status": "completed"})),
+            ("run_status_cancelled", override_run(updates={"status": "cancelled"})),
+            ("non_200_run_lookup", override_run(status_code=503)),
+            ("non_200_pr_lookup", non_200_pr),
+        ]
+        req = _make_request(operation_id="op-gate5-fail-closed")
+        for label, interceptor in interceptors:
+            with self.subTest(case=label):
+                client, _, app_tr = _build_client(pr, broker_interceptor=interceptor)
+                with self.assertRaises(StaleWriterOwnershipError):
+                    V6RecoveryEngine(client).recover_and_publish(req)
+                self.assertEqual(
+                    [c for c in app_tr.calls if c["method"] != "GET"],
+                    [],
+                )
+        self.assertEqual(pr.reviews, [])
+        self.assertEqual(pr.comments, snapshot_before)
 
     def test_gate_6_lost_write_response_reconciles_with_zero_duplicates_and_model_calls(
         self,
