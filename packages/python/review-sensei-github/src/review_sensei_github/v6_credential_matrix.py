@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 from review_sensei.errors import ReviewInputError
 
-from .errors import GitHubHTTPError
+from .errors import GitHubHTTPPermissionError
 
 
 class CredentialKind(str, Enum):
@@ -48,7 +48,7 @@ class OperationKind(str, Enum):
     MUTATION = "mutation"
 
 
-class V6CredentialPermissionError(GitHubHTTPError):
+class V6CredentialPermissionError(GitHubHTTPPermissionError):
     """Raised when a workflow token lacks a required read-only scope (HTTP 403)."""
 
     error_category = "github_http_permission"
@@ -61,8 +61,15 @@ class V6CredentialPermissionError(GitHubHTTPError):
         credential: CredentialKind,
         missing_scopes: tuple[str, ...],
     ) -> None:
-        super().__init__(message, http_status=403, failed_lookup=endpoint_id)
-        self.endpoint_id = endpoint_id
+        missing_scope = ", ".join(missing_scopes) if missing_scopes else None
+        super().__init__(
+            message,
+            http_status=403,
+            failed_lookup=endpoint_id,
+            endpoint_id=endpoint_id,
+            credential_kind=credential.value,
+            missing_scope=missing_scope,
+        )
         self.credential = credential
         self.missing_scopes = missing_scopes
 
