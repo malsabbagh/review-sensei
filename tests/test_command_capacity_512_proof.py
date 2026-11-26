@@ -138,6 +138,9 @@ class CommandCapacity512ProofTests(unittest.TestCase):
             "cleanup_threads",
             "check_run",
             "approval",
+            "other_writes",
+            "restore_and_snapshot_reads",
+            "body_receipt_calls",
             "total",
         ):
             self.assertIn(key, nt)
@@ -211,6 +214,9 @@ class CommandCapacity512ProofTests(unittest.TestCase):
                 "disposition_checkpoint_calls=7",
                 "lifecycle_checkpoint_calls=",
                 "native_tail_calls=",
+                f"other_writes={bd['native_tail_calls']['other_writes']}",
+                f"restore_and_snapshot_reads={bd['native_tail_calls']['restore_and_snapshot_reads']}",
+                f"body_receipt_calls={bd['native_tail_calls']['body_receipt_calls']}",
                 "receipt_calls=8",
             ):
                 self.assertIn(token, fixture.stdout)

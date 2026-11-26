@@ -4149,6 +4149,7 @@ class FindingLifecycleJournal:
                 "approval": approval_calls,
                 "other_writes": 2 * other_non_cleanup,
                 "restore_and_snapshot_reads": restore_calls + snapshot_reads,
+                "body_receipt_calls": body_receipt_calls,
                 "total": native_calls,
             },
             "receipt_calls": receipt_calls,
