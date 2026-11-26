@@ -1068,3 +1068,35 @@ class VisibleProseOverflowTests(unittest.TestCase):
                     for rev in state.reviews
                 )
             )
+
+    def test_no_intent_comments_skips_projected_inventory_store_and_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_dir = Path(directory) / "ledger"
+            init_ledger = LocalSessionLedger(ledger_dir)
+            result, _key = _body_placed_result(
+                init_ledger, count=2, body_padding=20, blocker_count=0, human_count=1
+            )
+            state = _VisibleProseOverflowState(result.comments)
+            budget = EvidenceReadBudget()
+            http = publication_http(state.http, budget)
+            ctx = build_human_inventory_context(
+                http=http,
+                token="synthetic",
+                ledger=LocalSessionLedger(ledger_dir),
+                identity=IDENTITY,
+                base_sha=BASE,
+                head_sha=HEAD,
+                app_slug=APP,
+                publication_digest=review_result_digest(result),
+                policy_digest=POLICY.digest(),
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    CONFIGURATION
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+                budget=budget,
+            )
+            store = HumanInventoryStore(
+                http, "synthetic", LocalSessionLedger(ledger_dir), ctx
+            )
+            self.assertIsNone(store.read_available())
+            self.assertFalse(store._last_read_saw_producer_intent)

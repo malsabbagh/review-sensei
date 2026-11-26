@@ -2373,6 +2373,11 @@ class GitHubApplication:
                     available_admission = admitted_inventory_store.read_available()
                     if (
                         available_admission is None
+                        and getattr(
+                            admitted_inventory_store,
+                            "_last_read_saw_producer_intent",
+                            True,
+                        )
                         and lifecycle_record is not None
                         and lifecycle_record.finding_lifecycle is not None
                     ):

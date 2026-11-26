@@ -10567,10 +10567,17 @@ class ReviewPublisher:
         stage_human_inventory = (
             complete_inventory
             and human_inventory_store is not None
-            and (result is admitted_result or planned_drift_state is not None)
+            and result is admitted_result
+        )
+        drift_human_inventory_available = (
+            complete_inventory
+            and human_inventory_store is not None
+            and result is not admitted_result
+            and planned_drift_state is not None
         )
         human_inventory = prospective_eligibility.human_review
-        if stage_human_inventory:
+        inventory_context = None
+        if stage_human_inventory or drift_human_inventory_available:
             from .default_human_inventory import (
                 HumanInventoryReference,
                 HumanInventoryStore,
@@ -10633,6 +10640,7 @@ class ReviewPublisher:
                     human_inventory_store.ledger,
                     context,
                 )
+            inventory_context = context
             if (
                 visible_prose_store is not None
                 and visible_prose_store.producer_id != context.producer_id
@@ -10640,24 +10648,27 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "visible prose store authority mismatches publication"
                 )
-            self.finalizer._attach_authenticated_human_inventory(
-                human_inventory_store,
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-            )
+            if stage_human_inventory:
+                self.finalizer._attach_authenticated_human_inventory(
+                    human_inventory_store,
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
         if human_inventory is not None:
             try:
                 human_inventory.to_dict()
             except ReviewInputError:
-                if not stage_human_inventory:
+                if not (stage_human_inventory or drift_human_inventory_available):
                     raise
+                assert inventory_context is not None
+                stage_human_inventory = True
                 prospective_eligibility = replace(
                     prospective_eligibility,
                     human_inventory_reference=HumanInventoryReference(
-                        context.event_key, "0" * 64
+                        inventory_context.event_key, "0" * 64
                     ),
                 )
                 needs_human_inventory = True
@@ -10818,16 +10829,18 @@ class ReviewPublisher:
                     if (
                         exc.check == "framed-review-body"
                         and not needs_human_inventory
-                        and stage_human_inventory
+                        and (stage_human_inventory or drift_human_inventory_available)
                         and human_inventory is not None
                     ):
                         # The inventory may fit alone while its legacy marker
                         # crowds out the complete body. Qualify the same v5
                         # reference and future receipt before staging anything.
+                        assert inventory_context is not None
+                        stage_human_inventory = True
                         prospective_eligibility = replace(
                             prospective_eligibility,
                             human_inventory_reference=HumanInventoryReference(
-                                context.event_key, "0" * 64
+                                inventory_context.event_key, "0" * 64
                             ),
                         )
                         preflight_document = replace(
@@ -10923,15 +10936,18 @@ class ReviewPublisher:
                         prose_parts = prepare_body_explanation_prose_parts(
                             preflight_review.body_explanations, head_sha=head_sha
                         )
+                        if drift_human_inventory_available:
+                            stage_human_inventory = True
                         if (
                             not needs_human_inventory
                             and stage_human_inventory
                             and human_inventory is not None
                         ):
+                            assert inventory_context is not None
                             prospective_eligibility = replace(
                                 prospective_eligibility,
                                 human_inventory_reference=HumanInventoryReference(
-                                    context.event_key, "0" * 64
+                                    inventory_context.event_key, "0" * 64
                                 ),
                             )
                             preflight_document = replace(

@@ -252,7 +252,9 @@ class DefaultHumanInventoryReader:
         ):
             self._current_read = reader
 
-    def _cold_store(self) -> HumanInventoryStore:
+    def _cold_store(
+        self, *, allow_projected_digest: bool = True
+    ) -> HumanInventoryStore:
         status, pr = self.http.request(
             "GET",
             self.http.repository_path(self.repository, f"/pulls/{self.pull_request}"),
@@ -295,8 +297,11 @@ class DefaultHumanInventoryReader:
             )
         publication_digest = transaction_publication_digest(transaction)
         if (
-            self._retained_source is None
+            allow_projected_digest
+            and self._retained_source is None
+            and not getattr(self.ledger, "_quarantine_required", False)
             and loaded.record is not None
+            and loaded.record.quarantine_lineage is None
             and loaded.record.finding_lifecycle is not None
         ):
             from .quarantine_action import _current_publication_digest
@@ -305,8 +310,7 @@ class DefaultHumanInventoryReader:
                 self.ledger, "load_retained_checkpoint_result", None
             )
             if callable(load_retained) and (
-                getattr(self.ledger, "_quarantine_required", False)
-                or load_retained(
+                load_retained(
                     identity, transaction=transaction, head_sha=transaction.head_sha
                 )
                 is not None
@@ -350,7 +354,11 @@ class DefaultHumanInventoryReader:
             return None
 
         def read(receipt):
-            store = self.store or self._admitted_store or self._cold_store()
+            store = (
+                self.store
+                or self._admitted_store
+                or self._cold_store(allow_projected_digest=False)
+            )
             original_budget = self.budget
             self._native_root_frontier = None
             self._native_root_read = None
