@@ -44,6 +44,7 @@ from review_sensei.convergence import (
 from review_sensei.coverage import CoverageManifest, coverage_approval_state
 from review_sensei.diff import DiffAnalysis, analyze_diff
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
+from review_sensei.failure_observation import exception_kind
 from review_sensei.finding_drift import (
     DriftEvaluationResult,
     DriftInventory,
@@ -8326,12 +8327,12 @@ class ReviewPublisher:
                             },
                         )
                     )
+            readback_pages = min(
+                MAX_REVIEW_THREAD_PAGES,
+                (len(getattr(self, "_native_binding_nodes", ())) // 100) + 2,
+            )
             native_calls = (
-                1
-                + edit_count
-                + reopen_count
-                + MAX_REVIEW_THREAD_PAGES
-                + following_native_calls
+                1 + edit_count + reopen_count + readback_pages + following_native_calls
             )
             from .ordinary_drift_execution import suffix_native_calls
 
@@ -11493,6 +11494,10 @@ class ReviewPublisher:
                 and ob.native_target is not None
                 and ob.target_state in {"active", "contingent", "uncertain"}
             }
+        drift_journal = getattr(self, "_finding_lifecycle_journal", None)
+        before_drift_effects = (
+            len(drift_journal.effects) if drift_journal is not None else 0
+        )
         try:
             reused_drift_instances = self._update_existing_drift_threads(
                 planned=planned_drift_state,
@@ -11511,15 +11516,22 @@ class ReviewPublisher:
                     + COMMAND_FINALIZATION_RESERVE
                 ),
             )
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
-            self._commit_drift_uncertain(
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=base_sha,
-                planned_drift=planned_drift_state,
-                input_key=drift_input_key,
-            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+            from . import review_lifecycle_diagnostics as lifecycle_diagnostics
+
+            lifecycle_diagnostics.classified_failure(exception_kind(exc), None)
+            if (
+                drift_journal is None
+                or len(drift_journal.effects) > before_drift_effects
+            ):
+                self._commit_drift_uncertain(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_drift=planned_drift_state,
+                    input_key=drift_input_key,
+                )
             return PublicationResult(
                 status="publication_incomplete", diagnostic="publication_ambiguous"
             )

@@ -39,6 +39,8 @@ ACTION_NOOP_REASONS = frozenset(
         "not_mentioned",
         "source_already_handled",
         "no_change",
+        "capacity_unavailable",
+        "evaluation_failed",
     }
 )
 UNSTARTED_CANCELLATION_REASONS = frozenset(

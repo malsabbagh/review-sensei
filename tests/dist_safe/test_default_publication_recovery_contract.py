@@ -1,6 +1,7 @@
 """Default publication/recovery contracts against exact installed distributions."""
 
 import sys
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,9 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 assert_distribution_import()
 
 import review_sensei_github  # noqa: E402
+from review_sensei_github import publication_failure_recovery  # noqa: E402
+
+from review_sensei.api_work import ACTION_NOOP_REASONS  # noqa: E402
 
 if (
     not Path(review_sensei_github.__file__)
@@ -74,6 +78,15 @@ class InstalledTrustedPublicationRecoveryTests(
     test_trusted_publication_recovery.TrustedPublicationRecoveryTests
 ):
     pass
+
+
+class InstalledRecoveryAndActionReasonGapContractTests(unittest.TestCase):
+    def test_recovery_entrypoints_and_noop_reasons_are_packaged(self):
+        self.assertTrue(
+            callable(publication_failure_recovery.admit_publication_failure_recovery)
+        )
+        self.assertIn("evaluation_failed", ACTION_NOOP_REASONS)
+        self.assertIn("capacity_unavailable", ACTION_NOOP_REASONS)
 
 
 def setUpModule():

@@ -2769,6 +2769,7 @@ def restore_finding_lifecycle(
             from .quarantine_lifecycle_transfer import consume
 
             record, document = consume(_retained, ledger, identity)
+            source_record = record
             document = _validate(document)
         else:
             if loaded is None:
@@ -2785,17 +2786,36 @@ def restore_finding_lifecycle(
                 for item in record.dispositions:
                     if isinstance(item, dict):
                         register_compact_actor(item.get("actor"))
-            if record is None or record.finding_lifecycle is None:
+            caller = getattr(ledger, "caller", None)
+            reconciled = getattr(caller, "_reconciled_prior_lifecycle", None)
+            source_record = record
+            if (
+                loaded is None
+                and record is not None
+                and record.finding_lifecycle is not None
+                and isinstance(reconciled, tuple)
+                and len(reconciled) == 2
+                and reconciled[0] == record.finding_lifecycle.get("operation_id")
+            ):
+                prior_record = reconciled[1]
+                if prior_record is None or prior_record.finding_lifecycle is None:
+                    return record, None
+                source_record = prior_record
+            if source_record is None or source_record.finding_lifecycle is None:
                 return record, None
-            if loaded is not None:
-                stored = read_finding_lifecycle(ledger, record, _selected_load=selected)
+            if loaded is not None or source_record is not record:
+                stored = read_finding_lifecycle(
+                    ledger,
+                    source_record,
+                    _selected_load=selected if source_record is record else None,
+                )
             from .finding_lifecycle_dictionary import resolve_stored
 
-            stored = resolve_stored(ledger, record, stored)
+            stored = resolve_stored(ledger, source_record, stored)
             document = _validate(_unpack_journal(stored))
         restored = decode_lifecycle_state(document["lifecycle"])
         state = restored.state
-        binding = record.finding_lifecycle["manifest"]["binding"]
+        binding = source_record.finding_lifecycle["manifest"]["binding"]
         if (
             state.head_sha != binding["head_sha"]
             or state.base_sha != binding["base_sha"]
@@ -2816,7 +2836,7 @@ def restore_finding_lifecycle(
                 raise ReviewInputError(
                     "finding lifecycle receipt scope conflicts with selected authority"
                 )
-        history = record.finding_lifecycle.get(
+        history = source_record.finding_lifecycle.get(
             "accepted_semantic_history", document.get("accepted_semantic_history")
         )
         if history is not None and history.get("qualification") != "unavailable":
@@ -2825,7 +2845,7 @@ def restore_finding_lifecycle(
             validate_history(history, identity)
         from .quarantine_namespace import inherited_namespace_is_historical
 
-        if inherited_namespace_is_historical(ledger, record, state, document):
+        if inherited_namespace_is_historical(ledger, source_record, state, document):
             if (
                 key in reviewer._active_window_states
                 or key in reviewer._drift_states

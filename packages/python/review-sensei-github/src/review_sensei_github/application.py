@@ -5345,10 +5345,6 @@ class GitHubApplication:
         # and five approval reads. Worker internal fanout has its own service
         # allowance and cannot narrow this caller's cleanup capacity.
         command_finalization_reserve = (0 if prepared_check is not None else 1) + 2 + 5
-        failed = (
-            command_result.summary
-            + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
-        )
         from .approval_progress import render_command_progress
 
         def command_token(budget: EvidenceReadBudget, capability: str) -> str:
@@ -5538,8 +5534,15 @@ class GitHubApplication:
                 command_finalization_reserve=command_finalization_reserve,
             )
         except Exception as exc:
+            reason = (
+                " ".join(str(exc).split())
+                .encode("utf-8")[:256]
+                .decode("utf-8", errors="ignore")
+            )
+            detail = f": {reason}" if reason else ""
+            summary = f"{command_result.summary}; gate re-evaluation failed{detail}"
             return render_command_progress(
-                replace(command_result, summary=failed, evaluation_failed=True), exc
+                replace(command_result, summary=summary, evaluation_failed=True), exc
             )
 
         if getattr(
@@ -5578,8 +5581,11 @@ class GitHubApplication:
                 ),
             )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
+            diag = getattr(publication, "diagnostic", None)
+            detail = f" ({diag})" if isinstance(diag, str) and diag else ""
+            summary = f"{command_result.summary}; gate re-evaluation failed{detail}"
             return render_command_progress(
-                replace(command_result, summary=failed, evaluation_failed=True),
+                replace(command_result, summary=summary, evaluation_failed=True),
                 publication,
             )
         if getattr(publication, "status", None) in {"approved", "already_approved"}:

@@ -805,21 +805,143 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 observed_trust=observed_trust,
             )
         if result.evaluation_failed:
-            raise ReviewInputError(
-                "command effect or required finalization remains unconfirmed: "
-                + result.summary
+            if command.action == "approve-media" or quarantine is not None:
+                raise ReviewInputError(
+                    "command effect or required finalization remains unconfirmed: "
+                    + result.summary
+                )
+            from .accepted_semantic_history import _record_has_pending_receipt
+
+            has_pending_lifecycle = False
+            effect_record = caller._effect_record
+            if _record_has_pending_receipt(effect_record):
+                has_pending_lifecycle = True
+            elif (
+                effect_record is not None
+                and effect_record.finding_lifecycle is not None
+            ):
+                try:
+                    from review_sensei.finding_lifecycle_store import (
+                        read_finding_lifecycle,
+                    )
+
+                    from .finding_lifecycle import _unpack_journal, _validate
+                    from .finding_lifecycle_dictionary import (
+                        _manifest as _dict_manifest,
+                    )
+                    from .finding_lifecycle_dictionary import is_dictionary
+                    from .finding_lifecycle_dictionary import (
+                        unpack as _unpack_dictionary,
+                    )
+
+                    effect_lifecycle = effect_record.finding_lifecycle
+                    stored = read_finding_lifecycle(run.ledger, effect_record)
+                    if stored is None:
+                        has_pending_lifecycle = True
+                    else:
+                        if is_dictionary(stored):
+                            from review_sensei.bounded_evidence import (
+                                read_inline_evidence,
+                            )
+
+                            ref_manifest = (
+                                effect_lifecycle.get("manifest")
+                                if isinstance(effect_lifecycle, Mapping)
+                                else None
+                            )
+                            dict_manifest = stored.get("dictionary_manifest")
+                            if not isinstance(dict_manifest, dict) or not isinstance(
+                                ref_manifest, dict
+                            ):
+                                has_pending_lifecycle = True
+                            else:
+                                base_binding = _dict_manifest(
+                                    dict_manifest, ref_manifest["binding"]
+                                )
+                                base = (
+                                    read_inline_evidence(
+                                        dict_manifest, expected_binding=base_binding
+                                    )
+                                    if dict_manifest.get("encoding") == "inline-json-v1"
+                                    else run.ledger.read_evidence(
+                                        run.identity,
+                                        dict_manifest,
+                                        expected_binding=base_binding,
+                                    )
+                                )
+                                journal_doc = _unpack_dictionary(
+                                    stored,
+                                    base=base,
+                                    current_binding=ref_manifest["binding"],
+                                )
+                        else:
+                            journal_doc = _validate(_unpack_journal(stored))
+                        if journal_doc.get("unknown_trust_effect") or any(
+                            e.get("status") == "pending"
+                            for e in journal_doc.get("effects", ())
+                        ):
+                            has_pending_lifecycle = True
+                except Exception:
+                    has_pending_lifecycle = True
+            if caller.accounting.uncertain > 0 or has_pending_lifecycle:
+                raise ReviewInputError(
+                    "command effect or required finalization remains unconfirmed: "
+                    + result.summary
+                )
+            outcome = {"kind": "explicit_noop", "reason": "evaluation_failed"}
+            require_action_settlement_representable(
+                run,
+                outcome=outcome,
+                result_document=asdict(result),
+                extra_work_requests=0,
+                action_name=command.action,
             )
-        outcome = (
+            proof = caller.settle_action_effect(
+                run.ledger,
+                run.identity,
+                boundary,
+                outcome=outcome,
+                result_document=asdict(result),
+            )
+            from review_sensei.source_registry import require_module_seal
+
+            from . import current_quarantine_finalization, historical_terminal_fence
+
+            require_module_seal(current_quarantine_finalization)
+            current_quarantine_finalization.before_terminal(caller, run, proof)
+            require_module_seal(historical_terminal_fence)
+            historical_terminal_fence.before_terminal(caller, run, proof)
+            caller.begin_terminal("action-completion")
+            caller.close_action(run.ledger, run.identity, proof)
+            print(result.summary)
+            return command_exit_code(result)
+        is_capacity_refusal = (
+            not result.applied
+            and isinstance(result.summary, str)
+            and (
+                result.summary.startswith(
+                    "command finalization capacity unavailable before business writes:"
+                )
+                or result.summary.startswith(
+                    "quarantine command finalization capacity unavailable before business writes:"
+                )
+            )
+        )
+        action_outcome: dict[str, Any] = (
             {"kind": "applied", "reason": None}
             if result.applied
             else {
                 "kind": "explicit_noop",
-                "reason": "status" if command.action == "status" else "no_change",
+                "reason": (
+                    "capacity_unavailable"
+                    if is_capacity_refusal
+                    else ("status" if command.action == "status" else "no_change")
+                ),
             }
         )
         require_action_settlement_representable(
             run,
-            outcome=outcome,
+            outcome=action_outcome,
             result_document=asdict(result),
             extra_work_requests=2 if result.receipts else 0,
             action_name=command.action,
@@ -833,7 +955,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             run.ledger,
             run.identity,
             boundary,
-            outcome=outcome,
+            outcome=action_outcome,
             result_document=asdict(result),
         )
         from review_sensei.source_registry import require_module_seal

@@ -92,6 +92,13 @@ export interface LiveIssueComment {
   association: string;
 }
 
+const PUBLIC_WORKFLOW_TOKEN_SKEW_MS = 60_000;
+const publicWorkflowTokenCache = new Map<string, { installationId: number; token?: InstallationToken }>();
+
+export function resetPublicWorkflowTokenCacheForTesting(): void {
+  publicWorkflowTokenCache.clear();
+}
+
 function publicWorkflowTag(value: string): string {
   if (
     typeof value !== "string" ||
@@ -737,10 +744,87 @@ export class GitHubApi {
     return await this.publicWorkflowRuntimeShasFromApi(validatedTag, gitFailure);
   }
 
+  private publicWorkflowCacheKey(): string {
+    return `${this.apiUrl}|${this.env.GITHUB_APP_ID ?? ""}|${this.env.GITHUB_APP_PRIVATE_KEY ?? ""}`;
+  }
+
+  private cachedPublicWorkflowReadToken(): { token: string | undefined; fromEnv: boolean } {
+    const envToken = this.env.PUBLIC_WORKFLOW_READ_TOKEN?.trim();
+    if (envToken) {
+      return { token: envToken, fromEnv: true };
+    }
+    const cached = publicWorkflowTokenCache.get(this.publicWorkflowCacheKey());
+    if (
+      cached?.token &&
+      cached.token.expiresAt - Date.now() > PUBLIC_WORKFLOW_TOKEN_SKEW_MS
+    ) {
+      return { token: cached.token.token, fromEnv: false };
+    }
+    return { token: undefined, fromEnv: false };
+  }
+
+  private invalidatePublicWorkflowReadToken(): void {
+    const key = this.publicWorkflowCacheKey();
+    const existing = publicWorkflowTokenCache.get(key);
+    if (existing) {
+      publicWorkflowTokenCache.set(key, { installationId: existing.installationId });
+    }
+  }
+
+  private async mintPublicWorkflowReadToken(forceRefresh = false): Promise<string | undefined> {
+    const key = this.publicWorkflowCacheKey();
+    const cached = publicWorkflowTokenCache.get(key);
+    try {
+      const installationId =
+        !forceRefresh && cached?.installationId
+          ? cached.installationId
+          : await this.installationFor(PUBLIC_WORKFLOW_REPOSITORY);
+      if (installationId === null) {
+        publicWorkflowTokenCache.delete(key);
+        return undefined;
+      }
+      const issued = await this.installationToken(
+        installationId,
+        PUBLIC_WORKFLOW_REPOSITORY,
+        { contents: "read" },
+      );
+      publicWorkflowTokenCache.set(key, { installationId, token: issued });
+      return issued.token;
+    } catch (error) {
+      if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) {
+        throw error;
+      }
+      publicWorkflowTokenCache.delete(key);
+      return undefined;
+    }
+  }
+
   private async publicWorkflowRuntimeShasFromApi(tag: string, gitFailure?: LookupDiagnostic["git_failure"]): Promise<PublicWorkflowRuntimeShas> {
+    let { token, fromEnv } = this.cachedPublicWorkflowReadToken();
     const read = async (path: string, phase: "rest_ref" | "rest_tag") => {
       let response: GitHubApiResponse;
-      try { response = await this.request("GET", path, undefined); }
+      try {
+        response = await this.request("GET", path, token);
+        if (response.status === 401 && token !== undefined && !fromEnv) {
+          this.invalidatePublicWorkflowReadToken();
+          const refreshed = await this.mintPublicWorkflowReadToken(true);
+          if (refreshed !== undefined) {
+            token = refreshed;
+            response = await this.request("GET", path, token);
+          }
+        } else if (
+          token === undefined &&
+          (response.status === 403 || response.status === 429) &&
+          response.lookupMetadata?.rate_limit_remaining === 0
+        ) {
+          const minted = await this.mintPublicWorkflowReadToken(true);
+          if (minted !== undefined) {
+            token = minted;
+            fromEnv = false;
+            response = await this.request("GET", path, token);
+          }
+        }
+      }
       catch (error) {
         if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) throw error;
         throw new WorkflowLookupError({phase, failure: lookupFailure(error), ...(gitFailure ? {git_failure: gitFailure} : {}), ...(error instanceof GitHubResponseError ? error.metadata : {})}, error instanceof GitHubResponseError ? error.status : undefined);

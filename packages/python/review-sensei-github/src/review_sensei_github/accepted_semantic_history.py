@@ -194,6 +194,59 @@ def _check_duplicate_terminal_delivery(
                 )
 
 
+def _is_prewrite_capacity_refusal(result: Mapping[str, Any] | None) -> bool:
+    """True for unapplied pre-write command finalization capacity refusals."""
+    if not isinstance(result, Mapping) or result.get("applied") is not False:
+        return False
+    summary = result.get("summary")
+    return isinstance(summary, str) and (
+        summary.startswith(
+            "command finalization capacity unavailable before business writes:"
+        )
+        or summary.startswith(
+            "quarantine command finalization capacity unavailable before business writes:"
+        )
+    )
+
+
+def _is_prewrite_non_dispositional_noop(
+    result: Mapping[str, Any],
+    *,
+    unchanged_lifecycle: bool,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> bool:
+    """True when a command aborted before business writes without mutating lifecycle state."""
+    if not unchanged_lifecycle or after != before:
+        return False
+    return _is_prewrite_capacity_refusal(result) or (
+        result.get("evaluation_failed") is True
+    )
+
+
+def action_allows_carried_history_fallback(
+    action: Mapping[str, Any] | None,
+    retained_action: Mapping[str, Any] | None = None,
+) -> bool:
+    """True when a settled no-op/unstarted predecessor legitimately omitted history."""
+    if not isinstance(action, Mapping):
+        return False
+    outcome = action.get("outcome")
+    if not isinstance(outcome, Mapping):
+        return False
+    kind = outcome.get("kind")
+    if kind == "canceled_unstarted":
+        return True
+    if outcome in (
+        {"kind": "explicit_noop", "reason": "capacity_unavailable"},
+        {"kind": "explicit_noop", "reason": "evaluation_failed"},
+    ):
+        return True
+    if kind == "explicit_noop" and isinstance(retained_action, Mapping):
+        return _is_prewrite_capacity_refusal(retained_action.get("result"))
+    return False
+
+
 def _record_has_pending_receipt(record: Any) -> bool:
     if record is None:
         return False
@@ -709,11 +762,9 @@ def _prepare_action(run):
             retained_old = read_action_result(run.ledger, run.identity, old)
             previous = retained_old["result"].get(KEY)
             if previous is None:
-                canceled_unstarted = (
-                    isinstance(old_state.action.get("outcome"), Mapping)
-                    and old_state.action["outcome"].get("kind") == "canceled_unstarted"
-                )
-                if canceled_unstarted:
+                if action_allows_carried_history_fallback(
+                    old_state.action, retained_old
+                ):
                     previous = history_from_record(run.ledger, run.identity, old)
                 else:
                     _hold("missing_predecessor_summary")
@@ -828,7 +879,8 @@ def enrich_settlement(caller, ledger, identity, intent, result):
     if record.identity() != identity or record.record_sha256 != caller._root:
         _hold("selected_root_changed")
     observation = getattr(caller, "_accepted_semantic_checkpoint", None)
-    if _digest(record.finding_lifecycle) == context.reference_sha256:
+    unchanged_lifecycle = _digest(record.finding_lifecycle) == context.reference_sha256
+    if unchanged_lifecycle:
         after = (
             context.finding_before
             if context.finding_before is not None
@@ -874,6 +926,23 @@ def enrich_settlement(caller, ledger, identity, intent, result):
         _require_effect_scope(document, identity, state.head_sha)
         after = semantic_snapshot(state, document)
     after = historical_snapshot(after, ledger, record)
+    if _is_prewrite_non_dispositional_noop(
+        result,
+        unchanged_lifecycle=unchanged_lifecycle,
+        before=context.before,
+        after=after,
+    ):
+        enriched = (
+            {**result, KEY: context.previous}
+            if context.previous is not None
+            else dict(result)
+        )
+        caller._accepted_semantic_result_cache = (
+            caller._root,
+            _digest(result),
+            enriched,
+        )
+        return enriched
     # The existing close_action fresh expected-root CAS and readback authenticates
     # this exact internally issued checkpoint. This is reviewed carrier state,
     # not a claim that mutable native effects have been independently reread.
