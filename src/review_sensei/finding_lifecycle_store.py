@@ -1352,7 +1352,10 @@ def _format_reserved_cost_breakdown(breakdown: Mapping[str, Any]) -> str:
         f"review_update={nt.get('review_update', 0)},"
         f"cleanup_threads={nt.get('cleanup_threads', 0)},"
         f"check_run={nt.get('check_run', 0)},"
-        f"approval={nt.get('approval', 0)}) "
+        f"approval={nt.get('approval', 0)},"
+        f"other_writes={nt.get('other_writes', 0)},"
+        f"restore_and_snapshot_reads={nt.get('restore_and_snapshot_reads', 0)},"
+        f"body_receipt_calls={nt.get('body_receipt_calls', 0)}) "
         f"receipt_calls={breakdown['receipt_calls']}"
     )
     return " ".join(parts)
