@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-29
+Last updated: 2026-11-26
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0144](0144-github-governed-recovery.md) | Proposed | Adopt GitHub-governed v6 recovery without fixed read caps | v6 recovery architecture | Dual credentials with 5-read App allowlist, exclusive writer ownership, stability-verified pagination, PR-resident results, `v5` pinned until release gate passes |
 | [0143](0143-asynchronous-npm-release.md) | Proposed | Qualify Python and signed v5 independently of asynchronous npm | User-directed release policy correction | Exact Python and installed qualification, protected OIDC npm and independent Pages |
 | [0142](0142-prospective-pre-entry-abort-close-witness.md) | Proposed | Match one original paid pre-entry abort close to exact native storage | G29; follow-up to PR #468 | Unconnected candidate; no dispatch, settlement or admission authority |
 | [0141](0141-cold-namespace-deadline-ceiling.md) | Proposed | Enforce a narrower future deadline representation in the original cold namespace | Issue pending; PR #462 | Existing receipts, funding and bounds unchanged; no execution authority |
