@@ -1331,11 +1331,27 @@ def _inspect_confirmed_failed_tx_lifecycle(
                 record=record,
             )
         if eff_status == "rejected":
-            allowed_endpoint = (
+            allowed_endpoint = False
+            if (
                 method == "POST"
                 and eff_path == check_post_path
                 and request.get("head_sha") == tx.head_sha
-            ) or (method == "PATCH" and eff_path.startswith(check_post_path + "/"))
+            ):
+                allowed_endpoint = True
+            elif method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+                suffix = eff_path[len(check_post_path) + 1 :]
+                precond = effect.get("check_update_precondition")
+                if suffix.isdigit():
+                    target_check_id = int(suffix)
+                    if target_check_id in confirmed_check_runs and (
+                        precond is None
+                        or (
+                            isinstance(precond, dict)
+                            and precond.get("check_run_id") == target_check_id
+                            and precond.get("head_sha") == tx.head_sha
+                        )
+                    ):
+                        allowed_endpoint = True
             if type(status) is int and 400 <= status < 500 and allowed_endpoint:
                 continue
         raise _hold(

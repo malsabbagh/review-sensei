@@ -1,7 +1,11 @@
 import { WorkflowLookupError } from "../src/broker-lookup-diagnostic";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/env";
-import { GitHubApi, resetPublicWorkflowTokenCacheForTesting } from "../src/github-api";
+import {
+  GitHubApi,
+  publicWorkflowTokenCacheSnapshotForTesting,
+  resetPublicWorkflowTokenCacheForTesting,
+} from "../src/github-api";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
@@ -416,6 +420,47 @@ describe("GitHubApi public workflow resolution", () => {
         "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
         "ghs_env_read_token",
       );
+    } finally {
+      resetPublicWorkflowTokenCacheForTesting();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("hashes the private key in the workflow token cache key and bounds cache size", async () => {
+    resetPublicWorkflowTokenCacheForTesting();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 503 }),
+    );
+    try {
+      const secretPrefix = "PRIVATE_KEY_SECRET_CANARY_";
+      for (let idx = 0; idx < 20; idx += 1) {
+        const client = new GitHubApi({
+          GITHUB_APP_ID: String(10_000 + idx),
+          GITHUB_APP_PRIVATE_KEY: `${secretPrefix}${idx}`,
+        } as unknown as WorkerEnv);
+        vi.spyOn(client, "installationFor").mockResolvedValue(800 + idx);
+        vi.spyOn(client, "installationToken").mockResolvedValue({
+          token: `ghs_tok_${idx}`,
+          expiresAt: Date.now() + 600_000,
+          permissions: { contents: "read", metadata: "read" },
+        });
+        vi.spyOn(client, "request")
+          .mockResolvedValueOnce({
+            status: 403,
+            data: { message: "API rate limit exceeded" },
+            lookupMetadata: { rate_limit_remaining: 0 },
+          })
+          .mockResolvedValueOnce({
+            status: 200,
+            data: { object: { type: "commit", sha: SHA } },
+          });
+        await expect(client.publicWorkflowSha("v5")).resolves.toBe(SHA);
+      }
+      const snapshot = publicWorkflowTokenCacheSnapshotForTesting();
+      expect(snapshot.length).toBeLessThanOrEqual(16);
+      for (const entry of snapshot) {
+        expect(entry.key).not.toContain(secretPrefix);
+      }
     } finally {
       resetPublicWorkflowTokenCacheForTesting();
       fetchMock.mockRestore();

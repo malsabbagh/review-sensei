@@ -213,11 +213,15 @@ def _is_prewrite_non_dispositional_noop(
     result: Mapping[str, Any],
     *,
     unchanged_lifecycle: bool,
+    raw_before: Mapping[str, Any] | None,
+    raw_after: Mapping[str, Any],
     before: Mapping[str, Any],
     after: Mapping[str, Any],
 ) -> bool:
     """True when a command aborted before business writes without mutating lifecycle state."""
     if not unchanged_lifecycle or after != before:
+        return False
+    if raw_before is not None and raw_after != raw_before:
         return False
     return _is_prewrite_capacity_refusal(result) or (
         result.get("evaluation_failed") is True
@@ -925,18 +929,17 @@ def enrich_settlement(caller, ledger, identity, intent, result):
             _hold("snapshot_binding_conflict")
         _require_effect_scope(document, identity, state.head_sha)
         after = semantic_snapshot(state, document)
+    raw_after = after
     after = historical_snapshot(after, ledger, record)
-    if _is_prewrite_non_dispositional_noop(
+    if context.previous is not None and _is_prewrite_non_dispositional_noop(
         result,
         unchanged_lifecycle=unchanged_lifecycle,
+        raw_before=context.finding_before,
+        raw_after=raw_after,
         before=context.before,
         after=after,
     ):
-        enriched = (
-            {**result, KEY: context.previous}
-            if context.previous is not None
-            else dict(result)
-        )
+        enriched = {**result, KEY: context.previous}
         caller._accepted_semantic_result_cache = (
             caller._root,
             _digest(result),

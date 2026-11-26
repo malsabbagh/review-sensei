@@ -2240,6 +2240,78 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
             self.assertEqual(accepted_rollover.completed_initial_reviews, 1)
             self.assertEqual(accepted_rollover.completed_verification_rounds, 0)
 
+    def test_path_a_rejects_foreign_or_malformed_rejected_check_run_patch(self):
+        from review_sensei_github.publication_failure_recovery import (
+            _inspect_confirmed_failed_tx_lifecycle,
+        )
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=1024)
+            f.next_review_run(head_sha=HEAD_2)
+            checks_before = len(f.check_runs)
+
+            def fail_after_check_run(pub_self, **_kwargs):
+                _ = pub_self, _kwargs
+                raise GitHubPublicationError("drift preflight failed after check-run")
+
+            with patch.object(
+                ReviewPublisher, "_update_existing_drift_threads", fail_after_check_run
+            ):
+                self.assertEqual(f.invoke(), 1)
+            self.assertGreater(len(f.check_runs), checks_before)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            created_check_id = f.check_runs[-1]["id"]
+
+            for bad_patch_path in (
+                f"/repos/owner/repo/check-runs/{created_check_id + 999}",
+                "/repos/owner/repo/check-runs/not-an-id",
+            ):
+                fake_doc = {
+                    "schema_version": "finding-lifecycle-journal-v2",
+                    "unknown_trust_effect": False,
+                    "native_receipts": [],
+                    "effects": [
+                        {
+                            "method": "POST",
+                            "path": "/repos/owner/repo/check-runs",
+                            "status": "confirmed",
+                            "request": {
+                                "head_sha": HEAD_2,
+                                "name": "ReviewSensei Review Gate",
+                            },
+                            "response": [201, {"id": created_check_id}],
+                        },
+                        {
+                            "method": "PATCH",
+                            "path": bad_patch_path,
+                            "status": "rejected",
+                            "request": {"status": "completed"},
+                            "response": [404, {"message": "Not Found"}],
+                        },
+                    ],
+                }
+                with (
+                    patch(
+                        "review_sensei.finding_lifecycle_store._decode_selected_lifecycle",
+                        return_value=fake_doc,
+                    ),
+                    self.assertRaisesRegex(
+                        ReviewInputError,
+                        "finding lifecycle already recorded effects for the failed transaction",
+                    ),
+                ):
+                    _inspect_confirmed_failed_tx_lifecycle(
+                        f.ledger,
+                        IDENTITY,
+                        settled,
+                        ApiRunAccounting.from_document(settled.api_run_accounting),
+                        EvidenceReadBudget(),
+                        app_slug="reviewsensei[bot]",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11521,17 +11521,18 @@ class ReviewPublisher:
 
             lifecycle_diagnostics.classified_failure(exception_kind(exc), None)
             if (
-                drift_journal is None
-                or len(drift_journal.effects) > before_drift_effects
+                drift_journal is not None
+                and len(drift_journal.effects) == before_drift_effects
             ):
-                self._commit_drift_uncertain(
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_sha=base_sha,
-                    planned_drift=planned_drift_state,
-                    input_key=drift_input_key,
-                )
+                raise
+            self._commit_drift_uncertain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_drift=planned_drift_state,
+                input_key=drift_input_key,
+            )
             return PublicationResult(
                 status="publication_incomplete", diagnostic="publication_ambiguous"
             )

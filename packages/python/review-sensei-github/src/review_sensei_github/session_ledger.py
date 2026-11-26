@@ -2469,8 +2469,6 @@ class GitHubIssueCommentSessionLedger:
                 self._list_refresh = True
                 self._verified_parts = {}
                 comment_id, record = self._discover(identity, now=now)
-                if manage_reuse and self._inventory_complete and not self._fencing():
-                    self._reuse_listed_parts = True
             else:
                 comment_id, record = selected
             if comment_id is None or record is None:
@@ -2514,9 +2512,19 @@ class GitHubIssueCommentSessionLedger:
                     prior_record=admitted_prior,
                     skipped_failed_ancestors=admitted_chain,
                 )
-                read_session_baseline(self, updated)
-                read_session_dispositions(self, updated)
-                read_session_assessment_queue(self, updated)
+                reuse_post_mutate = (
+                    manage_reuse and self._inventory_complete and not self._fencing()
+                )
+                post_mutate_prior_reuse = self._reuse_listed_parts
+                if reuse_post_mutate:
+                    self._reuse_listed_parts = True
+                try:
+                    read_session_baseline(self, updated)
+                    read_session_dispositions(self, updated)
+                    read_session_assessment_queue(self, updated)
+                finally:
+                    if reuse_post_mutate:
+                        self._reuse_listed_parts = post_mutate_prior_reuse
                 _history_legacy_write_guard(self, updated)
             finally:
                 self._mutation_active = False

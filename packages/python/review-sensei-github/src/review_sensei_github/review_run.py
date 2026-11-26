@@ -948,6 +948,7 @@ class ReviewRun:
                 ):
                     return None
                 assert self.identity.repository_id is not None
+                resolved_app_slug = self.ledger.app_slug or "reviewsensei[bot]"
                 try:
                     recovered = recover_retained_result_for_transaction(
                         http=self.http,
@@ -955,7 +956,7 @@ class ReviewRun:
                         repository_id=self.identity.repository_id,
                         base_sha=self.base_sha,
                         head_sha=self.head_sha,
-                        app_slug="reviewsensei[bot]",
+                        app_slug=resolved_app_slug,
                         ledger=self.ledger,
                         identity=self.identity,
                         transaction=failed_tx,
@@ -1031,7 +1032,7 @@ class ReviewRun:
                                 identity=self.identity,
                                 base_sha=self.base_sha,
                                 head_sha=self.head_sha,
-                                app_slug="reviewsensei[bot]",
+                                app_slug=resolved_app_slug,
                                 pending_transaction=pending_tx,
                                 configuration_context=contexts.configuration,
                                 evidence_context=contexts.evidence,

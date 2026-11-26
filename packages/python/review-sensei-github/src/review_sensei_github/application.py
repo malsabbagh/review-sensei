@@ -107,6 +107,7 @@ from .conversation import (
 )
 from .errors import (
     GitHubBrokerClientError,
+    GitHubHTTPError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
 )
@@ -3369,6 +3370,8 @@ class GitHubApplication:
             parse_maintainer_command,
         )
 
+        self._last_command_evaluation_clean_settleable = False
+
         typed_inventory = cast(Sequence[FindingIdentity] | None, finding_inventory)
         typed_priors = cast(
             Sequence[tuple[str, Sequence[FindingIdentity]]], prior_inventories
@@ -5396,6 +5399,7 @@ class GitHubApplication:
                 if item.outcome in {"recorded", "already-recorded"}
                 and item.reference.startswith("RS-")
             )
+            journal: Any = None
             if (
                 isinstance(self.reviewer, ReviewPublisher)
                 and ledger is not None
@@ -5506,6 +5510,9 @@ class GitHubApplication:
                         finally:
                             journal.finish()
 
+            before_refinalize_effects = (
+                len(journal.effects) if journal is not None else 0
+            )
             publication = refinalize(
                 token=review_token,
                 check_token=None,
@@ -5534,6 +5541,9 @@ class GitHubApplication:
                 command_finalization_reserve=command_finalization_reserve,
             )
         except Exception as exc:
+            self._last_command_evaluation_clean_settleable = isinstance(
+                exc, (GitHubHTTPError, GitHubPublicationError, GitHubBrokerClientError)
+            ) and (journal is None or len(journal.effects) == before_refinalize_effects)
             reason = (
                 " ".join(str(exc).split())
                 .encode("utf-8")[:256]
@@ -5581,7 +5591,32 @@ class GitHubApplication:
                 ),
             )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
+            from .operation_diagnostics import OperationDiagnostics
+
             diag = getattr(publication, "diagnostic", None)
+            obs = getattr(publication, "operation_diagnostics", None)
+            cleanup_phase = obs.cleanup if type(obs) is OperationDiagnostics else None
+            cleanup_first = cleanup_phase.first if cleanup_phase is not None else None
+            if (
+                diag == "command_cleanup_incomplete"
+                and type(obs) is OperationDiagnostics
+                and cleanup_phase is not None
+                and cleanup_first is not None
+                and cleanup_first.stage == "cleanup.discovery"
+                and cleanup_phase.count == 1
+                and obs.eligibility is None
+                and obs.check is None
+                and obs.approval is None
+                and not obs.approval_request_attempted
+                and (
+                    journal is None
+                    or all(
+                        e.get("status") == "confirmed" and e.get("path") != "/graphql"
+                        for e in journal.effects[before_refinalize_effects:]
+                    )
+                )
+            ):
+                self._last_command_evaluation_clean_settleable = True
             detail = f" ({diag})" if isinstance(diag, str) and diag else ""
             summary = f"{command_result.summary}; gate re-evaluation failed{detail}"
             return render_command_progress(

@@ -1044,22 +1044,36 @@ def recover_retained_review_result(
             or transaction.phase == "analysis"
         ):
             raise ReviewInputError("retention requires a durable result checkpoint")
-        result = recover_retained_result_for_transaction(
-            http=http,
+        # Keep `store` as a direct local in this frame so `empty_original_admission`
+        # can match the original `ResultPartStore` instance during cold readback.
+        transport = publication_http(http, budget)
+        store = _store(
+            transport,
             token=token,
-            repository_id=repository_id,
+            identity=identity,
+            app_slug=app_slug,
             base_sha=base_sha,
             head_sha=head_sha,
-            app_slug=app_slug,
-            ledger=ledger,
-            identity=identity,
-            transaction=transaction,
-            configuration_context=configuration_context,
-            evidence_context=evidence_context,
-            convergence_policy=convergence_policy,
-            budget=budget,
             primed_comments=primed_comments,
+            transaction=transaction,
+            source_app_id=getattr(ledger, "authenticated_app_id", None),
         )
+        available = store.read_available(event_key=_event_key(identity, transaction))
+        if available is None:
+            raise ReviewInputError(
+                "retained result is missing; historical result bytes do not exist for "
+                f"transaction {transaction.transaction_id}; do not reconstruct from an "
+                "old head; an authorized maintainer (maintain/admin) must comment "
+                "'@reviewsensei review reenroll' to record an irrecoverable-transaction "
+                "successor transition"
+            )
+        _digest, payload = available
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            raise ReviewInputError("retained result is invalid")
+        result = ReviewResult.from_dict(document)
+        if _payload(result, projected=store.last_read_was_projection) != payload:
+            raise ReviewInputError("retained result is not canonical")
         return _validate(
             result,
             ledger=ledger,

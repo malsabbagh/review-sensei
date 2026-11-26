@@ -2799,6 +2799,16 @@ def restore_finding_lifecycle(
             ):
                 prior_record = reconciled[1]
                 if prior_record is None or prior_record.finding_lifecycle is None:
+                    # A reconciled failed Round 1 with no prior completed rounds or
+                    # prior lifecycle intentionally restores an empty Round-0 baseline.
+                    # Never silently drop lifecycle state if completed rounds exist.
+                    if (
+                        record.completed_initial_reviews != 0
+                        or record.completed_verification_rounds != 0
+                    ):
+                        raise ReviewInputError(
+                            "reconciled prior finding lifecycle is missing for a session with completed reviews"
+                        )
                     return record, None
                 source_record = prior_record
             if source_record is None or source_record.finding_lifecycle is None:

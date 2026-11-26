@@ -805,7 +805,13 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 observed_trust=observed_trust,
             )
         if result.evaluation_failed:
-            if command.action == "approve-media" or quarantine is not None:
+            if (
+                command.action == "approve-media"
+                or quarantine is not None
+                or historical is not None
+                or getattr(app, "_last_command_evaluation_clean_settleable", False)
+                is not True
+            ):
                 raise ReviewInputError(
                     "command effect or required finalization remains unconfirmed: "
                     + result.summary
@@ -888,6 +894,18 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                     "command effect or required finalization remains unconfirmed: "
                     + result.summary
                 )
+            try:
+                fenced_after = authority.fence()
+                verify_live_comment_source(
+                    bound_source=source,
+                    live_comment=fenced_after,
+                    phase="unstarted_intent",
+                )
+            except Exception:
+                raise ReviewInputError(
+                    "command effect or required finalization remains unconfirmed: "
+                    + result.summary
+                ) from None
             outcome = {"kind": "explicit_noop", "reason": "evaluation_failed"}
             require_action_settlement_representable(
                 run,
