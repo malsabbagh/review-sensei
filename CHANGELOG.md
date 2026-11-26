@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.8.28 - 2026-11-26
+
+Changes since [v0.8.27](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.27), from [99f4a9cbb627b555e9132189d961e29827e07cbb](https://github.com/malsabbagh/review-sensei/commit/99f4a9cbb627b555e9132189d961e29827e07cbb) through [77dc79d5b5f1489178018bba2c30ec2988cfabe3](https://github.com/malsabbagh/review-sensei/commit/77dc79d5b5f1489178018bba2c30ec2988cfabe3).
+
+Previous annotated tag object: `7172613b5da7189ff72f9a8c9605d55272a68338`.
+
+- docs: record released v0.8.27 ([2a900db41383bcc23f0e98f1cca4648e9e2204bb](https://github.com/malsabbagh/review-sensei/commit/2a900db41383bcc23f0e98f1cca4648e9e2204bb)).
+- Harden paged readback, no-transaction startup recovery, broker PR lookup retries, and historical executor diagnostics \(\#506\) ([283f6fb37424c052163c4aa69953ccac77a11e17](https://github.com/malsabbagh/review-sensei/commit/283f6fb37424c052163c4aa69953ccac77a11e17)).
+- Add verified generated-mirror coverage and mandatory context overflow diagnostics \(\#505\) ([92c3d1ff50c8533bfffb21f677bdfc229afe4fa3](https://github.com/malsabbagh/review-sensei/commit/92c3d1ff50c8533bfffb21f677bdfc229afe4fa3)).
+- Handle benign PR/base lifecycle races and terminal reruns cleanly in hosted runs \(\#504\) ([a98a15d2489d052209d8ef2afcb963e70baa5cec](https://github.com/malsabbagh/review-sensei/commit/a98a15d2489d052209d8ef2afcb963e70baa5cec)).
+- Offload overflow body explanations to verified companion prose reviews \(\#507\) ([e77fb906fa40e14c3c8b00fe50ed1c33e7ff90f3](https://github.com/malsabbagh/review-sensei/commit/e77fb906fa40e14c3c8b00fe50ed1c33e7ff90f3)).
+- Handle originalCommit on drift thread updates and prevent Tier 4 same-file collision \(\#508\) ([77dc79d5b5f1489178018bba2c30ec2988cfabe3](https://github.com/malsabbagh/review-sensei/commit/77dc79d5b5f1489178018bba2c30ec2988cfabe3)).
+
+## review-sensei-github 0.3.34 - 2026-11-26
+
+- Pin `review-sensei==0.8.28`.
+
 ## 0.8.27 - 2026-11-26
 
 Changes since [v0.8.26](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.26), from [71388ea45480c7ba1b41b19ad99ebf02c13713a9](https://github.com/malsabbagh/review-sensei/commit/71388ea45480c7ba1b41b19ad99ebf02c13713a9) through [4b4cea7af07664a85a73788647e8d84f8aacb53b](https://github.com/malsabbagh/review-sensei/commit/4b4cea7af07664a85a73788647e8d84f8aacb53b).
