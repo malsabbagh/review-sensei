@@ -451,6 +451,7 @@ class HumanInventoryStore:
         self._authenticated_snapshot: (
             tuple[HumanInventoryReference, bytes, bytes] | None
         ) = None
+        self._last_read_saw_producer_intent = False
         self.port = GitHubIssueCommentOperationPort(
             self.http,
             token=token,
@@ -1037,10 +1038,17 @@ class HumanInventoryStore:
     def _read_available(
         self,
     ) -> tuple[HumanInventoryReference, dict[str, object]] | None:
+        self._last_read_saw_producer_intent = False
         loaded, comments = self._complete_snapshot()
         self._authority(loaded=loaded)
         if comments is None:
             comments = self.port.list_comments()
+        self._last_read_saw_producer_intent = any(
+            INTENT_MARKER in item.body
+            and item.user_id == self.context.producer_id
+            and item.user_type == "Bot"
+            for item in comments
+        )
         intent = self._intent(comments)
         if intent is None:
             return None

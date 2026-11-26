@@ -105,6 +105,7 @@ class BodyLimitJourneyFixture(JourneyFixture):
 
         def old_formatter(publisher, **kwargs):
             kwargs["narrative_archive"] = None
+            kwargs["visible_prose_store"] = None
             return original(publisher, **kwargs)
 
         with patch.object(ReviewPublisher, "publish", old_formatter):

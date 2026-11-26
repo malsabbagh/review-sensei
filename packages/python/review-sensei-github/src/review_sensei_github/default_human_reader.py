@@ -252,7 +252,9 @@ class DefaultHumanInventoryReader:
         ):
             self._current_read = reader
 
-    def _cold_store(self) -> HumanInventoryStore:
+    def _cold_store(
+        self, *, allow_projected_digest: bool = True
+    ) -> HumanInventoryStore:
         status, pr = self.http.request(
             "GET",
             self.http.repository_path(self.repository, f"/pulls/{self.pull_request}"),
@@ -293,6 +295,29 @@ class DefaultHumanInventoryReader:
             raise ReviewInputError(
                 "default human inventory independent checkpoint unavailable"
             )
+        publication_digest = transaction_publication_digest(transaction)
+        if (
+            allow_projected_digest
+            and self._retained_source is None
+            and not getattr(self.ledger, "_quarantine_required", False)
+            and loaded.record is not None
+            and loaded.record.quarantine_lineage is None
+            and loaded.record.finding_lifecycle is not None
+        ):
+            from .quarantine_action import _current_publication_digest
+
+            load_retained = getattr(
+                self.ledger, "load_retained_checkpoint_result", None
+            )
+            if callable(load_retained) and (
+                load_retained(
+                    identity, transaction=transaction, head_sha=transaction.head_sha
+                )
+                is not None
+            ):
+                publication_digest = _current_publication_digest(
+                    self.ledger, loaded.record
+                )
         context = build_human_inventory_context(
             http=self.http,
             token=self.token,
@@ -301,7 +326,7 @@ class DefaultHumanInventoryReader:
             base_sha=transaction.base_sha,
             head_sha=self.head_sha,
             app_slug=self.app_slug,
-            publication_digest=transaction_publication_digest(transaction),
+            publication_digest=publication_digest,
             policy_digest=transaction.policy_digest,
             configuration_digest=transaction.configuration_digest,
             evidence_digest=transaction.evidence_digest,
@@ -329,7 +354,11 @@ class DefaultHumanInventoryReader:
             return None
 
         def read(receipt):
-            store = self.store or self._admitted_store or self._cold_store()
+            store = (
+                self.store
+                or self._admitted_store
+                or self._cold_store(allow_projected_digest=False)
+            )
             original_budget = self.budget
             self._native_root_frontier = None
             self._native_root_read = None
@@ -374,13 +403,15 @@ class DefaultHumanInventoryReader:
         value = getattr(self, "_native_root_read", None)
         if value is None:
             return None
+        budget = self._native_root_read_budget
         if (
-            self.store is None
-            or self._native_root_read_budget is not self.budget
-            or self.store.context.budget is not self._native_root_read_budget
+            budget is None
+            or self.store is None
+            or budget is not self.budget
+            or self.store.context.budget is not budget
         ):
             raise ReviewInputError("native root consumer original budget changed")
-        self.budget.check()
+        budget.check()
         _, evidence = value
         return refresh_native_thread_nodes(
             self.store.http,
@@ -398,12 +429,14 @@ class DefaultHumanInventoryReader:
         value = getattr(self, "_native_root_read", None)
         if value is None or self.store is None or eligibility.native_union is None:
             return None
+        budget = self._native_root_read_budget
         if (
-            self._native_root_read_budget is not self.budget
-            or self.store.context.budget is not self._native_root_read_budget
+            budget is None
+            or budget is not self.budget
+            or self.store.context.budget is not budget
         ):
             raise ReviewInputError("native root consumer original budget changed")
-        self.budget.check()
+        budget.check()
         raw, evidence = value
         if (
             evidence.document_sha256
@@ -558,8 +591,61 @@ class DefaultHumanInventoryReader:
         # replace or strengthen that already completed proof.
         if eligibility.native_union is not None:
             return
-        assert self.store is not None and self.inventory is not None
+        assert (
+            self.store is not None
+            and self.inventory is not None
+            and self.document is not None
+        )
         context = self.store.context
+        raw_visible_prose = self.document.get("visible_prose") or []
+        verified_companion_bodies: dict[str, str] = {}
+        if raw_visible_prose:
+            from .prose_publication import CommentReviewProseStore, VisibleProseReceipt
+
+            if not isinstance(raw_visible_prose, list):
+                raise ReviewInputError(
+                    "default human inventory visible prose metadata is invalid"
+                )
+            receipts = tuple(
+                VisibleProseReceipt.from_dict(item) for item in raw_visible_prose
+            )
+            if any(
+                receipt.head_sha != context.head_sha
+                or receipt.producer_id != context.producer_id
+                for receipt in receipts
+            ):
+                raise ReviewInputError(
+                    "default human inventory visible prose authority conflicts"
+                )
+            prose_store = CommentReviewProseStore(
+                http=self.http,
+                token=self.token,
+                repository=self.repository,
+                pull_request=self.pull_request,
+                producer_id=context.producer_id,
+                app_slug=self.app_slug,
+                budget=self.budget,
+            )
+            prose_store._revalidate_listing(receipts, reviews)
+            by_review_id = {
+                item["id"]: item["body"]
+                for item in reviews
+                if isinstance(item, dict)
+                and type(item.get("id")) is int
+                and isinstance(item.get("body"), str)
+            }
+            for receipt in receipts:
+                companion_body = by_review_id.get(receipt.review_id)
+                if companion_body is None:
+                    raise ReviewInputError(
+                        "default human inventory visible prose review is missing"
+                    )
+                for instance in receipt.instances:
+                    if instance in verified_companion_bodies:
+                        raise ReviewInputError(
+                            "default human inventory visible prose instance duplicated"
+                        )
+                    verified_companion_bodies[instance] = companion_body
         # Initial inference, decision persistence and final approval all use
         # this full fresh proof. Receipt-only pages may use metadata fences.
         inline = self.http.paginate(
@@ -589,7 +675,13 @@ class DefaultHumanInventoryReader:
                 )
             )
             if entry.body_placed:
-                if explanation not in original["body"]:
+                companion_body = verified_companion_bodies.get(finding.fingerprint)
+                if companion_body is not None:
+                    if explanation not in companion_body:
+                        raise ReviewInputError(
+                            "default human inventory visible prose missing"
+                        )
+                elif explanation not in original["body"]:
                     raise ReviewInputError(
                         "default human inventory visible prose missing"
                     )

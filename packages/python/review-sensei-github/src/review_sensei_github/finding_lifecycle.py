@@ -32,6 +32,7 @@ from review_sensei.finding_lifecycle import (
 from review_sensei.finding_lifecycle_store import _sizing_producer
 from review_sensei.session import SessionIdentity
 
+from .errors import GitHubHTTPError
 from .thread_resolution import graphql_app_author
 
 VERSION = "finding-lifecycle-journal-v1"
@@ -6323,6 +6324,41 @@ class FindingLifecycleJournal:
                             for instance, item in explanations.items()
                             if instance in indexed and render_finding(item.view) in body
                         }
+                        if assembled.offloaded_body_instances and self.app_slug:
+                            try:
+                                companions = (
+                                    self.reviewer._verified_companion_prose_bodies(
+                                        token=token,
+                                        repository=self.identity.repository,
+                                        repository_id=self.identity.repository_id,
+                                        pull_request=self.identity.pull_request,
+                                        head_sha=self.head_sha,
+                                        app_slug=self.app_slug,
+                                        main_body=body,
+                                        producer_id=producer_id,
+                                    )
+                                )
+                            except GitHubHTTPError:
+                                companions = {}
+                            for instance, item in explanations.items():
+                                if (
+                                    instance in indexed
+                                    and instance not in receipts
+                                    and instance in assembled.offloaded_body_instances
+                                    and (companion := companions.get(instance))
+                                    is not None
+                                    and render_finding(item.view) in companion[2]
+                                ):
+                                    receipts[instance] = NativeFindingReceipt(
+                                        self.identity.repository_id,
+                                        self.identity.pull_request,
+                                        self.head_sha,
+                                        self.base_sha,
+                                        producer_id,
+                                        companion[0],
+                                        instance,
+                                        companion[1],
+                                    )
                         if isinstance(state, ActiveWindowRoundState):
                             for (
                                 obligation
