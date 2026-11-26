@@ -3288,6 +3288,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             decision_provider=default_decision_registry().create(
                 work_configuration.decision, os.environ
             ),
+            generated_mirrors=work_configuration.advanced.generated_mirrors,
         )
         context_root = args.context_root or args.learning_root
         context_store = (
@@ -3389,6 +3390,69 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 encoding="utf-8",
             )
 
+        from .generated_mirrors import (
+            VerifiedMirrorAttestation,
+            verify_generated_mirrors,
+        )
+
+        verified_mirrors: tuple[VerifiedMirrorAttestation, ...] = ()
+        if (
+            work_configuration.advanced.generated_mirrors
+            and resolved_base_sha
+            and resolved_head_sha
+        ):
+            import subprocess
+
+            mirror_candidate = (
+                args.context_root
+                or args.learning_root
+                or (
+                    work_configuration.root
+                    if work_configuration.source is not None
+                    else None
+                )
+                or Path.cwd()
+            )
+            top = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(mirror_candidate),
+                    "-c",
+                    "core.hooksPath=",
+                    "rev-parse",
+                    "--show-toplevel",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if top.returncode == 0 and top.stdout.strip():
+                hosted_policy_cfg = getattr(
+                    getattr(
+                        getattr(
+                            getattr(hosted_hooks, "ledger", None),
+                            "caller",
+                            None,
+                        ),
+                        "accounting",
+                        None,
+                    ),
+                    "configuration",
+                    None,
+                )
+                mirror_policy_commit = (
+                    getattr(hosted_policy_cfg, "commit", None) or resolved_base_sha
+                )
+                verified_mirrors = verify_generated_mirrors(
+                    Path(top.stdout.strip()),
+                    rules=work_configuration.advanced.generated_mirrors,
+                    base_sha=resolved_base_sha,
+                    head_sha=resolved_head_sha,
+                    policy_commit=mirror_policy_commit,
+                    changed_paths=changed_paths,
+                )
+
         effective_model = provider_settings.model or provider.model or args.model
         request = ReviewRequest(
             diff=diff,
@@ -3407,6 +3471,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             orchestrate_large_changes=orchestrate,
             work_budget=work_budget,
             work_policy_digest=service.work_policy_digest,
+            verified_mirrors=verified_mirrors,
         )
         current_key = service.context_cache_key(
             _checkpoint_cache_request(

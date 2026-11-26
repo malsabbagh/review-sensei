@@ -388,6 +388,7 @@ def _expected_transaction_digests(
         resource_budget,
         None,
         decision=work_configuration.decision,
+        generated_mirrors=work_configuration.advanced.generated_mirrors,
     )
     orchestrate = (
         bool(getattr(resolved_args, "orchestrate_large_changes", False))

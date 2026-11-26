@@ -13,6 +13,12 @@ from .validation import DEFAULT_TOTAL_WORK_BUDGET
 
 HUNK_SUBDIVISION_POLICY = "canonical-line-segments-v2"
 MAX_HUNK_SEGMENTS = 128
+SUBDIVISION_STOP_REASONS = (
+    "single-line-oversized",
+    "per-hunk-segment-limit",
+    "run-subdivision-allowance-exhausted",
+    "planning-deadline-exhausted",
+)
 
 _TOP_LEVEL_DECL_PREFIXES = (
     "def ",
@@ -131,7 +137,7 @@ def _choose_split_index(
 
 @dataclass
 class SubdivisionAllowance:
-    """One bounded subdivision liability shared by every hunk and stage."""
+    """One bounded subdivision liability shared across hunks in a stage."""
 
     remaining: int = MAX_HUNK_SEGMENTS - 1
 
@@ -159,6 +165,7 @@ def subdivide_hunk(
     max_parts: int = MAX_HUNK_SEGMENTS,
     before_probe: Callable[[], None] | None = None,
     allowance: SubdivisionAllowance | None = None,
+    unadmitted_reasons: dict[str, str] | None = None,
 ) -> tuple[EvidenceRecord, ...]:
     """Probe a balanced partition, retaining every unadmitted terminal range.
 
@@ -262,13 +269,25 @@ def subdivide_hunk(
                 if exc.error_category != "planning_deadline_exhausted":
                     raise
                 expired = True
-        if (
-            expired
-            or admit(part)
-            or end - begin == 1
-            or remaining == 0
-            or not allowance.take()
-        ):
+        if expired:
+            if unadmitted_reasons is not None:
+                unadmitted_reasons[part.evidence_id] = "planning-deadline-exhausted"
+            result.append(part)
+        elif admit(part):
+            result.append(part)
+        elif end - begin == 1:
+            if unadmitted_reasons is not None:
+                unadmitted_reasons[part.evidence_id] = "single-line-oversized"
+            result.append(part)
+        elif remaining == 0:
+            if unadmitted_reasons is not None:
+                unadmitted_reasons[part.evidence_id] = "per-hunk-segment-limit"
+            result.append(part)
+        elif not allowance.take():
+            if unadmitted_reasons is not None:
+                unadmitted_reasons[part.evidence_id] = (
+                    "run-subdivision-allowance-exhausted"
+                )
             result.append(part)
         else:
             remaining -= 1

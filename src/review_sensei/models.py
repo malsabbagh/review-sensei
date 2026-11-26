@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .coverage import CoverageManifest
 from .errors import ReviewInputError
+from .generated_mirrors import VerifiedMirrorAttestation
 from .review_verdict import ReviewVerdict, comment_admission, comment_selection_digest
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
@@ -533,6 +534,7 @@ class ReviewRequest:
         default_factory=lambda: DEFAULT_TOTAL_WORK_BUDGET
     )
     work_policy_digest: str | None = None
+    verified_mirrors: tuple[VerifiedMirrorAttestation, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.diff, str) or not self.diff.strip():
@@ -552,6 +554,25 @@ class ReviewRequest:
             or not _SHA256.fullmatch(self.work_policy_digest)
         ):
             raise ReviewInputError("review work policy digest is invalid")
+        if not isinstance(self.verified_mirrors, tuple) or any(
+            not isinstance(item, VerifiedMirrorAttestation)
+            for item in self.verified_mirrors
+        ):
+            raise ReviewInputError(
+                "verified_mirrors must be a tuple of VerifiedMirrorAttestation values"
+            )
+        mirror_rule_names = [item.rule_name for item in self.verified_mirrors]
+        if len(mirror_rule_names) != len(set(mirror_rule_names)):
+            raise ReviewInputError("verified_mirrors rule names must be unique")
+        for attestation in self.verified_mirrors:
+            if self.base_sha and attestation.base_sha != self.base_sha:
+                raise ReviewInputError(
+                    "verified_mirrors base_sha does not match request base_sha"
+                )
+            if self.head_sha and attestation.head_sha != self.head_sha:
+                raise ReviewInputError(
+                    "verified_mirrors head_sha does not match request head_sha"
+                )
         for label, value, maximum in (
             ("repository", self.repository, self.limits.max_repository_bytes),
             ("title", self.title, self.limits.max_title_bytes),

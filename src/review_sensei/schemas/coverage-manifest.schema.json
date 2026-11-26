@@ -52,6 +52,7 @@
               "provider-call-budget",
               "incomplete-enumeration",
               "cross-file-relationship",
+              "verified-generated-mirror",
               "deleted",
               "renamed"
             ]
@@ -92,6 +93,7 @@
               "provider-call-budget",
               "incomplete-enumeration",
               "cross-file-relationship",
+              "verified-generated-mirror",
               "deleted",
               "renamed"
             ]

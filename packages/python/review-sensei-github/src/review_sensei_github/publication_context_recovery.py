@@ -624,7 +624,10 @@ def reconstruct_publication_contexts(
         ResourceBudget.for_limits(DEFAULT_REVIEW_LIMITS), configuration
     )
     work_policy = review_work_policy_digest(
-        configuration.advanced.review_work, budget, decision=configuration.decision
+        configuration.advanced.review_work,
+        budget,
+        decision=configuration.decision,
+        generated_mirrors=configuration.advanced.generated_mirrors,
     )
     effective_stages, catalog = _load_trusted_stages(
         source_root,

@@ -325,7 +325,10 @@ class PromptContextAdmissionTests(unittest.TestCase):
         self.assertEqual(run.result.review_status, "partial")
         self.assertFalse(run.result.coverage.fully_reviewed)
         self.assertIn("mandatory-context-and-evidence-oversized", run.result.summary)
-        self.assertIsNone(run.context_admission)
+        self.assertIsNotNone(run.context_admission)
+        assert run.context_admission is not None
+        self.assertEqual(run.context_admission["batches"], [])
+        self.assertTrue(run.context_admission["overflow_diagnostics"])
 
     def test_context_diagnostics_take_no_summary_or_response_budget(self):
         provider = Provider()
