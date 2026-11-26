@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Mapping
 
+from review_sensei.errors import BENIGN_LIFECYCLE_RACE_REASONS
 from review_sensei.failure_observation import exception_kind, observe_cli_failures
 
 PREFIX = "review-sensei: lifecycle "
@@ -69,6 +70,7 @@ _PUBLICATION = {
     "published_terminal_pending",
     "publication_incomplete",
     "skipped",
+    "skipped_stale",
     "refused",
     "stale_head",
     "stale_base",
@@ -161,11 +163,15 @@ class LifecycleDiagnostics:
         self.primary_exception_kind: str | None = None
         self.cleanup_exception_kind: str | None = None
         self.broker: dict[str, object] | None = None
+        self._skipped_benign_race_reason: str | None = None
         self._check_proof_failure_mask = 0
 
     def returned(self, code: int) -> int:
         self.exit_code = _number(code)
         if self.exception_kind is not None:
+            return code
+        if self._skipped_benign_race_reason is not None:
+            self.reason = "skipped_benign_race"
             return code
         if self.publication is not None:
             reason = self.publication["terminal_reason"]
@@ -335,6 +341,8 @@ class LifecycleDiagnostics:
                 "check_proof_hook_failures": self._check_proof_failures(),
                 "runtime_packages": self._runtime_packages(),
             }
+            if self._skipped_benign_race_reason is not None:
+                value["benign_race_reason"] = self._skipped_benign_race_reason
             line = PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"))
             if (
                 len((line + "\n").encode()) > MAX_LINE_BYTES
@@ -522,6 +530,17 @@ def classified_failure(primary: str, cleanup: str | None = None) -> None:
     current = _ACTIVE.get()
     if current is not None:
         current.classified_failure(primary, cleanup)
+
+
+def skipped_benign_race(reason: str) -> None:
+    """Record a benign lifecycle race skip while preserving step/predecessor telemetry."""
+    if reason not in BENIGN_LIFECYCLE_RACE_REASONS:
+        return
+    current = _ACTIVE.get()
+    if current is not None:
+        current._skipped_benign_race_reason = reason
+        current.reason = "skipped_benign_race"
+        current.scope["transition_reason"] = reason
 
 
 def publication(value: Mapping[str, object]) -> None:

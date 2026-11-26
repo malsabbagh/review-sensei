@@ -23,12 +23,13 @@ from review_sensei.disposition import (
     command_exit_code,
     parse_maintainer_command,
 )
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import BenignLifecycleRace, ReviewInputError
 from review_sensei.writer_containment import (
     ContainedForwardingCoordinator,
     IssuedWriterToken,
 )
 
+from . import review_lifecycle_diagnostics as lifecycle_diagnostics
 from .action_representability import require_action_settlement_representable
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_requests import ApiRunRequestTransport
@@ -51,6 +52,7 @@ from .event_routing_contract import (
 )
 from .learning_pr import LearningPRPublisher
 from .publication import ReviewPublisher, parse_finding_index
+from .review_guidance import write_benign_race_step_summary
 from .review_run import ActionRunLedger, ReviewRun, RolloverService, bootstrap
 from .run_authority import VerifiedRunAction
 from .source_comment_lifecycle import (
@@ -972,6 +974,11 @@ def run_action(
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--skip-benign-races",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
     cancel_on_mutation = bool(
@@ -1055,6 +1062,23 @@ def run_action(
         except DuplicateTerminalDelivery:
             if not allow_duplicate_terminal:
                 raise
+            if purpose == "reply":
+                print("already_replied")
+            return 0
+        except BenignLifecycleRace as error:
+            if not options.skip_benign_races:
+                raise
+            lifecycle_diagnostics.skipped_benign_race(error.reason)
+            if purpose == "reply":
+                print(error.reply_status or "skipped_stale_head")
+                return 0
+            print(f"Command skipped after benign lifecycle race ({error.reason})")
+            write_benign_race_step_summary(
+                operation="command",
+                reason=error.reason,
+                repository=getattr(args, "repository", None),
+                pull_request=getattr(args, "pull_request", None),
+            )
             return 0
     same_run_gate = (
         unstarted_recovery

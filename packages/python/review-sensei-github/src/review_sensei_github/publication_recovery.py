@@ -21,7 +21,7 @@ from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.convergence import ReviewConvergencePolicy
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import BenignLifecycleRace, ReviewInputError
 from review_sensei.models import ReviewResult, ReviewTransaction
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
@@ -49,6 +49,7 @@ from .operation_diagnostics import OperationObserver
 # authority decisions are retained; distinct physical transports stay isolated.
 _PAGINATION_OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
 _NARRATIVE_CONFIRMATION = object()
+_SHA = re.compile(r"[a-f0-9]{40}\Z")
 
 
 @dataclass(frozen=True)
@@ -849,20 +850,34 @@ def _store(
         base = pr.get("base") if isinstance(pr, dict) else None
         head = pr.get("head") if isinstance(pr, dict) else None
         repo = base.get("repo") if isinstance(base, dict) else None
+        live_base_sha = base.get("sha") if isinstance(base, dict) else None
+        live_head_sha = head.get("sha") if isinstance(head, dict) else None
         if (
             status != 200
             or not isinstance(pr, dict)
-            or pr.get("state") != "open"
+            or pr.get("state") not in {"open", "closed"}
             or not isinstance(base, dict)
-            or base.get("sha") != base_sha
+            or not isinstance(live_base_sha, str)
+            or _SHA.fullmatch(live_base_sha) is None
             or not isinstance(head, dict)
-            or head.get("sha") != head_sha
+            or not isinstance(live_head_sha, str)
+            or _SHA.fullmatch(live_head_sha) is None
             or not isinstance(repo, dict)
             or type(repo.get("id")) is not int
             or repo.get("id") != identity.repository_id
             or repo.get("full_name") != identity.repository
         ):
             raise ReviewInputError("retention current pull request identity mismatches")
+        if pr["state"] == "closed":
+            raise BenignLifecycleRace(
+                "retention current pull request identity mismatches",
+                reason="pr_closed_during_review",
+            )
+        if live_base_sha != base_sha or live_head_sha != head_sha:
+            raise BenignLifecycleRace(
+                "retention current pull request identity mismatches",
+                reason="pr_revision_superseded_during_review",
+            )
     port = GitHubIssueCommentOperationPort(
         http,
         token=token,
@@ -1194,6 +1209,8 @@ def retain_checkpoint_review_result(
             ):
                 raise ReviewInputError("retained result differs from checkpoint")
         return bound
+    except BenignLifecycleRace:
+        raise
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(
             "publication result not retained: " + str(exc)
@@ -1359,6 +1376,8 @@ def retain_review_result(
                     mark_review_publication_unconfirmed(
                         ledger, identity, validated.transaction
                     )
+    except BenignLifecycleRace:
+        raise
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(
             "publication result not retained: " + str(exc)

@@ -7,12 +7,13 @@ and incoming receipts cannot select a new allowance or an old phase fallback.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Unpack
 
 from review_sensei.api_work import LEGACY_ACCOUNTING_VERSION, StartupPlan, StartupSlot
 from review_sensei.configuration import MAX_CONFIG_BYTES
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import BenignLifecycleRace, ReviewInputError
 from review_sensei.models import ReviewRequest
 from review_sensei.rescan import AuthorizedRescan
 from review_sensei.service import ReviewService
@@ -268,12 +269,21 @@ class ApiRunReviewHooks:
             ),
             token=self.ledger.token,
         )
+        head = pull.get("head") if isinstance(pull, dict) else None
+        live_head = head.get("sha") if isinstance(head, dict) else None
         if (
             status != 200
             or not isinstance(pull, dict)
-            or pull.get("head", {}).get("sha") != self.head_sha
+            or not isinstance(head, dict)
+            or not isinstance(live_head, str)
+            or re.fullmatch(r"[a-f0-9]{40}\Z", live_head) is None
         ):
             raise ReviewInputError("caller workflow publication head changed")
+        if live_head != self.head_sha:
+            raise BenignLifecycleRace(
+                "caller workflow publication head changed",
+                reason="pr_revision_superseded_during_review",
+            )
         return application.publish_review(
             publication_budget=self.ledger.caller.budget_view, **kwargs
         )
