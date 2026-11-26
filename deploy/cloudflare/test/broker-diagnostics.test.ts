@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { brokerDiagnostic } from "../src/broker-diagnostics";
 import { WorkflowLookupError } from "../src/broker-lookup-diagnostic";
+import { PullRequestLookupError } from "../src/pull-request-lookup-diagnostic";
 
 const ray = "0123456789abcdef-YYZ";
 
@@ -11,6 +12,16 @@ describe("closed broker diagnostics", () => {
     expect(brokerDiagnostic(error).code).toBe("broker_control_budget_exhausted");
     expect(brokerDiagnostic({ message: "github_workflow_tag_unavailable_429", status: 429, lookup: error.lookup }).code).toBe("broker_unknown");
     expect(brokerDiagnostic(new Error("github_workflow_lookup_temporary")).code).toBe("broker_unknown");
+    const prError = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 503);
+    expect(brokerDiagnostic(prError)).toEqual({
+      version: 1, code: "github_pull_request_lookup_temporary", stage: "github_api", action: "retry_later",
+    });
+    expect(brokerDiagnostic(new PullRequestLookupError("github_pull_request_lookup_failed", "http", 422))).toEqual({
+      version: 1, code: "github_pull_request_lookup_failed", stage: "repository_installation", action: "check_installation",
+    });
+    prError.message = "broker_control_budget_exhausted";
+    expect(brokerDiagnostic(prError).code).toBe("broker_control_budget_exhausted");
+    expect(brokerDiagnostic(new Error("github_pull_request_lookup_temporary")).code).toBe("broker_unknown");
   });
 
   it("uses an exact allowlist, not a code-shaped text allowlist", () => {

@@ -2010,7 +2010,8 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
             ev_http, token="synthetic-actions", command_run_id="901", job="hosted"
         )
         with self.assertRaisesRegex(
-            ReviewInputError, "historical executor source is unrecognized"
+            ReviewInputError,
+            r"historical executor source is unrecognized.*source_sha='9{40}'.*@reviewsensei review reenroll",
         ):
             ev.qualified_publication_cessation(
                 IDENTITY,
@@ -2019,7 +2020,8 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
                 head_sha=HEAD,
             )
         with self.assertRaisesRegex(
-            ReviewInputError, "historical executor did not prove successful review exit"
+            ReviewInputError,
+            r"historical executor did not prove successful review exit.*head_sha_mismatch=.*@reviewsensei review reenroll",
         ):
             ev.qualified_publication_cessation(
                 IDENTITY,
@@ -2027,6 +2029,109 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
                 ApiExecutionOwner(1, "hosted", 0),
                 head_sha="0" * 40,  # Mismatched/unknown head_sha
             )
+
+        # 5. v0.8.15 (github-v0.3.21) is qualified in QUALIFIED_EXECUTORS and passes strict checks.
+        from review_sensei.historical_completion import QUALIFIED_EXECUTORS
+
+        v0815_sha = "c7f13b8cfe28e89ec82ad03bd2f34aed5b40cbb1"
+        self.assertIn(v0815_sha, QUALIFIED_EXECUTORS)
+        v0815 = QUALIFIED_EXECUTORS[v0815_sha]
+        self.assertEqual(v0815["commit"], "e006596160be74a9a72b9428c5675224afa347c6")
+        self.assertEqual(
+            v0815["workflow_blob"], "b23d80ebbc831f8baa6a38937c044dc3a13633f7"
+        )
+        self.assertEqual(v0815["core"], "0.8.15")
+        self.assertEqual(v0815["hosted"], "0.3.21")
+
+        def v0815_handler(req: Request):
+            path = urlsplit(req.full_url).path
+            if path == "/repos/owner/repo/actions/runs/902":
+                return json_response(
+                    {
+                        "id": 902,
+                        "run_attempt": 1,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": HEAD,
+                        "event": "pull_request",
+                        "repository": {"id": 123, "full_name": "owner/repo"},
+                        "referenced_workflows": [
+                            {
+                                "path": v0815["workflow_path"],
+                                "sha": v0815_sha,
+                                "ref": v0815["workflow_ref"],
+                            }
+                        ],
+                    }
+                )
+            if path == "/repos/owner/repo/actions/runs/902/attempts/1/jobs":
+                return json_response(
+                    {
+                        "total_count": 3,
+                        "jobs": [
+                            {
+                                "id": 1,
+                                "run_id": 902,
+                                "run_attempt": 1,
+                                "name": "hosted",
+                                "status": "completed",
+                                "conclusion": "success",
+                                "completed_at": "2026-10-27T19:00:00Z",
+                                "steps": [
+                                    {
+                                        "number": 1,
+                                        "name": "Run hosted review",
+                                        "status": "completed",
+                                        "conclusion": "success",
+                                        "completed_at": "2026-10-27T18:59:59Z",
+                                    },
+                                    {
+                                        "number": 2,
+                                        "name": "Generate and publish hosted mention reply",
+                                        "status": "completed",
+                                        "conclusion": "skipped",
+                                    },
+                                ],
+                            },
+                            {
+                                "id": 2,
+                                "run_id": 902,
+                                "run_attempt": 1,
+                                "name": "local",
+                                "status": "completed",
+                                "conclusion": "skipped",
+                            },
+                            {
+                                "id": 3,
+                                "run_id": 902,
+                                "run_attempt": 1,
+                                "name": "command",
+                                "status": "completed",
+                                "conclusion": "skipped",
+                            },
+                        ],
+                    }
+                )
+            raise AssertionError(path)
+
+        v0815_ev = ApiRunActionsEvidence(
+            GitHubHttp(
+                api_url="https://api.github.test",
+                opener=lambda req, timeout=5.0: v0815_handler(req),
+            ),
+            token="synthetic-actions",
+            command_run_id="903",
+            job="hosted",
+        )
+        proof = v0815_ev.qualified_publication_cessation(
+            IDENTITY,
+            902,
+            ApiExecutionOwner(1, "hosted", 0),
+            head_sha=HEAD,
+        )
+        self.assertEqual(proof["executor_sha"], v0815_sha)
+        self.assertEqual(proof["executor_commit"], v0815["commit"])
+        self.assertEqual(proof["workflow_blob"], v0815["workflow_blob"])
 
     def test_fenced_epoch_reconcile_refuses_and_preserves_observations(self) -> None:
         coord = ContainedForwardingCoordinator(

@@ -323,7 +323,14 @@ def _match_action_result(value, binding, action) -> dict[str, Any]:
     return value
 
 
-def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
+def retained_binding(
+    record: SessionRecord,
+    producer: str,
+    *,
+    crashed_head_sha: str | None = None,
+) -> dict[str, object]:
+    from review_sensei.session import is_startup_crash_predecessor
+
     state = ApiRunAccounting.from_document(record.api_run_accounting)
     if state.action is not None:
         if state.action["phase"] != "terminal":
@@ -337,6 +344,7 @@ def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
         transaction = ReviewTransaction.from_dict(
             cast(Mapping[str, object], state.analysis_abort["transaction"])
         )
+    settled_head_sha: str | None = None
     if (
         transaction is None
         and state.action is None
@@ -344,16 +352,32 @@ def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
         and state.terminal_transaction is None
         and record.reservation_id is None
         and record.reserved_slot is None
-        and record.failed_attempts > 0
-        and isinstance(record.failed_attempts_head_sha, str)
-        and re.fullmatch(r"[a-f0-9]{40}", record.failed_attempts_head_sha) is not None
     ):
+        if (
+            record.failed_attempts > 0
+            and isinstance(record.failed_attempts_head_sha, str)
+            and re.fullmatch(r"[a-f0-9]{40}", record.failed_attempts_head_sha)
+            is not None
+        ):
+            settled_head_sha = record.failed_attempts_head_sha
+        elif is_startup_crash_predecessor(record, state):
+            candidate_head = (
+                record.failed_attempts_head_sha
+                if record.failed_attempts_head_sha is not None
+                else crashed_head_sha
+            )
+            if (
+                isinstance(candidate_head, str)
+                and re.fullmatch(r"[a-f0-9]{40}", candidate_head) is not None
+            ):
+                settled_head_sha = candidate_head
+    if settled_head_sha is not None:
         return {
             "repository": record.repository,
             "repository_id": record.repository_id,
             "pull_request": record.pull_request,
             "base_sha": state.configuration.commit,
-            "head_sha": record.failed_attempts_head_sha,
+            "head_sha": settled_head_sha,
             "policy_digest": record.record_sha256,
             "configuration_digest": state.configuration.digest,
             "generation": record.generation,
@@ -378,10 +402,16 @@ def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
     }
 
 
-def _prepared_archive(ledger, previous, completion):
+def _prepared_archive(
+    ledger,
+    previous,
+    completion,
+    *,
+    crashed_head_sha: str | None = None,
+):
     state = ApiRunAccounting.from_document(previous.api_run_accounting)
     producer = ledger.evidence_producer()
-    binding = retained_binding(previous, producer)
+    binding = retained_binding(previous, producer, crashed_head_sha=crashed_head_sha)
     document = {"schema_version": "caller-run-root-v1", "record": previous.to_dict()}
     if completion is not None:
         from .action_completion import _issued
@@ -443,12 +473,13 @@ def retain_previous_run(
     previous: SessionRecord,
     *,
     completion=None,
+    crashed_head_sha: str | None = None,
 ) -> dict[str, object]:
     """Only inside the native serialized mutation after fresh root discovery."""
     if not ledger._mutation_active or ledger.evidence_budget is None:
         raise ReviewInputError("retained run requires the current native mutation")
     state, binding, document, parts, body = _prepared_archive(
-        ledger, previous, completion
+        ledger, previous, completion, crashed_head_sha=crashed_head_sha
     )
 
     def owned(item: object) -> bool:

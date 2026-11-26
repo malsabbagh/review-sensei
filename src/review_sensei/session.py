@@ -1840,6 +1840,7 @@ class SessionRecord:
             )
             or (
                 self.transaction is None
+                and not is_startup_crash_predecessor(self, previous)
                 and (
                     self.failed_attempts <= 0
                     or not isinstance(self.failed_attempts_head_sha, str)
@@ -5109,6 +5110,29 @@ def _history_preserve_sources(
             )
 
 
+def is_startup_crash_predecessor(record: SessionRecord, accounting: object) -> bool:
+    """Return True only for an unwitnessed no-transaction predecessor with zero reserved work."""
+    from .api_work import ApiRunAccounting
+
+    if not isinstance(record, SessionRecord) or not isinstance(
+        accounting, ApiRunAccounting
+    ):
+        return False
+    return (
+        record.transaction is None
+        and record.reservation_id is None
+        and record.reserved_slot is None
+        and record.publication_staging is None
+        and accounting.action is None
+        and accounting.analysis_abort is None
+        and accounting.terminal_transaction is None
+        and record.failed_attempts == 0
+        and accounting.confirmed == 0
+        and accounting.uncertain == 0
+        and all(not block.pending for block in accounting.blocks)
+    )
+
+
 def _validate_queue_retention(
     before: SessionRecord,
     after: SessionRecord,
@@ -5197,6 +5221,7 @@ def _validate_queue_retention(
                         )
                         is not None
                     )
+                    or is_startup_crash_predecessor(before, previous)
                 )
                 and after.transaction is None
             )

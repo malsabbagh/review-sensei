@@ -536,6 +536,11 @@ function advertisedTagSha(bytes: Uint8Array, tag: string): string {
   return advertisedTagShas(bytes, tag).commitSha;
 }
 
+const PULL_REQUEST_HEAD_RETRY_DELAYS_MS = [200, 500] as const;
+const RETRYABLE_PR_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
+const defaultRetryDelay = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Bounded GitHub transport shared by the broker and setup adapters. */
 export class GitHubApi {
   private privateKey: Promise<CryptoKey> | undefined;
@@ -544,7 +549,13 @@ export class GitHubApi {
     | undefined;
   private readonly apiUrl: string;
 
-  constructor(private readonly env: WorkerEnv, private readonly dispatchControl?: BrokerDispatchControl, private readonly lifetime?: BrokerLifetime) {
+  constructor(
+    private readonly env: WorkerEnv,
+    private readonly dispatchControl?: BrokerDispatchControl,
+    private readonly lifetime?: BrokerLifetime,
+    private readonly retryDelay: (ms: number) => Promise<void> = defaultRetryDelay,
+    private readonly reserveDispatches = 0,
+  ) {
     const apiUrl = (env.GITHUB_API_URL ?? "https://api.github.com").trim();
     if (!/^https:\/\//i.test(apiUrl) && !/^http:\/\/(?:127\.0\.0\.1|localhost)(?::|\/|$)/i.test(apiUrl)) {
       throw new Error("github_api_url_invalid");
@@ -553,11 +564,15 @@ export class GitHubApi {
   }
 
   withDispatchControl(control: BrokerDispatchControl): GitHubApi {
-    return new GitHubApi(this.env, control, this.lifetime);
+    return new GitHubApi(this.env, control, this.lifetime, this.retryDelay, this.reserveDispatches);
   }
 
   withRequestLifetime(lifetime: BrokerLifetime, control?: BrokerDispatchControl): GitHubApi {
-    return new GitHubApi(this.env, control, lifetime);
+    return new GitHubApi(this.env, control, lifetime, this.retryDelay, this.reserveDispatches);
+  }
+
+  withHeadReserve(reserveDispatches: number): GitHubApi {
+    return new GitHubApi(this.env, this.dispatchControl, this.lifetime, this.retryDelay, reserveDispatches);
   }
 
   private async key(): Promise<CryptoKey> {
@@ -694,39 +709,78 @@ export class GitHubApi {
     repository: string,
     pullRequest: number,
     token: string,
+    reserveDispatches = this.reserveDispatches,
   ): Promise<string | null> {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
       throw new Error("github_pull_request_invalid");
     }
-    let response: GitHubApiResponse;
-    try {
-      response = await this.request("GET", `${repositoryPath(repository)}/pulls/${pullRequest}`, token);
-    } catch (error) {
-      if (!(error instanceof GitHubResponseError)) throw error;
-      const outcomes: Record<string, PullRequestLookupOutcome> = {
-        github_response_invalid: "malformed", github_response_too_large: "oversized",
-        broker_upstream_timeout: "timeout", github_response_unavailable: "transport",
-      };
-      throw new PullRequestLookupError(error.message, outcomes[error.message] ?? "unknown", error.status);
+    const maxAttempts = 1 + PULL_REQUEST_HEAD_RETRY_DELAYS_MS.length;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      let response: GitHubApiResponse | undefined;
+      let transientError: PullRequestLookupError | undefined;
+      try {
+        response = await this.request("GET", `${repositoryPath(repository)}/pulls/${pullRequest}`, token);
+      } catch (error) {
+        if (!(error instanceof GitHubResponseError)) throw error;
+        const outcomes: Record<string, PullRequestLookupOutcome> = {
+          github_response_invalid: "malformed", github_response_too_large: "oversized",
+          broker_upstream_timeout: "timeout", github_response_unavailable: "transport",
+        };
+        const lookupError = new PullRequestLookupError(error.message, outcomes[error.message] ?? "unknown", error.status);
+        if (error.message !== "broker_upstream_timeout" && error.message !== "github_response_unavailable") {
+          throw lookupError;
+        }
+        transientError = lookupError;
+      }
+      if (transientError === undefined) {
+        // A 403 on this read is a permission, installation-scope, or rate-limit
+        // problem, not a missing or stale pull request. Reporting it as an absent
+        // head would send the operator after the wrong failure, so it keeps its
+        // own diagnosis instead of collapsing into the 404 result.
+        if (response!.status === 403) {
+          throw new PullRequestLookupError("github_pull_request_forbidden", "http", response!.status);
+        }
+        if (response!.status === 404) {
+          return null;
+        }
+        if (response!.status >= 200 && response!.status < 300) {
+          if (!isObject(response!.data)) {
+            throw new PullRequestLookupError("github_pull_request_lookup_failed", "malformed", response!.status);
+          }
+          const head = response!.data.head;
+          if (!isObject(head) || typeof head.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(head.sha)) {
+            throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response!.status);
+          }
+          return head.sha;
+        }
+        const lookupError = new PullRequestLookupError("github_pull_request_lookup_failed", "http", response!.status);
+        if (!RETRYABLE_PR_HTTP_STATUSES.has(response!.status)) {
+          throw lookupError;
+        }
+        transientError = lookupError;
+      }
+      if (attempt >= PULL_REQUEST_HEAD_RETRY_DELAYS_MS.length) {
+        throw transientError;
+      }
+      const delayMs = PULL_REQUEST_HEAD_RETRY_DELAYS_MS[attempt];
+      const controlSpare = this.dispatchControl === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.dispatchControl.request.max_dispatches - this.dispatchControl.receipt().dispatched;
+      const lifetimeSpare = this.lifetime === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.lifetime.remainingDispatches();
+      if (Math.min(controlSpare, lifetimeSpare) <= reserveDispatches) {
+        throw transientError;
+      }
+      const remainingMs = this.lifetime?.check() ?? this.dispatchControl?.check();
+      if (remainingMs !== undefined && remainingMs <= delayMs) {
+        throw transientError;
+      }
+      await this.retryDelay(delayMs);
+      this.lifetime?.check();
+      this.dispatchControl?.check();
     }
-    // A 403 on this read is a permission, installation-scope, or rate-limit
-    // problem, not a missing or stale pull request. Reporting it as an absent
-    // head would send the operator after the wrong failure, so it keeps its
-    // own diagnosis instead of collapsing into the 404 result.
-    if (response.status === 403) {
-      throw new PullRequestLookupError("github_pull_request_forbidden", "http", response.status);
-    }
-    if (response.status === 404) {
-      return null;
-    }
-    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
-      throw new PullRequestLookupError("github_pull_request_lookup_failed", response.status < 200 || response.status >= 300 ? "http" : "malformed", response.status);
-    }
-    const head = response.data.head;
-    if (!isObject(head) || typeof head.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(head.sha)) {
-      throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
-    }
-    return head.sha;
+    throw new PullRequestLookupError("github_pull_request_lookup_failed", "unknown");
   }
 
   /**

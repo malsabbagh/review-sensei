@@ -2312,6 +2312,167 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                         app_slug="reviewsensei[bot]",
                     )
 
+    def test_unwitnessed_no_transaction_startup_crash_recovery_and_fail_closed_gates(
+        self,
+    ):
+        from dataclasses import replace
+
+        from review_sensei.api_work import ApiRunAccounting, PendingApiRequest
+
+        def _make_startup_crash_fixture(
+            directory: str,
+            *,
+            crashed_head: str,
+            live_head: str,
+            run_conclusion: str = "failure",
+            run_status: str = "completed",
+            job_conclusion: str = "failure",
+            confirmed: int = 0,
+        ):
+            f = PublicationFailureRecoveryFixture(directory, limit=1024)
+            f.live_head = f.requested_head = crashed_head
+
+            def crash_after_activation() -> None:
+                raise RuntimeError("synthetic startup crash after activation")
+
+            with (
+                patch.object(f, "before_entry", crash_after_activation),
+                self.assertRaises(RuntimeError),
+            ):
+                f.invoke()
+            crashed_run_id = f.run_id
+            rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert rec is not None
+            self.assertIsNone(rec.transaction)
+            acc = ApiRunAccounting.from_document(rec.api_run_accounting)
+            clean_blocks = tuple(replace(b, pending=()) for b in acc.blocks)
+            completed = (
+                (PendingApiRequest("confirmed_1", 9_999_999_999_999),)
+                if confirmed > 0
+                else ()
+            )
+            clean_acc = replace(
+                acc,
+                blocks=clean_blocks,
+                completed=completed,
+                analysis_abort=None,
+                terminal_transaction=None,
+            )
+            payload = rec.to_dict()
+            del payload["schema_version"], payload["record_sha256"]
+            payload["generation"] = rec.generation + 1
+            payload["transaction"] = None
+            payload["reservation_id"] = None
+            payload["reserved_slot"] = None
+            payload["publication_staging"] = None
+            payload["failed_attempts"] = 0
+            payload["failed_attempts_head_sha"] = None
+            payload["api_run_accounting"] = clean_acc.to_document()
+            crashed_rec = SessionRecord._construct(**payload)
+            f.comment["body"] = render_session_comment(
+                repository_id=123, pull_request=7, record=crashed_rec
+            )
+            f.previous_conclusion = run_conclusion
+            f.next_review_run(head_sha=live_head)
+            base_external = f.external
+
+            def wrapped_external(request, timeout):
+                response = base_external(request, timeout)
+                path = urlsplit(request.full_url).path
+                if path == f"/repos/owner/repo/actions/runs/{crashed_run_id}":
+                    value = json.loads(response.read(524288))
+                    value["status"] = run_status
+                    value["conclusion"] = run_conclusion
+                    value["head_sha"] = crashed_head
+                    return json_response(value)
+                if path.startswith(
+                    f"/repos/owner/repo/actions/runs/{crashed_run_id}/attempts/"
+                ) and path.endswith("/jobs"):
+                    value = json.loads(response.read(524288))
+                    value["jobs"][0]["conclusion"] = job_conclusion
+                    return json_response(value)
+                return response
+
+            f.external = wrapped_external
+            return f, crashed_rec
+
+        # 1) Confirmed == 0, completed non-success startup crash recovers automatically
+        #    both on the same head and when the live PR moved to a newer head.
+        for conclusion in ("failure", "cancelled", "timed_out", "startup_failure"):
+            for live_head in ("a" * 40, HEAD_2):
+                with (
+                    self.subTest(conclusion=conclusion, moved=live_head != "a" * 40),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    f, _ = _make_startup_crash_fixture(
+                        directory,
+                        crashed_head="a" * 40,
+                        live_head=live_head,
+                        run_conclusion=conclusion,
+                        job_conclusion=conclusion,
+                    )
+                    self.assertEqual(f.invoke(), 0, f.error)
+                    final = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    self.assertIsNotNone(final.transaction)
+                    self.assertEqual(final.transaction.phase, "publication_succeeded")
+
+        # 2) Fail closed on active run, success conclusion, success job, or confirmed > 0.
+        for label, overrides in (
+            ("in_progress", {"run_status": "in_progress", "run_conclusion": "failure"}),
+            ("run_success", {"run_conclusion": "success"}),
+            ("job_success", {"job_conclusion": "success"}),
+            ("confirmed_nonzero", {"confirmed": 1}),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                f, _ = _make_startup_crash_fixture(
+                    directory,
+                    crashed_head="a" * 40,
+                    live_head=HEAD_2,
+                    **overrides,
+                )
+                self.assertEqual(f.invoke(), 1)
+                if label == "confirmed_nonzero":
+                    self.assertIn("phase=no-transaction", f.error)
+
+        # 3) Fail closed on bot carrier referencing crashed root or native effect on crashed/live head.
+        with tempfile.TemporaryDirectory() as directory:
+            f, crashed_rec = _make_startup_crash_fixture(
+                directory, crashed_head="a" * 40, live_head=HEAD_2
+            )
+            f.extra_comments[900001] = {
+                "id": 900001,
+                "body": (
+                    "ReviewSensei immutable evidence part v1\n```json\n"
+                    + json.dumps({"unexpected": crashed_rec.record_sha256})
+                    + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+                ),
+                "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
+                "issue_url": f"{f.api_url}/repos/owner/repo/issues/7",
+            }
+            self.assertEqual(f.invoke(), 1)
+            self.assertIn("phase=no-transaction", f.error)
+
+        for check_head in ("a" * 40, HEAD_2):
+            with (
+                self.subTest(check_head=check_head),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f, _ = _make_startup_crash_fixture(
+                    directory, crashed_head="a" * 40, live_head=HEAD_2
+                )
+                f.check_runs.append(
+                    {
+                        "id": 88001,
+                        "name": "ReviewSensei",
+                        "head_sha": check_head,
+                        "app": {"slug": "reviewsensei"},
+                        "status": "completed",
+                        "conclusion": "neutral",
+                    }
+                )
+                self.assertEqual(f.invoke(), 1)
+                self.assertIn("phase=no-transaction", f.error)
+
 
 if __name__ == "__main__":
     unittest.main()

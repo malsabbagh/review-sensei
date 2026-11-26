@@ -229,6 +229,11 @@
     "action": "check_installation",
     "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
   },
+  "github_pull_request_lookup_temporary": {
+    "stage": "github_api",
+    "action": "retry_later",
+    "hint": "GitHub pull request lookup is temporarily unavailable. Retry later; if it persists, ask the broker operator to inspect GitHub API availability."
+  },
   "github_pull_request_response_invalid": {
     "stage": "repository_installation",
     "action": "check_installation",

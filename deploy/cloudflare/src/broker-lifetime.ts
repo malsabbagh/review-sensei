@@ -48,6 +48,10 @@ export class BrokerLifetime {
     this.timer = setTimeout(() => this.controller.abort(new Error(this.deadlineCode)), this.check());
   }
 
+  remainingDispatches(): number {
+    return BROKER_MAX_DISPATCHES - this.dispatched;
+  }
+
   async run<T>(operation: () => Promise<T>): Promise<T> {
     this.arm();
     try { return await waitFor(operation(), this.controller.signal, () => this.check()); }
