@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -471,7 +471,12 @@ class NativeUnionReceipt:
             )
 
     def reconstruct_plan(
-        self, result: ReviewResult, index: FindingIndex, *, main_body: str | None = None
+        self,
+        result: ReviewResult,
+        index: FindingIndex,
+        *,
+        main_body: str | None = None,
+        companion_bodies: Mapping[str, str] | None = None,
     ) -> NativeReviewPlan:
         """Replay exact native bodies from the authenticated original admission.
 
@@ -499,6 +504,7 @@ class NativeUnionReceipt:
             reused_roots=self.reused_roots,
             transaction_id=self.transaction_id,
             main_body=main_body,
+            companion_bodies=companion_bodies,
         )
 
 
@@ -517,6 +523,7 @@ def reconstruct_original_plan(
     reused_roots,
     transaction_id,
     main_body: str | None,
+    companion_bodies: Mapping[str, str] | None = None,
 ) -> NativeReviewPlan:
     """Original cold rendering from explicit data; no positive native evidence."""
     from dataclasses import replace
@@ -595,7 +602,17 @@ def reconstruct_original_plan(
                 repeat=True,
             )
             if entry.body_placed:
-                if main_body is not None and render_finding(view) not in main_body:
+                rendered = render_finding(view)
+                companion = (
+                    companion_bodies.get(instance)
+                    if companion_bodies is not None
+                    else None
+                )
+                if (
+                    main_body is not None
+                    and rendered not in main_body
+                    and (companion is None or rendered not in companion)
+                ):
                     body_complete = False
                 continue
             body = render_native_inline(

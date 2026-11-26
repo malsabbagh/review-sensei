@@ -184,6 +184,8 @@ if TYPE_CHECKING:
         PartitionedPublicationHost,
         PartitionedPublicationReceipt,
     )
+    from .prose_publication import CommentReviewProseStore, VisibleProseReceipt
+    from .publication_parts import FindingProsePart
     from .publication_recovery import ConfirmedNarrativeArchive
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
@@ -982,6 +984,7 @@ class BodyExplanation:
     severity: str | None
     obligatory: bool
     view: FindingView
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1005,6 +1008,77 @@ class AssembledReview:
     compact_references: bool = False
     literal_malformed_fences: bool = False
     next_action_text: str | None = None
+    offloaded_body_instances: frozenset[str] = frozenset()
+    visible_prose_directory: str | None = None
+
+
+def _render_visible_prose_directory(
+    parts: Sequence[FindingProsePart],
+    explanations: Sequence[BodyExplanation],
+    *,
+    review_ids: Sequence[int],
+) -> str:
+    """Render a compact pointer table linking each companion prose review."""
+    if len(parts) != len(review_ids):
+        raise GitHubPublicationError("visible prose directory parts mismatch")
+    id_by_instance = {item.instance: item.view.identifier for item in explanations}
+    lines = [
+        "### Full finding explanations",
+        "",
+        "Full explanations for body-placed findings are published in verified companion prose reviews:",
+        "",
+        "| Part | Companion review | SHA-256 | Findings |",
+        "| --- | --- | --- | --- |",
+    ]
+    for part, review_id in zip(parts, review_ids, strict=True):
+        finding_ids = ", ".join(
+            id_by_instance[instance]
+            for instance in part.instances
+            if instance in id_by_instance
+        )
+        lines.append(
+            f"| {part.index + 1} of {part.count} "
+            f"| [Part {part.index + 1}](#pullrequestreview-{review_id}) "
+            f"| `{part.sha256}` | {finding_ids} |"
+        )
+    directory = "\n".join(lines)
+    if "<!-- reviewsensei:" in directory:
+        raise GitHubPublicationError(
+            "visible prose directory cannot carry authority markers"
+        )
+    return directory
+
+
+def _preflight_frame_extra_reserve(
+    http: GitHubHttp,
+    *,
+    check_token: str | None,
+    check_capability_failure: CheckFailure | None,
+) -> int:
+    """Reserve restart marker and worst-case check warning bytes at preflight."""
+    from .controlled_restart import effect_guard
+
+    restart_guard = effect_guard(http)
+    restart_marker = (
+        "\n" + restart_guard.admission.marker if restart_guard is not None else ""
+    )
+    warning_bytes = 0
+    if check_token is None:
+        if check_capability_failure is not None:
+            warning_bytes = (
+                len(
+                    render_check_warning(
+                        check_capability_failure.code, concise=True
+                    ).encode("utf-8")
+                )
+                + 2
+            )
+        else:
+            warning_bytes = max(
+                len(render_check_warning(code, concise=True).encode("utf-8")) + 2
+                for code in CHECK_FAILURE_CODES | {"check_permission"}
+            )
+    return warning_bytes + len(restart_marker.encode("utf-8"))
 
 
 def _render_assembled_summary(
@@ -1055,10 +1129,14 @@ def _render_assembled_summary(
     prose = tuple(
         item.view
         for item in kept_explanations
-        if item.view.identifier not in omitted_identifiers and item.view.detail
+        if item.view.identifier not in omitted_identifiers
+        and item.instance not in assembled.offloaded_body_instances
+        and item.view.detail
     )
     if prose:
         summary = f"{summary}\n\n{render_body_findings(prose)}"
+    if assembled.visible_prose_directory:
+        summary = f"{summary}\n\n{assembled.visible_prose_directory}"
     if suffix:
         summary = f"{summary}\n\n{suffix}"
     return summary
@@ -2739,6 +2817,132 @@ class ReviewApprovalFinalizer:
         if callable(attach):
             attach(store)
 
+    def _verified_companion_prose_bodies(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        main_body: str,
+        producer_id: int | None = None,
+        reviews: list[Any] | None = None,
+        active_visible_prose: Any | None = None,
+    ) -> dict[str, tuple[int, str, str]]:
+        """Authenticate companion COMMENT reviews for offloaded body explanations."""
+        from .prose_publication import CommentReviewProseStore, VisibleProseReceipt
+        from .publication_recovery import _publication_transport
+
+        del repository_id
+        receipts: tuple[VisibleProseReceipt, ...] = ()
+        prose_store: CommentReviewProseStore | None = None
+        if active_visible_prose is not None:
+            active_store, active_receipts = active_visible_prose
+            if (
+                isinstance(active_store, CommentReviewProseStore)
+                and active_store.path
+                == self.http.repository_path(repository, f"/pulls/{pull_request}")
+                and active_store.app_slug.casefold() == app_slug.casefold()
+                and (producer_id is None or active_store.producer_id == producer_id)
+                and all(item.head_sha == head_sha for item in active_receipts)
+            ):
+                prose_store = active_store
+                receipts = active_receipts
+        if not receipts:
+            source_reader = self._human_reader_for_scope(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            eligibility = approval_eligibility_from_body(
+                main_body, human_inventory_reader=source_reader
+            )
+            get_inner_reader = getattr(source_reader, "_reader", None)
+            inner_reader: Any = (
+                get_inner_reader() if callable(get_inner_reader) else source_reader
+            )
+            document = getattr(inner_reader, "document", None)
+            reader_store = getattr(inner_reader, "store", None)
+            if document is None or reader_store is None:
+                candidate_store = getattr(inner_reader, "store", None) or getattr(
+                    inner_reader, "_admitted_store", None
+                )
+                cold_store = getattr(inner_reader, "_cold_store", None)
+                if candidate_store is None and callable(cold_store):
+                    try:
+                        candidate_store = cold_store()
+                    except ReviewInputError:
+                        candidate_store = None
+                if candidate_store is not None:
+                    available = candidate_store.read_available()
+                    if available is not None:
+                        document = available[1]
+                        reader_store = candidate_store
+            if (
+                eligibility is None
+                or eligibility.head_sha != head_sha
+                or not isinstance(document, dict)
+                or not document.get("visible_prose")
+                or reader_store is None
+            ):
+                return {}
+            context = reader_store.context
+            if producer_id is not None and context.producer_id != producer_id:
+                return {}
+            receipts = tuple(
+                VisibleProseReceipt.from_dict(item)
+                for item in document["visible_prose"]
+            )
+            prose_store = CommentReviewProseStore(
+                http=_publication_transport(getattr(inner_reader, "http", self.http)),
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                producer_id=context.producer_id,
+                app_slug=app_slug,
+                budget=context.budget,
+            )
+        assert prose_store is not None
+        if any(
+            receipt.head_sha != head_sha
+            or receipt.producer_id != prose_store.producer_id
+            for receipt in receipts
+        ):
+            raise GitHubPublicationError("visible prose receipt authority conflicts")
+        by_review_id: dict[int, str] = {}
+        if reviews is not None:
+            prose_store._revalidate_listing(receipts, reviews)
+            by_review_id = {
+                item["id"]: item["body"]
+                for item in reviews
+                if isinstance(item, dict)
+                and type(item.get("id")) is int
+                and isinstance(item.get("body"), str)
+            }
+        else:
+            prose_store.budget.preflight(len(receipts))
+            for receipt in receipts:
+                readback = prose_store._read(receipt.review_id, receipt.head_sha)
+                raw = readback.body.encode("utf-8")
+                if (
+                    len(raw) != receipt.bytes
+                    or hashlib.sha256(raw).hexdigest() != receipt.sha256
+                ):
+                    raise GitHubPublicationError("visible prose receipt body changed")
+                by_review_id[receipt.review_id] = readback.body
+        verified: dict[str, tuple[int, str, str]] = {}
+        for receipt in receipts:
+            companion_body = by_review_id[receipt.review_id]
+            for instance in receipt.instances:
+                if instance in verified:
+                    raise GitHubPublicationError("visible prose instance duplicated")
+                verified[instance] = (receipt.review_id, receipt.sha256, companion_body)
+        return verified
+
     def _review_pages(
         self, *, token: str, repository: str, pull_request: int
     ) -> list[Any]:
@@ -3950,14 +4154,43 @@ class ReviewApprovalFinalizer:
         compact_rows = required_section is not None and re.search(
             r"(?m)^- \*\*RS-[A-F0-9]{6,64}\*\*$", required_section[1]
         )
-        # A verified grouped native union already binds each summary entry to
-        # its complete original explanation in the actual part review. The
-        # legacy compactor requires those comments on the main review itself.
-        # Keep native frames on the exact-root and fresh union fences below;
-        # the same final body-size check still applies before any PUT.
-        if eligibility.native_union is None and (
-            len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
-            or compact_rows
+        companion_prose_verified = False
+        if (
+            eligibility.native_union is None
+            and eligibility.human_inventory_reference is not None
+            and compact_rows
+            and len(new_body.encode("utf-8")) <= MAX_PUBLISHED_REVIEW_BODY_BYTES
+            and "\n## Findings explained in this review body\n" not in f"\n{body}"
+            and "\n### Full finding explanations\n" in f"\n{body}"
+        ):
+            try:
+                companion_prose_verified = bool(
+                    self._verified_companion_prose_bodies(
+                        token=token,
+                        repository=repository,
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        main_body=body,
+                        reviews=reviews,
+                    )
+                )
+            except (ReviewInputError, GitHubHTTPError, GitHubPublicationError):
+                companion_prose_verified = False
+        # A verified grouped native union (or verified companion visible-prose
+        # offload) already binds each summary entry to its complete original
+        # explanation in the authenticated part reviews. The legacy compactor
+        # requires those comments on the main review itself. Keep these frames on
+        # the exact-root and fresh inventory/union fences below; the same final
+        # body-size check still applies before any PUT.
+        if (
+            eligibility.native_union is None
+            and not companion_prose_verified
+            and (
+                len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
+                or compact_rows
+            )
         ):
             if self._closed_command_reads:
                 raise ReviewInputError(
@@ -7628,8 +7861,23 @@ class ReviewPublisher:
             expected=expected,
             existing_bindings=existing,
         )
+        companion_bodies = (
+            self._verified_companion_prose_bodies(
+                token=context["token"],
+                repository=context["repository"],
+                repository_id=receipt.repository_id,
+                pull_request=receipt.pull_request,
+                head_sha=receipt.head_sha,
+                app_slug=context["app_slug"],
+                main_body=evidence.main_body,
+                producer_id=receipt.producer_id,
+            )
+            if assembled.offloaded_body_instances
+            else {}
+        )
         for item in assembled.body_explanations:
-            if render_finding(item.view) in evidence.main_body:
+            rendered = render_finding(item.view)
+            if rendered in evidence.main_body:
                 confirmed[item.instance] = NativeFindingReceipt(
                     receipt.repository_id,
                     receipt.pull_request,
@@ -7639,6 +7887,21 @@ class ReviewPublisher:
                     evidence.main_review_id,
                     item.instance,
                     hashlib.sha256(evidence.main_body.encode()).hexdigest(),
+                )
+            elif (
+                item.instance in assembled.offloaded_body_instances
+                and (companion := companion_bodies.get(item.instance)) is not None
+                and rendered in companion[2]
+            ):
+                confirmed[item.instance] = NativeFindingReceipt(
+                    receipt.repository_id,
+                    receipt.pull_request,
+                    receipt.head_sha,
+                    receipt.base_sha,
+                    receipt.producer_id,
+                    companion[0],
+                    item.instance,
+                    companion[1],
                 )
         scope = (receipt.repository_id, receipt.pull_request)
         scoped = dict(self._native_finding_receipt_records.get(scope, {}))
@@ -7844,8 +8107,25 @@ class ReviewPublisher:
                 indexed = {
                     entry.instance for entry in index.entries if entry.body_placed
                 }
+                companion_bodies = (
+                    self._verified_companion_prose_bodies(
+                        token=context["token"],
+                        repository=context["repository"],
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=context["app_slug"],
+                        main_body=body,
+                        producer_id=context["producer_id"],
+                    )
+                    if assembled.offloaded_body_instances
+                    else {}
+                )
                 for item in assembled.body_explanations:
-                    if item.instance in indexed and render_finding(item.view) in body:
+                    if item.instance not in indexed:
+                        continue
+                    rendered = render_finding(item.view)
+                    if rendered in body:
                         receipts[item.instance] = NativeFindingReceipt(
                             repository_id,
                             pull_request,
@@ -7856,6 +8136,22 @@ class ReviewPublisher:
                             item.instance,
                             hashlib.sha256(body.encode("utf-8")).hexdigest(),
                         )
+                    elif (
+                        item.instance in assembled.offloaded_body_instances
+                        and (companion := companion_bodies.get(item.instance))
+                        is not None
+                        and rendered in companion[2]
+                    ):
+                        receipts[item.instance] = NativeFindingReceipt(
+                            repository_id,
+                            pull_request,
+                            head_sha,
+                            base_sha,
+                            context["producer_id"],
+                            companion[0],
+                            item.instance,
+                            companion[1],
+                        )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             # Known native success remains known; only the absent binding proof
             # is uncertain. Do not repeat the business effect.
@@ -7864,6 +8160,33 @@ class ReviewPublisher:
             for instance, receipt in receipts.items():
                 scoped[instance] = receipt.to_dict()
         return receipts
+
+    def _verified_companion_prose_bodies(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        main_body: str,
+        producer_id: int | None = None,
+        reviews: list[Any] | None = None,
+    ) -> dict[str, tuple[int, str, str]]:
+        """Authenticate companion COMMENT reviews for offloaded body explanations."""
+        return self.finalizer._verified_companion_prose_bodies(
+            token=token,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            main_body=main_body,
+            producer_id=producer_id,
+            reviews=reviews,
+            active_visible_prose=getattr(self, "_active_visible_prose", None),
+        )
 
     def _commit_active_window_success(
         self,
@@ -9444,6 +9767,7 @@ class ReviewPublisher:
         complete_inventory: bool = False,
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
+        visible_prose_store: CommentReviewProseStore | None = None,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
         max_active_findings: int | None = None,
         confirmed_fixes: Sequence[ConfirmedFixEvidence] = (),
@@ -9471,6 +9795,8 @@ class ReviewPublisher:
             )
         previous_native_context = getattr(self, "_native_finding_context", None)
         self._native_finding_context = None
+        previous_visible_prose = getattr(self, "_active_visible_prose", None)
+        self._active_visible_prose = None
         if (
             max_active_findings is not None
             or enable_drift_tracking
@@ -9678,6 +10004,7 @@ class ReviewPublisher:
                 complete_inventory=complete_inventory,
                 human_inventory_store=human_inventory_store,
                 allow_human_inventory_start=allow_human_inventory_start,
+                visible_prose_store=visible_prose_store,
                 narrative_archive=narrative_archive,
                 max_active_findings=max_active_findings,
                 confirmed_fixes=confirmed_fixes,
@@ -9716,6 +10043,7 @@ class ReviewPublisher:
 
             adjacent_publication_preflight.discard(self)
             self._native_finding_context = previous_native_context
+            self._active_visible_prose = previous_visible_prose
             self._carried_context = previous_carried_context
             self.finalizer._observed_trust_context = prev_observed_trust
             if owns_operation_budget:
@@ -9762,6 +10090,7 @@ class ReviewPublisher:
         complete_inventory: bool = False,
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
+        visible_prose_store: CommentReviewProseStore | None = None,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
         max_active_findings: int | None = None,
         confirmed_fixes: Sequence[ConfirmedFixEvidence] = (),
@@ -10217,11 +10546,28 @@ class ReviewPublisher:
         # A fixed-width placeholder qualifies every authority/body allocation
         # before the first inventory, check, or review write. No reference or
         # caller-supplied hash can authorize a new staging attempt.
+        if visible_prose_store is not None:
+            from .prose_publication import CommentReviewProseStore
+
+            if not isinstance(visible_prose_store, CommentReviewProseStore):
+                raise GitHubPublicationError("visible prose store is invalid")
+            if (
+                visible_prose_store.path
+                != self.http.repository_path(repository, f"/pulls/{pull_request}")
+                or visible_prose_store.app_slug.casefold() != app_slug.casefold()
+                or visible_prose_store.budget
+                is not (
+                    self.finalizer.evidence_budget or self.finalizer._operation_budget
+                )
+            ):
+                raise GitHubPublicationError(
+                    "visible prose store authority mismatches publication"
+                )
         needs_human_inventory = False
         stage_human_inventory = (
             complete_inventory
             and human_inventory_store is not None
-            and result is admitted_result
+            and (result is admitted_result or planned_drift_state is not None)
         )
         human_inventory = prospective_eligibility.human_review
         if stage_human_inventory:
@@ -10233,6 +10579,17 @@ class ReviewPublisher:
             if not isinstance(human_inventory_store, HumanInventoryStore):
                 raise GitHubPublicationError("human inventory store is invalid")
             context = human_inventory_store.context
+            inventory_transaction = (
+                result.transaction
+                if result.transaction is not None
+                else admitted_result.transaction
+            )
+            expected_content_digest = (
+                admitted_result.content_digest()
+                if planned_drift_state is not None
+                else result.content_digest()
+            )
+            expected_publication_digest = review_result_digest(result)
             if (
                 context.repository != repository
                 or context.repository_id != repository_id
@@ -10240,17 +10597,48 @@ class ReviewPublisher:
                 or context.base_sha != base_sha
                 or context.head_sha != head_sha
                 or context.app_slug.casefold() != app_slug.casefold()
-                or context.original_content_digest != result.content_digest()
-                or context.publication_digest != review_result_digest(result)
+                or context.original_content_digest != expected_content_digest
+                or (
+                    planned_drift_state is None
+                    and context.publication_digest != expected_publication_digest
+                )
+                or (
+                    planned_drift_state is not None
+                    and context.publication_digest
+                    not in {
+                        expected_publication_digest,
+                        review_result_digest(admitted_result),
+                    }
+                )
                 or context.budget
                 is not (
                     self.finalizer.evidence_budget or self.finalizer._operation_budget
                 )
-                or result.transaction is None
-                or context.transaction_id != result.transaction.transaction_id
+                or inventory_transaction is None
+                or context.transaction_id != inventory_transaction.transaction_id
             ):
                 raise GitHubPublicationError(
                     "human inventory store authority mismatches publication"
+                )
+            if (
+                planned_drift_state is not None
+                and context.publication_digest != expected_publication_digest
+            ):
+                context = replace(
+                    context, publication_digest=expected_publication_digest
+                )
+                human_inventory_store = HumanInventoryStore(
+                    human_inventory_store.http,
+                    human_inventory_store.token,
+                    human_inventory_store.ledger,
+                    context,
+                )
+            if (
+                visible_prose_store is not None
+                and visible_prose_store.producer_id != context.producer_id
+            ):
+                raise GitHubPublicationError(
+                    "visible prose store authority mismatches publication"
                 )
             self.finalizer._attach_authenticated_human_inventory(
                 human_inventory_store,
@@ -10327,6 +10715,7 @@ class ReviewPublisher:
         )
         complete_review: AssembledReview | None = None
         preflight_review: AssembledReview | None = None
+        prose_parts: tuple[FindingProsePart, ...] = ()
         if (
             complete_inventory
             or human_inventory is not None
@@ -10383,11 +10772,18 @@ class ReviewPublisher:
                     has_blocking_findings=body_blocking,
                 ),
             )
-            reserve = _disposition_frame_reserve(
-                preflight_document, preflight_review.index_entries
+            preflight_extra_reserve = _preflight_frame_extra_reserve(
+                self.http,
+                check_token=check_token,
+                check_capability_failure=check_capability_failure,
             )
-            if grouped_publication:
-                reserve += NATIVE_UNION_FRAME_RESERVE
+            reserve = (
+                _disposition_frame_reserve(
+                    preflight_document, preflight_review.index_entries
+                )
+                + (NATIVE_UNION_FRAME_RESERVE if grouped_publication else 0)
+                + preflight_extra_reserve
+            )
             narrative_compacted = False
             while True:
                 try:
@@ -10440,11 +10836,13 @@ class ReviewPublisher:
                                 prospective_eligibility.human_inventory_reference
                             ),
                         )
-                        reserve = _disposition_frame_reserve(
-                            preflight_document, preflight_review.index_entries
+                        reserve = (
+                            _disposition_frame_reserve(
+                                preflight_document, preflight_review.index_entries
+                            )
+                            + (NATIVE_UNION_FRAME_RESERVE if grouped_publication else 0)
+                            + preflight_extra_reserve
                         )
-                        if grouped_publication:
-                            reserve += NATIVE_UNION_FRAME_RESERVE
                         needs_human_inventory = True
                         continue
                     if (
@@ -10511,6 +10909,64 @@ class ReviewPublisher:
                         )
                         preflight_review = replace(preflight_review, overview=overview)
                         narrative_compacted = True
+                        continue
+                    if (
+                        exc.check in {"published-summary", "framed-review-body"}
+                        and visible_prose_store is not None
+                        and not preflight_review.offloaded_body_instances
+                        and preflight_review.body_explanations
+                    ):
+                        from .publication_parts import (
+                            prepare_body_explanation_prose_parts,
+                        )
+
+                        prose_parts = prepare_body_explanation_prose_parts(
+                            preflight_review.body_explanations, head_sha=head_sha
+                        )
+                        if (
+                            not needs_human_inventory
+                            and stage_human_inventory
+                            and human_inventory is not None
+                        ):
+                            prospective_eligibility = replace(
+                                prospective_eligibility,
+                                human_inventory_reference=HumanInventoryReference(
+                                    context.event_key, "0" * 64
+                                ),
+                            )
+                            preflight_document = replace(
+                                preflight_document,
+                                human_inventory_reference=(
+                                    prospective_eligibility.human_inventory_reference
+                                ),
+                            )
+                            reserve = (
+                                _disposition_frame_reserve(
+                                    preflight_document, preflight_review.index_entries
+                                )
+                                + (
+                                    NATIVE_UNION_FRAME_RESERVE
+                                    if grouped_publication
+                                    else 0
+                                )
+                                + preflight_extra_reserve
+                            )
+                            needs_human_inventory = True
+                        placeholder_directory = _render_visible_prose_directory(
+                            prose_parts,
+                            preflight_review.body_explanations,
+                            review_ids=tuple(
+                                9_999_999_999_999_999_999 for _ in prose_parts
+                            ),
+                        )
+                        preflight_review = replace(
+                            preflight_review,
+                            offloaded_body_instances=frozenset(
+                                item.instance
+                                for item in preflight_review.body_explanations
+                            ),
+                            visible_prose_directory=placeholder_directory,
+                        )
                         continue
                     raise
                 else:
@@ -11112,6 +11568,44 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "complete inline publication requires reconciliation of retained explanations"
                 )
+        visible_prose_receipts: tuple[VisibleProseReceipt, ...] = ()
+        if prose_parts:
+            assert visible_prose_store is not None
+            assert preflight_review is not None
+            visible_prose_receipts = visible_prose_store.stage(
+                prose_parts, head_sha=head_sha
+            )
+            self._active_visible_prose = (
+                visible_prose_store,
+                visible_prose_receipts,
+            )
+            real_directory = _render_visible_prose_directory(
+                prose_parts,
+                preflight_review.body_explanations,
+                review_ids=tuple(
+                    receipt.review_id for receipt in visible_prose_receipts
+                ),
+            )
+            preflight_review = replace(
+                preflight_review, visible_prose_directory=real_directory
+            )
+            if complete_review is not None:
+                complete_review = preflight_review
+            if continuation_review is not None:
+                continuation_review = preflight_review
+            if not stage_human_inventory:
+                write_preflight = self._preflight_pr(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                )
+                if write_preflight.result is not None:
+                    return write_preflight.result
         if stage_human_inventory:
             from review_sensei.human_inventory import inventory_result_document
 
@@ -11136,7 +11630,9 @@ class ReviewPublisher:
                         entries=complete_review.index_entries,
                         complete_inventory=True,
                     ),
-                    "visible_prose": [],
+                    "visible_prose": [
+                        receipt.to_dict() for receipt in visible_prose_receipts
+                    ],
                 },
                 allow_start=allow_human_inventory_start,
             )
@@ -12773,6 +13269,7 @@ class ReviewPublisher:
                         severity=comment.severity,
                         obligatory=bool(comment.blocks_approval or comment.needs_human),
                         view=view,
+                        path=comment.path,
                     )
                 )
         state, reason = _review_summary_state(
@@ -13201,13 +13698,35 @@ class ReviewPublisher:
             )
             self._adopt_native_union_finding_receipts(native_evidence, receipt)
             return
-        if any(
-            render_finding(item.view) not in review["body"]
+        missing_explanations = [
+            item
             for item in assembled.body_explanations
-        ):
-            raise GitHubPublicationError(
-                "complete publication prose is missing from retained review"
+            if render_finding(item.view) not in review["body"]
+        ]
+        if missing_explanations:
+            if not assembled.offloaded_body_instances or any(
+                item.instance not in assembled.offloaded_body_instances
+                for item in missing_explanations
+            ):
+                raise GitHubPublicationError(
+                    "complete publication prose is missing from retained review"
+                )
+            verified_companions = self._verified_companion_prose_bodies(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                main_body=review["body"],
+                reviews=getattr(self, "_last_review_payload", None),
             )
+            for item in missing_explanations:
+                companion = verified_companions.get(item.instance)
+                if companion is None or render_finding(item.view) not in companion[2]:
+                    raise GitHubPublicationError(
+                        "complete publication prose is missing from retained review"
+                    )
         if not assembled.inline_comments:
             return
         review_id = review.get("id")

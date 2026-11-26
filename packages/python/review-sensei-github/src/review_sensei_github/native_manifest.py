@@ -417,7 +417,46 @@ class NativePublicationReader:
         )
         if published_index != index:
             raise ReviewInputError("native publication selected review index conflicts")
-        plan = receipt.reconstruct_plan(restored, index, main_body=review["body"])
+        companion_bodies: dict[str, str] = {}
+        raw_visible_prose = admitted.get("visible_prose") or []
+        if raw_visible_prose:
+            from .prose_publication import CommentReviewProseStore, VisibleProseReceipt
+
+            if not isinstance(raw_visible_prose, list):
+                raise ReviewInputError("native publication visible prose is invalid")
+            prose_receipts = tuple(
+                VisibleProseReceipt.from_dict(item) for item in raw_visible_prose
+            )
+            prose_store = CommentReviewProseStore(
+                http=store.http,
+                token=store.token,
+                repository=context.repository,
+                pull_request=context.pull_request,
+                producer_id=context.producer_id,
+                app_slug=context.app_slug,
+                budget=context.budget,
+            )
+            prose_store.budget.preflight(len(prose_receipts))
+            for vp in prose_receipts:
+                if (
+                    vp.head_sha != context.head_sha
+                    or vp.producer_id != context.producer_id
+                ):
+                    raise ReviewInputError("native publication visible prose conflicts")
+                readback = prose_store._read(vp.review_id, vp.head_sha)
+                raw = readback.body.encode("utf-8")
+                if len(raw) != vp.bytes or hashlib.sha256(raw).hexdigest() != vp.sha256:
+                    raise ReviewInputError(
+                        "native publication visible prose body changed"
+                    )
+                for inst in vp.instances:
+                    companion_bodies[inst] = readback.body
+        plan = receipt.reconstruct_plan(
+            restored,
+            index,
+            main_body=review["body"],
+            companion_bodies=companion_bodies or None,
+        )
         evidence = read_publication_union(
             store.http,
             token=store.token,

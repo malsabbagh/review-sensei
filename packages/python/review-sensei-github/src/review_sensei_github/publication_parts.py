@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.errors import ReviewInputError
@@ -20,6 +20,9 @@ from review_sensei.presentation import (
     render_finding,
 )
 from review_sensei.validation import validate_bounded_text, validate_repository_path
+
+if TYPE_CHECKING:
+    from .publication import BodyExplanation
 
 PROSE_PART_VERSION = "1"
 MAX_PROSE_PART_BYTES = 65_536
@@ -86,6 +89,78 @@ def _header(index: int, count: int, head_sha: str) -> str:
     )
 
 
+def _validate_prose_identity(head_sha: str, item_count: int) -> None:
+    if (
+        not isinstance(head_sha, str)
+        or len(head_sha) != 40
+        or any(character not in "0123456789abcdef" for character in head_sha)
+        or item_count > 250
+    ):
+        raise ReviewInputError("finding prose publication identity is invalid")
+
+
+def _pack_prose_parts(
+    rendered_items: Sequence[tuple[str, str, str]], *, head_sha: str
+) -> tuple[FindingProsePart, ...]:
+    """Group pre-rendered `(instance, path, explanation)` tuples under byte caps."""
+    # Reserve the longest supported navigation header before any host write.
+    header_reserve = len(
+        _header(MAX_PROSE_PARTS - 1, MAX_PROSE_PARTS, head_sha).encode()
+    )
+    groups: list[list[tuple[str, str, str]]] = []
+    group: list[tuple[str, str, str]] = []
+    paths: set[str] = set()
+    group_bytes = header_reserve
+    for instance, path, explanation in rendered_items:
+        size = len(explanation.encode("utf-8"))
+        if header_reserve + size > MAX_PROSE_PART_BYTES:
+            raise ReviewInputError("one complete finding exceeds prose part capacity")
+        if group and (
+            group_bytes + 2 + size > MAX_PROSE_PART_BYTES
+            or len(paths | {path}) > MAX_PROSE_PART_PATHS
+        ):
+            groups.append(group)
+            group, paths, group_bytes = [], set(), header_reserve
+        group_bytes += (2 if group else 0) + size
+        group.append((instance, path, explanation))
+        paths.add(path)
+    if group:
+        groups.append(group)
+    if len(groups) > MAX_PROSE_PARTS:
+        raise ReviewInputError("finding prose part count exceeds capacity")
+    parts = tuple(
+        FindingProsePart(
+            index,
+            len(groups),
+            _header(index, len(groups), head_sha)
+            + "\n\n".join(item[2] for item in items),
+            tuple(item[0] for item in items),
+            tuple(sorted({item[1] for item in items})),
+        )
+        for index, items in enumerate(groups)
+    )
+    if sum(part.byte_length for part in parts) > MAX_PROSE_TOTAL_BYTES:
+        raise ReviewInputError("complete finding prose exceeds aggregate capacity")
+    return parts
+
+
+def _body_explanation_path(item: BodyExplanation) -> str:
+    explicit = getattr(item, "path", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    location = item.view.location
+    if isinstance(location, str):
+        candidate = location.strip()
+        if candidate.startswith("`") and candidate.endswith("`") and len(candidate) > 2:
+            candidate = candidate[1:-1]
+        head, sep, tail = candidate.rpartition(":")
+        if sep and head and tail.isdigit():
+            candidate = head
+        if candidate:
+            return candidate
+    return "review-body"
+
+
 def prepare_finding_prose_parts(
     comments: Sequence[ReviewComment], *, head_sha: str
 ) -> tuple[FindingProsePart, ...]:
@@ -95,13 +170,7 @@ def prepare_finding_prose_parts(
     exact validated duplicates coalesce. Every retained body is rendered in
     full, even when a lifecycle concern was present in an earlier review.
     """
-    if (
-        not isinstance(head_sha, str)
-        or len(head_sha) != 40
-        or any(character not in "0123456789abcdef" for character in head_sha)
-        or len(comments) > 250
-    ):
-        raise ReviewInputError("finding prose publication identity is invalid")
+    _validate_prose_identity(head_sha, len(comments))
     instances: dict[str, ReviewComment] = {}
     for comment in comments:
         instance = finding_instance_fingerprint(comment)
@@ -123,52 +192,45 @@ def prepare_finding_prose_parts(
         if previous is None:
             instances[instance] = comment
     identifiers = assign_finding_identifiers(instances)
-    # Reserve the longest supported navigation header before any host write.
-    header_reserve = len(
-        _header(MAX_PROSE_PARTS - 1, MAX_PROSE_PARTS, head_sha).encode()
-    )
-    groups: list[list[tuple[str, str, str]]] = []
-    group: list[tuple[str, str, str]] = []
-    paths: set[str] = set()
-    group_bytes = header_reserve
-    for instance, comment in sorted(instances.items()):
-        view = build_finding_view(
-            comment,
-            fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
-            identifier=identifiers[instance],
-            placement="body",
+    rendered_items = [
+        (
+            instance,
+            comment.path,
+            render_finding(
+                build_finding_view(
+                    comment,
+                    fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
+                    identifier=identifiers[instance],
+                    placement="body",
+                )
+            ),
         )
-        explanation = render_finding(view)
-        size = len(explanation.encode("utf-8"))
-        if header_reserve + size > MAX_PROSE_PART_BYTES:
-            raise ReviewInputError("one complete finding exceeds prose part capacity")
-        if group and (
-            group_bytes + 2 + size > MAX_PROSE_PART_BYTES
-            or len(paths | {comment.path}) > MAX_PROSE_PART_PATHS
-        ):
-            groups.append(group)
-            group, paths, group_bytes = [], set(), header_reserve
-        group_bytes += (2 if group else 0) + size
-        group.append((instance, comment.path, explanation))
-        paths.add(comment.path)
-    if group:
-        groups.append(group)
-    if len(groups) > MAX_PROSE_PARTS:
-        raise ReviewInputError("finding prose part count exceeds capacity")
-    parts = tuple(
-        FindingProsePart(
-            index,
-            len(groups),
-            _header(index, len(groups), head_sha)
-            + "\n\n".join(item[2] for item in items),
-            tuple(item[0] for item in items),
-            tuple(sorted({item[1] for item in items})),
-        )
-        for index, items in enumerate(groups)
-    )
-    if sum(part.byte_length for part in parts) > MAX_PROSE_TOTAL_BYTES:
-        raise ReviewInputError("complete finding prose exceeds aggregate capacity")
-    return parts
+        for instance, comment in sorted(instances.items())
+    ]
+    return _pack_prose_parts(rendered_items, head_sha=head_sha)
+
+
+def prepare_body_explanation_prose_parts(
+    explanations: Sequence[BodyExplanation], *, head_sha: str
+) -> tuple[FindingProsePart, ...]:
+    """Pack verbatim body-placed explanations into companion prose parts."""
+    _validate_prose_identity(head_sha, len(explanations))
+    if not explanations:
+        return ()
+    by_instance: dict[str, tuple[str, str]] = {}
+    for item in explanations:
+        path = _body_explanation_path(item)
+        rendered = render_finding(item.view)
+        previous = by_instance.get(item.instance)
+        if previous is not None and previous != (path, rendered):
+            raise ReviewInputError("body explanation prose instance identity conflicts")
+        if previous is None:
+            by_instance[item.instance] = (path, rendered)
+    rendered_items = [
+        (instance, path, rendered)
+        for instance, (path, rendered) in sorted(by_instance.items())
+    ]
+    return _pack_prose_parts(rendered_items, head_sha=head_sha)
 
 
 @dataclass(frozen=True)

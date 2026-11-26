@@ -122,6 +122,7 @@ def request_branches(
     failure_outcomes,
     approval_body,
     review_event="COMMENT",
+    prose_part_bodies=(),
 ):
     """Closed ordinary producer shapes; future numeric identities are sizing only."""
     from .checks import ReviewCheckPublisher
@@ -190,9 +191,18 @@ def request_branches(
         if approval_body is not None
         else None
     )
+    companion_reviews = tuple(
+        (
+            "POST",
+            review_path,
+            {"commit_id": journal.head_sha, "event": "COMMENT", "body": part_body},
+            None,
+        )
+        for part_body in prose_part_bodies
+    )
     branches = []
     for create in (True, False):
-        initial = (check(None, create=create), complete, review)
+        initial = (*companion_reviews, check(None, create=create), complete, review)
         branches.append(initial + ((approve,) if approve is not None else ()))
         # A definitively failed publication can complete its non-passing check.
         # Unknown native effects stop with their pending receipt, never retry.
@@ -201,7 +211,7 @@ def request_branches(
     return tuple(branches)
 
 
-def admit_prefix_branches(journal, branches, *, read_calls):
+def admit_prefix_branches(journal, branches, *, read_calls, prose_read_calls=0):
     """Consume a source-qualified native read quote and bound all durable stops.
 
     Caller owns source qualification. No branch is executed here; only the
@@ -214,10 +224,16 @@ def admit_prefix_branches(journal, branches, *, read_calls):
         or not branches
         or type(read_calls) is not int
         or read_calls < 0
+        or type(prose_read_calls) is not int
+        or prose_read_calls < 0
     ):
         raise ReviewInputError("ordinary publication source plan is invalid")
     prepared = [
-        price_prefixes(journal, branch, native_calls=read_calls + len(branch))
+        price_prefixes(
+            journal,
+            branch,
+            native_calls=read_calls + prose_read_calls + len(branch),
+        )
         for branch in branches
     ]
     # These are closed maximum-native-allocation envelopes from the actual
@@ -229,7 +245,9 @@ def admit_prefix_branches(journal, branches, *, read_calls):
             documents[min(index, len(documents) - 1)] for documents, _ in prepared
         ]
         documents.append(max(candidates, key=lambda value: len(canonical_bytes(value))))
-    native_calls = read_calls + max(len(branch) for branch in branches)
+    native_calls = (
+        read_calls + prose_read_calls + max(len(branch) for branch in branches)
+    )
     return preflight_finding_lifecycle(
         journal.ledger,
         journal._record,
@@ -331,6 +349,14 @@ def current_request_branches(
         retained_blocking=False,
         app_authored=False,
     )
+    prose_part_bodies: tuple[str, ...] = ()
+    if assembled.offloaded_body_instances:
+        from .publication_parts import prepare_body_explanation_prose_parts
+
+        prose_parts = prepare_body_explanation_prose_parts(
+            assembled.body_explanations, head_sha=journal.head_sha
+        )
+        prose_part_bodies = tuple(part.body for part in prose_parts)
     return request_branches(
         publisher,
         journal,
@@ -348,6 +374,7 @@ def current_request_branches(
             for temporary in (False, True)
         ),
         approval_body=approval,
+        prose_part_bodies=prose_part_bodies,
     )
 
 
@@ -436,7 +463,21 @@ def admit_current(
         preserve_explanations=preserve_explanations,
         window_non_inline_blocking=window_non_inline_blocking,
     )
-    plan = admit_prefix_branches(journal, branches, read_calls=witness.read_calls)
+    prose_read_calls = 0
+    if assembled is not None and assembled.offloaded_body_instances:
+        from .publication_parts import prepare_body_explanation_prose_parts
+
+        prose_read_calls = len(
+            prepare_body_explanation_prose_parts(
+                assembled.body_explanations, head_sha=journal.head_sha
+            )
+        )
+    plan = admit_prefix_branches(
+        journal,
+        branches,
+        read_calls=witness.read_calls,
+        prose_read_calls=prose_read_calls,
+    )
     witness.require(journal, publisher)
     return plan
 

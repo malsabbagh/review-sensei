@@ -1559,6 +1559,7 @@ class ReviewRun:
                     complete_inventory=True,
                     max_active_findings=analysis.result.limits.max_comments,
                     enable_drift_tracking=True,
+                    allow_visible_prose_overflow=True,
                 ),
                 oidc_token=self.oidc,
                 repository=self.identity.repository,
