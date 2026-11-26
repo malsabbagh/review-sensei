@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from review_sensei.convergence import DEFAULT_MAX_FAILED_ATTEMPTS, MAX_FAILED_ATTEMPTS
 from review_sensei.disposition import session_honors_coverage_uncertainty
+from review_sensei.errors import BENIGN_LIFECYCLE_RACE_REASONS
 from review_sensei.human_file_review import (
     coverage_only_binary,
     is_human_confirmable_file,
@@ -1212,10 +1213,9 @@ def write_benign_race_step_summary(
     pull_request: int | None = None,
 ) -> bool:
     """Append a neutral Actions job summary notice for a skipped benign lifecycle race."""
-    notice = _BENIGN_RACE_NOTICES.get(
-        reason,
-        "Run skipped cleanly after a benign pull-request or policy lifecycle race.",
-    )
+    if reason not in BENIGN_LIFECYCLE_RACE_REASONS:
+        raise ValueError(f"unsupported benign lifecycle race reason: {reason!r}")
+    notice = _BENIGN_RACE_NOTICES[reason]
     lines = [
         f"## ReviewSensei {operation} skipped ({_clean_text(reason, max_bytes=64)})"
     ]

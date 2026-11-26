@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 
 from fake_github_http import json_response
 from review_sensei_github import cli as package_cli
+from review_sensei_github.review_guidance import (
+    _BENIGN_RACE_NOTICES,
+    write_benign_race_step_summary,
+)
 from review_sensei_github.review_run import _is_benign_terminal_rerun
 from review_sensei_github.session_ledger import parse_session_comment
 from test_action_reply_entry import ReplyEntryFixture
@@ -29,7 +33,11 @@ from review_sensei.api_work import (
     CallerRequestBlock,
     PendingApiRequest,
 )
-from review_sensei.errors import BenignLifecycleRace, ReviewInputError
+from review_sensei.errors import (
+    BENIGN_LIFECYCLE_RACE_REASONS,
+    BenignLifecycleRace,
+    ReviewInputError,
+)
 from review_sensei.models import ReviewTransaction
 
 
@@ -47,9 +55,18 @@ def _wrap_cli_main_adding_skip_flag(
             sep = args.index("--")
             if "--skip-benign-races" not in args[:sep]:
                 args = [*args[:sep], "--skip-benign-races", *args[sep:]]
-        if step_summary is not None:
-            os.environ["GITHUB_STEP_SUMMARY"] = str(step_summary)
-        return original_main(args)
+        if step_summary is None:
+            return original_main(args)
+        had_summary = "GITHUB_STEP_SUMMARY" in os.environ
+        previous_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        os.environ["GITHUB_STEP_SUMMARY"] = str(step_summary)
+        try:
+            return original_main(args)
+        finally:
+            if had_summary and previous_summary is not None:
+                os.environ["GITHUB_STEP_SUMMARY"] = previous_summary
+            else:
+                os.environ.pop("GITHUB_STEP_SUMMARY", None)
 
     return patch.object(package_cli, "main", side_effect=wrapped)
 
@@ -180,6 +197,9 @@ class BenignLifecycleRacesTests(unittest.TestCase):
         self.assertIsNone(err.reply_status)
         with self.assertRaises(ValueError):
             BenignLifecycleRace("bad", reason="not_a_real_reason")
+        self.assertEqual(set(_BENIGN_RACE_NOTICES), set(BENIGN_LIFECYCLE_RACE_REASONS))
+        with self.assertRaises(ValueError):
+            write_benign_race_step_summary(operation="review", reason="unknown_reason")
 
     def test_restart_run_rejects_skip_benign_races_flag(self) -> None:
         with self.assertRaises(SystemExit) as exited:
@@ -334,9 +354,6 @@ class BenignLifecycleRacesTests(unittest.TestCase):
                 self.assertEqual(diag["step"], "live_pr")
                 self.assertIn(expected_reason, summary.read_text())
 
-            if label == "superseded_base":
-                # Reply does not pass --base-sha on CLI, so live_base is adopted.
-                continue
             with (
                 self.subTest(lane="reply", case=label),
                 tempfile.TemporaryDirectory() as d,
@@ -346,11 +363,17 @@ class BenignLifecycleRacesTests(unittest.TestCase):
                 with _wrap_cli_main_adding_skip_flag(target_subcommand="reply-run"):
                     code = rfx.invoke_reply()
                 self.assertEqual(code, 0, rfx.error)
-                self.assertEqual(rfx.output.strip(), expected_reply_token)
-                diag = lifecycle_outcome(self, rfx.error)
-                self.assertEqual(diag["reason"], "skipped_benign_race")
-                self.assertEqual(diag["benign_race_reason"], expected_reason)
-                self.assertEqual(diag["step"], "live_pr")
+                if label == "superseded_base":
+                    # Reply omits --base-sha on CLI, so live base advance is adopted and reply proceeds.
+                    self.assertEqual(rfx.output.strip(), "replied")
+                    self.assertEqual(rfx.provider_calls, 1)
+                    self.assertEqual(rfx.selected.base_sha, "f" * 40)
+                else:
+                    self.assertEqual(rfx.output.strip(), expected_reply_token)
+                    diag = lifecycle_outcome(self, rfx.error)
+                    self.assertEqual(diag["reason"], "skipped_benign_race")
+                    self.assertEqual(diag["benign_race_reason"], expected_reason)
+                    self.assertEqual(diag["step"], "live_pr")
 
         # Command lane closed PR before admission:
         with tempfile.TemporaryDirectory() as d:

@@ -7,7 +7,6 @@ and incoming receipts cannot select a new allowance or an old phase fallback.
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 from typing import Any, Unpack
 
@@ -246,7 +245,7 @@ class ApiRunReviewHooks:
 
     def publish_review(self, application: Any, **kwargs: Any) -> Any:
         from .api_run_plan import publication_attempt_plan
-        from .publication_recovery import _payload
+        from .publication_recovery import _payload, is_commit_sha
 
         if (
             application.session_ledger is not self.ledger
@@ -275,8 +274,7 @@ class ApiRunReviewHooks:
             status != 200
             or not isinstance(pull, dict)
             or not isinstance(head, dict)
-            or not isinstance(live_head, str)
-            or re.fullmatch(r"[a-f0-9]{40}\Z", live_head) is None
+            or not is_commit_sha(live_head)
         ):
             raise ReviewInputError("caller workflow publication head changed")
         if live_head != self.head_sha:

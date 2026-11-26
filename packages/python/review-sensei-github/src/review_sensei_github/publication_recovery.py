@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, TypeGuard
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from weakref import WeakKeyDictionary
 
@@ -50,6 +50,11 @@ from .operation_diagnostics import OperationObserver
 _PAGINATION_OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
 _NARRATIVE_CONFIRMATION = object()
 _SHA = re.compile(r"[a-f0-9]{40}\Z")
+
+
+def is_commit_sha(value: object) -> TypeGuard[str]:
+    """Return True when ``value`` is a lowercase 40-hex Git commit SHA."""
+    return isinstance(value, str) and _SHA.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)
@@ -857,11 +862,9 @@ def _store(
             or not isinstance(pr, dict)
             or pr.get("state") not in {"open", "closed"}
             or not isinstance(base, dict)
-            or not isinstance(live_base_sha, str)
-            or _SHA.fullmatch(live_base_sha) is None
+            or not is_commit_sha(live_base_sha)
             or not isinstance(head, dict)
-            or not isinstance(live_head_sha, str)
-            or _SHA.fullmatch(live_head_sha) is None
+            or not is_commit_sha(live_head_sha)
             or not isinstance(repo, dict)
             or type(repo.get("id")) is not int
             or repo.get("id") != identity.repository_id
