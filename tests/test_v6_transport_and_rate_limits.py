@@ -578,9 +578,12 @@ class DualCredentialTransportTests(unittest.TestCase):
                 is_graphql=True,
             )
         self.assertEqual(gql_err.exception.rate_limit_kind, "graphql_200")
-        self.assertEqual(client.workflow_quota.remaining, 0)
-        self.assertTrue(client.workflow_quota.rate_limited)
-        self.assertEqual(client.workflow_quota.last_graphql_cost, 2)
+        self.assertEqual(client.workflow_quota.remaining, 14990)
+        self.assertFalse(client.workflow_quota.rate_limited)
+        self.assertEqual(client.workflow_graphql_quota.remaining, 0)
+        self.assertTrue(client.workflow_graphql_quota.rate_limited)
+        self.assertEqual(client.workflow_graphql_quota.last_graphql_cost, 2)
+        self.assertEqual(client.workflow_graphql_quota.limit, WORKFLOW_TOKEN_GHEC_LIMIT)
 
         # App broker can still persist a checkpoint cleanly.
         checkpoint_resp = client.execute(
@@ -595,6 +598,10 @@ class DualCredentialTransportTests(unittest.TestCase):
         self.assertEqual(checkpoint_resp.status, 201)
         self.assertEqual(client.app_quota.remaining, 4980)
         self.assertFalse(client.app_quota.rate_limited)
+        self.assertEqual(
+            client.total_requests_for(CredentialKind.WORKFLOW_GITHUB_TOKEN), 2
+        )
+        self.assertEqual(client.total_requests_for(CredentialKind.APP_BROKER), 1)
         self.assertEqual(len(workflow_transport.calls), 2)
         self.assertEqual(len(app_transport.calls), 1)
 
@@ -695,6 +702,399 @@ class DualCredentialTransportTests(unittest.TestCase):
         )
         self.assertFalse(perm_snap.rate_limited)
         self.assertFalse(perm_tracker.rate_limited)
+
+    def test_app_graphql_low_does_not_block_rest_core_order_1(self) -> None:
+        workflow_transport = RecordingTransport()
+        app_transport = RecordingTransport(
+            [
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "4500",
+                        "X-RateLimit-Reset": "1764177000",
+                        "X-RateLimit-Resource": "core",
+                    },
+                    {"id": 1},
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "5",
+                        "X-RateLimit-Reset": "1764177100",
+                        "X-RateLimit-Resource": "graphql",
+                    },
+                    {"data": {"resolveReviewThread": {"thread": {"id": "T1"}}}},
+                ),
+                (
+                    201,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "4499",
+                        "X-RateLimit-Reset": "1764177000",
+                        "X-RateLimit-Resource": "core",
+                    },
+                    {"id": 2},
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "4",
+                        "X-RateLimit-Reset": "1764177100",
+                        "X-RateLimit-Resource": "graphql",
+                    },
+                    {"data": {"resolveReviewThread": {"thread": {"id": "T2"}}}},
+                ),
+            ]
+        )
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=workflow_transport,
+            broker_app_transport=app_transport,
+            app_checkpoint_reserve=20,
+        )
+
+        # Seed App REST core at 4500, then drop App GraphQL to 5 (<= reserve 20).
+        client.execute(
+            "broker_app_identity",
+            method="GET",
+            path="/app",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        client.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+        )
+        self.assertEqual(client.app_quota.remaining, 4500)
+        self.assertEqual(client.app_graphql_quota.remaining, 5)
+
+        # Subsequent non-checkpoint App REST call succeeds with core bucket isolated.
+        rest_resp = client.execute(
+            "pr_review_publish",
+            method="POST",
+            path="/repos/o/r/pulls/1/reviews",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"event": "COMMENT", "body": "ok"},
+        )
+        self.assertEqual(rest_resp.status, 201)
+        self.assertEqual(rest_resp.quota_snapshot.resource, "core")
+        self.assertEqual(client.app_quota.remaining, 4499)
+        self.assertEqual(client.app_graphql_quota.remaining, 5)
+
+        # Subsequent non-checkpoint App GraphQL call is blocked by graphql reserve.
+        with self.assertRaises(GitHubHTTPRateLimitError) as gql_err:
+            client.execute(
+                "review_thread_mutation",
+                method="POST",
+                path="/graphql",
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                body={"query": "mutation {}"},
+                is_graphql=True,
+            )
+        self.assertEqual(gql_err.exception.remaining, 5)
+        self.assertEqual(gql_err.exception.resource, "graphql")
+        self.assertEqual(gql_err.exception.reset_epoch, 1764177100)
+        self.assertEqual(len(app_transport.calls), 3)
+
+        # Override still permits checkpoint/reserved GraphQL call.
+        override_resp = client.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+            allow_checkpoint_reserve_override=True,
+        )
+        self.assertEqual(override_resp.status, 200)
+        self.assertEqual(client.app_graphql_quota.remaining, 4)
+        self.assertEqual(client.total_requests_for(CredentialKind.APP_BROKER), 4)
+
+    def test_app_rest_core_low_does_not_block_graphql_order_2(self) -> None:
+        workflow_transport = RecordingTransport()
+        app_transport = RecordingTransport(
+            [
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "4500",
+                        "X-RateLimit-Reset": "1764177100",
+                        "X-RateLimit-Resource": "graphql",
+                    },
+                    {"data": {"resolveReviewThread": {"thread": {"id": "T1"}}}},
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "5",
+                        "X-RateLimit-Reset": "1764177000",
+                        "X-RateLimit-Resource": "core",
+                    },
+                    {"id": 1},
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "4499",
+                        "X-RateLimit-Reset": "1764177100",
+                        "X-RateLimit-Resource": "graphql",
+                    },
+                    {"data": {"resolveReviewThread": {"thread": {"id": "T2"}}}},
+                ),
+                (
+                    201,
+                    {
+                        "X-RateLimit-Limit": "5000",
+                        "X-RateLimit-Remaining": "4",
+                        "X-RateLimit-Reset": "1764177000",
+                        "X-RateLimit-Resource": "core",
+                    },
+                    {"id": 99},
+                ),
+            ]
+        )
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=workflow_transport,
+            broker_app_transport=app_transport,
+            app_checkpoint_reserve=20,
+        )
+
+        # Seed App GraphQL at 4500, then drop App REST core to 5 (<= reserve 20).
+        client.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+        )
+        client.execute(
+            "broker_app_identity",
+            method="GET",
+            path="/app",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        self.assertEqual(client.app_graphql_quota.remaining, 4500)
+        self.assertEqual(client.app_quota.remaining, 5)
+
+        # Subsequent non-checkpoint App GraphQL call succeeds with graphql bucket isolated.
+        gql_resp = client.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+        )
+        self.assertEqual(gql_resp.status, 200)
+        self.assertEqual(gql_resp.quota_snapshot.resource, "graphql")
+        self.assertEqual(client.app_graphql_quota.remaining, 4499)
+        self.assertEqual(client.app_quota.remaining, 5)
+
+        # Subsequent non-checkpoint App REST call is blocked by core reserve.
+        with self.assertRaises(GitHubHTTPRateLimitError) as core_err:
+            client.execute(
+                "pr_review_publish",
+                method="POST",
+                path="/repos/o/r/pulls/1/reviews",
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                body={"event": "COMMENT", "body": "blocked"},
+            )
+        self.assertEqual(core_err.exception.remaining, 5)
+        self.assertEqual(core_err.exception.resource, "core")
+        self.assertEqual(core_err.exception.reset_epoch, 1764177000)
+        self.assertEqual(len(app_transport.calls), 3)
+
+        # Checkpoint save with override=True still succeeds on core reserve.
+        saved = client.execute(
+            "completion_receipt_comment",
+            method="POST",
+            path="/repos/o/r/issues/1/comments",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"body": "receipt"},
+            allow_checkpoint_reserve_override=True,
+        )
+        self.assertEqual(saved.status, 201)
+        self.assertEqual(client.app_quota.remaining, 4)
+        self.assertEqual(client.total_requests_for(CredentialKind.APP_BROKER), 4)
+
+    def test_workflow_bucket_isolation_header_override_and_validation(self) -> None:
+        workflow_transport = RecordingTransport(
+            [
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "1000",
+                        "X-RateLimit-Remaining": "900",
+                        "X-RateLimit-Resource": "Core",
+                    },
+                    [],
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "1000",
+                        "X-RateLimit-Remaining": "12",
+                        "X-RateLimit-Resource": "GraphQL",
+                    },
+                    {
+                        "data": {
+                            "rateLimit": {"limit": 1000, "remaining": 12, "cost": 1}
+                        }
+                    },
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "1000",
+                        "X-RateLimit-Remaining": "899",
+                    },
+                    [],
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "1000",
+                        "X-RateLimit-Remaining": "11",
+                    },
+                    {
+                        "data": {
+                            "rateLimit": {"limit": 1000, "remaining": 11, "cost": 1}
+                        }
+                    },
+                ),
+                (
+                    200,
+                    {
+                        "X-RateLimit-Limit": "30",
+                        "X-RateLimit-Remaining": "29",
+                        "X-RateLimit-Resource": "Search",
+                    },
+                    {"items": []},
+                ),
+            ]
+        )
+        app_transport = RecordingTransport()
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=workflow_transport,
+            broker_app_transport=app_transport,
+        )
+
+        # Interleaved REST -> GraphQL -> REST -> GraphQL keeps core & graphql isolated.
+        client.execute(
+            "pr_issue_comments",
+            method="GET",
+            path="/repos/o/r/issues/1/comments",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        client.execute(
+            "graphql_review_threads",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "query {}"},
+            is_graphql=True,
+        )
+        self.assertEqual(client.workflow_quota.remaining, 900)
+        self.assertEqual(client.workflow_graphql_quota.remaining, 12)
+
+        client.execute(
+            "pr_issue_comments",
+            method="GET",
+            path="/repos/o/r/issues/1/comments?page=2",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        client.execute(
+            "graphql_review_threads",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "query {}"},
+            is_graphql=True,
+        )
+        self.assertEqual(client.workflow_quota.remaining, 899)
+        self.assertEqual(client.workflow_quota.observed_requests, 2)
+        self.assertEqual(client.workflow_graphql_quota.remaining, 11)
+        self.assertEqual(client.workflow_graphql_quota.observed_requests, 2)
+
+        # X-RateLimit-Resource header routes telemetry to normalized "search" bucket.
+        search_resp = client.execute(
+            "pr_metadata",
+            method="GET",
+            path="/repos/o/r/pulls/1",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            quota_bucket="CORE",
+        )
+        self.assertEqual(search_resp.quota_snapshot.resource, "search")
+        self.assertEqual(search_resp.quota_snapshot.remaining, 29)
+        self.assertEqual(
+            client.quota_snapshot(
+                CredentialKind.WORKFLOW_GITHUB_TOKEN, "search"
+            ).remaining,
+            29,
+        )
+        self.assertEqual(client.workflow_quota.remaining, 899)
+        self.assertEqual(client.workflow_graphql_quota.remaining, 11)
+        self.assertEqual(
+            client.total_requests_for(CredentialKind.WORKFLOW_GITHUB_TOKEN), 5
+        )
+        self.assertEqual(client.total_requests_for(CredentialKind.APP_BROKER), 0)
+
+        # Invalid quota_bucket values fail closed before touching transport.
+        for bad_bucket in ("", "   ", "core\ngraphql", "core\r", 123):
+            with self.subTest(bad_bucket=bad_bucket):
+                with self.assertRaises(ReviewInputError) as bucket_err:
+                    client.execute(
+                        "pr_metadata",
+                        method="GET",
+                        path="/repos/o/r/pulls/1",
+                        event=GitHubEventKind.PULL_REQUEST,
+                        visibility=RepositoryVisibility.PUBLIC,
+                        granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                        quota_bucket=bad_bucket,  # type: ignore[arg-type]
+                    )
+                self.assertEqual(
+                    bucket_err.exception.diagnostic, "v6_invalid_quota_bucket"
+                )
+        self.assertEqual(len(workflow_transport.calls), 5)
 
 
 class ThrottleDecisionTests(unittest.TestCase):

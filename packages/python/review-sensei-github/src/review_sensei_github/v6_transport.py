@@ -132,6 +132,30 @@ def _parse_non_empty_header(headers: Any, name: str) -> str | None:
     return stripped or None
 
 
+def _normalize_quota_bucket(bucket: str) -> str:
+    """Validate and normalize a GitHub rate-limit quota bucket name."""
+
+    if not isinstance(bucket, str) or "\n" in bucket or "\r" in bucket:
+        raise ReviewInputError(
+            f"invalid quota_bucket: {bucket!r}",
+            diagnostic="v6_invalid_quota_bucket",
+        )
+    normalized = bucket.strip().lower()
+    if not normalized:
+        raise ReviewInputError(
+            f"invalid quota_bucket: {bucket!r}",
+            diagnostic="v6_invalid_quota_bucket",
+        )
+    return normalized
+
+
+def _parse_response_quota_bucket(headers: Any, *, default_bucket: str) -> str:
+    raw_resource = _parse_non_empty_header(headers, "X-RateLimit-Resource")
+    if raw_resource is None or "\n" in raw_resource or "\r" in raw_resource:
+        return default_bucket
+    return _normalize_quota_bucket(raw_resource)
+
+
 def _parse_retry_after(
     headers: Any, *, now_epoch: float | None = None
 ) -> tuple[float | None, bool]:
@@ -396,6 +420,7 @@ class CredentialQuotaTracker:
         *,
         is_ghec: bool = False,
         default_limit: int | None = None,
+        resource: str | None = None,
     ) -> None:
         if not isinstance(credential_kind, CredentialKind):
             raise ValueError(f"invalid credential_kind: {credential_kind!r}")
@@ -406,13 +431,16 @@ class CredentialQuotaTracker:
                 default_limit, name="default_limit", allow_zero=False
             )
         )
+        normalized_resource = (
+            None if resource is None else _normalize_quota_bucket(resource)
+        )
         self.credential_kind = credential_kind
         self.is_ghec = bool(is_ghec)
         self.default_limit = effective_default
         self._limit = effective_default
         self._remaining: int | None = None
         self._reset_epoch: int | None = None
-        self._resource: str | None = None
+        self._resource: str | None = normalized_resource
         self._retry_after_seconds: float | None = None
         self._last_graphql_cost: int | None = None
         self._observed_requests = 0
@@ -496,8 +524,12 @@ class CredentialQuotaTracker:
             self._reset_epoch = header_reset
 
         header_resource = _parse_non_empty_header(headers, "X-RateLimit-Resource")
-        if header_resource is not None:
-            self._resource = header_resource
+        if (
+            header_resource is not None
+            and "\n" not in header_resource
+            and "\r" not in header_resource
+        ):
+            self._resource = _normalize_quota_bucket(header_resource)
 
         retry_after_seconds, has_403_retry_after = _parse_retry_after(
             headers, now_epoch=now_epoch
@@ -779,23 +811,115 @@ class DualCredentialGitHubClient:
             raise ValueError("workflow_token_transport must provide request()")
         if not callable(getattr(broker_app_transport, "request", None)):
             raise ValueError("broker_app_transport must provide request()")
-        if workflow_quota is None:
-            workflow_quota = CredentialQuotaTracker(
-                CredentialKind.WORKFLOW_GITHUB_TOKEN, is_ghec=is_ghec
-            )
-        elif workflow_quota.credential_kind != CredentialKind.WORKFLOW_GITHUB_TOKEN:
+        if workflow_quota is not None and (
+            not isinstance(workflow_quota, CredentialQuotaTracker)
+            or workflow_quota.credential_kind != CredentialKind.WORKFLOW_GITHUB_TOKEN
+        ):
             raise ValueError("workflow_quota must track WORKFLOW_GITHUB_TOKEN")
-        if app_quota is None:
-            app_quota = CredentialQuotaTracker(CredentialKind.APP_BROKER)
-        elif app_quota.credential_kind != CredentialKind.APP_BROKER:
+        if app_quota is not None and (
+            not isinstance(app_quota, CredentialQuotaTracker)
+            or app_quota.credential_kind != CredentialKind.APP_BROKER
+        ):
             raise ValueError("app_quota must track APP_BROKER")
 
         self.workflow_token_transport = workflow_token_transport
         self.broker_app_transport = broker_app_transport
-        self.workflow_quota = workflow_quota
-        self.app_quota = app_quota
+        self._is_ghec = bool(is_ghec)
+        self._workflow_is_ghec = self._is_ghec or (
+            workflow_quota is not None and workflow_quota.is_ghec
+        )
+        self._app_is_ghec = self._is_ghec or (
+            app_quota is not None and app_quota.is_ghec
+        )
+        self._quota_trackers: dict[
+            tuple[CredentialKind, str], CredentialQuotaTracker
+        ] = {}
+        self._quota_trackers[(CredentialKind.WORKFLOW_GITHUB_TOKEN, "core")] = (
+            workflow_quota
+            if workflow_quota is not None
+            else CredentialQuotaTracker(
+                CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                is_ghec=self._workflow_is_ghec,
+                resource="core",
+            )
+        )
+        self._quota_trackers[(CredentialKind.APP_BROKER, "core")] = (
+            app_quota
+            if app_quota is not None
+            else CredentialQuotaTracker(
+                CredentialKind.APP_BROKER,
+                is_ghec=self._app_is_ghec,
+                resource="core",
+            )
+        )
         self.app_checkpoint_reserve = _validate_non_negative_int(
             app_checkpoint_reserve, name="app_checkpoint_reserve"
+        )
+
+    @property
+    def workflow_quota(self) -> CredentialQuotaTracker:
+        """Return the workflow ``GITHUB_TOKEN`` ``core`` quota tracker."""
+
+        return self.quota_for(CredentialKind.WORKFLOW_GITHUB_TOKEN, "core")
+
+    @property
+    def app_quota(self) -> CredentialQuotaTracker:
+        """Return the App broker ``core`` quota tracker."""
+
+        return self.quota_for(CredentialKind.APP_BROKER, "core")
+
+    @property
+    def workflow_graphql_quota(self) -> CredentialQuotaTracker:
+        """Return the workflow ``GITHUB_TOKEN`` ``graphql`` quota tracker."""
+
+        return self.quota_for(CredentialKind.WORKFLOW_GITHUB_TOKEN, "graphql")
+
+    @property
+    def app_graphql_quota(self) -> CredentialQuotaTracker:
+        """Return the App broker ``graphql`` quota tracker."""
+
+        return self.quota_for(CredentialKind.APP_BROKER, "graphql")
+
+    def quota_for(
+        self, credential_kind: CredentialKind, bucket: str = "core"
+    ) -> CredentialQuotaTracker:
+        """Return or create the quota tracker for ``(credential_kind, bucket)``."""
+
+        if not isinstance(credential_kind, CredentialKind):
+            raise ValueError(f"invalid credential_kind: {credential_kind!r}")
+        normalized_bucket = _normalize_quota_bucket(bucket)
+        key = (credential_kind, normalized_bucket)
+        tracker = self._quota_trackers.get(key)
+        if tracker is None:
+            is_ghec = (
+                self._workflow_is_ghec
+                if credential_kind == CredentialKind.WORKFLOW_GITHUB_TOKEN
+                else self._app_is_ghec
+            )
+            tracker = CredentialQuotaTracker(
+                credential_kind,
+                is_ghec=is_ghec,
+                resource=normalized_bucket,
+            )
+            self._quota_trackers[key] = tracker
+        return tracker
+
+    def quota_snapshot(
+        self, credential_kind: CredentialKind, bucket: str = "core"
+    ) -> RateLimitSnapshot:
+        """Return an immutable quota snapshot for ``(credential_kind, bucket)``."""
+
+        return self.quota_for(credential_kind, bucket).snapshot()
+
+    def total_requests_for(self, credential_kind: CredentialKind) -> int:
+        """Sum observed requests across all quota buckets for ``credential_kind``."""
+
+        if not isinstance(credential_kind, CredentialKind):
+            raise ValueError(f"invalid credential_kind: {credential_kind!r}")
+        return sum(
+            tracker.observed_requests
+            for (kind, _), tracker in self._quota_trackers.items()
+            if kind == credential_kind
         )
 
     def execute(
@@ -811,6 +935,7 @@ class DualCredentialGitHubClient:
         headers: Mapping[str, str] | None = None,
         body: dict[str, Any] | None = None,
         is_graphql: bool = False,
+        quota_bucket: str | None = None,
         timeout_seconds: float | None = None,
         allow_checkpoint_reserve_override: bool = False,
         now_epoch: float | None = None,
@@ -840,31 +965,38 @@ class DualCredentialGitHubClient:
                 diagnostic="v6_invalid_path",
             )
 
+        request_bucket = (
+            _normalize_quota_bucket(quota_bucket)
+            if quota_bucket is not None
+            else ("graphql" if is_graphql else "core")
+        )
+
         if (
             authorized_rule.credential_kind == CredentialKind.APP_BROKER
             and not allow_checkpoint_reserve_override
-            and self.app_quota.remaining is not None
-            and self.app_quota.remaining <= self.app_checkpoint_reserve
         ):
-            raise GitHubHTTPRateLimitError(
-                f"app_broker remaining quota ({self.app_quota.remaining}) is within "
-                f"checkpoint reserve ({self.app_checkpoint_reserve}); refusing "
-                f"non-checkpoint operation {endpoint_id!r}",
-                credential_kind=CredentialKind.APP_BROKER.value,
-                rate_limit_kind="primary",
-                remaining=self.app_quota.remaining,
-                reset_epoch=self.app_quota.reset_epoch,
-                resource=self.app_quota.resource or "core",
-                http_status=None,
-                endpoint_id=endpoint_id,
-            )
+            precheck_tracker = self.quota_for(CredentialKind.APP_BROKER, request_bucket)
+            if (
+                precheck_tracker.remaining is not None
+                and precheck_tracker.remaining <= self.app_checkpoint_reserve
+            ):
+                raise GitHubHTTPRateLimitError(
+                    f"app_broker remaining quota ({precheck_tracker.remaining}) is "
+                    f"within checkpoint reserve ({self.app_checkpoint_reserve}); "
+                    f"refusing non-checkpoint operation {endpoint_id!r}",
+                    credential_kind=CredentialKind.APP_BROKER.value,
+                    rate_limit_kind="primary",
+                    remaining=precheck_tracker.remaining,
+                    reset_epoch=precheck_tracker.reset_epoch,
+                    resource=precheck_tracker.resource or request_bucket,
+                    http_status=None,
+                    endpoint_id=endpoint_id,
+                )
 
         if authorized_rule.credential_kind == CredentialKind.WORKFLOW_GITHUB_TOKEN:
             transport = self.workflow_token_transport
-            tracker = self.workflow_quota
         else:
             transport = self.broker_app_transport
-            tracker = self.app_quota
 
         status, response_headers, response_body = transport.request(
             method,
@@ -873,6 +1005,10 @@ class DualCredentialGitHubClient:
             body=body,
             timeout_seconds=timeout_seconds,
         )
+        response_bucket = _parse_response_quota_bucket(
+            response_headers, default_bucket=request_bucket
+        )
+        tracker = self.quota_for(authorized_rule.credential_kind, response_bucket)
         snapshot = tracker.update_from_response(
             response_headers,
             response_body,
