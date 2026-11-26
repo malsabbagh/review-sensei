@@ -36,6 +36,7 @@ from tests.test_action_run import CommandEntryFixture
 from tests.test_api_work_persistence import HEAD, IDENTITY
 from tests.test_publication_failure_recovery import (
     HEAD_2,
+    HEAD_3,
     PublicationFailureRecoveryFixture,
 )
 
@@ -164,6 +165,72 @@ class Gap2DiagnosticsAndRecoveryTests(unittest.TestCase):
             calls_before = fixture.provider_calls
             self.assertEqual(fixture.invoke(), 1)
             self.assertEqual(fixture.provider_calls, calls_before)
+
+    def test_pre_write_recovery_allows_untouched_earlier_inline_comment_with_advanced_commit_id(
+        self,
+    ) -> None:
+        def setup_with_advanced_commit_id(
+            mode: str, directory: str
+        ) -> PublicationFailureRecoveryFixture:
+            fixture = PublicationFailureRecoveryFixture(directory, limit=1024)
+            fixture.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "Validate input bounds on initial review.",
+                    "severity": "high",
+                    "blocking": True,
+                    "needs_human": False,
+                }
+            ]
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            self.assertEqual(len(fixture.inline), 1)
+            self.assertEqual(fixture.inline[0]["commit_id"], HEAD)
+            fixture.inline[0].setdefault("original_commit_id", HEAD)
+
+            fixture.next_review_run(head_sha=HEAD_2)
+            with patch.object(
+                ReviewPublisher,
+                "publish",
+                side_effect=GitHubPublicationError("synthetic pre-write failure"),
+            ):
+                self.assertEqual(fixture.invoke(), 1)
+            settled = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(settled.transaction.phase, "publication_failed")
+            self.assertEqual(settled.transaction.head_sha, HEAD_2)
+
+            if mode == "untouched_advanced":
+                fixture.inline[0]["commit_id"] = HEAD_2
+            elif mode == "edited_body":
+                fixture.inline[0]["commit_id"] = HEAD_2
+                fixture.inline[0]["body"] = str(fixture.inline[0]["body"]) + "\nedited"
+            elif mode == "created_on_failed_head":
+                fixture.inline[0]["original_commit_id"] = HEAD_2
+                fixture.inline[0]["commit_id"] = HEAD_2
+            else:
+                raise AssertionError(mode)
+
+            fixture.next_review_run(head_sha=HEAD_3)
+            return fixture
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = setup_with_advanced_commit_id("untouched_advanced", directory)
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            recovered = parse_session_comment(
+                fixture.comment["body"], identity=IDENTITY
+            )
+            self.assertEqual(recovered.transaction.phase, "publication_succeeded")
+            self.assertEqual(recovered.transaction.head_sha, HEAD_3)
+
+        for negative_mode in ("edited_body", "created_on_failed_head"):
+            with (
+                self.subTest(mode=negative_mode),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = setup_with_advanced_commit_id(negative_mode, directory)
+                self.assertEqual(fixture.invoke(), 1)
+                self.assertIn("native effect scope is unconfirmed", fixture.error)
 
 
 class Gap3EvaluationFailedTests(unittest.TestCase):

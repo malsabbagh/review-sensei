@@ -819,13 +819,14 @@ class _EarlierSettledEffects:
         digest = hashlib.sha256(raw).hexdigest()
         if inline:
             parent = row.get("pull_request_review_id")
-            head = row.get("commit_id")
+            native_head = row.get("original_commit_id")
+            current_head = row.get("commit_id")
             return (
                 _positive_id(parent)
-                and isinstance(head, str)
-                and head == row.get("original_commit_id")
+                and isinstance(native_head, str)
+                and isinstance(current_head, str)
                 and row.get("in_reply_to_id") is None
-                and (row["id"], parent, head, digest) in self.inline
+                and (row["id"], parent, native_head, digest) in self.inline
             )
         state = row.get("state")
         return (
@@ -915,6 +916,149 @@ def _same_lifecycle_envelope(
         item.pop("schema_version", None)
         item.pop("accepted_semantic_history", None)
     return left == right
+
+
+def _read_settled_lifecycle_journal(
+    ledger: Any,
+    identity: SessionIdentity,
+    current: SessionRecord,
+    source_record: SessionRecord,
+    binding: Mapping[str, Any],
+    budget: EvidenceReadBudget,
+    *,
+    decode_selected: Callable[[Any, SessionRecord], Any],
+    unpack_journal: Callable[[Any], Any],
+    validate_journal: Callable[[Any], dict[str, Any]],
+    is_dictionary: Callable[[Any], bool],
+    dict_manifest_fn: Callable[[Any, Mapping[str, Any]], Any],
+    unpack_dictionary: Callable[..., dict[str, Any]],
+    read_inline_evidence: Callable[..., Any],
+) -> dict[str, Any] | None:
+    """Decode and validate a settled lifecycle journal within ``budget``."""
+    stored = decode_selected(ledger, source_record)
+    if stored is None:
+        return None
+    if is_dictionary(stored):
+        dict_manifest = stored.get("dictionary_manifest")
+        base_binding = dict_manifest_fn(dict_manifest, binding)
+        if not isinstance(dict_manifest, dict):
+            raise ReviewInputError("finding lifecycle dictionary manifest is invalid")
+        base_parts = (
+            0
+            if dict_manifest.get("encoding") == "inline-json-v1"
+            else len(dict_manifest.get("parts", ()))
+            if isinstance(dict_manifest.get("parts"), list)
+            else 0
+        )
+        _protect_tail(budget, base_parts, record=current)
+        base = (
+            read_inline_evidence(dict_manifest, expected_binding=base_binding)
+            if dict_manifest.get("encoding") == "inline-json-v1"
+            else ledger.read_evidence(
+                identity, dict_manifest, expected_binding=base_binding
+            )
+        )
+        return unpack_dictionary(stored, base=base, current_binding=binding)
+    return validate_journal(unpack_journal(stored))
+
+
+def _settled_earlier_head_inline_receipts(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    current: SessionRecord,
+    candidate: SessionRecord,
+    producer_id: int,
+    excluded_head_sha: str,
+    budget: EvidenceReadBudget,
+) -> frozenset[tuple[int, int, str, str]]:
+    """Return confirmed native inline receipts from a settled earlier-head ancestor."""
+    tx = candidate.transaction
+    reference = candidate.finding_lifecycle
+    if (
+        tx is None
+        or not isinstance(reference, dict)
+        or candidate.reservation_id is not None
+    ):
+        return frozenset()
+    manifest = reference.get("manifest")
+    binding = manifest.get("binding") if isinstance(manifest, dict) else None
+    parts = manifest.get("parts", ()) if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(binding, dict)
+        or not isinstance(parts, (list, tuple))
+        or tx.phase != "publication_succeeded"
+        or tx.head_sha == excluded_head_sha
+        or reference.get("operation_id") != tx.transaction_id
+        or not tx.generation <= binding.get("generation", -1) <= candidate.generation
+        or (
+            binding.get("base_sha"),
+            binding.get("head_sha"),
+            binding.get("policy_digest"),
+            binding.get("configuration_digest"),
+        )
+        != (tx.base_sha, tx.head_sha, tx.policy_digest, tx.configuration_digest)
+        or candidate.api_run_accounting is None
+    ):
+        return frozenset()
+    candidate_caller = ApiRunAccounting.from_document(candidate.api_run_accounting)
+    terminal_review = (
+        candidate_caller.action is None
+        and candidate_caller.terminal_transaction == tx.transaction_id
+    )
+    terminal_command = (
+        candidate_caller.action is not None
+        and candidate_caller.action.get("phase") == "terminal"
+        and candidate_caller.terminal_transaction is None
+    )
+    if not terminal_review and not terminal_command:
+        return frozenset()
+
+    from review_sensei.bounded_evidence import read_inline_evidence
+    from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
+
+    from .finding_lifecycle import _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import _manifest as _dict_manifest
+    from .finding_lifecycle_dictionary import is_dictionary
+    from .finding_lifecycle_dictionary import unpack as _unpack_dictionary
+
+    _protect_tail(budget, len(parts), record=current)
+    try:
+        journal = _read_settled_lifecycle_journal(
+            ledger,
+            identity,
+            current,
+            candidate,
+            binding,
+            budget,
+            decode_selected=_decode_selected_lifecycle,
+            unpack_journal=_unpack_journal,
+            validate_journal=_validate,
+            is_dictionary=is_dictionary,
+            dict_manifest_fn=_dict_manifest,
+            unpack_dictionary=_unpack_dictionary,
+            read_inline_evidence=read_inline_evidence,
+        )
+    except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        raise _hold(
+            "earlier native effect evidence is unavailable", record=current
+        ) from None
+    if journal is None or journal["unknown_trust_effect"]:
+        return frozenset()
+    return frozenset(
+        (r["comment_id"], r["review_id"], r["native_head_sha"], r["body_sha256"])
+        for r in journal["native_receipts"]
+        if (
+            _positive_id(r.get("comment_id"))
+            and _positive_id(r.get("review_id"))
+            and r.get("producer_id") == producer_id
+            and (r.get("repository_id"), r.get("pull_request"))
+            == (identity.repository_id, identity.pull_request)
+            and isinstance(r.get("native_head_sha"), str)
+            and r["native_head_sha"] != excluded_head_sha
+            and r.get("head_sha") != excluded_head_sha
+        )
+    )
 
 
 def _earlier_settled_effects(
@@ -1053,34 +1197,24 @@ def _earlier_settled_effects(
             != (tx.base_sha, tx.head_sha, tx.policy_digest, tx.configuration_digest)
         ):
             return _NO_EARLIER_EFFECTS
-        stored = _decode_selected_lifecycle(ledger, source_record)
-        if stored is None:
+        decoded = _read_settled_lifecycle_journal(
+            ledger,
+            identity,
+            current,
+            source_record,
+            binding,
+            budget,
+            decode_selected=_decode_selected_lifecycle,
+            unpack_journal=_unpack_journal,
+            validate_journal=_validate,
+            is_dictionary=is_dictionary,
+            dict_manifest_fn=_dict_manifest,
+            unpack_dictionary=_unpack_dictionary,
+            read_inline_evidence=read_inline_evidence,
+        )
+        if decoded is None:
             return _NO_EARLIER_EFFECTS
-        if is_dictionary(stored):
-            dict_manifest = stored.get("dictionary_manifest")
-            base_binding = _dict_manifest(dict_manifest, binding)
-            if not isinstance(dict_manifest, dict):
-                raise ReviewInputError(
-                    "finding lifecycle dictionary manifest is invalid"
-                )
-            base_parts = (
-                0
-                if dict_manifest.get("encoding") == "inline-json-v1"
-                else len(dict_manifest.get("parts", ()))
-                if isinstance(dict_manifest.get("parts"), list)
-                else 0
-            )
-            _protect_tail(budget, base_parts, record=current)
-            base = (
-                read_inline_evidence(dict_manifest, expected_binding=base_binding)
-                if dict_manifest.get("encoding") == "inline-json-v1"
-                else ledger.read_evidence(
-                    identity, dict_manifest, expected_binding=base_binding
-                )
-            )
-            journal = _unpack_dictionary(stored, base=base, current_binding=binding)
-        else:
-            journal = _validate(_unpack_journal(stored))
+        journal = decoded
     except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
         raise _hold(
             "earlier native effect evidence is unavailable", record=current
@@ -1162,11 +1296,14 @@ def _earlier_settled_effects(
             ):
                 check_runs.add(response["id"])
         elif method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+            suffix = eff_path[len(check_post_path) + 1 :]
             precond = effect.get("check_update_precondition")
             if (
-                isinstance(precond, dict)
+                suffix.isdigit()
+                and isinstance(precond, dict)
                 and precond.get("head_sha") == head_sha
                 and _positive_id(precond.get("check_run_id"))
+                and int(suffix) == precond.get("check_run_id")
                 and (
                     not app_slug
                     or str(precond.get("app_slug", "")).casefold() == app_slug
@@ -1615,6 +1752,18 @@ def admit_publication_failure_recovery(
 
     earlier: _EarlierSettledEffects | None = None
     earlier_review_ids: set[int] = set()
+    earlier_head_reviews: dict[int, str] = {}
+    earlier_head_inline_receipts: set[tuple[int, int, str, str]] = set()
+    earlier_head_cursor: Any = (
+        ApiRunAccounting.from_document(prior_record.api_run_accounting).previous_record
+        if prior_record is not None and prior_record.api_run_accounting is not None
+        else None
+    )
+    earlier_head_child_gen: int = (
+        prior_record.generation if prior_record is not None else record.generation
+    )
+    earlier_head_loaded_prior = False
+    earlier_head_hops_used = 0
 
     def ensure_earlier() -> _EarlierSettledEffects:
         nonlocal earlier
@@ -1631,6 +1780,112 @@ def admit_publication_failure_recovery(
                 prior_archive_ref=prior_archive_ref,
             )
         return earlier
+
+    def explains_untouched_earlier_head_inline(row: dict[str, Any]) -> bool:
+        nonlocal \
+            earlier_head_cursor, \
+            earlier_head_child_gen, \
+            earlier_head_loaded_prior, \
+            earlier_head_hops_used
+        # GitHub auto-advances `commit_id` on untouched inline comments across pushes
+        # when the commented hunk stays unchanged. Accept only if immutable review +
+        # marker + original_commit_id + archived native_receipts all match an earlier head.
+        native_head = row.get("original_commit_id")
+        body = row.get("body")
+        parent = row.get("pull_request_review_id")
+        if (
+            row.get("commit_id") != head_sha
+            or not isinstance(native_head, str)
+            or native_head == head_sha
+            or row.get("in_reply_to_id") is not None
+            or not isinstance(body, str)
+            or type(parent) is not int
+            or not _positive_id(parent)
+            or earlier_head_reviews.get(parent) != native_head
+        ):
+            return False
+        if (
+            classify_abort_inline_effect(
+                author=row.get("user"),
+                native_head=native_head,
+                body=body,
+                identity=identity,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                app_user_id=producer_id,
+            )
+            is not False
+        ):
+            return False
+        try:
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            return False
+        key = (row["id"], parent, native_head, digest)
+        if key in earlier_head_inline_receipts:
+            return True
+        if not earlier_head_loaded_prior:
+            earlier_head_loaded_prior = True
+            if prior_record is not None:
+                earlier_head_inline_receipts.update(
+                    _settled_earlier_head_inline_receipts(
+                        ledger,
+                        identity,
+                        record,
+                        prior_record,
+                        producer_id,
+                        head_sha,
+                        budget,
+                    )
+                )
+                if key in earlier_head_inline_receipts:
+                    return True
+        while (
+            isinstance(earlier_head_cursor, dict)
+            and earlier_head_hops_used < _MAX_PRIOR_ANCESTOR_HOPS
+        ):
+            earlier_head_hops_used += 1
+            _protect_tail(
+                budget, _archive_part_count(earlier_head_cursor), record=record
+            )
+            try:
+                ancestor = read_previous_run(ledger, identity, earlier_head_cursor)
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+                raise _hold(
+                    "prior settled session root is unavailable", record=record
+                ) from None
+            if (
+                ancestor.identity() != identity
+                or ancestor.record_sha256 != earlier_head_cursor.get("root_sha256")
+                or ancestor.generation >= earlier_head_child_gen
+                or ancestor.api_run_accounting is None
+            ):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            ancestor_acc = ApiRunAccounting.from_document(ancestor.api_run_accounting)
+            if ancestor_acc.identity.run_id != earlier_head_cursor.get("run_id"):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            earlier_head_child_gen = ancestor.generation
+            earlier_head_cursor = ancestor_acc.previous_record
+            earlier_head_inline_receipts.update(
+                _settled_earlier_head_inline_receipts(
+                    ledger,
+                    identity,
+                    record,
+                    ancestor,
+                    producer_id,
+                    head_sha,
+                    budget,
+                )
+            )
+            if key in earlier_head_inline_receipts:
+                return True
+        return False
 
     def inspect_pr_surface(
         resource: str,
@@ -1668,7 +1923,24 @@ def admit_publication_failure_recovery(
                 # Classifiers return False for unrelated human/foreign/different-head rows
                 # and None exclusively for unreadable or contradictory Bot-owned rows.
                 if effect is None:
+                    if inline and explains_untouched_earlier_head_inline(row):
+                        continue
                     raise _hold("native effect scope is unconfirmed", record=record)
+                if (
+                    not inline
+                    and effect is False
+                    and isinstance(row.get("commit_id"), str)
+                    and row["commit_id"] != head_sha
+                    and classify_abort_review_effect(
+                        row,
+                        identity=identity,
+                        head_sha=row["commit_id"],
+                        app_slug=app_slug,
+                        app_user_id=producer_id,
+                    )
+                    is True
+                ):
+                    earlier_head_reviews[row["id"]] = row["commit_id"]
                 if effect is True:
                     ancestor = ensure_earlier()
                     if inline:
