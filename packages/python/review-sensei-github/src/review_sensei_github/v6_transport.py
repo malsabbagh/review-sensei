@@ -22,7 +22,11 @@ from typing import Any, Protocol
 
 from review_sensei.errors import ReviewInputError
 
-from .errors import GitHubHTTPPermissionError, GitHubHTTPRateLimitError
+from .errors import (
+    GitHubHTTPError,
+    GitHubHTTPPermissionError,
+    GitHubHTTPRateLimitError,
+)
 from .http import _header_value
 from .v6_credential_matrix import (
     CredentialKind,
@@ -56,6 +60,14 @@ _GRAPHQL_RATE_LIMIT_PHRASES = (
     "api rate limit exceeded",
     "secondary rate limit",
     "rate limit",
+)
+_GRAPHQL_PERMISSION_ERROR_TYPES = frozenset({"FORBIDDEN", "UNAUTHORIZED"})
+_GRAPHQL_PERMISSION_PHRASES = (
+    "insufficient permission",
+    "insufficient permissions",
+    "resource not accessible",
+    "forbidden",
+    "must have admin rights",
 )
 _LINK_SEGMENT_RE = re.compile(r"<([^>\s]+)>\s*;([^<]+)")
 _LINK_REL_RE = re.compile(r'(?:^|;)\s*rel\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s;]+))')
@@ -245,6 +257,80 @@ def _extract_graphql_rate_limit(
     return limit, remaining, reset_epoch, cost
 
 
+def _classify_rest_rate_limit_signal(
+    status: int | None,
+    *,
+    remaining: int | None,
+    has_retry_after_signal: bool,
+    lower_message: str,
+) -> str | None:
+    """Return ``'secondary'`` or ``'primary'`` when REST 403/429 signals throttling."""
+
+    if status not in (403, 429):
+        return None
+    has_secondary_message = any(
+        phrase in lower_message for phrase in _SECONDARY_RATE_LIMIT_PHRASES
+    )
+    if has_secondary_message or has_retry_after_signal:
+        return "secondary"
+
+    has_zero_remaining = remaining == 0
+    has_positive_remaining = remaining is not None and remaining > 0
+    has_primary_message = any(
+        phrase in lower_message for phrase in _PRIMARY_RATE_LIMIT_PHRASES
+    )
+    if has_zero_remaining or (not has_positive_remaining and has_primary_message):
+        return "primary"
+
+    if status == 429:
+        return "secondary"
+    return None
+
+
+def _raise_graphql_non_rate_limit_error(
+    errors: Any,
+    *,
+    credential_kind: CredentialKind,
+    endpoint_id: str,
+) -> None:
+    """Raise a typed permission or HTTP error when GraphQL HTTP 200 has ``errors``."""
+
+    if isinstance(errors, list):
+        for entry in errors:
+            if not isinstance(entry, Mapping):
+                continue
+            err_type = entry.get("type")
+            if (
+                isinstance(err_type, str)
+                and err_type.strip().upper() in _GRAPHQL_PERMISSION_ERROR_TYPES
+            ):
+                raise GitHubHTTPPermissionError(
+                    f"GitHub GraphQL permission denied for {endpoint_id!r} using "
+                    f"{credential_kind.value}",
+                    http_status=200,
+                    failed_lookup=endpoint_id,
+                    endpoint_id=endpoint_id,
+                    credential_kind=credential_kind.value,
+                )
+            err_msg = entry.get("message")
+            if isinstance(err_msg, str):
+                lower_msg = err_msg.lower()
+                if any(phrase in lower_msg for phrase in _GRAPHQL_PERMISSION_PHRASES):
+                    raise GitHubHTTPPermissionError(
+                        f"GitHub GraphQL permission denied for {endpoint_id!r} using "
+                        f"{credential_kind.value}",
+                        http_status=200,
+                        failed_lookup=endpoint_id,
+                        endpoint_id=endpoint_id,
+                        credential_kind=credential_kind.value,
+                    )
+    raise GitHubHTTPError(
+        f"GitHub GraphQL query returned errors for {endpoint_id!r}",
+        http_status=200,
+        failed_lookup=endpoint_id,
+    )
+
+
 def _detect_graphql_rate_limit(
     parsed_body: Any,
 ) -> tuple[bool, int | None, int | None, str]:
@@ -390,6 +476,9 @@ class CredentialQuotaTracker:
     ) -> RateLimitSnapshot:
         """Update quota telemetry from response headers and GraphQL ``rateLimit``."""
 
+        if status is not None and (type(status) is not int or not 100 <= status <= 599):
+            raise ValueError(f"invalid status: {status!r}")
+
         self._observed_requests += 1
 
         header_limit = _parse_non_negative_int_header(headers, "X-RateLimit-Limit")
@@ -410,12 +499,12 @@ class CredentialQuotaTracker:
         if header_resource is not None:
             self._resource = header_resource
 
-        retry_after_seconds, has_retry_after_signal = _parse_retry_after(
+        retry_after_seconds, has_403_retry_after = _parse_retry_after(
             headers, now_epoch=now_epoch
         )
         self._retry_after_seconds = retry_after_seconds
 
-        parsed_body, _ = _normalize_body(body)
+        parsed_body, lower_message = _normalize_body(body)
         graphql_rate_limited = False
         if is_graphql:
             gql_limit, gql_remaining, gql_reset, gql_cost = _extract_graphql_rate_limit(
@@ -437,11 +526,19 @@ class CredentialQuotaTracker:
                 self._resource = "graphql"
             graphql_rate_limited, _, _, _ = _detect_graphql_rate_limit(parsed_body)
 
+        has_retry_after_signal = (
+            has_403_retry_after if status == 403 else (retry_after_seconds is not None)
+        )
+        rest_rate_limit_kind = _classify_rest_rate_limit_signal(
+            status,
+            remaining=header_remaining,
+            has_retry_after_signal=has_retry_after_signal,
+            lower_message=lower_message,
+        )
         self._rate_limited = (
             self._remaining == 0
             or graphql_rate_limited
-            or (status == 429)
-            or (status == 403 and has_retry_after_signal)
+            or (rest_rate_limit_kind is not None)
         )
         return self.snapshot()
 
@@ -456,14 +553,16 @@ def classify_github_response(
     is_graphql: bool = False,
     now_epoch: float | None = None,
 ) -> None:
-    """Classify rate-limit and permission failures from a GitHub HTTP response.
+    """Classify rate-limit, GraphQL, and permission errors from a GitHub response.
 
     Raises :class:`GitHubHTTPRateLimitError` for REST primary/secondary rate limits
-    and GraphQL HTTP ``200`` rate-limit responses, and raises
-    :class:`GitHubHTTPPermissionError` for HTTP ``403`` responses lacking any
-    rate-limit indicator.
+    and GraphQL HTTP ``200`` rate-limit responses, :class:`GitHubHTTPPermissionError`
+    for HTTP ``403`` (or GraphQL ``FORBIDDEN``/``UNAUTHORIZED``) permission denials,
+    and :class:`GitHubHTTPError` for non-rate-limit GraphQL HTTP ``200`` errors.
     """
 
+    if type(status) is not int or not 100 <= status <= 599:
+        raise ValueError(f"invalid status: {status!r}")
     if not isinstance(credential_kind, CredentialKind):
         raise ValueError(f"invalid credential_kind: {credential_kind!r}")
     if not isinstance(endpoint_id, str) or not endpoint_id.strip():
@@ -498,61 +597,39 @@ def classify_github_response(
                 http_status=200,
                 endpoint_id=endpoint_id,
             )
+        if isinstance(parsed_body, Mapping):
+            errors = parsed_body.get("errors")
+            if errors:
+                _raise_graphql_non_rate_limit_error(
+                    errors,
+                    credential_kind=credential_kind,
+                    endpoint_id=endpoint_id,
+                )
         return
 
     if status not in (403, 429):
         return
 
-    has_secondary_message = any(
-        phrase in lower_message for phrase in _SECONDARY_RATE_LIMIT_PHRASES
-    )
     has_retry_after_signal = (
         has_403_retry_after if status == 403 else (retry_after_seconds is not None)
     )
-    if has_secondary_message or has_retry_after_signal:
-        raise GitHubHTTPRateLimitError(
-            f"GitHub secondary rate limit triggered (HTTP {status}) for "
-            f"{endpoint_id!r} using {credential_kind.value}",
-            credential_kind=credential_kind.value,
-            rate_limit_kind="secondary",
-            retry_after_seconds=retry_after_seconds,
-            reset_epoch=reset_epoch,
-            remaining=remaining,
-            resource=resource,
-            http_status=status,
-            endpoint_id=endpoint_id,
-        )
-
-    has_zero_remaining = remaining == 0
-    has_positive_remaining = remaining is not None and remaining > 0
-    has_primary_message = (not has_secondary_message) and any(
-        phrase in lower_message for phrase in _PRIMARY_RATE_LIMIT_PHRASES
+    rate_limit_kind = _classify_rest_rate_limit_signal(
+        status,
+        remaining=remaining,
+        has_retry_after_signal=has_retry_after_signal,
+        lower_message=lower_message,
     )
-    if has_zero_remaining or (not has_positive_remaining and has_primary_message):
+    if rate_limit_kind is not None:
         raise GitHubHTTPRateLimitError(
-            f"GitHub primary rate limit exhausted (HTTP {status}) for "
+            f"GitHub {rate_limit_kind} rate limit triggered (HTTP {status}) for "
             f"{endpoint_id!r} using {credential_kind.value}",
             credential_kind=credential_kind.value,
-            rate_limit_kind="primary",
+            rate_limit_kind=rate_limit_kind,
             retry_after_seconds=retry_after_seconds,
             reset_epoch=reset_epoch,
             remaining=remaining,
             resource=resource,
             http_status=status,
-            endpoint_id=endpoint_id,
-        )
-
-    if status == 429:
-        raise GitHubHTTPRateLimitError(
-            f"GitHub rate limit triggered (HTTP 429) for {endpoint_id!r} using "
-            f"{credential_kind.value}",
-            credential_kind=credential_kind.value,
-            rate_limit_kind="secondary",
-            retry_after_seconds=retry_after_seconds,
-            reset_epoch=reset_epoch,
-            remaining=remaining,
-            resource=resource,
-            http_status=429,
             endpoint_id=endpoint_id,
         )
 
@@ -624,10 +701,10 @@ def evaluate_throttle_wait(
         checkpoint_safety_margin_seconds, name="checkpoint_safety_margin_seconds"
     )
 
-    if error.retry_after_seconds is not None:
+    if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
         wait_seconds = float(error.retry_after_seconds)
-    elif error.reset_epoch is not None:
-        wait_seconds = max(0.0, float(error.reset_epoch) - now)
+    elif error.reset_epoch is not None and float(error.reset_epoch) > now:
+        wait_seconds = float(error.reset_epoch) - now
     else:
         exp_backoff = min(max_backoff, base_backoff * (2 ** (validated_attempt - 1)))
         wait_seconds = exp_backoff + jitter

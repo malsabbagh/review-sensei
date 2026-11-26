@@ -254,7 +254,102 @@ class ResponseClassifierTests(unittest.TestCase):
             is_graphql=True,
         )
 
+        # Null target data with positive remaining and NO errors is not a rate limit.
+        classify_github_response(
+            200,
+            {},
+            {
+                "data": {
+                    "repository": None,
+                    "rateLimit": {"remaining": 100},
+                }
+            },
+            credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+            endpoint_id="graphql_review_threads",
+            is_graphql=True,
+        )
+
+    def test_graphql_http_200_non_rate_limit_errors_and_status_validation(self) -> None:
+        for perm_body in (
+            {
+                "data": {"repository": None},
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "Resource not accessible by integration",
+                    }
+                ],
+            },
+            {
+                "data": None,
+                "errors": [
+                    {
+                        "type": "UNAUTHORIZED",
+                        "message": "Bad credentials",
+                    }
+                ],
+            },
+        ):
+            with self.subTest(perm_body=perm_body):
+                with self.assertRaises(GitHubHTTPPermissionError) as perm_err:
+                    classify_github_response(
+                        200,
+                        {},
+                        perm_body,
+                        credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                        endpoint_id="graphql_review_threads",
+                        is_graphql=True,
+                    )
+                self.assertEqual(perm_err.exception.http_status, 200)
+                self.assertEqual(
+                    perm_err.exception.endpoint_id, "graphql_review_threads"
+                )
+
+        for non_rate_body in (
+            {
+                "data": {"repository": None},
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": "Could not resolve to a PullRequest",
+                    }
+                ],
+            },
+            {
+                "data": None,
+                "errors": "unexpected error payload",
+            },
+        ):
+            with self.subTest(non_rate_body=non_rate_body):
+                with self.assertRaises(GitHubHTTPError) as http_err:
+                    classify_github_response(
+                        200,
+                        {},
+                        non_rate_body,
+                        credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                        endpoint_id="graphql_review_threads",
+                        is_graphql=True,
+                    )
+                self.assertNotIsInstance(http_err.exception, GitHubHTTPRateLimitError)
+                self.assertNotIsInstance(http_err.exception, GitHubHTTPPermissionError)
+                self.assertEqual(http_err.exception.http_status, 200)
+
+        for bad_status in (True, "200", 200.0, 99, 600):
+            with self.subTest(bad_status=bad_status), self.assertRaises(ValueError):
+                classify_github_response(
+                    bad_status,  # type: ignore[arg-type]
+                    {},
+                    {},
+                    credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                    endpoint_id="pr_metadata",
+                )
+
     def test_permission_403_never_classified_as_rate_limit(self) -> None:
+        # Precedence rule: on HTTP 403 without a secondary rate-limit signal,
+        # positive X-RateLimit-Remaining (> 0) keeps the response classified as
+        # GitHubHTTPPermissionError even if the body mentions "API rate limit
+        # exceeded", whereas X-RateLimit-Remaining: 0 with the same body
+        # classifies as a primary GitHubHTTPRateLimitError.
         for headers, body in (
             (
                 {"X-RateLimit-Remaining": "998"},
@@ -287,6 +382,18 @@ class ResponseClassifierTests(unittest.TestCase):
                 self.assertEqual(
                     err.credential_kind, CredentialKind.WORKFLOW_GITHUB_TOKEN.value
                 )
+
+        # Boundary contrast: remaining=0 with the same body is primary rate limit.
+        with self.assertRaises(GitHubHTTPRateLimitError) as rate_err:
+            classify_github_response(
+                403,
+                {"X-RateLimit-Remaining": "0"},
+                {"message": "API rate limit exceeded"},
+                credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                endpoint_id="pr_metadata",
+            )
+        self.assertEqual(rate_err.exception.rate_limit_kind, "primary")
+        self.assertEqual(rate_err.exception.remaining, 0)
 
     def test_error_validation_and_v6_permission_inheritance(self) -> None:
         with self.assertRaises(ValueError):
@@ -561,6 +668,34 @@ class DualCredentialTransportTests(unittest.TestCase):
         self.assertEqual(client.app_quota.remaining, 17)
         self.assertEqual(len(app_transport.calls), 2)
 
+    def test_quota_tracker_marks_rate_limited_on_rest_403_body_phrases(self) -> None:
+        sec_tracker = CredentialQuotaTracker(CredentialKind.WORKFLOW_GITHUB_TOKEN)
+        sec_snap = sec_tracker.update_from_response(
+            {"X-RateLimit-Remaining": "500"},
+            {"message": "You have exceeded a secondary rate limit."},
+            status=403,
+        )
+        self.assertTrue(sec_snap.rate_limited)
+        self.assertTrue(sec_tracker.rate_limited)
+
+        prim_tracker = CredentialQuotaTracker(CredentialKind.WORKFLOW_GITHUB_TOKEN)
+        prim_snap = prim_tracker.update_from_response(
+            {},
+            {"message": "API rate limit exceeded"},
+            status=403,
+        )
+        self.assertTrue(prim_snap.rate_limited)
+        self.assertTrue(prim_tracker.rate_limited)
+
+        perm_tracker = CredentialQuotaTracker(CredentialKind.WORKFLOW_GITHUB_TOKEN)
+        perm_snap = perm_tracker.update_from_response(
+            {"X-RateLimit-Remaining": "500"},
+            {"message": "Resource not accessible by integration"},
+            status=403,
+        )
+        self.assertFalse(perm_snap.rate_limited)
+        self.assertFalse(perm_tracker.rate_limited)
+
 
 class ThrottleDecisionTests(unittest.TestCase):
     """Verify in-job sleep vs. v6.0 maintainer-rerun pause decisions."""
@@ -656,6 +791,41 @@ class ThrottleDecisionTests(unittest.TestCase):
         ):
             with self.subTest(bad_kwargs=bad_kwargs), self.assertRaises(ValueError):
                 evaluate_throttle_wait(bare_err, **bad_kwargs)  # type: ignore[arg-type]
+
+    def test_zero_retry_after_or_past_reset_falls_back_to_backoff(self) -> None:
+        zero_retry_err = GitHubHTTPRateLimitError(
+            "secondary",
+            rate_limit_kind="secondary",
+            retry_after_seconds=0.0,
+        )
+        d_zero = evaluate_throttle_wait(
+            zero_retry_err,
+            remaining_job_seconds=600.0,
+            attempt=2,
+            now_epoch=1000.0,
+            base_backoff_seconds=2.0,
+            max_backoff_seconds=60.0,
+        )
+        self.assertEqual(d_zero.action, "sleep")
+        self.assertEqual(d_zero.wait_seconds, 4.0)
+        self.assertEqual(d_zero.resume_after_epoch, 1004.0)
+
+        past_reset_err = GitHubHTTPRateLimitError(
+            "primary",
+            rate_limit_kind="primary",
+            reset_epoch=900,
+        )
+        d_past = evaluate_throttle_wait(
+            past_reset_err,
+            remaining_job_seconds=600.0,
+            attempt=1,
+            now_epoch=1000.0,
+            base_backoff_seconds=2.0,
+            max_backoff_seconds=60.0,
+        )
+        self.assertEqual(d_past.action, "sleep")
+        self.assertEqual(d_past.wait_seconds, 2.0)
+        self.assertEqual(d_past.resume_after_epoch, 1002.0)
 
 
 if __name__ == "__main__":
