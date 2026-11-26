@@ -28,6 +28,15 @@ QUALIFIED_EXECUTORS = {
         "hosted": "0.3.20",
         "contract": "successful-review-no-unsettled-root-write-v1",
     },
+    "c7f13b8cfe28e89ec82ad03bd2f34aed5b40cbb1": {
+        "commit": "e006596160be74a9a72b9428c5675224afa347c6",
+        "workflow_blob": "b23d80ebbc831f8baa6a38937c044dc3a13633f7",
+        "workflow_path": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+        "workflow_ref": "refs/tags/v5",
+        "core": "0.8.15",
+        "hosted": "0.3.21",
+        "contract": "successful-review-no-unsettled-root-write-v1",
+    },
 }
 
 

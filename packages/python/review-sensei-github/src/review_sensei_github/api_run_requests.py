@@ -47,12 +47,14 @@ from review_sensei.session import SessionIdentity, SessionRecord
 from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
 from .errors import GitHubHTTPError, GitHubPublicationTransientError
-from .http import Opener
+from .http import MAX_GITHUB_RESPONSE_BYTES, Opener
 from .quarantine_capacity import (
     _guarded_lifecycle_writer,
     _install_guarded_lifecycle_writer,
 )
 from .session_ledger import GitHubIssueCommentSessionLedger
+
+MAX_CONCURRENT_NON_OWNED_COMMENTS = 20
 
 
 @dataclass(frozen=True, eq=False)
@@ -70,6 +72,9 @@ class _PlainFindingPagePlan:
     checkpoint_parts: tuple[int, ...]
     root_calls: int
     fences: int
+    owned_carrier_digests: tuple[tuple[int, str], ...]
+    page_response_ceiling: int
+    max_non_owned_appends: int
 
 
 # These capabilities are issued only after the complete source frontier passes
@@ -100,6 +105,9 @@ def _plain_page_signature(plan):
         plan.checkpoint_parts,
         plan.root_calls,
         plan.fences,
+        plan.owned_carrier_digests,
+        plan.page_response_ceiling,
+        plan.max_non_owned_appends,
     )
 
 
@@ -1737,24 +1745,28 @@ class ApiRunRequestTransport:
                 )
             else:
                 cessation()
-            pre_write_settlement_candidate = (
-                completion is None
-                and old.action is None
-                and old.analysis_abort is None
-                and old.terminal_transaction is None
-                and record.reservation_id is None
-                and record.reserved_slot is None
-                and (
-                    (
-                        record.transaction is None
-                        and record.failed_attempts > 0
-                        and isinstance(record.failed_attempts_head_sha, str)
-                    )
-                    or (
-                        record.transaction is not None
-                        and record.transaction.phase == "publication_failed"
+            from review_sensei.session import is_startup_crash_predecessor
+
+            pre_write_settlement_candidate = completion is None and (
+                (
+                    old.action is None
+                    and old.analysis_abort is None
+                    and old.terminal_transaction is None
+                    and record.reservation_id is None
+                    and record.reserved_slot is None
+                    and (
+                        (
+                            record.transaction is None
+                            and record.failed_attempts > 0
+                            and isinstance(record.failed_attempts_head_sha, str)
+                        )
+                        or (
+                            record.transaction is not None
+                            and record.transaction.phase == "publication_failed"
+                        )
                     )
                 )
+                or is_startup_crash_predecessor(record, old)
             )
             if (
                 record.reservation_id is not None
@@ -1873,6 +1885,7 @@ class ApiRunRequestTransport:
             settled_witness: Any = None
             settled_prior_record: SessionRecord | None = None
             settled_prior_chain: tuple[SessionRecord, ...] = ()
+            crashed_head_sha: str | None = None
             if old.analysis_abort is not None:
                 from .pre_entry_abort_admission import require_pre_entry_abort_admission
 
@@ -1881,19 +1894,25 @@ class ApiRunRequestTransport:
                 from .publication_failure_recovery import (
                     admit_publication_failure_recovery,
                     peek_admitted_prior_chain,
+                    peek_admitted_startup_crash_head,
                 )
 
                 settled_witness, settled_prior_record = (
                     admit_publication_failure_recovery(ledger, identity, record, old)
                 )
                 settled_prior_chain = peek_admitted_prior_chain(ledger, record)
+                crashed_head_sha = peek_admitted_startup_crash_head(ledger, record)
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
                 # and current Actions inventories and current PR after archive.
                 self.budget_view.preflight(RETAINED_CONFIRMATION_TAIL + 5)
             reference = retain_previous_run(
-                ledger, identity, record, completion=completion
+                ledger,
+                identity,
+                record,
+                completion=completion,
+                crashed_head_sha=crashed_head_sha,
             )
             if completion is not None:
                 from .review_completion_recovery import _get
@@ -2943,6 +2962,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         self.evidence_budget = caller.budget_view
         self._terminal_claimed = False
         self._part_staging_identity: SessionIdentity | None = None
+        self._plain_finding_staged_parts: dict[int, str] = {}
 
     def preflight_finding_lifecycle_retention(
         self, identity, *, added_parts, added_bytes, checkpoint_parts=None
@@ -3447,6 +3467,14 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             raise ReviewInputError(
                 "finding lifecycle comment allocation capacity exceeded"
             )
+        carriers = tuple(self._owned_carrier_items(items, identity))
+        owned_carrier_digests = tuple(
+            (
+                item["id"],
+                hashlib.sha256(item["body"].encode("utf-8")).hexdigest(),
+            )
+            for item in carriers
+        )
         page_count = 1
         exceeds_generic_operation = any(
             root_calls + 3 * n + (n + 1) * fences > NATIVE_OPERATION_REQUESTS + fences
@@ -3501,7 +3529,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                         continue
                     members = bounds[offset : offset + size]
                     bound = 2 + sum(members) + max(0, len(members) - 1)
-                    if bound < 512 * 1024:
+                    if bound < MAX_GITHUB_RESPONSE_BYTES:
                         requests.append((size, offset // size + 1))
                         response_bounds.append(bound)
                         offset += size
@@ -3513,6 +3541,16 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             page_requests = tuple(requests)
             page_size = page_requests[0][0]
             page_bounds = tuple(response_bounds)
+            terminal_page_size, terminal_page = page_requests[-1]
+            terminal_planned_items = max(
+                0, len(bounds) - (terminal_page - 1) * terminal_page_size
+            )
+            max_non_owned_appends = min(
+                MAX_CONCURRENT_NON_OWNED_COMMENTS,
+                max(0, 200 - len(bounds)),
+                max(0, terminal_page_size - 1 - terminal_planned_items),
+            )
+            page_response_ceiling = MAX_GITHUB_RESPONSE_BYTES
             if self.caller._root != selected.record_sha256:
                 raise ReviewInputError("finding lifecycle page plan root changed")
             plan = _PlainFindingPagePlan(
@@ -3529,6 +3567,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 checkpoints,
                 root_calls,
                 fences,
+                owned_carrier_digests,
+                page_response_ceiling,
+                max_non_owned_appends,
             )
             _PLAIN_FINDING_ISSUED[plan] = _plain_page_signature(plan)
             _PLAIN_FINDING_PLANS[self] = plan
@@ -3539,7 +3580,6 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 raise EvidenceBudgetExhausted(
                     "finding lifecycle parts exceed original checkpoint operation"
                 )
-        carriers = tuple(self._owned_carrier_items(items, identity))
         assert self.evidence_budget is not None
         self.evidence_budget.preflight(
             sum(
@@ -3592,6 +3632,36 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             NATIVE_OPERATION_REQUESTS, calls
         ), WRITE_CONFIRMATION_TAIL + pages - 1
 
+    def _is_non_owned_appended_comment(self, item: dict[str, Any]) -> bool:
+        from .session_ledger import _PART_PREFIX, _marker_shaped, retained_carrier_body
+
+        author = item.get("user")
+        if not isinstance(author, dict):
+            return False
+        if author.get("type") == "Bot":
+            return False
+        if (
+            self._evidence_author_id is not None
+            and author.get("id") == self._evidence_author_id
+        ):
+            return False
+        login = author.get("login")
+        if (
+            self.app_slug is not None
+            and isinstance(login, str)
+            and login.casefold() == self.app_slug.casefold()
+        ):
+            return False
+        body = item.get("body")
+        if not isinstance(body, str):
+            return False
+        return not (
+            retained_carrier_body(body)
+            or _marker_shaped(body)
+            or body.startswith(_PART_PREFIX)
+            or "<!-- reviewsensei:" in body
+        )
+
     def _read_plain_finding_pages(self, identity):
         from review_sensei.bounded_evidence import canonical_bytes
 
@@ -3621,11 +3691,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 or not isinstance(payload, list)
                 or len(payload) > page_size
                 or any(not isinstance(item, dict) for item in payload)
-                or len(canonical_bytes(payload)) > bound
+                or bound >= plan.page_response_ceiling
+                or len(canonical_bytes(payload)) >= plan.page_response_ceiling
             ):
                 raise ReviewInputError("finding lifecycle planned page changed")
             collected.extend(payload)
-            if len(collected) > plan.maximum_items:
+            if len(collected) > plan.maximum_items + plan.max_non_owned_appends:
                 raise ReviewInputError("finding lifecycle planned frontier grew")
             if len(payload) < page_size:
                 observed_ids = tuple(item.get("id") for item in collected)
@@ -3637,6 +3708,33 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                     raise ReviewInputError(
                         "finding lifecycle planned frontier order changed"
                     )
+                by_id = {item["id"]: item for item in collected}
+                for cid, digest in plan.owned_carrier_digests:
+                    carrier = by_id.get(cid)
+                    body = carrier.get("body") if isinstance(carrier, dict) else None
+                    if (
+                        not isinstance(body, str)
+                        or hashlib.sha256(body.encode("utf-8")).hexdigest() != digest
+                    ):
+                        raise ReviewInputError("finding lifecycle planned page changed")
+                staged_parts = getattr(self, "_plain_finding_staged_parts", {})
+                for item in collected[len(plan.inventory_ids) :]:
+                    cid = item["id"]
+                    body = item.get("body")
+                    if cid in staged_parts:
+                        self._part_owner(item, identity)
+                        if (
+                            not isinstance(body, str)
+                            or hashlib.sha256(body.encode("utf-8")).hexdigest()
+                            != staged_parts[cid]
+                        ):
+                            raise ReviewInputError(
+                                "finding lifecycle planned page changed"
+                            )
+                    elif not self._is_non_owned_appended_comment(item):
+                        raise ReviewInputError(
+                            "finding lifecycle planned frontier grew"
+                        )
                 self._replace_inventory(collected)
                 self._inventory_complete = True
                 self._list_refresh = False
@@ -3905,6 +4003,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         page_plan = _PLAIN_FINDING_PLANS.pop(self, None)
         if page_plan is not None:
             _PLAIN_FINDING_ACTIVE[self] = (page_plan, False)
+            self._plain_finding_staged_parts = {}
         self._finding_lifecycle_page_size = 100
         self._plain_finding_input = (
             (record, canonical_bytes(record.to_dict()))
@@ -3933,6 +4032,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             self._plain_finding_input = None
             self._plain_finding_scope_active = False
             self._finding_lifecycle_page_size = None
+            self._plain_finding_staged_parts = {}
             _PLAIN_FINDING_ACTIVE.pop(self, None)
 
     def stage_disposition_snapshot_batch(self, identity, **kwargs):
@@ -4034,6 +4134,10 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 )
             self._part_owner(payload, identity)
             operation.confirmed = True
+            if self in _PLAIN_FINDING_ACTIVE:
+                staged = getattr(self, "_plain_finding_staged_parts", None)
+                if isinstance(staged, dict):
+                    staged[payload["id"]] = key
             snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
             if snapshot is not None:
                 snapshot.note_staged(payload)

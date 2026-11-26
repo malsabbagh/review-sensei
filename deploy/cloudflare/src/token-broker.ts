@@ -392,7 +392,14 @@ export class TokenBroker {
     const validationToken = hasPullScope ? token : await github.capabilityToken(
       installationId, claims.repository, CAPABILITIES.review_status,
     );
-    const currentHead = await github.pullRequestHead(
+    const reserveAfterHead =
+      (requestedAuthority.purpose === "review" ? 0 : 1) +
+      (requestedAuthority.version === 4 && body.observe_actor_role === true ? 1 : 0) +
+      (requestedSession !== undefined && body.release_only !== true ? 1 : 0);
+    const headClient = typeof github.withHeadReserve === "function"
+      ? github.withHeadReserve(reserveAfterHead)
+      : github;
+    const currentHead = await headClient.pullRequestHead(
       claims.repository, requestedAuthority.pull_request, validationToken,
     );
     if (currentHead !== requestedAuthority.head_sha && body.release_only !== true) {
@@ -504,7 +511,11 @@ export class TokenBroker {
       const capability = await github.capabilityTokenObservation(installation.id, parsed.repository, CAPABILITIES.review_session);
       const repository = await github.repositoryInfo(parsed.repository, capability.token, true);
       if (!repository || repository.fork) throw new Error("broker_repository_rejected");
-      if (await github.pullRequestHead(parsed.repository, parsed.pull_request, capability.token) !== parsed.head_sha) throw new Error("broker_session_head_rejected");
+      const reserveAfterHead = parsed.purpose === "review" ? 1 : 2;
+      const headClient = typeof github.withHeadReserve === "function"
+        ? github.withHeadReserve(reserveAfterHead)
+        : github;
+      if (await headClient.pullRequestHead(parsed.repository, parsed.pull_request, capability.token) !== parsed.head_sha) throw new Error("broker_session_head_rejected");
       if (parsed.purpose !== "review") {
         const source = await github.feedbackComment(parsed.repository, parsed.pull_request,
           parsed.source.kind === "issue_comment" ? "issue" : "inline", parsed.source.id, capability.token);

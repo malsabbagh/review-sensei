@@ -453,6 +453,7 @@ class StartupRunLedger(GitHubIssueCommentSessionLedger):
         )
         self._startup_caller = caller
         self.evidence_budget = caller.budget_view
+        self._run_reader: ApiRunActionsEvidence | None = None
 
     def _fetch_pages(
         self, identity: SessionIdentity, *, since: str | None
@@ -2302,6 +2303,7 @@ def bootstrap(
         reservation_owner=session.reservation_owner,
     )
     native.authenticated_app_id = session.app_id
+    native._run_reader = evidence
     # Capacity uses the existing check capability's read permission, never a
     # workflow token that may intentionally lack Checks. This requests no new
     # installation permission and stays on the same physical caller budget.
@@ -2442,6 +2444,12 @@ def bootstrap(
                     and previous_root.transaction is not None
                     and previous_root.transaction.phase == "publication_succeeded"
                 )
+                from review_sensei.session import is_startup_crash_predecessor
+
+                startup_crash_candidate = (
+                    not historical_candidate
+                    and is_startup_crash_predecessor(previous_root, previous)
+                )
                 pre_write_settlement_candidate = (
                     not historical_candidate
                     and previous.action is None
@@ -2460,9 +2468,17 @@ def bootstrap(
                             and previous_root.transaction.phase == "publication_failed"
                         )
                     )
-                )
+                ) or startup_crash_candidate
 
                 def observe_cessation():
+                    if startup_crash_candidate:
+                        return evidence.ceased_run_owner(
+                            identity,
+                            previous.identity.run_id,
+                            previous.owner,
+                            complete_terminal_inventory=True,
+                            require_startup_crash_proof=True,
+                        )
                     return evidence.ceased_run_owner(
                         identity,
                         previous.identity.run_id,

@@ -50,3 +50,24 @@ export function pullRequestLookupEvidence(error: unknown, capability: unknown, r
     };
   } catch { return undefined; } // Supplementary metadata never replaces the original refusal.
 }
+
+/** Transient GitHub PR lookup failures only; never promote 4xx/malformed/oversized or untyped errors. */
+export function temporaryPullRequestLookup(error: unknown): boolean {
+  try {
+    if (!(error instanceof PullRequestLookupError)) return false;
+    if (!CODES.has(error.message) || error.message !== error.diagnosticCode) return false;
+    const { outcome, upstream_status } = error.pullRequestLookup;
+    if (outcome === "timeout" || outcome === "transport") return true;
+    if (outcome === "http") {
+      return upstream_status === 429 || (
+        typeof upstream_status === "number" &&
+        Number.isSafeInteger(upstream_status) &&
+        upstream_status >= 500 &&
+        upstream_status <= 599
+      );
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}

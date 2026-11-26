@@ -527,7 +527,7 @@ describe("bounded broker operation telemetry", () => {
 
 
 describe("pull-request lookup error serialization", () => {
-  it("retains bounded status/capability/runtime identity without changing refusal or leaking content", async () => {
+  it("retains bounded status/capability/runtime identity on transient 503 exhaustion without leaking content", async () => {
     const error = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 502);
     Object.assign(error, { headers: { authorization: "ghs_header_canary" }, body: "ghs_body_canary", url: "https://private.invalid/canary" });
     broker.exchange.mockRejectedValueOnce(error);
@@ -536,15 +536,47 @@ describe("pull-request lookup error serialization", () => {
       const result = await worker.fetch(request({ oidc_token: "ghs_oidc_canary", capability: "review_actions", worker_version: "ghs_source_canary" } as never, { "cf-ray": "0123456789abcdef-YYZ" }), {
         ...env, CF_VERSION_METADATA: { id: "abcde123-1234-1234-1234-123456789abc", tag: "ghs_tag_canary", timestamp: "ghs_time_canary" },
       } as WorkerEnv);
-      expect(result.status).toBe(403);
+      expect(result.status).toBe(503);
       expect(result.headers.get("cache-control")).toBe("no-store");
       const body = await result.json();
       expect(body).toEqual({ error: "capability_not_issued", diagnostic: brokerDiagnostic(error, "0123456789abcdef-YYZ"),
         pull_request_lookup: { outcome: "http", upstream_status: 502, requested_capability: "review_actions", worker_version: "abcde123-1234-1234-1234-123456789abc" } });
+      expect((body as { diagnostic: { code: string; stage: string; action: string } }).diagnostic).toMatchObject({
+        code: "github_pull_request_lookup_temporary", stage: "github_api", action: "retry_later",
+      });
       expect(JSON.stringify([body, log.mock.calls])).not.toContain("canary");
       expect(JSON.stringify(body).length).toBeLessThan(600);
       expect(broker.exchange).toHaveBeenCalledTimes(1);
     } finally { log.mockRestore(); }
+  });
+
+  it.each([
+    ["non-transient 400", new PullRequestLookupError("github_pull_request_lookup_failed", "http", 400)],
+    ["non-transient 422", new PullRequestLookupError("github_pull_request_lookup_failed", "http", 422)],
+    ["malformed 2xx", new PullRequestLookupError("github_pull_request_lookup_failed", "malformed", 200)],
+  ])("keeps %s on 403 github_pull_request_lookup_failed", async (_label, error) => {
+    broker.exchange.mockRejectedValueOnce(error);
+    const result = await worker.fetch(request(), env);
+    expect(result.status).toBe(403);
+    const body = await result.json() as { diagnostic: { code: string; stage: string; action: string } };
+    expect(body.diagnostic).toMatchObject({
+      code: "github_pull_request_lookup_failed",
+      stage: "repository_installation",
+      action: "check_installation",
+    });
+  });
+
+  it("refuses forged temporary PR lookup strings as 403 broker_unknown", async () => {
+    for (const forged of [
+      new Error("github_pull_request_lookup_temporary"),
+      { message: "github_pull_request_lookup_temporary", pullRequestLookup: { outcome: "http", upstream_status: 503 } },
+    ]) {
+      broker.exchange.mockRejectedValueOnce(forged);
+      const result = await worker.fetch(request(), env);
+      expect(result.status).toBe(403);
+      const body = await result.json() as { diagnostic: { code: string } };
+      expect(body.diagnostic.code).toBe("broker_unknown");
+    }
   });
 });
 
@@ -577,10 +609,12 @@ describe("pull-request lookup malformed metadata refusal", () => {
     expect(await result.json()).not.toHaveProperty("pull_request_lookup");
   });
 
-  it("keeps unknown version absent and includes no caller-provided identity", async () => {
+  it("keeps unknown version absent and includes no caller-provided identity on 503 temporary refusal", async () => {
     broker.exchange.mockRejectedValueOnce(new PullRequestLookupError("github_pull_request_lookup_failed", "http", 503));
     const result = await worker.fetch(request({ oidc_token: "signed", worker_version: "abcde123-1234-1234-1234-123456789abc" } as never), env);
-    const body = await result.json() as { pull_request_lookup: object };
+    expect(result.status).toBe(503);
+    const body = await result.json() as { diagnostic: { code: string }; pull_request_lookup: object };
+    expect(body.diagnostic.code).toBe("github_pull_request_lookup_temporary");
     expect(body.pull_request_lookup).toEqual({ outcome: "http", upstream_status: 503, requested_capability: "review_publish" });
   });
 
@@ -599,7 +633,7 @@ describe("pull-request lookup malformed metadata refusal", () => {
 
 describe("supplementary lookup failures preserve the business refusal", () => {
   it.each(["exception", "binding", "version"])("omits evidence when the %s metadata getter fails", async surface => {
-    const error = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 502);
+    const error = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 400);
     const runtime = { ...env, CF_VERSION_METADATA: { id: "abcde123-1234-1234-1234-123456789abc" } } as WorkerEnv;
     const fails = { get() { throw new Error("ghs_getter_canary"); } };
     if (surface === "exception") Object.defineProperty(error, "pullRequestLookup", fails);

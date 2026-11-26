@@ -8,6 +8,7 @@ workflow's existing PR concurrency serialization. This module adds no allocator.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -41,6 +42,10 @@ _BUSINESS_EXECUTION_STEPS_BY_JOB: Final[dict[str, frozenset[str]]] = {
         }
     ),
 }
+_STARTUP_CRASH_RUN_CONCLUSIONS: Final[frozenset[str]] = frozenset(
+    {"failure", "cancelled", "timed_out", "startup_failure"}
+)
+_HEX40_RE = re.compile(r"[a-f0-9]{40}")
 _TERMINAL_JOB_CONCLUSIONS: Final[frozenset[str]] = frozenset(
     {
         "success",
@@ -269,9 +274,12 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         predecessor: ApiExecutionOwner,
         *,
         complete_terminal_inventory: bool = False,
+        require_startup_crash_proof: bool = False,
     ) -> tuple[object, ...]:
         if type(run_id) is not int or run_id < 1 or str(run_id) == self.command_run_id:
             raise ReviewInputError("previous Actions run identity conflicts")
+        if require_startup_crash_proof:
+            complete_terminal_inventory = True
         previous = ApiRunActionsEvidence(
             self.http, token=self.token, command_run_id=str(run_id), job=predecessor.job
         )
@@ -304,6 +312,25 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             raise ReviewInputError(
                 "previous Actions run has not ceased or its identity conflicts"
             )
+        crashed_head_sha: str | None = None
+        run_conclusion = run.get("conclusion")
+        if require_startup_crash_proof:
+            if (
+                not isinstance(run_conclusion, str)
+                or run_conclusion not in _STARTUP_CRASH_RUN_CONCLUSIONS
+            ):
+                raise ReviewInputError(
+                    "previous Actions run did not terminate in a failed startup state"
+                )
+            head_sha_value = run.get("head_sha")
+            if (
+                not isinstance(head_sha_value, str)
+                or _HEX40_RE.fullmatch(head_sha_value) is None
+            ):
+                raise ReviewInputError(
+                    "previous Actions run head_sha is unavailable or invalid"
+                )
+            crashed_head_sha = head_sha_value
         if latest_attempt < predecessor.run_attempt:
             raise ReviewInputError(
                 "previous Actions run attempt conflicts with predecessor"
@@ -317,6 +344,10 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             predecessor,
             complete_terminal_inventory=complete_terminal_inventory,
         )
+        if require_startup_crash_proof and predecessor_proof[2] == "success":
+            raise ReviewInputError(
+                "previous Actions owning job did not terminate without success"
+            )
         later_proofs: list[tuple[object, ...]] = []
         for later_attempt in range(predecessor.run_attempt + 1, latest_attempt + 1):
             later_jobs = previous._jobs(identity, later_attempt)
@@ -351,9 +382,30 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
                     ),
                 )
             )
+        proof: tuple[object, ...]
         if later_proofs:
-            return run_id, *predecessor_proof, tuple(later_proofs)
-        return run_id, *predecessor_proof
+            proof = (run_id, *predecessor_proof, tuple(later_proofs))
+        else:
+            proof = (run_id, *predecessor_proof)
+        if require_startup_crash_proof:
+            assert crashed_head_sha is not None
+            return (*proof, crashed_head_sha, run_conclusion)
+        return proof
+
+    def startup_crash_head_sha(
+        self,
+        identity: SessionIdentity,
+        run_id: int,
+        predecessor: ApiExecutionOwner,
+    ) -> str:
+        proof = self.ceased_run_owner(
+            identity,
+            run_id,
+            predecessor,
+            complete_terminal_inventory=True,
+            require_startup_crash_proof=True,
+        )
+        return str(proof[-2])
 
     def qualified_publication_cessation(
         self,
@@ -391,22 +443,39 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         # a later rerun could still own an unsettled write to this same root.
         run = previous._get(identity, f"/actions/runs/{run_id}")
         repository = run.get("repository")
+        mismatches: list[str] = []
+        if type(run.get("id")) is not int or run.get("id") != run_id:
+            mismatches.append(f"run_id={run.get('id')!r}")
         if (
-            type(run.get("id")) is not int
-            or run.get("id") != run_id
-            or not isinstance(repository, dict)
+            not isinstance(repository, dict)
             or type(repository.get("id")) is not int
             or repository.get("id") != identity.repository_id
             or repository.get("full_name") != identity.repository
-            or type(run.get("run_attempt")) is not int
-            or run.get("run_attempt") != predecessor.run_attempt
-            or run.get("status") != "completed"
-            or run.get("conclusion") != "success"
-            or run.get("head_sha") != head_sha
-            or run.get("event") != "pull_request"
         ):
+            mismatches.append("repository_mismatch")
+        if (
+            type(run.get("run_attempt")) is not int
+            or run.get("run_attempt") != predecessor.run_attempt
+        ):
+            mismatches.append(f"run_attempt={run.get('run_attempt')!r}")
+        if run.get("status") != "completed":
+            mismatches.append(f"status={run.get('status')!r}")
+        if run.get("conclusion") != "success":
+            mismatches.append(f"conclusion={run.get('conclusion')!r}")
+        if run.get("head_sha") != head_sha:
+            mismatches.append(
+                f"head_sha_mismatch={run.get('head_sha')!r}!={head_sha!r}"
+            )
+        if run.get("event") != "pull_request":
+            mismatches.append(f"event={run.get('event')!r}")
+        if mismatches:
             raise ReviewInputError(
-                "historical executor did not prove successful review exit"
+                "historical executor did not prove successful review exit ("
+                f"run_id={run_id} status={run.get('status')!r} "
+                f"conclusion={run.get('conclusion')!r} event={run.get('event')!r} "
+                f"run_attempt={run.get('run_attempt')!r} "
+                f"mismatches={','.join(mismatches)}); "
+                "recover with `@reviewsensei review reenroll` or controlled restart"
             )
         references = run.get("referenced_workflows")
         if (
@@ -414,7 +483,11 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             or len(references) != 1
             or not isinstance(references[0], dict)
         ):
-            raise ReviewInputError("historical executor source is unrecognized")
+            raise ReviewInputError(
+                "historical executor source is unrecognized ("
+                f"run_id={run_id} referenced_workflows_invalid); "
+                "recover with `@reviewsensei review reenroll` or controlled restart"
+            )
         source = references[0]
         source_sha = source.get("sha")
         contract = (
@@ -425,7 +498,12 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             or source.get("path") != contract["workflow_path"]
             or source.get("ref") != contract["workflow_ref"]
         ):
-            raise ReviewInputError("historical executor source is unrecognized")
+            raise ReviewInputError(
+                "historical executor source is unrecognized ("
+                f"run_id={run_id} source_sha={source_sha!r} "
+                f"workflow_ref={source.get('ref')!r} workflow_path={source.get('path')!r}); "
+                "recover with `@reviewsensei review reenroll` or controlled restart"
+            )
         jobs = previous._jobs(identity, predecessor.run_attempt)
         selected = [j for j in jobs if _writer_name(j.get("name"), predecessor.job)]
         if len(selected) != 1:

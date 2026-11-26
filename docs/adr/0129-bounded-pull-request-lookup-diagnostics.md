@@ -86,3 +86,15 @@ new observations without rewriting retained state or changing old failure reason
 Independently qualify the installed caller and deployed Worker and any genuine
 version binding before operational reliance. Historical recovery still requires
 original authority, effects, funding and closure evidence; diagnostics grant none.
+
+## Addendum (bounded idempotent GET retries & transient status)
+
+`GitHubApi.pullRequestHead` (an idempotent `GET` on `/pulls/{pr}`) performs up to
+two bounded retries (200 ms, 500 ms) only for transient upstream failures (`429`,
+`500`, `502`, `503`, `504`, `broker_upstream_timeout`, `github_response_unavailable`)
+when spare `BrokerDispatchControl` and `BrokerLifetime` budget remains without
+starving subsequent dispatches. Non-transient responses (`400`, `401`, `403`,
+`404`, `422`, malformed 2xx JSON, `github_response_too_large`) never retry.
+Exhausted transient `PullRequestLookupError` failures surface as HTTP `503` with
+closed diagnostic code `github_pull_request_lookup_temporary` (`stage: "github_api"`,
+`action: "retry_later"`).

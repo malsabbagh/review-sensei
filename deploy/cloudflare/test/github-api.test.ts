@@ -1,4 +1,7 @@
 import { WorkflowLookupError } from "../src/broker-lookup-diagnostic";
+import { BrokerDispatchControl } from "../src/broker-dispatch-control";
+import { BrokerLifetime } from "../src/broker-lifetime";
+import { temporaryPullRequestLookup } from "../src/pull-request-lookup-diagnostic";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/env";
 import {
@@ -10,13 +13,13 @@ import {
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
 
-function api() {
+function api(retryDelay: (ms: number) => Promise<void> = async () => {}) {
   const value = {
     GITHUB_APP_ID: "12345",
     GITHUB_APP_PRIVATE_KEY: "unused-by-test",
     GITHUB_API_URL: "https://api.example.test",
   } as unknown as WorkerEnv;
-  const client = new GitHubApi(value);
+  const client = new GitHubApi(value, undefined, undefined, retryDelay);
   vi.spyOn(client as never, "appJwt" as never).mockResolvedValue("app-jwt");
   return client;
 }
@@ -946,16 +949,17 @@ describe("GitHubApi pull-request head lookup", () => {
 describe("bounded pull-request lookup evidence", () => {
   it.each([502, 200])("retains status %s without copying upstream content", async status => {
     const client = api();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response(
       status === 200 ? "[]" : JSON.stringify({ message: "ghs_private_body_canary" }),
       { status, headers: { "authorization": "Bearer ghs_private_header_canary" } },
-    ));
+    )));
     try {
       const error = await client.pullRequestHead("acme/widgets", 7, "ghs_private_token_canary").catch(error => error);
       expect(error.message).toBe("github_pull_request_lookup_failed");
       expect(error.pullRequestLookup).toEqual({ outcome: status === 200 ? "malformed" : "http", upstream_status: status });
       expect(JSON.stringify(error)).not.toContain("canary");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(status === 502 ? 3 : 1);
+      expect(temporaryPullRequestLookup(error)).toBe(status === 502);
     } finally { fetchMock.mockRestore(); }
   });
 });
@@ -963,11 +967,14 @@ describe("bounded pull-request lookup evidence", () => {
 
 describe("pull-request lookup exact failure handling", () => {
   it.each([
+    [400, "{}", "github_pull_request_lookup_failed", "http"],
+    [401, "{}", "github_pull_request_lookup_failed", "http"],
     [403, "{}", "github_pull_request_forbidden", "http"],
+    [422, "{}", "github_pull_request_lookup_failed", "http"],
     [200, "{}", "github_pull_request_response_invalid", "malformed"],
     [502, "not JSON: ghs_body_canary", "github_response_invalid", "malformed"],
     [200, new Uint8Array(524289), "github_response_too_large", "oversized"],
-  ])("preserves status %s/code %s and the real bounded decoder", async (status, body, code, outcome) => {
+  ])("preserves status %s/code %s and the real bounded decoder without retrying", async (status, body, code, outcome) => {
     const client = api();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status }));
     try {
@@ -976,6 +983,43 @@ describe("pull-request lookup exact failure handling", () => {
       expect(error.pullRequestLookup).toEqual({ outcome, upstream_status: status });
       expect(JSON.stringify(error)).not.toContain("canary");
       expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(temporaryPullRequestLookup(error)).toBe(false);
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("retries transient 429/5xx failures up to 3 attempts and succeeds with bounded delays", async () => {
+    const delays: number[] = [];
+    const client = api(async (ms) => { delays.push(ms); });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{}", { status: 429 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ head: { sha: SHA } }), { status: 200 }));
+    try {
+      await expect(client.pullRequestHead("acme/widgets", 7, "token")).resolves.toBe(SHA);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(delays).toEqual([200, 500]);
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("never retries when spare dispatch capacity is reserved for subsequent calls", async () => {
+    const delays: number[] = [];
+    const control = new BrokerDispatchControl({
+      schema_version: "1.0", operation_id: "a".repeat(64), request_id: "b".repeat(64),
+      deadline_unix_ms: Date.now() + 60_000, max_dispatches: 2,
+    });
+    const lifetime = new BrokerLifetime();
+    lifetime.constrain(control);
+    const client = api(async (ms) => { delays.push(ms); }).withRequestLifetime(lifetime, control).withHeadReserve(1);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{}", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ head: { sha: SHA } }), { status: 200 }));
+    try {
+      const error = await client.pullRequestHead("acme/widgets", 7, "token").catch(error => error);
+      expect(error.message).toBe("github_pull_request_lookup_failed");
+      expect(temporaryPullRequestLookup(error)).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(control.receipt().dispatched).toBe(1);
+      expect(delays).toEqual([]);
     } finally { fetchMock.mockRestore(); }
   });
 
@@ -999,16 +1043,19 @@ describe("pull-request lookup exact failure handling", () => {
 describe("post-header PR lookup transport evidence", () => {
   it("distinguishes a lost response body from a pre-response transport failure", async () => {
     const client = api();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) { controller.error(new TypeError("ghs_body_transport_canary")); },
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.error(new TypeError("ghs_body_transport_canary")); },
+      });
+      return Promise.resolve(new Response(stream, { status: 200 }));
     });
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(stream, { status: 200 }));
     try {
       const error = await client.pullRequestHead("acme/widgets", 7, "ghs_token_canary").catch(error => error);
       expect(error.message).toBe("github_response_unavailable");
       expect(error.pullRequestLookup).toEqual({ outcome: "transport", upstream_status: 200 });
+      expect(temporaryPullRequestLookup(error)).toBe(true);
       expect(JSON.stringify(error)).not.toContain("canary");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally { fetchMock.mockRestore(); }
   });
 });

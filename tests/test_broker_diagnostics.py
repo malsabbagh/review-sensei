@@ -257,6 +257,41 @@ class BrokerDiagnosticTests(unittest.TestCase):
         self.assertNotIn("Confirm the supported release", str(raised.exception))
         self.assertNotIn(SECRET, str(raised.exception))
 
+    def test_temporary_pull_request_lookup_reaches_client_as_transient_without_replay(
+        self,
+    ):
+        body = payload("github_pull_request_lookup_temporary")
+        body["pull_request_lookup"] = {
+            "outcome": "http",
+            "upstream_status": 503,
+            "requested_capability": "review_publish",
+        }
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            raise http_error(json.dumps(body).encode(), status=503)
+
+        client = BrokerClient(opener=opener, authority=current_authority())
+        with self.assertRaises(GitHubHTTPTransientError) as raised:
+            client.exchange("synthetic-oidc")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].method, "POST")
+        diagnostic = exception_broker_diagnostic(raised.exception)
+        self.assertEqual(diagnostic.code, "github_pull_request_lookup_temporary")
+        self.assertEqual(diagnostic.stage, "github_api")
+        self.assertEqual(diagnostic.action, "retry_later")
+        self.assertEqual(
+            diagnostic.metadata()["broker.pr_lookup_upstream_status"], "503"
+        )
+        self.assertEqual(
+            outcome_broker_diagnostic(
+                "broker_temporarily_unavailable", diagnostic.metadata()
+            ),
+            diagnostic,
+        )
+        self.assertNotIn(SECRET, diagnostic.message())
+
     def test_lookup_envelope_is_closed_and_does_not_replace_legacy_reason(self):
         body = payload("github_workflow_tag_unavailable", upstream_status=403)
         body["lookup"] = {

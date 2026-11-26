@@ -27,7 +27,11 @@ from weakref import WeakKeyDictionary
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
-from review_sensei.session import SessionIdentity, SessionRecord
+from review_sensei.session import (
+    SessionIdentity,
+    SessionRecord,
+    is_startup_crash_predecessor,
+)
 from review_sensei.validation import validate_repository_path
 
 from .api_run_history import RETAINED_CONFIRMATION_TAIL, read_previous_run
@@ -846,6 +850,9 @@ _ADMITTED_PRIOR_RECORDS: WeakKeyDictionary[Any, tuple[str, SessionRecord | None]
 _ADMITTED_PRIOR_CHAINS: WeakKeyDictionary[
     Any, tuple[str, tuple[SessionRecord, ...]]
 ] = WeakKeyDictionary()
+_ADMITTED_STARTUP_CRASH_HEADS: WeakKeyDictionary[Any, tuple[str, str]] = (
+    WeakKeyDictionary()
+)
 _MAX_PRIOR_ANCESTOR_HOPS = 8
 
 
@@ -888,10 +895,24 @@ def consume_admitted_prior_chain(
     return chain
 
 
+def peek_admitted_startup_crash_head(
+    ledger: Any, before_record: SessionRecord
+) -> str | None:
+    """Return the verified crashed head SHA for the active rollover root."""
+    entry = _ADMITTED_STARTUP_CRASH_HEADS.get(ledger)
+    if entry is None:
+        return None
+    root_sha256, head_sha = entry
+    if root_sha256 != before_record.record_sha256:
+        return None
+    return head_sha
+
+
 def clear_admitted_prior_record(ledger: Any) -> None:
     """Drop any unclaimed admitted prior record and chain on cleanup."""
     _ADMITTED_PRIOR_RECORDS.pop(ledger, None)
     _ADMITTED_PRIOR_CHAINS.pop(ledger, None)
+    _ADMITTED_STARTUP_CRASH_HEADS.pop(ledger, None)
 
 
 def _archive_part_count(archive_ref: Mapping[str, object]) -> int:
@@ -1575,6 +1596,133 @@ def _verify_legacy_witnessless_retained_result(
         return False
 
 
+def _is_crashed_root_carrier_comment(
+    row: dict[str, Any],
+    *,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    expected_binding_digests: set[str],
+    producer_id: int,
+    app_slug: str,
+) -> bool:
+    """Return True only when a bot carrier/evidence-part comment demonstrably references this crashed root/run/generation."""
+    import base64
+    import zlib
+
+    from .native_manifest import parse_manifest_body
+    from .session_ledger import _PART_PREFIX, retained_carrier_body
+
+    body = row.get("body")
+    if not isinstance(body, str):
+        return False
+    user = row.get("user")
+    is_bot = _is_authenticated_bot_comment(
+        row, producer_id=producer_id, app_slug=app_slug
+    ) or (isinstance(user, dict) and user.get("type") == "Bot")
+    if not is_bot:
+        return False
+    is_carrier = (
+        retained_carrier_body(body)
+        or body.startswith(_PART_PREFIX)
+        or "<!-- reviewsensei:evidence-part:v1 -->" in body
+        or "<!-- reviewsensei:native-manifest:v1 -->" in body
+        or "<!-- reviewsensei:native-part:v1 " in body
+    )
+    if not is_carrier:
+        return False
+    if record.record_sha256 in body:
+        return True
+    if "<!-- reviewsensei:native-manifest:v1 -->" in body:
+        try:
+            source_sha256, receipt = parse_manifest_body(body)
+        except ReviewInputError:
+            return False
+        return (
+            source_sha256 == record.record_sha256
+            or receipt.plan_sha256 == record.record_sha256
+        )
+    if "<!-- reviewsensei:native-part:v1 " in body:
+        return f"plan={record.record_sha256}" in body
+    if body.startswith(_PART_PREFIX) and body.rstrip().endswith(
+        "<!-- reviewsensei:evidence-part:v1 -->"
+    ):
+        match = re.search(
+            r"```json\n([^\n]+)\n```\n<!-- reviewsensei:evidence-part:v1 -->\s*\Z",
+            body,
+        )
+        if match is None:
+            return False
+        try:
+            part = json.loads(match.group(1))
+        except ValueError:
+            return False
+        if not isinstance(part, dict):
+            return False
+        if part.get("binding_sha256") in expected_binding_digests:
+            return True
+        if part.get("count") == 1 and isinstance(part.get("data"), str):
+            try:
+                raw = zlib.decompress(
+                    base64.b64decode(part["data"].encode("ascii"), validate=True)
+                ).decode("utf-8")
+                decoded = json.loads(raw)
+            except (ValueError, UnicodeDecodeError, zlib.error):
+                return False
+            if record.record_sha256 in raw:
+                return True
+            if isinstance(decoded, dict):
+                rec = decoded.get("record")
+                if isinstance(rec, dict):
+                    if (
+                        rec.get("record_sha256") == record.record_sha256
+                        or rec.get("generation") == record.generation
+                    ):
+                        return True
+                    acc = rec.get("api_run_accounting")
+                    if (
+                        isinstance(acc, dict)
+                        and isinstance(acc.get("identity"), dict)
+                        and acc["identity"].get("run_id") == old.identity.run_id
+                    ):
+                        return True
+    return False
+
+
+def _has_startup_crash_carrier_comment(
+    scanned_comments: list[dict[str, Any]],
+    *,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    producer: str,
+    producer_id: int,
+    app_slug: str,
+    candidate_heads: tuple[str, ...],
+) -> bool:
+    """Return True if any bot carrier/evidence-part comment references this crashed root/run/generation."""
+    from .api_run_history import retained_binding
+
+    expected_binding_digests = {
+        hashlib.sha256(
+            canonical_bytes(
+                retained_binding(record, producer, crashed_head_sha=candidate_head)
+            )
+        ).hexdigest()
+        for candidate_head in candidate_heads
+        if _HEX40.fullmatch(candidate_head) is not None
+    }
+    return any(
+        _is_crashed_root_carrier_comment(
+            row,
+            record=record,
+            old=old,
+            expected_binding_digests=expected_binding_digests,
+            producer_id=producer_id,
+            app_slug=app_slug,
+        )
+        for row in scanned_comments
+    )
+
+
 def admit_publication_failure_recovery(
     ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
@@ -1582,6 +1730,7 @@ def admit_publication_failure_recovery(
     old: ApiRunAccounting,
 ) -> tuple[PreExternalWriteSettlementWitness | None, SessionRecord | None]:
     """Verify witness/confirmed-only/retained-result proof, census, and prior root inside CAS."""
+    startup_crash = is_startup_crash_predecessor(record, old)
     if (
         old.action is not None
         or old.analysis_abort is not None
@@ -1597,6 +1746,7 @@ def admit_publication_failure_recovery(
         )
         or (
             record.transaction is None
+            and not startup_crash
             and (
                 record.failed_attempts <= 0
                 or not isinstance(record.failed_attempts_head_sha, str)
@@ -1619,6 +1769,7 @@ def admit_publication_failure_recovery(
 
     confirmed_failed_tx_check_runs: set[int] = set()
     witness: PreExternalWriteSettlementWitness | None = None
+    extra_live_head: str | None = None
     is_failed_tx_lifecycle = (
         record.transaction is not None
         and record.finding_lifecycle is not None
@@ -1636,6 +1787,95 @@ def admit_publication_failure_recovery(
             app_slug=app_slug,
         )
         head_sha = record.transaction.head_sha
+    elif startup_crash:
+        from .api_run_owner import ApiRunActionsEvidence
+
+        run_reader = getattr(ledger, "_run_reader", None)
+        actions_evidence: ApiRunActionsEvidence | None = None
+        if isinstance(run_reader, ApiRunActionsEvidence):
+            actions_evidence = ApiRunActionsEvidence(
+                ledger.http,
+                token=run_reader.token,
+                command_run_id=run_reader.command_run_id,
+                job=old.owner.job,
+            )
+        else:
+            origin_reader = getattr(ledger, "_quarantine_origin_reader", None)
+            actions_token = getattr(origin_reader, "actions_token", None)
+            caller = getattr(ledger, "caller", None)
+            caller_run = getattr(caller, "run", None)
+            if (
+                isinstance(actions_token, str)
+                and actions_token.strip()
+                and caller_run is not None
+            ):
+                actions_evidence = ApiRunActionsEvidence(
+                    ledger.http,
+                    token=actions_token,
+                    command_run_id=str(caller_run.run_id),
+                    job=old.owner.job,
+                )
+        if actions_evidence is None:
+            raise _hold("startup crash Actions evidence is unavailable", record=record)
+        _protect_tail(budget, 2, record=record)
+        try:
+            head_sha = actions_evidence.startup_crash_head_sha(
+                identity, old.identity.run_id, old.owner
+            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+            raise _hold(str(exc), record=record) from exc
+        _protect_tail(budget, 1, record=record)
+        try:
+            pull_status, pull_payload = ledger.http.request(
+                "GET",
+                ledger.http.repository_path(
+                    identity.repository, f"/pulls/{identity.pull_request}"
+                ),
+                token=ledger.token,
+            )
+        except (GitHubHTTPError, GitHubPublicationError) as exc:
+            raise _hold("live pull request head is unavailable", record=record) from exc
+        live_head = (
+            pull_payload.get("head", {}).get("sha")
+            if pull_status == 200
+            and isinstance(pull_payload, dict)
+            and isinstance(pull_payload.get("head"), dict)
+            else None
+        )
+        if not isinstance(live_head, str) or _HEX40.fullmatch(live_head) is None:
+            raise _hold("live pull request head is unavailable", record=record)
+        if live_head != head_sha:
+            extra_live_head = live_head
+        matches, scanned_comments, foreign_witness_seen = _scan_settlement_comments(
+            http=ledger.http,
+            token=ledger.token,
+            app_slug=app_slug,
+            producer_id=producer_id,
+            budget=budget,
+            identity=identity,
+            record=record,
+        )
+        if foreign_witness_seen or matches:
+            raise _hold(
+                "startup crash settlement observed unexpected witness comment",
+                record=record,
+            )
+        candidate_heads = (
+            (head_sha, extra_live_head) if extra_live_head is not None else (head_sha,)
+        )
+        if _has_startup_crash_carrier_comment(
+            scanned_comments,
+            record=record,
+            old=old,
+            producer=producer,
+            producer_id=producer_id,
+            app_slug=app_slug,
+            candidate_heads=candidate_heads,
+        ):
+            raise _hold(
+                "startup crash settlement observed carrier comment for crashed root",
+                record=record,
+            )
     else:
         matches, scanned_comments, foreign_witness_seen = _scan_settlement_comments(
             http=ledger.http,
@@ -1781,7 +2021,9 @@ def admit_publication_failure_recovery(
             )
         return earlier
 
-    def explains_untouched_earlier_head_inline(row: dict[str, Any]) -> bool:
+    def explains_untouched_earlier_head_inline(
+        row: dict[str, Any], target_head: str
+    ) -> bool:
         nonlocal \
             earlier_head_cursor, \
             earlier_head_child_gen, \
@@ -1794,9 +2036,9 @@ def admit_publication_failure_recovery(
         body = row.get("body")
         parent = row.get("pull_request_review_id")
         if (
-            row.get("commit_id") != head_sha
+            row.get("commit_id") != target_head
             or not isinstance(native_head, str)
-            or native_head == head_sha
+            or native_head == target_head
             or row.get("in_reply_to_id") is not None
             or not isinstance(body, str)
             or type(parent) is not int
@@ -1810,7 +2052,7 @@ def admit_publication_failure_recovery(
                 native_head=native_head,
                 body=body,
                 identity=identity,
-                head_sha=head_sha,
+                head_sha=target_head,
                 app_slug=app_slug,
                 app_user_id=producer_id,
             )
@@ -1887,9 +2129,30 @@ def admit_publication_failure_recovery(
                 return True
         return False
 
+    earlier_for_head: dict[str, _EarlierSettledEffects] = {}
+
+    def ensure_earlier_for(target_head: str) -> _EarlierSettledEffects:
+        if target_head == head_sha:
+            return ensure_earlier()
+        cached = earlier_for_head.get(target_head)
+        if cached is None:
+            cached = _earlier_settled_effects(
+                ledger,
+                identity,
+                record,
+                old,
+                target_head,
+                producer_id,
+                budget,
+                prior_record=prior_record,
+                prior_archive_ref=prior_archive_ref,
+            )
+            earlier_for_head[target_head] = cached
+        return cached
+
     def inspect_pr_surface(
         resource: str,
-        classifier: Callable[[dict[str, Any]], bool | None],
+        classifier: Callable[[dict[str, Any], str], bool | None],
         *,
         inline: bool = False,
     ) -> None:
@@ -1897,6 +2160,9 @@ def admit_publication_failure_recovery(
             identity.repository, f"/pulls/{identity.pull_request}/{resource}"
         )
         seen: set[int] = set()
+        heads = (
+            (head_sha, extra_live_head) if extra_live_head is not None else (head_sha,)
+        )
         for rows in iter_step_down_pages(
             http=http,
             token=ledger.token,
@@ -1919,18 +2185,26 @@ def admit_publication_failure_recovery(
                         "native effect census has an unreadable row", record=record
                     )
                 seen.add(row["id"])
-                effect = classifier(row)
-                # Classifiers return False for unrelated human/foreign/different-head rows
-                # and None exclusively for unreadable or contradictory Bot-owned rows.
-                if effect is None:
-                    if inline and explains_untouched_earlier_head_inline(row):
-                        continue
-                    raise _hold("native effect scope is unconfirmed", record=record)
+                matched_head: str | None = None
+                for target_head in heads:
+                    effect = classifier(row, target_head)
+                    # Classifiers return False for unrelated human/foreign/different-head rows
+                    # and None exclusively for unreadable or contradictory Bot-owned rows.
+                    if effect is None:
+                        if inline and explains_untouched_earlier_head_inline(
+                            row, target_head
+                        ):
+                            matched_head = None
+                            break
+                        raise _hold("native effect scope is unconfirmed", record=record)
+                    if effect is True:
+                        matched_head = target_head
+                        break
                 if (
                     not inline
-                    and effect is False
+                    and matched_head is None
                     and isinstance(row.get("commit_id"), str)
-                    and row["commit_id"] != head_sha
+                    and row["commit_id"] not in heads
                     and classify_abort_review_effect(
                         row,
                         identity=identity,
@@ -1941,8 +2215,8 @@ def admit_publication_failure_recovery(
                     is True
                 ):
                     earlier_head_reviews[row["id"]] = row["commit_id"]
-                if effect is True:
-                    ancestor = ensure_earlier()
+                if matched_head is not None:
+                    ancestor = ensure_earlier_for(matched_head)
                     if inline:
                         parent = row.get("pull_request_review_id")
                         if not _positive_id(parent) or parent not in earlier_review_ids:
@@ -1956,30 +2230,30 @@ def admit_publication_failure_recovery(
                     if not inline:
                         earlier_review_ids.add(row["id"])
 
-    def classify_review(row: dict[str, Any]) -> bool | None:
+    def classify_review(row: dict[str, Any], target_head: str) -> bool | None:
         return classify_abort_review_effect(
             row,
             identity=identity,
-            head_sha=head_sha,
+            head_sha=target_head,
             app_slug=app_slug,
             app_user_id=producer_id,
         )
 
-    def classify_inline(row: dict[str, Any]) -> bool | None:
+    def classify_inline(row: dict[str, Any], target_head: str) -> bool | None:
         return classify_abort_inline_effect(
             author=row.get("user"),
             native_head=row.get("original_commit_id"),
             current_head=row.get("commit_id"),
             body=row.get("body"),
             identity=identity,
-            head_sha=head_sha,
+            head_sha=target_head,
             app_slug=app_slug,
             app_user_id=producer_id,
         )
 
-    def inspect_check_runs() -> None:
+    def inspect_check_runs(target_head: str) -> None:
         path = http.repository_path(
-            identity.repository, f"/commits/{head_sha}/check-runs"
+            identity.repository, f"/commits/{target_head}/check-runs"
         )
         seen: set[int] = set()
         total: int | None = None
@@ -2037,7 +2311,7 @@ def admit_publication_failure_recovery(
                     if (
                         not isinstance(app, dict)
                         or not isinstance(app.get("slug"), str)
-                        or row.get("head_sha") not in {head_sha, None}
+                        or row.get("head_sha") not in {target_head, None}
                     ):
                         raise _hold(
                             "native check-run scope is unconfirmed", record=record
@@ -2049,12 +2323,15 @@ def admit_publication_failure_recovery(
                                 "late native check-run effect on the failed scope",
                                 record=record,
                             )
-                        if row.get("head_sha") != head_sha:
+                        if row.get("head_sha") != target_head:
                             raise _hold(
                                 "native check-run scope is unconfirmed", record=record
                             )
-                        if row["id"] not in confirmed_failed_tx_check_runs:
-                            ancestor = ensure_earlier()
+                        if (
+                            target_head != head_sha
+                            or row["id"] not in confirmed_failed_tx_check_runs
+                        ):
+                            ancestor = ensure_earlier_for(target_head)
                             if not ancestor.explains_check_run(row):
                                 raise _hold(
                                     "late native check-run effect on the failed scope",
@@ -2064,8 +2341,12 @@ def admit_publication_failure_recovery(
 
     inspect_pr_surface("reviews", classify_review)
     inspect_pr_surface("comments", classify_inline, inline=True)
-    inspect_check_runs()
+    inspect_check_runs(head_sha)
+    if extra_live_head is not None:
+        inspect_check_runs(extra_live_head)
     if ledger._mutation_active:
+        if startup_crash:
+            _ADMITTED_STARTUP_CRASH_HEADS[ledger] = (record.record_sha256, head_sha)
         if prior_record is not None:
             _ADMITTED_PRIOR_RECORDS[ledger] = (record.record_sha256, prior_record)
         if skipped_failed_ancestors:
@@ -2224,6 +2505,7 @@ __all__ = [
     "find_authenticated_settlement_witness",
     "parse_settlement_witness_comment",
     "peek_admitted_prior_chain",
+    "peek_admitted_startup_crash_head",
     "render_settlement_witness_comment",
     "require_publication_failure_admission",
 ]

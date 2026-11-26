@@ -173,13 +173,59 @@ class PagedFindingCheckpointTests(unittest.TestCase):
             )
             f.assert_physical_accounting(self)
 
+    def test_concurrent_benign_human_comment_append_and_edit_succeeds(self):
+        from urllib.parse import urlsplit
+
+        for mode in ("append", "edit"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                f, record, kwargs = self.fixture(directory)
+                record = stage_finding_lifecycle(f.ledger, record, **kwargs)
+                original = f.caller._opener
+                tripped = []
+
+                def opened(request, timeout):
+                    if (
+                        not tripped
+                        and f.ledger in adapter._PLAIN_FINDING_ACTIVE
+                        and request.method == "GET"
+                        and urlsplit(request.full_url).path.endswith(
+                            "/issues/7/comments"
+                        )
+                    ):
+                        tripped.append(True)
+                        if mode == "append":
+                            f.service.extra_comments[9000000] = {
+                                "id": 9000000,
+                                "body": "unexpected growth",
+                                "user": {"id": 42, "type": "User"},
+                            }
+                        else:
+                            f.service.extra_comments[3000000]["body"] += " edited"
+                    return original(request, timeout)
+
+                f.caller._opener = opened
+                kwargs = {**kwargs, "document": {**kwargs["document"], "next": True}}
+                plan = preflight_finding_lifecycle(f.ledger, record, **kwargs)
+                before = len(f.caller.observations)
+                updated = stage_finding_lifecycle(f.ledger, record, **kwargs)
+                self.assertTrue(tripped)
+                self.assertIsNotNone(updated.finding_lifecycle)
+                self.assertLessEqual(
+                    len(f.caller.observations) - before, plan["conditional_calls"]
+                )
+                self.assertNotIn(f.ledger, adapter._PLAIN_FINDING_ACTIVE)
+                f.assert_physical_accounting(self)
+
     def test_complete_fresh_fences_reject_growth_deleted_dependency_and_duplicate_root(
         self,
     ):
         from urllib.parse import urlsplit
 
         for fault in (
-            "growth",
+            "bot-growth",
+            "marker-growth",
+            "carrier-mutation",
+            "terminal-overflow",
             "response-growth",
             "dependency-deletion",
             "duplicate-root",
@@ -209,12 +255,37 @@ class PagedFindingCheckpointTests(unittest.TestCase):
                         tripped.append(True)
                         if fault == "dependency-deletion":
                             del f.service.extra_comments[dependency]
-                        elif fault == "growth":
+                        elif fault == "bot-growth":
                             f.service.extra_comments[9000000] = {
                                 "id": 9000000,
-                                "body": "unexpected growth",
+                                "body": "unexpected bot comment",
+                                "user": {
+                                    "id": 999,
+                                    "login": "reviewsensei[bot]",
+                                    "type": "Bot",
+                                },
+                            }
+                        elif fault == "marker-growth":
+                            f.service.extra_comments[9000000] = {
+                                "id": 9000000,
+                                "body": "quoted\n<!-- reviewsensei:evidence-part:v1 -->",
                                 "user": {"id": 42, "type": "User"},
                             }
+                        elif fault == "carrier-mutation":
+                            f.service.extra_comments[dependency]["body"] += " tampered"
+                        elif fault == "terminal-overflow":
+                            plan, _ = adapter._PLAIN_FINDING_ACTIVE[f.ledger]
+                            last_size, last_page = plan.page_requests[-1]
+                            target_total = last_size * last_page
+                            needed = target_total - (1 + len(f.service.extra_comments))
+                            self.assertGreater(needed, 0)
+                            for offset in range(needed):
+                                cid = 9000000 + offset
+                                f.service.extra_comments[cid] = {
+                                    "id": cid,
+                                    "body": f"human comment {offset}",
+                                    "user": {"id": 42, "type": "User"},
+                                }
                         elif fault == "duplicate-appended-id":
                             newly_staged = set(f.service.extra_comments) - before_ids
                             self.assertEqual(len(newly_staged), 1)
