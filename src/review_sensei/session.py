@@ -5110,14 +5110,18 @@ def _history_preserve_sources(
             )
 
 
+_STARTUP_CRASH_INITIAL_BLOCK_IDS = frozenset({"hosted-review", "hosted-terminal"})
+
+
 def is_startup_crash_predecessor(record: SessionRecord, accounting: object) -> bool:
-    """Return True only for an unwitnessed no-transaction predecessor with zero reserved work."""
+    """Return True only for an unwitnessed no-transaction predecessor with unstarted initial blocks."""
     from .api_work import ApiRunAccounting
 
     if not isinstance(record, SessionRecord) or not isinstance(
         accounting, ApiRunAccounting
     ):
         return False
+    block_ids = [block.block_id for block in accounting.blocks]
     return (
         record.transaction is None
         and record.reservation_id is None
@@ -5127,9 +5131,17 @@ def is_startup_crash_predecessor(record: SessionRecord, accounting: object) -> b
         and accounting.analysis_abort is None
         and accounting.terminal_transaction is None
         and record.failed_attempts == 0
+        and accounting.prior_nonstartup_liability == 0
         and accounting.confirmed == 0
         and accounting.uncertain == 0
-        and all(not block.pending for block in accounting.blocks)
+        and len(accounting.blocks) <= len(_STARTUP_CRASH_INITIAL_BLOCK_IDS)
+        and len(set(block_ids)) == len(block_ids)
+        and all(
+            block.block_id in _STARTUP_CRASH_INITIAL_BLOCK_IDS
+            and block.issued_by == accounting.owner
+            and not block.pending
+            for block in accounting.blocks
+        )
     )
 
 

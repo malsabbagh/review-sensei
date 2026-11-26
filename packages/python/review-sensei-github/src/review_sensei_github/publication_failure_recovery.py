@@ -1596,6 +1596,98 @@ def _verify_legacy_witnessless_retained_result(
         return False
 
 
+def _is_crashed_root_carrier_comment(
+    row: dict[str, Any],
+    *,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    expected_binding_digests: set[str],
+    producer_id: int,
+    app_slug: str,
+) -> bool:
+    """Return True only when a bot carrier/evidence-part comment demonstrably references this crashed root/run/generation."""
+    import base64
+    import zlib
+
+    from .native_manifest import parse_manifest_body
+    from .session_ledger import _PART_PREFIX, retained_carrier_body
+
+    body = row.get("body")
+    if not isinstance(body, str):
+        return False
+    user = row.get("user")
+    is_bot = _is_authenticated_bot_comment(
+        row, producer_id=producer_id, app_slug=app_slug
+    ) or (isinstance(user, dict) and user.get("type") == "Bot")
+    if not is_bot:
+        return False
+    is_carrier = (
+        retained_carrier_body(body)
+        or body.startswith(_PART_PREFIX)
+        or "<!-- reviewsensei:evidence-part:v1 -->" in body
+        or "<!-- reviewsensei:native-manifest:v1 -->" in body
+        or "<!-- reviewsensei:native-part:v1 " in body
+    )
+    if not is_carrier:
+        return False
+    if record.record_sha256 in body:
+        return True
+    if "<!-- reviewsensei:native-manifest:v1 -->" in body:
+        try:
+            source_sha256, receipt = parse_manifest_body(body)
+        except ReviewInputError:
+            return False
+        return (
+            source_sha256 == record.record_sha256
+            or receipt.plan_sha256 == record.record_sha256
+        )
+    if "<!-- reviewsensei:native-part:v1 " in body:
+        return f"plan={record.record_sha256}" in body
+    if body.startswith(_PART_PREFIX) and body.rstrip().endswith(
+        "<!-- reviewsensei:evidence-part:v1 -->"
+    ):
+        match = re.search(
+            r"```json\n([^\n]+)\n```\n<!-- reviewsensei:evidence-part:v1 -->\s*\Z",
+            body,
+        )
+        if match is None:
+            return False
+        try:
+            part = json.loads(match.group(1))
+        except ValueError:
+            return False
+        if not isinstance(part, dict):
+            return False
+        if part.get("binding_sha256") in expected_binding_digests:
+            return True
+        if part.get("count") == 1 and isinstance(part.get("data"), str):
+            try:
+                raw = zlib.decompress(
+                    base64.b64decode(part["data"].encode("ascii"), validate=True)
+                ).decode("utf-8")
+                decoded = json.loads(raw)
+            except (ValueError, UnicodeDecodeError, zlib.error):
+                return False
+            if record.record_sha256 in raw:
+                return True
+            if isinstance(decoded, dict):
+                rec = decoded.get("record")
+                if isinstance(rec, dict):
+                    if (
+                        rec.get("record_sha256") == record.record_sha256
+                        or rec.get("generation") == record.generation
+                    ):
+                        return True
+                    acc = rec.get("api_run_accounting")
+                    if (
+                        isinstance(acc, dict)
+                        and isinstance(acc.get("identity"), dict)
+                        and acc["identity"].get("run_id") == old.identity.run_id
+                    ):
+                        return True
+    return False
+
+
 def _has_startup_crash_carrier_comment(
     scanned_comments: list[dict[str, Any]],
     *,
@@ -1607,12 +1699,7 @@ def _has_startup_crash_carrier_comment(
     candidate_heads: tuple[str, ...],
 ) -> bool:
     """Return True if any bot carrier/evidence-part comment references this crashed root/run/generation."""
-    import base64
-    import zlib
-
     from .api_run_history import retained_binding
-    from .native_manifest import parse_manifest_body
-    from .session_ledger import _PART_PREFIX, retained_carrier_body
 
     expected_binding_digests = {
         hashlib.sha256(
@@ -1623,82 +1710,17 @@ def _has_startup_crash_carrier_comment(
         for candidate_head in candidate_heads
         if _HEX40.fullmatch(candidate_head) is not None
     }
-    for row in scanned_comments:
-        body = row.get("body")
-        if not isinstance(body, str):
-            continue
-        user = row.get("user")
-        is_bot = _is_authenticated_bot_comment(
-            row, producer_id=producer_id, app_slug=app_slug
-        ) or (isinstance(user, dict) and user.get("type") == "Bot")
-        if not is_bot:
-            continue
-        is_carrier = (
-            retained_carrier_body(body)
-            or body.startswith(_PART_PREFIX)
-            or "<!-- reviewsensei:evidence-part:v1 -->" in body
-            or "<!-- reviewsensei:native-manifest:v1 -->" in body
-            or "<!-- reviewsensei:native-part:v1 " in body
+    return any(
+        _is_crashed_root_carrier_comment(
+            row,
+            record=record,
+            old=old,
+            expected_binding_digests=expected_binding_digests,
+            producer_id=producer_id,
+            app_slug=app_slug,
         )
-        if not is_carrier:
-            continue
-        if record.record_sha256 in body:
-            return True
-        if "<!-- reviewsensei:native-manifest:v1 -->" in body:
-            try:
-                source_sha256, _receipt = parse_manifest_body(body)
-            except ReviewInputError:
-                return True
-            if source_sha256 == record.record_sha256:
-                return True
-            continue
-        if "<!-- reviewsensei:native-part:v1 " in body:
-            if f"plan={record.record_sha256}" in body:
-                return True
-            continue
-        if body.startswith(_PART_PREFIX) and body.rstrip().endswith(
-            "<!-- reviewsensei:evidence-part:v1 -->"
-        ):
-            match = re.search(
-                r"```json\n([^\n]+)\n```\n<!-- reviewsensei:evidence-part:v1 -->\s*\Z",
-                body,
-            )
-            if match is None:
-                return True
-            try:
-                part = json.loads(match.group(1))
-            except ValueError:
-                return True
-            if not isinstance(part, dict):
-                return True
-            if part.get("binding_sha256") in expected_binding_digests:
-                return True
-            if part.get("count") == 1 and isinstance(part.get("data"), str):
-                try:
-                    raw = zlib.decompress(
-                        base64.b64decode(part["data"].encode("ascii"), validate=True)
-                    ).decode("utf-8")
-                    decoded = json.loads(raw)
-                except (ValueError, UnicodeDecodeError, zlib.error):
-                    return True
-                if record.record_sha256 in raw:
-                    return True
-                if isinstance(decoded, dict):
-                    rec = decoded.get("record")
-                    if isinstance(rec, dict):
-                        if (
-                            rec.get("record_sha256") == record.record_sha256
-                            or rec.get("generation") == record.generation
-                        ):
-                            return True
-                        acc = rec.get("api_run_accounting")
-                        if (
-                            isinstance(acc, dict)
-                            and isinstance(acc.get("identity"), dict)
-                            and acc["identity"].get("run_id") == old.identity.run_id
-                        ):
-                            return True
-    return False
+        for row in scanned_comments
+    )
 
 
 def admit_publication_failure_recovery(

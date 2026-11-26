@@ -2434,7 +2434,33 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                 if label == "confirmed_nonzero":
                     self.assertIn("phase=no-transaction", f.error)
 
-        # 3) Fail closed on bot carrier referencing crashed root or native effect on crashed/live head.
+        # 3) Unparseable unrelated bot carrier/manifest comments must NOT falsely block recovery,
+        #    while a carrier referencing the crashed root/run/generation or a native effect blocks it.
+        for label, body in (
+            (
+                "malformed_evidence_part",
+                "ReviewSensei immutable evidence part v1\n```json\n{not-json\n```\n<!-- reviewsensei:evidence-part:v1 -->",
+            ),
+            (
+                "malformed_native_manifest",
+                "ReviewSensei immutable native publication manifest v1\n```json\n{not-json\n```\n<!-- reviewsensei:native-manifest:v1 -->",
+            ),
+        ):
+            with (
+                self.subTest(carrier=label),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f, _ = _make_startup_crash_fixture(
+                    directory, crashed_head="a" * 40, live_head=HEAD_2
+                )
+                f.extra_comments[900000] = {
+                    "id": 900000,
+                    "body": body,
+                    "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
+                    "issue_url": f"{f.api_url}/repos/owner/repo/issues/7",
+                }
+                self.assertEqual(f.invoke(), 0, f.error)
+
         with tempfile.TemporaryDirectory() as directory:
             f, crashed_rec = _make_startup_crash_fixture(
                 directory, crashed_head="a" * 40, live_head=HEAD_2
@@ -2472,6 +2498,85 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(f.invoke(), 1)
                 self.assertIn("phase=no-transaction", f.error)
+
+    def test_is_startup_crash_predecessor_rejects_non_initial_or_prior_liability_blocks(
+        self,
+    ) -> None:
+        from dataclasses import replace
+
+        from review_sensei.api_work import ApiRunAccounting, CallerRequestBlock
+        from review_sensei.session import is_startup_crash_predecessor
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = PublicationFailureRecoveryFixture(directory, limit=1024)
+            with (
+                patch.object(f, "before_entry", side_effect=RuntimeError("crash")),
+                self.assertRaises(RuntimeError),
+            ):
+                f.invoke()
+            rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert rec is not None
+            acc = ApiRunAccounting.from_document(rec.api_run_accounting)
+            clean_blocks = tuple(replace(b, pending=()) for b in acc.blocks)
+            clean_acc = replace(
+                acc,
+                blocks=clean_blocks,
+                completed=(),
+                analysis_abort=None,
+                terminal_transaction=None,
+            )
+            payload = rec.to_dict()
+            del payload["schema_version"], payload["record_sha256"]
+            payload["transaction"] = None
+            payload["reservation_id"] = None
+            payload["reserved_slot"] = None
+            payload["publication_staging"] = None
+            payload["failed_attempts"] = 0
+            payload["api_run_accounting"] = clean_acc.to_document()
+            crashed_rec = SessionRecord._construct(**payload)
+
+            self.assertTrue(is_startup_crash_predecessor(crashed_rec, clean_acc))
+
+            # Extra / non-initial block is rejected even when pending=() and confirmed==0.
+            extra_acc = clean_acc.reserve("extra-block", 1)
+            self.assertFalse(is_startup_crash_predecessor(crashed_rec, extra_acc))
+            non_initial_only_acc = replace(
+                clean_acc,
+                blocks=(
+                    CallerRequestBlock(
+                        block_id="successor-review",
+                        issued_by=clean_acc.owner,
+                        undispatched=1,
+                        pending=(),
+                    ),
+                ),
+            )
+            self.assertFalse(
+                is_startup_crash_predecessor(crashed_rec, non_initial_only_acc)
+            )
+
+            # Block issued by another owner is rejected.
+            other_owner = replace(clean_acc.owner, job="other-job")
+            foreign_owner_acc = replace(
+                clean_acc,
+                blocks=(
+                    CallerRequestBlock(
+                        block_id="hosted-review",
+                        issued_by=other_owner,
+                        undispatched=1,
+                        pending=(),
+                    ),
+                ),
+            )
+            self.assertFalse(
+                is_startup_crash_predecessor(crashed_rec, foreign_owner_acc)
+            )
+
+            # Non-zero prior_nonstartup_liability is rejected.
+            prior_liability_acc = replace(clean_acc, prior_nonstartup_liability=1)
+            self.assertFalse(
+                is_startup_crash_predecessor(crashed_rec, prior_liability_acc)
+            )
 
 
 if __name__ == "__main__":

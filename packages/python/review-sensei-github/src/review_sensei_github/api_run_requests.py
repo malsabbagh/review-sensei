@@ -47,12 +47,14 @@ from review_sensei.session import SessionIdentity, SessionRecord
 from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
 from .errors import GitHubHTTPError, GitHubPublicationTransientError
-from .http import Opener
+from .http import MAX_GITHUB_RESPONSE_BYTES, Opener
 from .quarantine_capacity import (
     _guarded_lifecycle_writer,
     _install_guarded_lifecycle_writer,
 )
 from .session_ledger import GitHubIssueCommentSessionLedger
+
+MAX_CONCURRENT_NON_OWNED_COMMENTS = 20
 
 
 @dataclass(frozen=True, eq=False)
@@ -71,6 +73,8 @@ class _PlainFindingPagePlan:
     root_calls: int
     fences: int
     owned_carrier_digests: tuple[tuple[int, str], ...]
+    page_response_ceiling: int
+    max_non_owned_appends: int
 
 
 # These capabilities are issued only after the complete source frontier passes
@@ -102,6 +106,8 @@ def _plain_page_signature(plan):
         plan.root_calls,
         plan.fences,
         plan.owned_carrier_digests,
+        plan.page_response_ceiling,
+        plan.max_non_owned_appends,
     )
 
 
@@ -3523,7 +3529,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                         continue
                     members = bounds[offset : offset + size]
                     bound = 2 + sum(members) + max(0, len(members) - 1)
-                    if bound < 512 * 1024:
+                    if bound < MAX_GITHUB_RESPONSE_BYTES:
                         requests.append((size, offset // size + 1))
                         response_bounds.append(bound)
                         offset += size
@@ -3535,6 +3541,16 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             page_requests = tuple(requests)
             page_size = page_requests[0][0]
             page_bounds = tuple(response_bounds)
+            terminal_page_size, terminal_page = page_requests[-1]
+            terminal_planned_items = max(
+                0, len(bounds) - (terminal_page - 1) * terminal_page_size
+            )
+            max_non_owned_appends = min(
+                MAX_CONCURRENT_NON_OWNED_COMMENTS,
+                max(0, 200 - len(bounds)),
+                max(0, terminal_page_size - 1 - terminal_planned_items),
+            )
+            page_response_ceiling = MAX_GITHUB_RESPONSE_BYTES
             if self.caller._root != selected.record_sha256:
                 raise ReviewInputError("finding lifecycle page plan root changed")
             plan = _PlainFindingPagePlan(
@@ -3552,6 +3568,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 root_calls,
                 fences,
                 owned_carrier_digests,
+                page_response_ceiling,
+                max_non_owned_appends,
             )
             _PLAIN_FINDING_ISSUED[plan] = _plain_page_signature(plan)
             _PLAIN_FINDING_PLANS[self] = plan
@@ -3663,7 +3681,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         if self._inventory_complete and not self._list_refresh:
             return self._cached_comments()
         collected = []
-        for (page_size, page), _bound in zip(
+        for (page_size, page), bound in zip(
             plan.page_requests, plan.page_bounds, strict=True
         ):
             path = f"{self._comments_path(identity)}?per_page={page_size}&page={page}"
@@ -3673,11 +3691,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 or not isinstance(payload, list)
                 or len(payload) > page_size
                 or any(not isinstance(item, dict) for item in payload)
-                or len(canonical_bytes(payload)) >= 512 * 1024
+                or bound >= plan.page_response_ceiling
+                or len(canonical_bytes(payload)) >= plan.page_response_ceiling
             ):
                 raise ReviewInputError("finding lifecycle planned page changed")
             collected.extend(payload)
-            if len(collected) > 200:
+            if len(collected) > plan.maximum_items + plan.max_non_owned_appends:
                 raise ReviewInputError("finding lifecycle planned frontier grew")
             if len(payload) < page_size:
                 observed_ids = tuple(item.get("id") for item in collected)
