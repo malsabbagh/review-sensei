@@ -120,3 +120,133 @@ with patch.object(Path, "read_text", new=read):
             )
         self.assertEqual(emit.call_args.args[0].status, "action_required")
         self.assertEqual(emit.call_args.args[0].diagnostic, "broker_rejected")
+
+
+class HostedSemanticHistoryAndDriftGapContractTests(unittest.TestCase):
+    def test_carried_history_fallback_and_hierarchical_drift_matching(self):
+        from review_sensei_github.accepted_semantic_history import (
+            action_allows_carried_history_fallback,
+        )
+
+        from review_sensei.coverage import CoverageManifest, FileCoverage
+        from review_sensei.finding_drift import (
+            ConfirmedFixEvidence,
+            FileDriftDescriptor,
+            evaluate_drift_round,
+        )
+        from review_sensei.models import ReviewComment, ReviewResult
+
+        self.assertTrue(
+            action_allows_carried_history_fallback(
+                {"outcome": {"kind": "explicit_noop", "reason": "capacity_unavailable"}}
+            )
+        )
+        self.assertTrue(
+            action_allows_carried_history_fallback(
+                {"outcome": {"kind": "explicit_noop", "reason": "evaluation_failed"}}
+            )
+        )
+        self.assertFalse(
+            action_allows_carried_history_fallback(
+                {"outcome": {"kind": "explicit_noop", "reason": "no_change"}}
+            )
+        )
+
+        head_1, head_2, base = "a" * 40, "b" * 40, "0" * 40
+        validator_coverage = CoverageManifest(
+            files=(FileCoverage("src/validator.py", "reviewed"),),
+            enumerated_paths=("src/validator.py",),
+            enumeration_complete=True,
+        )
+        r1 = evaluate_drift_round(
+            ReviewResult(
+                summary="Round 1",
+                comments=(
+                    ReviewComment(
+                        path="src/validator.py",
+                        line=10,
+                        side="RIGHT",
+                        body="Reject empty header token.",
+                        severity="high",
+                        blocking=True,
+                        effective_blocking=True,
+                        needs_human=False,
+                        symbol="parse_header",
+                        evidence_id="ev-header-empty",
+                    ),
+                    ReviewComment(
+                        path="src/validator.py",
+                        line=40,
+                        side="RIGHT",
+                        body="Consider validating optional hint length.",
+                        severity="low",
+                        blocking=False,
+                        effective_blocking=False,
+                        needs_human=False,
+                        symbol="format_hint",
+                        evidence_id="ev-hint-length",
+                    ),
+                ),
+                provider="synthetic-provider",
+                model="synthetic-model",
+                review_status="complete",
+                coverage=validator_coverage,
+            ),
+            head_sha=head_1,
+            base_sha=base,
+            max_active_findings=20,
+            round_number=1,
+            diff_text="diff --git a/src/validator.py b/src/validator.py\n--- a/src/validator.py\n+++ b/src/validator.py\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        r2 = evaluate_drift_round(
+            ReviewResult(
+                summary="Round 2",
+                comments=(
+                    ReviewComment(
+                        path="src/validator.py",
+                        line=85,
+                        side="RIGHT",
+                        body="Validate footer checksum length.",
+                        severity="medium",
+                        blocking=True,
+                        effective_blocking=True,
+                        needs_human=False,
+                        symbol="parse_footer",
+                        evidence_id="ev-footer-len",
+                    ),
+                ),
+                provider="synthetic-provider",
+                model="synthetic-model",
+                review_status="complete",
+                coverage=validator_coverage,
+            ),
+            head_sha=head_2,
+            base_sha=base,
+            max_active_findings=20,
+            round_number=2,
+            prior_inventory=r1.inventory,
+            drift_descriptors=(
+                FileDriftDescriptor(
+                    drift_kind="line_deletion", source_path="src/validator.py"
+                ),
+            ),
+            confirmed_fixes=tuple(
+                ConfirmedFixEvidence(
+                    obligation_id=ob.obligation_id,
+                    resolution_criterion=ob.criterion.resolution_criterion,
+                    head_sha=head_2,
+                    evidence_sha256="f" * 64,
+                    verified_paths=("src/validator.py",),
+                )
+                for ob in r1.inventory.obligations
+            ),
+            diff_text="diff --git a/src/validator.py b/src/validator.py\n--- a/src/validator.py\n+++ b/src/validator.py\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        by_sym = {
+            (ob.present_anchor.symbol or ob.criterion.origin_symbol): ob
+            for ob in r2.inventory.obligations
+        }
+        self.assertEqual(by_sym["parse_header"].lifecycle_state, "verified-fixed")
+        self.assertEqual(by_sym["format_hint"].lifecycle_state, "verified-fixed")
+        self.assertFalse(by_sym["format_hint"].criterion.blocking)
+        self.assertEqual(by_sym["parse_footer"].lifecycle_state, "active-unresolved")

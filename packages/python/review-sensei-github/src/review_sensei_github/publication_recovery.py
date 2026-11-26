@@ -924,6 +924,77 @@ def _validate(
     return replace(result, transaction=record.transaction)
 
 
+def recover_retained_result_for_transaction(
+    *,
+    http: GitHubHttp,
+    token: str,
+    repository_id: int,
+    base_sha: str,
+    head_sha: str,
+    app_slug: str,
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    configuration_context: Mapping[str, object],
+    evidence_context: Mapping[str, object],
+    convergence_policy: ReviewConvergencePolicy | None = None,
+    budget: EvidenceReadBudget | None = None,
+    primed_comments: list[Any] | None = None,
+) -> ReviewResult:
+    """Decode and verify retained result bytes against an explicit transaction."""
+    if transaction.result_sha256 is None or transaction.phase == "analysis":
+        raise ReviewInputError("retention requires a durable result checkpoint")
+    effective_policy = convergence_policy or ReviewConvergencePolicy()
+    if not transaction.identity_matches(
+        repository=identity.repository,
+        pull_request=identity.pull_request,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        policy_digest=effective_policy.digest(),
+        configuration_digest=ReviewTransaction.compute_configuration_digest(
+            configuration_context
+        ),
+        evidence_digest=ReviewTransaction.compute_evidence_digest(evidence_context),
+    ):
+        raise ReviewInputError("retained transaction identity or context mismatches")
+    effective_budget = budget or EvidenceReadBudget()
+    effective_budget.check()
+    transport = publication_http(http, effective_budget)
+    store = _store(
+        transport,
+        token=token,
+        identity=identity,
+        app_slug=app_slug,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        primed_comments=primed_comments,
+        transaction=transaction,
+        source_app_id=getattr(ledger, "authenticated_app_id", None),
+    )
+    available = store.read_available(event_key=_event_key(identity, transaction))
+    if available is None:
+        raise ReviewInputError(
+            "retained result is missing; historical result bytes do not exist for "
+            f"transaction {transaction.transaction_id}; do not reconstruct from an "
+            "old head; an authorized maintainer (maintain/admin) must comment "
+            "'@reviewsensei review reenroll' to record an irrecoverable-transaction "
+            "successor transition"
+        )
+    _digest, payload = available
+    document = json.loads(payload)
+    if not isinstance(document, dict):
+        raise ReviewInputError("retained result is invalid")
+    result = ReviewResult.from_dict(document)
+    if _payload(result, projected=store.last_read_was_projection) != payload:
+        raise ReviewInputError("retained result is not canonical")
+    if transaction.result_sha256 != result.content_digest():
+        raise ReviewInputError("retained result digest does not match transaction")
+    _payload(
+        result, projected=bool(getattr(ledger, "_quarantine_capacity_cursor", False))
+    )
+    return replace(result, transaction=transaction)
+
+
 def recover_retained_review_result(
     *,
     http: GitHubHttp,
@@ -973,6 +1044,8 @@ def recover_retained_review_result(
             or transaction.phase == "analysis"
         ):
             raise ReviewInputError("retention requires a durable result checkpoint")
+        # Keep `store` as a direct local in this frame so `empty_original_admission`
+        # can match the original `ResultPartStore` instance during cold readback.
         transport = publication_http(http, budget)
         store = _store(
             transport,

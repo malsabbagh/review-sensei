@@ -2111,7 +2111,11 @@ class GitHubIssueCommentSessionLedger:
             )
 
     def _discover(
-        self, identity: SessionIdentity, *, now: datetime | None = None
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+        _reuse_fresh_listing: bool = False,
     ) -> tuple[int | None, SessionRecord | None]:
         self._last_selected_row = None
         self._observed_consumed_grants = set()
@@ -2289,13 +2293,16 @@ class GitHubIssueCommentSessionLedger:
                     "partition session requires shared read budget",
                 )
             reuse_listed = (
-                full_census and self._inventory_complete and not self._fencing()
+                (full_census or _reuse_fresh_listing)
+                and self._inventory_complete
+                and not self._fencing()
             )
             prior_reuse = self._reuse_listed_parts
             prior_complete_read = self._quarantine_complete_read
             if reuse_listed:
                 self._reuse_listed_parts = True
-                self._quarantine_complete_read = True
+                if full_census:
+                    self._quarantine_complete_read = True
             try:
                 self._part_owner(
                     next(
@@ -2450,129 +2457,162 @@ class GitHubIssueCommentSessionLedger:
         self._verify_mutation_grant(identity)
         selected_reader = getattr(self, "_consume_plain_finding_input", None)
         selected = selected_reader(identity) if callable(selected_reader) else None
-        if selected is None:
-            self._list_refresh = True
-            comment_id, record = self._discover(identity, now=now)
-        else:
-            comment_id, record = selected
-        if comment_id is None or record is None:
-            raise ReviewInputError("session record is missing")
-        if record.expired(now=now):
-            raise ReviewInputError("session record is missing")
-        latest_comment_id, latest_record = self._discover(identity, now=now)
-        if (
-            latest_comment_id != comment_id
-            or latest_record is None
-            or latest_record.record_sha256 != record.record_sha256
-            or latest_record.generation != record.generation
-        ):
-            raise ReviewInputError("session generation conflict")
-        record = latest_record
-        if record.api_run_accounting is not None:
-            ApiRunAccounting.from_document(
-                record.api_run_accounting
-            ).require_writer_version()
-        _history_legacy_write_guard(self, record)
-        from .publication_failure_recovery import (
-            clear_admitted_prior_record,
-            consume_admitted_prior_chain,
-            consume_admitted_prior_record,
+        prior_reuse = self._reuse_listed_parts
+        manage_reuse = (
+            selected is None
+            and self.evidence_budget is not None
+            and not self._fencing()
+            and not self._reuse_listed_parts
         )
-
-        self._mutation_active = True
         try:
-            updated = mutate(record)
-            # admit_publication_failure_recovery stashes the prior record only while
-            # _mutation_active is True inside mutate(); finally clears on failure.
-            if record.quarantine_lineage is not None:
-                from .quarantine_action import require_native_decision
-
-                require_native_decision(self, record, updated)
-            admitted_prior = consume_admitted_prior_record(self, record)
-            admitted_chain = consume_admitted_prior_chain(self, record)
-            _validate_queue_retention(
-                record,
-                updated,
-                prior_record=admitted_prior,
-                skipped_failed_ancestors=admitted_chain,
+            if selected is None:
+                self._list_refresh = True
+                self._verified_parts = {}
+                comment_id, record = self._discover(
+                    identity, now=now, _reuse_fresh_listing=manage_reuse
+                )
+            else:
+                comment_id, record = selected
+            if comment_id is None or record is None:
+                raise ReviewInputError("session record is missing")
+            if record.expired(now=now):
+                raise ReviewInputError("session record is missing")
+            latest_comment_id, latest_record = self._discover(
+                identity, now=now, _reuse_fresh_listing=manage_reuse
             )
-            read_session_baseline(self, updated)
-            read_session_dispositions(self, updated)
-            read_session_assessment_queue(self, updated)
-            _history_legacy_write_guard(self, updated)
-        finally:
-            self._mutation_active = False
-            clear_admitted_prior_record(self)
-        if self.evidence_budget is not None:
-            self._list_refresh = True
-            preactivation_id, preactivation = self._discover(identity, now=now)
             if (
-                preactivation_id != comment_id
-                or preactivation is None
-                or preactivation.record_sha256 != record.record_sha256
-                or preactivation.generation != record.generation
+                latest_comment_id != comment_id
+                or latest_record is None
+                or latest_record.record_sha256 != record.record_sha256
+                or latest_record.generation != record.generation
             ):
-                raise ReviewInputError("session generation conflict before activation")
-        if not self._is_own_release(record, updated):
-            self._verify_live_head(identity)
-        finalizer = self._prospective_abort_finalizer
-        self._prospective_abort_finalizer = None
-        patch_body: str | None = None
-        if finalizer is not None:
+                raise ReviewInputError("session generation conflict")
+            record = latest_record
+            if record.api_run_accounting is not None:
+                ApiRunAccounting.from_document(
+                    record.api_run_accounting
+                ).require_writer_version()
+            _history_legacy_write_guard(self, record)
+            from .publication_failure_recovery import (
+                clear_admitted_prior_record,
+                consume_admitted_prior_chain,
+                consume_admitted_prior_record,
+            )
+
             self._mutation_active = True
             try:
-                updated, patch_body = finalizer(record, updated, comment_id, now)
-                _validate_queue_retention(record, updated)
+                updated = mutate(record)
+                # admit_publication_failure_recovery stashes the prior record only while
+                # _mutation_active is True inside mutate(); finally clears on failure.
+                if record.quarantine_lineage is not None:
+                    from .quarantine_action import require_native_decision
+
+                    require_native_decision(self, record, updated)
+                admitted_prior = consume_admitted_prior_record(self, record)
+                admitted_chain = consume_admitted_prior_chain(self, record)
+                _validate_queue_retention(
+                    record,
+                    updated,
+                    prior_record=admitted_prior,
+                    skipped_failed_ancestors=admitted_chain,
+                )
+                reuse_post_mutate = (
+                    manage_reuse and self._inventory_complete and not self._fencing()
+                )
+                post_mutate_prior_reuse = self._reuse_listed_parts
+                if reuse_post_mutate:
+                    self._reuse_listed_parts = True
+                try:
+                    read_session_baseline(self, updated)
+                    read_session_dispositions(self, updated)
+                    read_session_assessment_queue(self, updated)
+                finally:
+                    if reuse_post_mutate:
+                        self._reuse_listed_parts = post_mutate_prior_reuse
                 _history_legacy_write_guard(self, updated)
             finally:
                 self._mutation_active = False
-        repository_id = self._require_identity(identity)
-        path = self.http.repository_path(
-            identity.repository, f"/issues/comments/{comment_id}"
-        )
-        if patch_body is None:
-            patch_body = self._render_comment(
-                repository_id=repository_id,
-                pull_request=identity.pull_request,
-                record=updated,
-            )
-        else:
-            self._require_readable_candidate(patch_body, updated)
-        status, payload = self._request(
-            "PATCH",
-            path,
-            body={"body": patch_body},
-        )
-        if status != 200 or not isinstance(payload, dict):
-            if status in {409, 422, 429} or status >= 500:
-                raise GitHubPublicationTransientError(
-                    "session comment update was ambiguous"
+                clear_admitted_prior_record(self)
+            if self.evidence_budget is not None:
+                self._list_refresh = True
+                self._verified_parts = {}
+                preactivation_id, preactivation = self._discover(
+                    identity, now=now, _reuse_fresh_listing=manage_reuse
                 )
-            raise GitHubPublicationError("session comment update failed")
-        verified = parse_session_comment(payload.get("body"), identity=identity)
-        payload_id = payload.get("id")
-        if (
-            isinstance(payload_id, bool)
-            or not isinstance(payload_id, int)
-            or payload_id != comment_id
-            or verified is None
-            or verified.record_sha256 != updated.record_sha256
-        ):
-            raise ReviewInputError("session comment update lost")
-        # A successful PATCH response proves only what GitHub returned for
-        # that request. Re-read the marker so a concurrent writer that landed
-        # immediately after the PATCH is surfaced instead of being silently
-        # treated as our committed generation.
-        self._list_refresh = True
-        readback_id, readback = self._discover(identity, now=now)
-        if (
-            readback_id != comment_id
-            or readback is None
-            or readback.record_sha256 != updated.record_sha256
-            or readback.generation != updated.generation
-        ):
-            raise ReviewInputError("session comment update lost")
-        return readback
+                if (
+                    preactivation_id != comment_id
+                    or preactivation is None
+                    or preactivation.record_sha256 != record.record_sha256
+                    or preactivation.generation != record.generation
+                ):
+                    raise ReviewInputError(
+                        "session generation conflict before activation"
+                    )
+            if not self._is_own_release(record, updated):
+                self._verify_live_head(identity)
+            finalizer = self._prospective_abort_finalizer
+            self._prospective_abort_finalizer = None
+            patch_body: str | None = None
+            if finalizer is not None:
+                self._mutation_active = True
+                try:
+                    updated, patch_body = finalizer(record, updated, comment_id, now)
+                    _validate_queue_retention(record, updated)
+                    _history_legacy_write_guard(self, updated)
+                finally:
+                    self._mutation_active = False
+            repository_id = self._require_identity(identity)
+            path = self.http.repository_path(
+                identity.repository, f"/issues/comments/{comment_id}"
+            )
+            if patch_body is None:
+                patch_body = self._render_comment(
+                    repository_id=repository_id,
+                    pull_request=identity.pull_request,
+                    record=updated,
+                )
+            else:
+                self._require_readable_candidate(patch_body, updated)
+            status, payload = self._request(
+                "PATCH",
+                path,
+                body={"body": patch_body},
+            )
+            if status != 200 or not isinstance(payload, dict):
+                if status in {409, 422, 429} or status >= 500:
+                    raise GitHubPublicationTransientError(
+                        "session comment update was ambiguous"
+                    )
+                raise GitHubPublicationError("session comment update failed")
+            verified = parse_session_comment(payload.get("body"), identity=identity)
+            payload_id = payload.get("id")
+            if (
+                isinstance(payload_id, bool)
+                or not isinstance(payload_id, int)
+                or payload_id != comment_id
+                or verified is None
+                or verified.record_sha256 != updated.record_sha256
+            ):
+                raise ReviewInputError("session comment update lost")
+            # A successful PATCH response proves only what GitHub returned for
+            # that request. Re-read the marker so a concurrent writer that landed
+            # immediately after the PATCH is surfaced instead of being silently
+            # treated as our committed generation.
+            self._list_refresh = True
+            self._verified_parts = {}
+            readback_id, readback = self._discover(
+                identity, now=now, _reuse_fresh_listing=manage_reuse
+            )
+            if (
+                readback_id != comment_id
+                or readback is None
+                or readback.record_sha256 != updated.record_sha256
+                or readback.generation != updated.generation
+            ):
+                raise ReviewInputError("session comment update lost")
+            return readback
+        finally:
+            self._reuse_listed_parts = prior_reuse
 
     def reserve_for_tail(
         self,

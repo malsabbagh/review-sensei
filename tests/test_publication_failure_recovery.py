@@ -794,7 +794,9 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
             f.next_review_run(head_sha=HEAD_3)
             self.assertEqual(f.invoke(), 0, f.error)
 
-        # 2b) Lost witness POST response: absent -> missing witness -> next command AND next push hold
+        # 2b) Lost witness POST response: absent -> reconciles cleanly when retained result parts
+        #     and clean 3-surface census exist, and still holds fail-closed if retained parts
+        #     are missing or a native effect is present.
         with tempfile.TemporaryDirectory() as directory:
             f = self._blocking_and_advisory_round1(directory, limit=1024)
             f.next_review_run(head_sha=HEAD_2)
@@ -807,6 +809,24 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
             with patch.object(ReviewPublisher, "publish", fail_pub):
                 self.assertEqual(f.invoke(), 1)
             self.assertEqual(len(_witnesses_from_extra(f.extra_comments)), 0)
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            f.next_review_run(head_sha=HEAD_3)
+            self.assertEqual(f.invoke(), 0, f.error)
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=1024)
+            f.next_review_run(head_sha=HEAD_2)
+            f.witness_post_fault = "absent"
+
+            def fail_pub(publisher_self, **kwargs):
+                _ = publisher_self, kwargs
+                raise GitHubPublicationError("synthetic pre-write failure")
+
+            with patch.object(ReviewPublisher, "publish", fail_pub):
+                self.assertEqual(f.invoke(), 1)
+            self.assertEqual(len(_witnesses_from_extra(f.extra_comments)), 0)
+            f.extra_comments.clear()
             self._assert_next_command_held(
                 f, expected_error="missing pre-external-write settlement witness"
             )
@@ -921,9 +941,10 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
             self.assertEqual(r3.transaction.phase, "publication_succeeded")
             self.assertEqual(len(f.reviews), 2)
 
-        # 2) Contrast: once a native effect (check-run POST) was recorded in journal.effects,
-        #    a later failure on review POST STILL checkpoints finding_lifecycle and MUST NOT
-        #    emit a pre-write settlement witness.
+        # 2) Contrast: once a native effect (check-run POST) AND an unconfirmed
+        #    review POST (recorded as status='pending') exist, fail-closed holds;
+        #    whereas confirmed-only check-run(s) with 0 pending effects (Path A)
+        #    reconcile cleanly on the next run.
         with tempfile.TemporaryDirectory() as directory:
             f = self._blocking_and_advisory_round1(directory, limit=1024)
             f.next_review_run(head_sha=HEAD_2)
@@ -941,6 +962,32 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
                 expected_error="finding lifecycle",
                 head_sha=HEAD_3,
             )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=1024)
+            f.next_review_run(head_sha=HEAD_2)
+            checks_before = len(f.check_runs)
+
+            def fail_after_check_run(pub_self, **_kwargs):
+                _ = pub_self, _kwargs
+                raise GitHubPublicationError("drift preflight failed after check-run")
+
+            with patch.object(
+                ReviewPublisher, "_update_existing_drift_threads", fail_after_check_run
+            ):
+                self.assertEqual(f.invoke(), 1)
+            self.assertGreater(len(f.check_runs), checks_before)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(settled.transaction.phase, "publication_failed")
+            self.assertEqual(
+                settled.finding_lifecycle["operation_id"],
+                settled.transaction.transaction_id,
+            )
+            self.assertEqual(len(_witnesses_from_extra(f.extra_comments)), 0)
+            f.next_review_run(head_sha=HEAD_3)
+            self.assertEqual(f.invoke(), 0, f.error)
+            r3 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(r3.transaction.phase, "publication_succeeded")
 
     def test_bug2_round2_pre_write_recovery_restores_baseline_and_round_counters(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2192,6 +2239,78 @@ class PublicationFailureRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(accepted_rollover.completed_initial_reviews, 1)
             self.assertEqual(accepted_rollover.completed_verification_rounds, 0)
+
+    def test_path_a_rejects_foreign_or_malformed_rejected_check_run_patch(self):
+        from review_sensei_github.publication_failure_recovery import (
+            _inspect_confirmed_failed_tx_lifecycle,
+        )
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self._blocking_and_advisory_round1(directory, limit=1024)
+            f.next_review_run(head_sha=HEAD_2)
+            checks_before = len(f.check_runs)
+
+            def fail_after_check_run(pub_self, **_kwargs):
+                _ = pub_self, _kwargs
+                raise GitHubPublicationError("drift preflight failed after check-run")
+
+            with patch.object(
+                ReviewPublisher, "_update_existing_drift_threads", fail_after_check_run
+            ):
+                self.assertEqual(f.invoke(), 1)
+            self.assertGreater(len(f.check_runs), checks_before)
+            settled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            created_check_id = f.check_runs[-1]["id"]
+
+            for bad_patch_path in (
+                f"/repos/owner/repo/check-runs/{created_check_id + 999}",
+                "/repos/owner/repo/check-runs/not-an-id",
+            ):
+                fake_doc = {
+                    "schema_version": "finding-lifecycle-journal-v2",
+                    "unknown_trust_effect": False,
+                    "native_receipts": [],
+                    "effects": [
+                        {
+                            "method": "POST",
+                            "path": "/repos/owner/repo/check-runs",
+                            "status": "confirmed",
+                            "request": {
+                                "head_sha": HEAD_2,
+                                "name": "ReviewSensei Review Gate",
+                            },
+                            "response": [201, {"id": created_check_id}],
+                        },
+                        {
+                            "method": "PATCH",
+                            "path": bad_patch_path,
+                            "status": "rejected",
+                            "request": {"status": "completed"},
+                            "response": [404, {"message": "Not Found"}],
+                        },
+                    ],
+                }
+                with (
+                    patch(
+                        "review_sensei.finding_lifecycle_store._decode_selected_lifecycle",
+                        return_value=fake_doc,
+                    ),
+                    self.assertRaisesRegex(
+                        ReviewInputError,
+                        "finding lifecycle already recorded effects for the failed transaction",
+                    ),
+                ):
+                    _inspect_confirmed_failed_tx_lifecycle(
+                        f.ledger,
+                        IDENTITY,
+                        settled,
+                        ApiRunAccounting.from_document(settled.api_run_accounting),
+                        EvidenceReadBudget(),
+                        app_slug="reviewsensei[bot]",
+                    )
 
 
 if __name__ == "__main__":

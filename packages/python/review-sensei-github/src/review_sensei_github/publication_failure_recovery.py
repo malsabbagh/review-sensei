@@ -612,25 +612,25 @@ def iter_step_down_pages(
     raise hold(pagination_bound_message)
 
 
-def _find_settlement_witness_for_producer(
+def _scan_settlement_comments(
     *,
     http: Any,
     token: str,
     app_slug: str,
     producer_id: int,
-    producer: str,
     budget: EvidenceReadBudget,
     identity: SessionIdentity,
     record: SessionRecord,
-    old: ApiRunAccounting,
-) -> PreExternalWriteSettlementWitness:
-    """Scan issue comments using caller-supplied producer identity and verify unique witness."""
+) -> tuple[list[PreExternalWriteSettlementWitness], list[dict[str, Any]], bool]:
+    """Scan issue comments once for authenticated bot witnesses and retained comments."""
     deadline = http.evidence_monotonic() + _CENSUS_WALL_SECONDS
     path = http.repository_path(
         identity.repository, f"/issues/{identity.pull_request}/comments"
     )
     seen_ids: set[int] = set()
     matches: list[PreExternalWriteSettlementWitness] = []
+    scanned_rows: list[dict[str, Any]] = []
+    foreign_witness_seen = False
     for rows in iter_step_down_pages(
         http=http,
         token=token,
@@ -653,13 +653,17 @@ def _find_settlement_witness_for_producer(
                     "settlement witness scan has an unreadable row", record=record
                 )
             seen_ids.add(row["id"])
-            if not _is_authenticated_bot_comment(
-                row, producer_id=producer_id, app_slug=app_slug
-            ):
-                # Ignore non-Bot or foreign comments so they can neither forge nor DoS.
-                continue
+            scanned_rows.append(row)
             body = row.get("body")
+            is_bot = _is_authenticated_bot_comment(
+                row, producer_id=producer_id, app_slug=app_slug
+            )
             if isinstance(body, str) and SETTLEMENT_WITNESS_MARKER in body:
+                if not is_bot:
+                    # Record non-Bot witness markers so legacy witnessless fallback
+                    # cannot bypass a foreign/spoofed witness control.
+                    foreign_witness_seen = True
+                    continue
                 try:
                     parsed = parse_settlement_witness_comment(body)
                 except ReviewInputError as exc:
@@ -672,16 +676,17 @@ def _find_settlement_witness_for_producer(
                     and parsed.settled_root_sha256 == record.record_sha256
                 ):
                     matches.append(parsed)
+    return matches, scanned_rows, foreign_witness_seen
 
-    if not matches:
-        if record.transaction is None:
-            raise ReviewInputError(
-                "previous caller run is not terminal: "
-                f"run={old.identity.run_id} root={record.record_sha256} "
-                "phase=no-transaction; "
-                "missing pre-external-write settlement witness"
-            )
-        raise _hold("missing pre-external-write settlement witness", record=record)
+
+def _validate_matched_witness(
+    matches: list[PreExternalWriteSettlementWitness],
+    *,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    producer: str,
+) -> PreExternalWriteSettlementWitness:
     if len(matches) > 1:
         raise _hold("ambiguous pre-external-write settlement witnesses", record=record)
     witness = matches[0]
@@ -732,6 +737,46 @@ def _find_settlement_witness_for_producer(
     return witness
 
 
+def _find_settlement_witness_for_producer(
+    *,
+    http: Any,
+    token: str,
+    app_slug: str,
+    producer_id: int,
+    producer: str,
+    budget: EvidenceReadBudget,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+) -> PreExternalWriteSettlementWitness:
+    """Scan issue comments using caller-supplied producer identity and verify unique witness."""
+    matches, _rows, _foreign = _scan_settlement_comments(
+        http=http,
+        token=token,
+        app_slug=app_slug,
+        producer_id=producer_id,
+        budget=budget,
+        identity=identity,
+        record=record,
+    )
+    if not matches:
+        if record.transaction is None:
+            raise ReviewInputError(
+                "previous caller run is not terminal: "
+                f"run={old.identity.run_id} root={record.record_sha256} "
+                "phase=no-transaction; "
+                "missing pre-external-write settlement witness"
+            )
+        raise _hold("missing pre-external-write settlement witness", record=record)
+    return _validate_matched_witness(
+        matches,
+        identity=identity,
+        record=record,
+        old=old,
+        producer=producer,
+    )
+
+
 def find_authenticated_settlement_witness(
     ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
@@ -774,13 +819,14 @@ class _EarlierSettledEffects:
         digest = hashlib.sha256(raw).hexdigest()
         if inline:
             parent = row.get("pull_request_review_id")
-            head = row.get("commit_id")
+            native_head = row.get("original_commit_id")
+            current_head = row.get("commit_id")
             return (
                 _positive_id(parent)
-                and isinstance(head, str)
-                and head == row.get("original_commit_id")
+                and isinstance(native_head, str)
+                and isinstance(current_head, str)
                 and row.get("in_reply_to_id") is None
-                and (row["id"], parent, head, digest) in self.inline
+                and (row["id"], parent, native_head, digest) in self.inline
             )
         state = row.get("state")
         return (
@@ -872,6 +918,149 @@ def _same_lifecycle_envelope(
     return left == right
 
 
+def _read_settled_lifecycle_journal(
+    ledger: Any,
+    identity: SessionIdentity,
+    current: SessionRecord,
+    source_record: SessionRecord,
+    binding: Mapping[str, Any],
+    budget: EvidenceReadBudget,
+    *,
+    decode_selected: Callable[[Any, SessionRecord], Any],
+    unpack_journal: Callable[[Any], Any],
+    validate_journal: Callable[[Any], dict[str, Any]],
+    is_dictionary: Callable[[Any], bool],
+    dict_manifest_fn: Callable[[Any, Mapping[str, Any]], Any],
+    unpack_dictionary: Callable[..., dict[str, Any]],
+    read_inline_evidence: Callable[..., Any],
+) -> dict[str, Any] | None:
+    """Decode and validate a settled lifecycle journal within ``budget``."""
+    stored = decode_selected(ledger, source_record)
+    if stored is None:
+        return None
+    if is_dictionary(stored):
+        dict_manifest = stored.get("dictionary_manifest")
+        base_binding = dict_manifest_fn(dict_manifest, binding)
+        if not isinstance(dict_manifest, dict):
+            raise ReviewInputError("finding lifecycle dictionary manifest is invalid")
+        base_parts = (
+            0
+            if dict_manifest.get("encoding") == "inline-json-v1"
+            else len(dict_manifest.get("parts", ()))
+            if isinstance(dict_manifest.get("parts"), list)
+            else 0
+        )
+        _protect_tail(budget, base_parts, record=current)
+        base = (
+            read_inline_evidence(dict_manifest, expected_binding=base_binding)
+            if dict_manifest.get("encoding") == "inline-json-v1"
+            else ledger.read_evidence(
+                identity, dict_manifest, expected_binding=base_binding
+            )
+        )
+        return unpack_dictionary(stored, base=base, current_binding=binding)
+    return validate_journal(unpack_journal(stored))
+
+
+def _settled_earlier_head_inline_receipts(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    current: SessionRecord,
+    candidate: SessionRecord,
+    producer_id: int,
+    excluded_head_sha: str,
+    budget: EvidenceReadBudget,
+) -> frozenset[tuple[int, int, str, str]]:
+    """Return confirmed native inline receipts from a settled earlier-head ancestor."""
+    tx = candidate.transaction
+    reference = candidate.finding_lifecycle
+    if (
+        tx is None
+        or not isinstance(reference, dict)
+        or candidate.reservation_id is not None
+    ):
+        return frozenset()
+    manifest = reference.get("manifest")
+    binding = manifest.get("binding") if isinstance(manifest, dict) else None
+    parts = manifest.get("parts", ()) if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(binding, dict)
+        or not isinstance(parts, (list, tuple))
+        or tx.phase != "publication_succeeded"
+        or tx.head_sha == excluded_head_sha
+        or reference.get("operation_id") != tx.transaction_id
+        or not tx.generation <= binding.get("generation", -1) <= candidate.generation
+        or (
+            binding.get("base_sha"),
+            binding.get("head_sha"),
+            binding.get("policy_digest"),
+            binding.get("configuration_digest"),
+        )
+        != (tx.base_sha, tx.head_sha, tx.policy_digest, tx.configuration_digest)
+        or candidate.api_run_accounting is None
+    ):
+        return frozenset()
+    candidate_caller = ApiRunAccounting.from_document(candidate.api_run_accounting)
+    terminal_review = (
+        candidate_caller.action is None
+        and candidate_caller.terminal_transaction == tx.transaction_id
+    )
+    terminal_command = (
+        candidate_caller.action is not None
+        and candidate_caller.action.get("phase") == "terminal"
+        and candidate_caller.terminal_transaction is None
+    )
+    if not terminal_review and not terminal_command:
+        return frozenset()
+
+    from review_sensei.bounded_evidence import read_inline_evidence
+    from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
+
+    from .finding_lifecycle import _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import _manifest as _dict_manifest
+    from .finding_lifecycle_dictionary import is_dictionary
+    from .finding_lifecycle_dictionary import unpack as _unpack_dictionary
+
+    _protect_tail(budget, len(parts), record=current)
+    try:
+        journal = _read_settled_lifecycle_journal(
+            ledger,
+            identity,
+            current,
+            candidate,
+            binding,
+            budget,
+            decode_selected=_decode_selected_lifecycle,
+            unpack_journal=_unpack_journal,
+            validate_journal=_validate,
+            is_dictionary=is_dictionary,
+            dict_manifest_fn=_dict_manifest,
+            unpack_dictionary=_unpack_dictionary,
+            read_inline_evidence=read_inline_evidence,
+        )
+    except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        raise _hold(
+            "earlier native effect evidence is unavailable", record=current
+        ) from None
+    if journal is None or journal["unknown_trust_effect"]:
+        return frozenset()
+    return frozenset(
+        (r["comment_id"], r["review_id"], r["native_head_sha"], r["body_sha256"])
+        for r in journal["native_receipts"]
+        if (
+            _positive_id(r.get("comment_id"))
+            and _positive_id(r.get("review_id"))
+            and r.get("producer_id") == producer_id
+            and (r.get("repository_id"), r.get("pull_request"))
+            == (identity.repository_id, identity.pull_request)
+            and isinstance(r.get("native_head_sha"), str)
+            and r["native_head_sha"] != excluded_head_sha
+            and r.get("head_sha") != excluded_head_sha
+        )
+    )
+
+
 def _earlier_settled_effects(
     ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
@@ -899,13 +1088,18 @@ def _earlier_settled_effects(
         unpack as _unpack_dictionary,
     )
 
+    source_record = current
     archive, reference = old.previous_record, current.finding_lifecycle
-    if archive is None or reference is None:
-        return _NO_EARLIER_EFFECTS
     if (
         current.transaction is not None
+        and reference is not None
         and reference.get("operation_id") == current.transaction.transaction_id
     ):
+        if prior_record is None or prior_record.finding_lifecycle is None:
+            return _NO_EARLIER_EFFECTS
+        source_record = prior_record
+        reference = prior_record.finding_lifecycle
+    if archive is None or reference is None:
         return _NO_EARLIER_EFFECTS
     manifest = reference.get("manifest")
     binding = manifest.get("binding") if isinstance(manifest, dict) else None
@@ -916,11 +1110,13 @@ def _earlier_settled_effects(
     ):
         return _NO_EARLIER_EFFECTS
     expected_archive = prior_archive_ref if prior_archive_ref is not None else archive
+    parts = manifest.get("parts", ())
+    if not isinstance(parts, (list, tuple)):
+        return _NO_EARLIER_EFFECTS
     need_prior_read = prior_record is None
     _protect_tail(
         budget,
-        (_archive_part_count(expected_archive) if need_prior_read else 0)
-        + len(manifest.get("parts", ())),
+        (_archive_part_count(expected_archive) if need_prior_read else 0) + len(parts),
         record=current,
     )
     try:
@@ -932,8 +1128,14 @@ def _earlier_settled_effects(
         candidate_caller = ApiRunAccounting.from_document(candidate.api_run_accounting)
         if (
             candidate.identity() != identity
-            or candidate.record_sha256 != expected_archive.get("root_sha256")
-            or candidate_caller.identity.run_id != expected_archive.get("run_id")
+            or (
+                (prior_record is None or prior_archive_ref is not None)
+                and (
+                    candidate.record_sha256 != expected_archive.get("root_sha256")
+                    or candidate_caller.identity.run_id
+                    != expected_archive.get("run_id")
+                )
+            )
             or candidate_caller.identity.repository_id != identity.repository_id
             or candidate.generation >= current.generation
         ):
@@ -984,7 +1186,7 @@ def _earlier_settled_effects(
             or prior.reservation_id is not None
             or not _same_lifecycle_envelope(prior.finding_lifecycle, reference)
             or not tx.generation <= binding["generation"] <= prior.generation
-            or prior.generation >= current.generation
+            or (source_record is current and prior.generation >= current.generation)
             or reference["operation_id"] != tx.transaction_id
             or (
                 binding["base_sha"],
@@ -995,34 +1197,24 @@ def _earlier_settled_effects(
             != (tx.base_sha, tx.head_sha, tx.policy_digest, tx.configuration_digest)
         ):
             return _NO_EARLIER_EFFECTS
-        stored = _decode_selected_lifecycle(ledger, current)
-        if stored is None:
+        decoded = _read_settled_lifecycle_journal(
+            ledger,
+            identity,
+            current,
+            source_record,
+            binding,
+            budget,
+            decode_selected=_decode_selected_lifecycle,
+            unpack_journal=_unpack_journal,
+            validate_journal=_validate,
+            is_dictionary=is_dictionary,
+            dict_manifest_fn=_dict_manifest,
+            unpack_dictionary=_unpack_dictionary,
+            read_inline_evidence=read_inline_evidence,
+        )
+        if decoded is None:
             return _NO_EARLIER_EFFECTS
-        if is_dictionary(stored):
-            dict_manifest = stored.get("dictionary_manifest")
-            base_binding = _dict_manifest(dict_manifest, binding)
-            if not isinstance(dict_manifest, dict):
-                raise ReviewInputError(
-                    "finding lifecycle dictionary manifest is invalid"
-                )
-            base_parts = (
-                0
-                if dict_manifest.get("encoding") == "inline-json-v1"
-                else len(dict_manifest.get("parts", ()))
-                if isinstance(dict_manifest.get("parts"), list)
-                else 0
-            )
-            _protect_tail(budget, base_parts, record=current)
-            base = (
-                read_inline_evidence(dict_manifest, expected_binding=base_binding)
-                if dict_manifest.get("encoding") == "inline-json-v1"
-                else ledger.read_evidence(
-                    identity, dict_manifest, expected_binding=base_binding
-                )
-            )
-            journal = _unpack_dictionary(stored, base=base, current_binding=binding)
-        else:
-            journal = _validate(_unpack_journal(stored))
+        journal = decoded
     except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
         raise _hold(
             "earlier native effect evidence is unavailable", record=current
@@ -1104,11 +1296,14 @@ def _earlier_settled_effects(
             ):
                 check_runs.add(response["id"])
         elif method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+            suffix = eff_path[len(check_post_path) + 1 :]
             precond = effect.get("check_update_precondition")
             if (
-                isinstance(precond, dict)
+                suffix.isdigit()
+                and isinstance(precond, dict)
                 and precond.get("head_sha") == head_sha
                 and _positive_id(precond.get("check_run_id"))
+                and int(suffix) == precond.get("check_run_id")
                 and (
                     not app_slug
                     or str(precond.get("app_slug", "")).casefold() == app_slug
@@ -1140,13 +1335,253 @@ def _earlier_settled_effects(
     )
 
 
+def _inspect_confirmed_failed_tx_lifecycle(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    budget: EvidenceReadBudget,
+    *,
+    app_slug: str,
+) -> set[int]:
+    """Verify Path A: failed tx's lifecycle has only confirmed check-runs / 4xx rejections."""
+    tx = record.transaction
+    if (
+        tx is None
+        or record.finding_lifecycle is None
+        or old.uncertain != 0
+        or any(block.pending for block in old.blocks)
+    ):
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+    from review_sensei.bounded_evidence import read_inline_evidence
+    from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
+
+    from .finding_lifecycle import _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import _manifest as _dict_manifest
+    from .finding_lifecycle_dictionary import is_dictionary
+    from .finding_lifecycle_dictionary import unpack as _unpack_dictionary
+
+    reference = record.finding_lifecycle
+    manifest = reference.get("manifest")
+    binding = manifest.get("binding") if isinstance(manifest, dict) else None
+    if not isinstance(manifest, dict) or not isinstance(binding, dict):
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+    parts = manifest.get("parts", ())
+    if not isinstance(parts, (list, tuple)):
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+    _protect_tail(budget, len(parts), record=record)
+    try:
+        stored = _decode_selected_lifecycle(ledger, record)
+        if stored is None:
+            raise ReviewInputError("finding lifecycle evidence is missing")
+        if is_dictionary(stored):
+            dict_manifest = stored.get("dictionary_manifest")
+            base_binding = _dict_manifest(dict_manifest, binding)
+            if not isinstance(dict_manifest, dict):
+                raise ReviewInputError(
+                    "finding lifecycle dictionary manifest is invalid"
+                )
+            base_parts = (
+                0
+                if dict_manifest.get("encoding") == "inline-json-v1"
+                else len(dict_manifest.get("parts", ()))
+                if isinstance(dict_manifest.get("parts"), list)
+                else 0
+            )
+            _protect_tail(budget, base_parts, record=record)
+            base = (
+                read_inline_evidence(dict_manifest, expected_binding=base_binding)
+                if dict_manifest.get("encoding") == "inline-json-v1"
+                else ledger.read_evidence(
+                    identity, dict_manifest, expected_binding=base_binding
+                )
+            )
+            journal = _unpack_dictionary(stored, base=base, current_binding=binding)
+        else:
+            journal = _validate(_unpack_journal(stored))
+    except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        ) from None
+    if journal["unknown_trust_effect"]:
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+
+    check_post_path = ledger.http.repository_path(identity.repository, "/check-runs")
+    slug_short = app_slug.removesuffix("[bot]").casefold()
+    confirmed_check_runs: set[int] = set()
+    for effect in journal["effects"]:
+        eff_status = effect.get("status")
+        if eff_status == "pending":
+            raise _hold(
+                "finding lifecycle already recorded effects for the failed transaction",
+                record=record,
+            )
+        method = effect.get("method")
+        eff_path = effect.get("path")
+        request = effect.get("request")
+        response_pair = effect.get("response")
+        status, response = (
+            response_pair
+            if isinstance(response_pair, (list, tuple)) and len(response_pair) == 2
+            else (None, None)
+        )
+        if not isinstance(request, dict) or not isinstance(eff_path, str):
+            raise _hold(
+                "finding lifecycle already recorded effects for the failed transaction",
+                record=record,
+            )
+        if eff_status == "confirmed":
+            if (
+                method == "POST"
+                and eff_path == check_post_path
+                and status in {200, 201}
+                and isinstance(response, dict)
+                and _positive_id(response.get("id"))
+                and request.get("head_sha") == tx.head_sha
+                and request.get("name") == REVIEW_CHECK_NAME
+            ):
+                confirmed_check_runs.add(response["id"])
+                continue
+            if method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+                suffix = eff_path[len(check_post_path) + 1 :]
+                precond = effect.get("check_update_precondition")
+                if (
+                    suffix.isdigit()
+                    and isinstance(precond, dict)
+                    and precond.get("head_sha") == tx.head_sha
+                    and _positive_id(precond.get("check_run_id"))
+                    and int(suffix) == precond.get("check_run_id")
+                    and (
+                        not slug_short
+                        or str(precond.get("app_slug", "")).casefold() == slug_short
+                    )
+                    and status in {200, 201}
+                    and isinstance(response, dict)
+                    and response.get("id") == precond["check_run_id"]
+                ):
+                    confirmed_check_runs.add(precond["check_run_id"])
+                    continue
+            raise _hold(
+                "finding lifecycle already recorded effects for the failed transaction",
+                record=record,
+            )
+        if eff_status == "rejected":
+            allowed_endpoint = False
+            if (
+                method == "POST"
+                and eff_path == check_post_path
+                and request.get("head_sha") == tx.head_sha
+            ):
+                allowed_endpoint = True
+            elif method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+                suffix = eff_path[len(check_post_path) + 1 :]
+                precond = effect.get("check_update_precondition")
+                if suffix.isdigit():
+                    target_check_id = int(suffix)
+                    if target_check_id in confirmed_check_runs and (
+                        precond is None
+                        or (
+                            isinstance(precond, dict)
+                            and precond.get("check_run_id") == target_check_id
+                            and precond.get("head_sha") == tx.head_sha
+                        )
+                    ):
+                        allowed_endpoint = True
+            if type(status) is int and 400 <= status < 500 and allowed_endpoint:
+                continue
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+    if not confirmed_check_runs:
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+    return confirmed_check_runs
+
+
+def _verify_legacy_witnessless_retained_result(
+    *,
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    old: ApiRunAccounting,
+    budget: EvidenceReadBudget,
+    app_slug: str,
+    scanned_comments: list[dict[str, Any]],
+) -> bool:
+    """Path B positive proof: legacy witnessless publication_failed with retained result."""
+    tx = record.transaction
+    if (
+        tx is None
+        or tx.phase != "publication_failed"
+        or tx.result_sha256 is None
+        or old.uncertain != 0
+        or record.failed_attempts < 1
+        or record.failed_attempts_head_sha != tx.head_sha
+        or sum(len(block.pending) for block in old.blocks) != 0
+    ):
+        return False
+    from review_sensei.models import ReviewResult
+
+    from .publication_recovery import _event_key, _payload, _store, publication_http
+
+    _protect_tail(budget, 2, record=record)
+    try:
+        store = _store(
+            publication_http(ledger.http, budget),
+            token=ledger.token,
+            identity=identity,
+            app_slug=app_slug,
+            base_sha=tx.base_sha,
+            head_sha=tx.head_sha,
+            primed_comments=scanned_comments,
+            transaction=tx,
+            source_app_id=getattr(ledger, "authenticated_app_id", None),
+        )
+        available = store.read_available(event_key=_event_key(identity, tx))
+        if available is None:
+            return False
+        _digest, payload = available
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            return False
+        result = ReviewResult.from_dict(document)
+        return (
+            _payload(result, projected=store.last_read_was_projection) == payload
+            and result.content_digest() == tx.result_sha256
+        )
+    except (
+        GitHubHTTPError,
+        GitHubPublicationError,
+        ReviewInputError,
+        ValueError,
+        TypeError,
+    ):
+        return False
+
+
 def admit_publication_failure_recovery(
     ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
     record: SessionRecord,
     old: ApiRunAccounting,
-) -> tuple[PreExternalWriteSettlementWitness, SessionRecord | None]:
-    """Verify witness, 3-surface negative census, and prior root inside rollover CAS."""
+) -> tuple[PreExternalWriteSettlementWitness | None, SessionRecord | None]:
+    """Verify witness/confirmed-only/retained-result proof, census, and prior root inside CAS."""
     if (
         old.action is not None
         or old.analysis_abort is not None
@@ -1173,25 +1608,78 @@ def admit_publication_failure_recovery(
             "predecessor state does not qualify for pre-write failure rollover",
             record=record,
         )
-    if (
+    budget, app_slug = ledger.evidence_budget, ledger.app_slug
+    if budget is None or not app_slug or not ledger._mutation_active:
+        raise _hold("authenticated native census is unavailable", record=record)
+    producer = ledger.evidence_producer()
+    try:
+        producer_id = _producer_id(producer)
+    except ReviewInputError as exc:
+        raise _hold(str(exc), record=record) from exc
+
+    confirmed_failed_tx_check_runs: set[int] = set()
+    witness: PreExternalWriteSettlementWitness | None = None
+    is_failed_tx_lifecycle = (
         record.transaction is not None
         and record.finding_lifecycle is not None
         and record.finding_lifecycle.get("operation_id")
         == record.transaction.transaction_id
-    ):
-        raise _hold(
-            "finding lifecycle already recorded effects for the failed transaction",
+    )
+    if is_failed_tx_lifecycle:
+        assert record.transaction is not None
+        confirmed_failed_tx_check_runs = _inspect_confirmed_failed_tx_lifecycle(
+            ledger,
+            identity,
+            record,
+            old,
+            budget,
+            app_slug=app_slug,
+        )
+        head_sha = record.transaction.head_sha
+    else:
+        matches, scanned_comments, foreign_witness_seen = _scan_settlement_comments(
+            http=ledger.http,
+            token=ledger.token,
+            app_slug=app_slug,
+            producer_id=producer_id,
+            budget=budget,
+            identity=identity,
             record=record,
         )
-    budget, app_slug = ledger.evidence_budget, ledger.app_slug
-    if budget is None or not app_slug or not ledger._mutation_active:
-        raise _hold("authenticated native census is unavailable", record=record)
+        if matches:
+            witness = _validate_matched_witness(
+                matches,
+                identity=identity,
+                record=record,
+                old=old,
+                producer=producer,
+            )
+            head_sha = witness.head_sha
+        else:
+            if foreign_witness_seen or not _verify_legacy_witnessless_retained_result(
+                ledger=ledger,
+                identity=identity,
+                record=record,
+                old=old,
+                budget=budget,
+                app_slug=app_slug,
+                scanned_comments=scanned_comments,
+            ):
+                if record.transaction is None:
+                    raise ReviewInputError(
+                        "previous caller run is not terminal: "
+                        f"run={old.identity.run_id} root={record.record_sha256} "
+                        "phase=no-transaction; "
+                        "missing pre-external-write settlement witness"
+                    )
+                raise _hold(
+                    "missing pre-external-write settlement witness", record=record
+                )
+            assert record.transaction is not None
+            head_sha = record.transaction.head_sha
 
-    witness = find_authenticated_settlement_witness(ledger, identity, record, old)
-    producer_id = _producer_id(ledger.evidence_producer())
     http = ledger.http
     deadline = http.evidence_monotonic() + _CENSUS_WALL_SECONDS
-    head_sha = witness.head_sha
 
     prior_record: SessionRecord | None = None
     prior_archive_ref: dict[str, Any] | None = None
@@ -1264,6 +1752,18 @@ def admit_publication_failure_recovery(
 
     earlier: _EarlierSettledEffects | None = None
     earlier_review_ids: set[int] = set()
+    earlier_head_reviews: dict[int, str] = {}
+    earlier_head_inline_receipts: set[tuple[int, int, str, str]] = set()
+    earlier_head_cursor: Any = (
+        ApiRunAccounting.from_document(prior_record.api_run_accounting).previous_record
+        if prior_record is not None and prior_record.api_run_accounting is not None
+        else None
+    )
+    earlier_head_child_gen: int = (
+        prior_record.generation if prior_record is not None else record.generation
+    )
+    earlier_head_loaded_prior = False
+    earlier_head_hops_used = 0
 
     def ensure_earlier() -> _EarlierSettledEffects:
         nonlocal earlier
@@ -1280,6 +1780,112 @@ def admit_publication_failure_recovery(
                 prior_archive_ref=prior_archive_ref,
             )
         return earlier
+
+    def explains_untouched_earlier_head_inline(row: dict[str, Any]) -> bool:
+        nonlocal \
+            earlier_head_cursor, \
+            earlier_head_child_gen, \
+            earlier_head_loaded_prior, \
+            earlier_head_hops_used
+        # GitHub auto-advances `commit_id` on untouched inline comments across pushes
+        # when the commented hunk stays unchanged. Accept only if immutable review +
+        # marker + original_commit_id + archived native_receipts all match an earlier head.
+        native_head = row.get("original_commit_id")
+        body = row.get("body")
+        parent = row.get("pull_request_review_id")
+        if (
+            row.get("commit_id") != head_sha
+            or not isinstance(native_head, str)
+            or native_head == head_sha
+            or row.get("in_reply_to_id") is not None
+            or not isinstance(body, str)
+            or type(parent) is not int
+            or not _positive_id(parent)
+            or earlier_head_reviews.get(parent) != native_head
+        ):
+            return False
+        if (
+            classify_abort_inline_effect(
+                author=row.get("user"),
+                native_head=native_head,
+                body=body,
+                identity=identity,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                app_user_id=producer_id,
+            )
+            is not False
+        ):
+            return False
+        try:
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            return False
+        key = (row["id"], parent, native_head, digest)
+        if key in earlier_head_inline_receipts:
+            return True
+        if not earlier_head_loaded_prior:
+            earlier_head_loaded_prior = True
+            if prior_record is not None:
+                earlier_head_inline_receipts.update(
+                    _settled_earlier_head_inline_receipts(
+                        ledger,
+                        identity,
+                        record,
+                        prior_record,
+                        producer_id,
+                        head_sha,
+                        budget,
+                    )
+                )
+                if key in earlier_head_inline_receipts:
+                    return True
+        while (
+            isinstance(earlier_head_cursor, dict)
+            and earlier_head_hops_used < _MAX_PRIOR_ANCESTOR_HOPS
+        ):
+            earlier_head_hops_used += 1
+            _protect_tail(
+                budget, _archive_part_count(earlier_head_cursor), record=record
+            )
+            try:
+                ancestor = read_previous_run(ledger, identity, earlier_head_cursor)
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+                raise _hold(
+                    "prior settled session root is unavailable", record=record
+                ) from None
+            if (
+                ancestor.identity() != identity
+                or ancestor.record_sha256 != earlier_head_cursor.get("root_sha256")
+                or ancestor.generation >= earlier_head_child_gen
+                or ancestor.api_run_accounting is None
+            ):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            ancestor_acc = ApiRunAccounting.from_document(ancestor.api_run_accounting)
+            if ancestor_acc.identity.run_id != earlier_head_cursor.get("run_id"):
+                raise _hold(
+                    "prior settled session root conflicts with predecessor",
+                    record=record,
+                )
+            earlier_head_child_gen = ancestor.generation
+            earlier_head_cursor = ancestor_acc.previous_record
+            earlier_head_inline_receipts.update(
+                _settled_earlier_head_inline_receipts(
+                    ledger,
+                    identity,
+                    record,
+                    ancestor,
+                    producer_id,
+                    head_sha,
+                    budget,
+                )
+            )
+            if key in earlier_head_inline_receipts:
+                return True
+        return False
 
     def inspect_pr_surface(
         resource: str,
@@ -1317,7 +1923,24 @@ def admit_publication_failure_recovery(
                 # Classifiers return False for unrelated human/foreign/different-head rows
                 # and None exclusively for unreadable or contradictory Bot-owned rows.
                 if effect is None:
+                    if inline and explains_untouched_earlier_head_inline(row):
+                        continue
                     raise _hold("native effect scope is unconfirmed", record=record)
+                if (
+                    not inline
+                    and effect is False
+                    and isinstance(row.get("commit_id"), str)
+                    and row["commit_id"] != head_sha
+                    and classify_abort_review_effect(
+                        row,
+                        identity=identity,
+                        head_sha=row["commit_id"],
+                        app_slug=app_slug,
+                        app_user_id=producer_id,
+                    )
+                    is True
+                ):
+                    earlier_head_reviews[row["id"]] = row["commit_id"]
                 if effect is True:
                     ancestor = ensure_earlier()
                     if inline:
@@ -1430,12 +2053,13 @@ def admit_publication_failure_recovery(
                             raise _hold(
                                 "native check-run scope is unconfirmed", record=record
                             )
-                        ancestor = ensure_earlier()
-                        if not ancestor.explains_check_run(row):
-                            raise _hold(
-                                "late native check-run effect on the failed scope",
-                                record=record,
-                            )
+                        if row["id"] not in confirmed_failed_tx_check_runs:
+                            ancestor = ensure_earlier()
+                            if not ancestor.explains_check_run(row):
+                                raise _hold(
+                                    "late native check-run effect on the failed scope",
+                                    record=record,
+                                )
         verify_check_runs()
 
     inspect_pr_surface("reviews", classify_review)
@@ -1460,7 +2084,131 @@ def require_publication_failure_admission(
 ) -> PreExternalWriteSettlementWitness:
     """Verify witness + 3-surface negative native census inside rollover CAS."""
     witness, _ = admit_publication_failure_recovery(ledger, identity, record, old)
+    if witness is None:
+        raise _hold("missing pre-external-write settlement witness", record=record)
     return witness
+
+
+def _settled_effects_from_journal(
+    journal: Mapping[str, Any],
+    *,
+    http: Any,
+    identity: SessionIdentity,
+    head_sha: str,
+    base_sha: str,
+    app_slug: str,
+    producer_id: int,
+) -> _EarlierSettledEffects:
+    if journal["unknown_trust_effect"]:
+        return _NO_EARLIER_EFFECTS
+    reviews: dict[int, tuple[int, str, str, int]] = {}
+    reviews_path = http.repository_path(
+        identity.repository, f"/pulls/{identity.pull_request}/reviews"
+    )
+    check_post_path = http.repository_path(identity.repository, "/check-runs")
+    check_runs: set[int] = set()
+    normalized_slug = app_slug.removesuffix("[bot]").casefold()
+    for effect in journal["effects"]:
+        if effect["status"] != "confirmed":
+            continue
+        method = effect["method"]
+        eff_path = effect["path"]
+        response_pair = effect.get("response")
+        status, response = (
+            response_pair
+            if isinstance(response_pair, (list, tuple)) and len(response_pair) == 2
+            else (None, None)
+        )
+        request = effect["request"]
+        if method == "POST" and eff_path == reviews_path:
+            event = request.get("event")
+            body = request.get("body")
+            if (
+                status in {200, 201}
+                and isinstance(response, dict)
+                and _positive_id(response.get("id"))
+                and response.get("producer_id") == producer_id
+                and request.get("commit_id") == head_sha
+                and isinstance(event, str)
+                and event in _REVIEW_STATES
+                and isinstance(body, dict)
+                and set(body) == {"$body_sha256", "utf8_bytes"}
+            ):
+                rid = response["id"]
+                if rid in reviews:
+                    return _NO_EARLIER_EFFECTS
+                reviews[rid] = (
+                    rid,
+                    _REVIEW_STATES[event],
+                    body["$body_sha256"],
+                    body["utf8_bytes"],
+                )
+        elif method == "PUT" and eff_path.startswith(reviews_path + "/"):
+            suffix = eff_path.removeprefix(reviews_path + "/")
+            body = request.get("body")
+            if (
+                suffix.isdigit()
+                and int(suffix) in reviews
+                and status in {200, 201}
+                and isinstance(response, dict)
+                and response.get("id") == int(suffix)
+                and response.get("producer_id") == producer_id
+                and isinstance(body, dict)
+                and set(body) == {"$body_sha256", "utf8_bytes"}
+            ):
+                rid = int(suffix)
+                old_row = reviews[rid]
+                reviews[rid] = (
+                    rid,
+                    old_row[1],
+                    body["$body_sha256"],
+                    body["utf8_bytes"],
+                )
+        elif method == "POST" and eff_path == check_post_path:
+            if (
+                status in {200, 201}
+                and isinstance(response, dict)
+                and _positive_id(response.get("id"))
+                and request.get("head_sha") == head_sha
+                and request.get("name") == REVIEW_CHECK_NAME
+            ):
+                check_runs.add(response["id"])
+        elif method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+            suffix = eff_path[len(check_post_path) + 1 :]
+            precond = effect.get("check_update_precondition")
+            if (
+                suffix.isdigit()
+                and isinstance(precond, dict)
+                and precond.get("head_sha") == head_sha
+                and _positive_id(precond.get("check_run_id"))
+                and int(suffix) == precond.get("check_run_id")
+                and (
+                    not normalized_slug
+                    or str(precond.get("app_slug", "")).casefold() == normalized_slug
+                )
+                and status in {200, 201}
+                and isinstance(response, dict)
+                and response.get("id") == precond["check_run_id"]
+            ):
+                check_runs.add(precond["check_run_id"])
+    inline: dict[int, tuple[int, int, str, str]] = {}
+    for r in journal["native_receipts"]:
+        if (
+            _positive_id(r["comment_id"])
+            and r["review_id"] in reviews
+            and r["producer_id"] == producer_id
+            and (r["repository_id"], r["pull_request"], r["head_sha"], r["base_sha"])
+            == (identity.repository_id, identity.pull_request, head_sha, base_sha)
+        ):
+            cid = r["comment_id"]
+            if cid in inline:
+                return _NO_EARLIER_EFFECTS
+            inline[cid] = (cid, r["review_id"], r["native_head_sha"], r["body_sha256"])
+    return _EarlierSettledEffects(
+        frozenset(reviews.values()),
+        frozenset(inline.values()),
+        frozenset(check_runs),
+    )
 
 
 __all__ = [

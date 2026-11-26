@@ -108,6 +108,7 @@ from .conversation import (
 )
 from .errors import (
     GitHubBrokerClientError,
+    GitHubHTTPError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
 )
@@ -3319,6 +3320,10 @@ class GitHubApplication:
         )
         publisher.request_review(review_id=review_id, result=result)
 
+    def last_command_evaluation_clean_settleable(self) -> bool:
+        """Whether the most recent command refinalization failed cleanly before native writes."""
+        return self._last_command_evaluation_clean_settleable
+
     def apply_maintainer_command(
         self,
         *,
@@ -3373,6 +3378,8 @@ class GitHubApplication:
             authorized_override,
             parse_maintainer_command,
         )
+
+        self._last_command_evaluation_clean_settleable = False
 
         typed_inventory = cast(Sequence[FindingIdentity] | None, finding_inventory)
         typed_priors = cast(
@@ -5384,6 +5391,8 @@ class GitHubApplication:
             # No dispositions, review-body update, cleanup, check or approval
             # has been attempted. Existing action audit/terminal obligations
             # remain on their original caller allocation.
+            from .accepted_semantic_history import COMMAND_CAPACITY_REFUSAL_PREFIX
+
             breakdown = getattr(error, "reserved_cost_breakdown", None)
             if breakdown is None and "journal" in locals():
                 breakdown = getattr(journal, "last_capacity_breakdown", None)
@@ -5395,10 +5404,7 @@ class GitHubApplication:
                 action=command.action,
                 applied=False,
                 operator_paused=record.operator_paused,
-                summary=(
-                    "command finalization capacity unavailable before business writes: "
-                    + reason
-                ),
+                summary=f"{COMMAND_CAPACITY_REFUSAL_PREFIX} {reason}",
             )
         return _PreparedCommandFinalization(
             plan, prepared_check, plan.can_reuse_retained_lifecycle(preview_record)
@@ -5434,6 +5440,7 @@ class GitHubApplication:
             session_dispositions,
         )
 
+        self._last_command_evaluation_clean_settleable = False
         if not isinstance(result, MaintainerCommandResult):
             return result
         command_result: MaintainerCommandResult = result
@@ -5471,10 +5478,6 @@ class GitHubApplication:
         # and five approval reads. Worker internal fanout has its own service
         # allowance and cannot narrow this caller's cleanup capacity.
         command_finalization_reserve = (0 if prepared_check is not None else 1) + 2 + 5
-        failed = (
-            command_result.summary
-            + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
-        )
         from .approval_progress import render_command_progress
 
         def command_token(budget: EvidenceReadBudget, capability: str) -> str:
@@ -5526,6 +5529,7 @@ class GitHubApplication:
                 if item.outcome in {"recorded", "already-recorded"}
                 and item.reference.startswith("RS-")
             )
+            journal: Any = None
             if (
                 isinstance(self.reviewer, ReviewPublisher)
                 and ledger is not None
@@ -5636,6 +5640,9 @@ class GitHubApplication:
                         finally:
                             journal.finish()
 
+            before_refinalize_effects = (
+                len(journal.effects) if journal is not None else 0
+            )
             publication = refinalize(
                 token=review_token,
                 check_token=None,
@@ -5664,8 +5671,14 @@ class GitHubApplication:
                 command_finalization_reserve=command_finalization_reserve,
             )
         except Exception as exc:
+            self._last_command_evaluation_clean_settleable = isinstance(
+                exc, (GitHubHTTPError, GitHubPublicationError, GitHubBrokerClientError)
+            ) and (journal is None or len(journal.effects) == before_refinalize_effects)
+            reason = " ".join(str(exc).split())[:256]
+            detail = f": {reason}" if reason else ""
+            summary = f"{command_result.summary}; gate re-evaluation failed{detail}"
             return render_command_progress(
-                replace(command_result, summary=failed, evaluation_failed=True), exc
+                replace(command_result, summary=summary, evaluation_failed=True), exc
             )
 
         if getattr(
@@ -5704,8 +5717,36 @@ class GitHubApplication:
                 ),
             )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
+            from .operation_diagnostics import OperationDiagnostics
+
+            diag = getattr(publication, "diagnostic", None)
+            obs = getattr(publication, "operation_diagnostics", None)
+            cleanup_phase = obs.cleanup if type(obs) is OperationDiagnostics else None
+            cleanup_first = cleanup_phase.first if cleanup_phase is not None else None
+            if (
+                diag == "command_cleanup_incomplete"
+                and type(obs) is OperationDiagnostics
+                and cleanup_phase is not None
+                and cleanup_first is not None
+                and cleanup_first.stage == "cleanup.discovery"
+                and cleanup_phase.count == 1
+                and obs.eligibility is None
+                and obs.check is None
+                and obs.approval is None
+                and not obs.approval_request_attempted
+                and (
+                    journal is None
+                    or all(
+                        e.get("status") == "confirmed" and e.get("path") != "/graphql"
+                        for e in journal.effects[before_refinalize_effects:]
+                    )
+                )
+            ):
+                self._last_command_evaluation_clean_settleable = True
+            detail = f" ({diag})" if isinstance(diag, str) and diag else ""
+            summary = f"{command_result.summary}; gate re-evaluation failed{detail}"
             return render_command_progress(
-                replace(command_result, summary=failed, evaluation_failed=True),
+                replace(command_result, summary=summary, evaluation_failed=True),
                 publication,
             )
         if getattr(publication, "status", None) in {"approved", "already_approved"}:

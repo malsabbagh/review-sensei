@@ -967,12 +967,12 @@ def _expected_paths_for_prior(
     return "unchanged", (current_path,)
 
 
-def _comment_matches_prior_with_drift(
+def _comment_prior_match_tier(
     comment: ReviewComment,
     prior: DriftTrackedObligation,
     expected_paths: Sequence[str],
-) -> bool:
-    """Return whether ``comment`` matches ``prior`` across path/symbol drift."""
+) -> int | None:
+    """Return match tier (1=fingerprint, 2=concern, 3=symbol, 4=coarse path) or None."""
 
     lifecycle = finding_lifecycle_for_comment(comment)
     defect_kind = comment_defect_kind(comment)
@@ -980,7 +980,7 @@ def _comment_matches_prior_with_drift(
     prior_path = prior.present_anchor.path or prior.criterion.origin_path
 
     if lifecycle.fingerprint == prior.criterion.original_fingerprint:
-        return True
+        return 1
 
     allowed_paths = set(expected_paths)
     if prior_path is not None:
@@ -1000,7 +1000,7 @@ def _comment_matches_prior_with_drift(
         and defect_kind == prior.criterion.defect_kind
         and path_or_symbol_compatible
     ):
-        return True
+        return 2
 
     # Cross-file symbol + defect_kind identity survives path changes!
     if (
@@ -1009,18 +1009,42 @@ def _comment_matches_prior_with_drift(
         and defect_kind == prior.criterion.defect_kind
         and defect_kind != "unknown"
     ):
-        return True
+        return 3
 
-    # Within expected rename/copy/rewrite target path, unique defect_kind matches.
+    # Within expected rename/copy/rewrite target path, unique defect_kind matches
+    # unless symbol or same-symbol concern explicitly distinguishes another finding.
     if (
         comment.path is not None
         and comment.path in allowed_paths
         and defect_kind == prior.criterion.defect_kind
         and defect_kind != "unknown"
     ):
-        return True
+        if (
+            comment.symbol is not None
+            and prior_symbol is not None
+            and comment.symbol != prior_symbol
+        ):
+            return None
+        if (
+            comment.path == prior_path
+            and (comment.symbol or "") == (prior_symbol or "")
+            and lifecycle.concern is not None
+            and prior.criterion.concern is not None
+            and lifecycle.concern != prior.criterion.concern
+        ):
+            return None
+        return 4
 
-    return False
+    return None
+
+
+def _comment_matches_prior_with_drift(
+    comment: ReviewComment,
+    prior: DriftTrackedObligation,
+    expected_paths: Sequence[str],
+) -> bool:
+    """Return whether ``comment`` matches ``prior`` across path/symbol drift."""
+    return _comment_prior_match_tier(comment, prior, expected_paths) is not None
 
 
 def evaluate_drift_round(
@@ -1138,19 +1162,44 @@ def evaluate_drift_round(
         for prior in unresolved_priors
     }
 
-    # Match current comments against unresolved prior obligations.
+    # Match current comments against unresolved prior obligations using
+    # hierarchical match tiers so higher-confidence matches win cleanly without
+    # dropping genuine cross-file copy duplicates onto already-matched priors.
     priors_for_comment: dict[int, list[DriftTrackedObligation]] = {
         idx: [] for idx in range(len(result.comments))
     }
     comments_for_prior: dict[str, list[int]] = {
         prior.obligation_id: [] for prior in unresolved_priors
     }
+    raw_edges: list[tuple[int, DriftTrackedObligation, int]] = []
+    min_tier_for_comment: dict[int, int] = {}
+    min_tier_for_prior: dict[str, int] = {}
     for idx, comment in enumerate(result.comments):
         for prior in unresolved_priors:
             _dkind, expected_paths = drift_plan[prior.obligation_id]
-            if _comment_matches_prior_with_drift(comment, prior, expected_paths):
-                priors_for_comment[idx].append(prior)
-                comments_for_prior[prior.obligation_id].append(idx)
+            tier = _comment_prior_match_tier(comment, prior, expected_paths)
+            if tier is None:
+                continue
+            raw_edges.append((idx, prior, tier))
+            prev_c = min_tier_for_comment.get(idx)
+            if prev_c is None or tier < prev_c:
+                min_tier_for_comment[idx] = tier
+            prev_p = min_tier_for_prior.get(prior.obligation_id)
+            if prev_p is None or tier < prev_p:
+                min_tier_for_prior[prior.obligation_id] = tier
+
+    for idx, prior, tier in raw_edges:
+        if tier > min_tier_for_comment[idx]:
+            continue
+        if (
+            tier == 4
+            and min_tier_for_prior[prior.obligation_id] <= 3
+            and result.comments[idx].path
+            == (prior.present_anchor.path or prior.criterion.origin_path)
+        ):
+            continue
+        priors_for_comment[idx].append(prior)
+        comments_for_prior[prior.obligation_id].append(idx)
 
     ambiguous_prior_ids: set[str] = set()
     ambiguous_comment_indices: set[int] = set()
@@ -1764,7 +1813,17 @@ def evaluate_drift_round(
             new_group_keys.setdefault((comment.symbol, dk), []).append(idx)
 
     duplicate_new_groups = {
-        key: indices for key, indices in new_group_keys.items() if len(indices) > 1
+        key: indices
+        for key, indices in new_group_keys.items()
+        if len(indices) > 1
+        and len(
+            {
+                result.comments[i].path
+                for i in indices
+                if result.comments[i].path is not None
+            }
+        )
+        > 1
     }
     consumed_new_duplicates: set[int] = set()
     for (_sym, _dk), indices in duplicate_new_groups.items():

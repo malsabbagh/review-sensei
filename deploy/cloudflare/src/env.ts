@@ -11,6 +11,8 @@ export interface WorkerEnv {
   GITHUB_APP_WEBHOOK_SECRET: string;
   /** Install-time update channel resolved before a setup caller is generated. */
   PUBLIC_WORKFLOW_TAG: string;
+  /** Optional read token for public workflow tag resolution when anonymous REST quota is exhausted. */
+  PUBLIC_WORKFLOW_READ_TOKEN?: string;
   /** Operator admission gate. Absent/open permits; held or invalid values refuse all protected entry. */
   BROKER_ADMISSION_MODE?: string;
   GITHUB_API_URL?: string;

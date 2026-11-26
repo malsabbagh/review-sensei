@@ -540,6 +540,8 @@ def reconstruct_publication_contexts(
     unknown_usage_requests: int = 0,
     active_reserved_requests: int = 0,
     ledger_expired: bool = False,
+    _preloaded_record: SessionRecord | None = None,
+    _baseline_record: SessionRecord | None = None,
 ) -> ReconstructedPublicationContexts:
     """Prove the original default reusable caller's context and reservation.
 
@@ -551,7 +553,7 @@ def reconstruct_publication_contexts(
     to the existing publication command for those cases.
     """
 
-    preloaded_record: SessionRecord | None = None
+    preloaded_record: SessionRecord | None = _preloaded_record
     if recovery_store is not None:
         if not policy_commit:
             raise RecoveryRefusalError(
@@ -869,7 +871,8 @@ def reconstruct_publication_contexts(
             "supply the original configuration and admission context documents",
             refusal_code="snapshot_or_transaction_mismatch",
         )
-    baseline = read_session_baseline(ledger, record)
+    baseline_source = _baseline_record if _baseline_record is not None else record
+    baseline = read_session_baseline(ledger, baseline_source)
     if quarantine_full_analysis:
         # The authenticated transaction commits to the independently rebuilt
         # ordinary context plus the immutable lineage. It selected a full pass;
@@ -877,8 +880,8 @@ def reconstruct_publication_contexts(
         baseline = None
     elif baseline is not None and baseline.cache_key == key:
         if (
-            record.completed_verification_rounds != 0
-            or record.completed_initial_reviews != 1
+            baseline_source.completed_verification_rounds != 0
+            or baseline_source.completed_initial_reviews != 1
         ):
             raise RecoveryRefusalError(
                 "original prior baseline is unavailable; supply the original admission context",
@@ -895,7 +898,8 @@ def reconstruct_publication_contexts(
             refusal_code="overwritten_baseline_or_context",
         )
     elif baseline is None and (
-        record.completed_initial_reviews or record.completed_verification_rounds
+        baseline_source.completed_initial_reviews
+        or baseline_source.completed_verification_rounds
     ):
         raise RecoveryRefusalError(
             "original prior baseline is unavailable; supply the original admission context",

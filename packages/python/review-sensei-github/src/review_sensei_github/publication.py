@@ -44,6 +44,7 @@ from review_sensei.convergence import (
 from review_sensei.coverage import CoverageManifest, coverage_approval_state
 from review_sensei.diff import DiffAnalysis, analyze_diff
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
+from review_sensei.failure_observation import exception_kind
 from review_sensei.finding_drift import (
     DriftEvaluationResult,
     DriftInventory,
@@ -229,6 +230,29 @@ _TRANSIENT_GRAPHQL_MESSAGE_FRAGMENTS = (
 _GRAPHQL_SAFE_TOKEN_RE = re.compile(r"^[A-Z0-9_]{1,48}\Z")
 _GRAPHQL_SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 _SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,64}\Z")
+
+
+def _has_drift_or_non_check_effects(journal: Any, before_count: int) -> bool:
+    """True if the lifecycle journal recorded any pending, new, or non-check-run effect."""
+    if journal is None:
+        return True
+    if bool(getattr(journal, "_initial_had_pending", False)):
+        return True
+    effects = getattr(journal, "effects", None)
+    if not isinstance(effects, Sequence):
+        return True
+    if len(effects) > before_count:
+        return True
+    for effect in effects:
+        if not isinstance(effect, Mapping) or effect.get("status") == "pending":
+            return True
+        path = str(effect.get("path", ""))
+        is_check_run = path.endswith("/check-runs") or (
+            "/check-runs/" in path and path.rsplit("/check-runs/", 1)[1].isdigit()
+        )
+        if not is_check_run:
+            return True
+    return False
 
 
 def _safe_http_error_summary(exc: BaseException) -> str:
@@ -8360,12 +8384,15 @@ class ReviewPublisher:
                             },
                         )
                     )
+            binding_nodes = getattr(self, "_native_binding_nodes", None)
+            readback_pages = (
+                min(MAX_REVIEW_THREAD_PAGES, (len(binding_nodes) // 100) + 2)
+                if isinstance(binding_nodes, Sequence)
+                and len(binding_nodes) >= len(updates)
+                else MAX_REVIEW_THREAD_PAGES
+            )
             native_calls = (
-                1
-                + edit_count
-                + reopen_count
-                + MAX_REVIEW_THREAD_PAGES
-                + following_native_calls
+                1 + edit_count + reopen_count + readback_pages + following_native_calls
             )
             from .ordinary_drift_execution import suffix_native_calls
 
@@ -11568,6 +11595,10 @@ class ReviewPublisher:
                 and ob.native_target is not None
                 and ob.target_state in {"active", "contingent", "uncertain"}
             }
+        drift_journal = getattr(self, "_finding_lifecycle_journal", None)
+        before_drift_effects = (
+            len(drift_journal.effects) if drift_journal is not None else 0
+        )
         try:
             reused_drift_instances = self._update_existing_drift_threads(
                 planned=planned_drift_state,
@@ -11586,7 +11617,12 @@ class ReviewPublisher:
                     + COMMAND_FINALIZATION_RESERVE
                 ),
             )
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+            from . import review_lifecycle_diagnostics as lifecycle_diagnostics
+
+            lifecycle_diagnostics.classified_failure(exception_kind(exc), None)
+            if not _has_drift_or_non_check_effects(drift_journal, before_drift_effects):
+                raise
             self._commit_drift_uncertain(
                 repository_id=repository_id,
                 pull_request=pull_request,

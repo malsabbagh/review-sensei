@@ -375,6 +375,8 @@ class ApiRunRequestTransport:
         self._final_abort_dispatched = False
         self._prospective_abort_close: tuple[Any, int, str] | None = None
         self._reconciled_mutations: set[str] = set()
+        self._reconciled_prior_lifecycle: tuple[str, SessionRecord | None] | None = None
+        self._reconciled_failed_transaction: tuple[Any, SessionRecord] | None = None
         self._effect_record: SessionRecord | None = None
         self._thread_resolution_capture: _ThreadResolutionCapture | None = None
         self._checkpoint_write_request_id: str | None = None
@@ -1701,6 +1703,8 @@ class ApiRunRequestTransport:
         old = ApiRunAccounting.from_document(previous.api_run_accounting)
         old.require_writer_version()
         historical_prepared = False
+        pending_reconciled_lifecycle: tuple[str, SessionRecord | None] | None = None
+        pending_reconciled_failed_tx: tuple[Any, SessionRecord] | None = None
 
         def prepare(record):
             nonlocal historical_prepared
@@ -1787,20 +1791,16 @@ class ApiRunRequestTransport:
                     "each requires its own authenticated source and activation"
                 )
             if old.action is not None:
-                from .api_run_history import read_action_result
-
-                retained_action = read_action_result(ledger, identity, record)
                 from .accepted_semantic_history import (
+                    action_allows_carried_history_fallback,
                     guard_carried_successor,
                     guard_successor_admission,
                     history_from_record,
                 )
+                from .api_run_history import read_action_result
 
+                retained_action = read_action_result(ledger, identity, record)
                 # Data only: this cannot authorize cancellation or dispatch.
-                canceled_unstarted = (
-                    isinstance(old.action.get("outcome"), Mapping)
-                    and old.action["outcome"].get("kind") == "canceled_unstarted"
-                )
                 if "accepted_semantic_history" in retained_action["result"]:
                     guard_successor_admission(
                         self, ledger, identity, record, retained_action
@@ -1808,7 +1808,9 @@ class ApiRunRequestTransport:
                     self._accepted_semantic_predecessor = retained_action["result"][
                         "accepted_semantic_history"
                     ]
-                elif canceled_unstarted:
+                elif action_allows_carried_history_fallback(
+                    old.action, retained_action
+                ):
                     carried_history = history_from_record(ledger, identity, record)
                     guard_carried_successor(
                         self, ledger, identity, record, carried_history
@@ -1868,6 +1870,7 @@ class ApiRunRequestTransport:
                 getattr(self, "_accepted_semantic_predecessor", None),
             )
             carried_reference = preview_candidate.finding_lifecycle
+            settled_witness: Any = None
             settled_prior_record: SessionRecord | None = None
             settled_prior_chain: tuple[SessionRecord, ...] = ()
             if old.analysis_abort is not None:
@@ -1880,8 +1883,8 @@ class ApiRunRequestTransport:
                     peek_admitted_prior_chain,
                 )
 
-                _, settled_prior_record = admit_publication_failure_recovery(
-                    ledger, identity, record, old
+                settled_witness, settled_prior_record = (
+                    admit_publication_failure_recovery(ledger, identity, record, old)
                 )
                 settled_prior_chain = peek_admitted_prior_chain(ledger, record)
             before_archive = len(self.observations)
@@ -1942,6 +1945,25 @@ class ApiRunRequestTransport:
                     finding_lifecycle=carried_reference,
                 )
             self._activation = updated, "hosted-review"
+            if pre_write_settlement_candidate:
+                nonlocal pending_reconciled_lifecycle, pending_reconciled_failed_tx
+                if (
+                    record.transaction is not None
+                    and record.finding_lifecycle is not None
+                    and record.finding_lifecycle.get("operation_id")
+                    == record.transaction.transaction_id
+                ):
+                    pending_reconciled_lifecycle = (
+                        record.transaction.transaction_id,
+                        settled_prior_record,
+                    )
+                if (
+                    settled_witness is None
+                    and record.transaction is not None
+                    and record.transaction.phase == "publication_failed"
+                    and record.transaction.result_sha256 is not None
+                ):
+                    pending_reconciled_failed_tx = (record.transaction, record)
             return updated
 
         if previous.quarantine_lineage is not None:
@@ -1953,6 +1975,8 @@ class ApiRunRequestTransport:
         else:
             confirmed = ledger.replace(identity, prepare)
         result = self._accept_activation(ledger, confirmed)
+        self._reconciled_prior_lifecycle = pending_reconciled_lifecycle
+        self._reconciled_failed_transaction = pending_reconciled_failed_tx
         self.bind_terminal_reservation("hosted-terminal")
         return result
 
@@ -3212,7 +3236,6 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                     if (
                         type(self) is ActionRunLedger
                         and trust_profile is None
-                        and (page_plan is None or len(page_plan.page_bounds) == 1)
                         and n >= 1
                     )
                     else guard_calls
@@ -3473,7 +3496,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             response_bounds: list[int] = []
             offset = 0
             while offset <= len(bounds):
-                for size in (100, 20, 10, 5, 1):
+                for size in (100, 50, 25, 20, 10, 5, 1):
                     if offset % size:
                         continue
                     members = bounds[offset : offset + size]

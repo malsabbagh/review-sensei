@@ -1,7 +1,11 @@
 import { WorkflowLookupError } from "../src/broker-lookup-diagnostic";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/env";
-import { GitHubApi } from "../src/github-api";
+import {
+  GitHubApi,
+  publicWorkflowTokenCacheSnapshotForTesting,
+  resetPublicWorkflowTokenCacheForTesting,
+} from "../src/github-api";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
@@ -280,6 +284,199 @@ describe("GitHubApi public workflow resolution", () => {
     await expect(client.publicWorkflowSha("v4")).rejects.toThrow(
       "github_workflow_tag_invalid",
     );
+  });
+
+  it("recovers from anonymous REST rate limit with a cached in-memory contents:read token without caching SHAs", async () => {
+    resetPublicWorkflowTokenCacheForTesting();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 503 }),
+    );
+    const client = new GitHubApi({
+      GITHUB_APP_ID: "99111",
+      GITHUB_APP_PRIVATE_KEY: "unused-test-cache-key-1",
+    } as unknown as WorkerEnv);
+    const instFor = vi.spyOn(client, "installationFor").mockResolvedValue(777);
+    const instTok = vi.spyOn(client, "installationToken").mockResolvedValue({
+      token: "ghs_pub_cached_1",
+      expiresAt: Date.now() + 600_000,
+      permissions: { contents: "read", metadata: "read" },
+    });
+    const SHA_2 = "f".repeat(40);
+    const request = vi
+      .spyOn(client, "request")
+      .mockResolvedValueOnce({
+        status: 403,
+        data: { message: "API rate limit exceeded" },
+        lookupMetadata: { rate_limit_remaining: 0, rate_limit_resource: "core" },
+      })
+      .mockResolvedValueOnce({ status: 200, data: { object: { type: "commit", sha: SHA } } })
+      .mockResolvedValueOnce({ status: 200, data: { object: { type: "commit", sha: SHA_2 } } });
+
+    try {
+      await expect(client.publicWorkflowRuntimeShas("v5")).resolves.toEqual({
+        commitSha: SHA,
+        refSha: SHA,
+      });
+      // Second lookup reuses the in-memory token immediately (0 anonymous 403s, 0 extra token mints)
+      // while still resolving the updated tag commit SHA.
+      await expect(client.publicWorkflowRuntimeShas("v5")).resolves.toEqual({
+        commitSha: SHA_2,
+        refSha: SHA_2,
+      });
+      expect(instFor).toHaveBeenCalledTimes(1);
+      expect(instTok).toHaveBeenCalledTimes(1);
+      expect(instTok).toHaveBeenCalledWith(777, "malsabbagh/review-sensei", { contents: "read" });
+      expect(request).toHaveBeenNthCalledWith(
+        1,
+        "GET",
+        "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
+        undefined,
+      );
+      expect(request).toHaveBeenNthCalledWith(
+        2,
+        "GET",
+        "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
+        "ghs_pub_cached_1",
+      );
+      expect(request).toHaveBeenNthCalledWith(
+        3,
+        "GET",
+        "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
+        "ghs_pub_cached_1",
+      );
+    } finally {
+      resetPublicWorkflowTokenCacheForTesting();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("refreshes the cached contents:read token once on 401, fails closed on 403, and supports env token", async () => {
+    resetPublicWorkflowTokenCacheForTesting();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 503 }),
+    );
+    const client = new GitHubApi({
+      GITHUB_APP_ID: "99222",
+      GITHUB_APP_PRIVATE_KEY: "unused-test-cache-key-2",
+    } as unknown as WorkerEnv);
+    vi.spyOn(client, "installationFor").mockResolvedValue(777);
+    const instTok = vi
+      .spyOn(client, "installationToken")
+      .mockResolvedValueOnce({
+        token: "ghs_stale_token",
+        expiresAt: Date.now() + 600_000,
+        permissions: { contents: "read", metadata: "read" },
+      })
+      .mockResolvedValueOnce({
+        token: "ghs_fresh_token",
+        expiresAt: Date.now() + 600_000,
+        permissions: { contents: "read", metadata: "read" },
+      });
+    const request = vi
+      .spyOn(client, "request")
+      .mockResolvedValueOnce({
+        status: 403,
+        data: { message: "API rate limit exceeded" },
+        lookupMetadata: { rate_limit_remaining: 0 },
+      })
+      .mockResolvedValueOnce({ status: 200, data: { object: { type: "commit", sha: SHA } } })
+      .mockResolvedValueOnce({ status: 401, data: { message: "Bad credentials" } })
+      .mockResolvedValueOnce({ status: 200, data: { object: { type: "commit", sha: SHA } } })
+      .mockResolvedValueOnce({ status: 403, data: { message: "Forbidden" } });
+
+    const envClient = new GitHubApi({
+      GITHUB_APP_ID: "99333",
+      GITHUB_APP_PRIVATE_KEY: "unused-env-key",
+      PUBLIC_WORKFLOW_READ_TOKEN: "ghs_env_read_token",
+    } as unknown as WorkerEnv);
+    const envInstFor = vi.spyOn(envClient, "installationFor");
+    const envReq = vi.spyOn(envClient, "request").mockResolvedValue({
+      status: 200,
+      data: { object: { type: "commit", sha: SHA } },
+    });
+
+    try {
+      await expect(client.publicWorkflowSha("v5")).resolves.toBe(SHA);
+      await expect(client.publicWorkflowSha("v5")).resolves.toBe(SHA);
+      expect(instTok).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenNthCalledWith(
+        3,
+        "GET",
+        "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
+        "ghs_stale_token",
+      );
+      expect(request).toHaveBeenNthCalledWith(
+        4,
+        "GET",
+        "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
+        "ghs_fresh_token",
+      );
+      await expect(client.publicWorkflowSha("v5")).rejects.toThrow(/github_workflow_/);
+
+      await expect(envClient.publicWorkflowSha("v5")).resolves.toBe(SHA);
+      expect(envInstFor).not.toHaveBeenCalled();
+      expect(envReq).toHaveBeenCalledWith(
+        "GET",
+        "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
+        "ghs_env_read_token",
+      );
+
+      // Configured env read token must not silently fall back to installation minting on 403 rate-limit.
+      envReq.mockResolvedValueOnce({
+        status: 403,
+        data: { message: "API rate limit exceeded" },
+        lookupMetadata: { rate_limit_remaining: 0 },
+      });
+      await expect(envClient.publicWorkflowRuntimeShas("v5")).rejects.toMatchObject({
+        message: "github_workflow_tag_unavailable_403",
+        status: 403,
+      });
+      expect(envInstFor).not.toHaveBeenCalled();
+    } finally {
+      resetPublicWorkflowTokenCacheForTesting();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("hashes the private key in the workflow token cache key and bounds cache size", async () => {
+    resetPublicWorkflowTokenCacheForTesting();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 503 }),
+    );
+    try {
+      const secretPrefix = "PRIVATE_KEY_SECRET_CANARY_";
+      for (let idx = 0; idx < 20; idx += 1) {
+        const client = new GitHubApi({
+          GITHUB_APP_ID: String(10_000 + idx),
+          GITHUB_APP_PRIVATE_KEY: `${secretPrefix}${idx}`,
+        } as unknown as WorkerEnv);
+        vi.spyOn(client, "installationFor").mockResolvedValue(800 + idx);
+        vi.spyOn(client, "installationToken").mockResolvedValue({
+          token: `ghs_tok_${idx}`,
+          expiresAt: Date.now() + 600_000,
+          permissions: { contents: "read", metadata: "read" },
+        });
+        vi.spyOn(client, "request")
+          .mockResolvedValueOnce({
+            status: 403,
+            data: { message: "API rate limit exceeded" },
+            lookupMetadata: { rate_limit_remaining: 0 },
+          })
+          .mockResolvedValueOnce({
+            status: 200,
+            data: { object: { type: "commit", sha: SHA } },
+          });
+        await expect(client.publicWorkflowSha("v5")).resolves.toBe(SHA);
+      }
+      const snapshot = publicWorkflowTokenCacheSnapshotForTesting();
+      expect(snapshot.length).toBeLessThanOrEqual(16);
+      for (const entry of snapshot) {
+        expect(entry.key).not.toContain(secretPrefix);
+      }
+    } finally {
+      resetPublicWorkflowTokenCacheForTesting();
+      fetchMock.mockRestore();
+    }
   });
 });
 

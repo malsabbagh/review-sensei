@@ -67,6 +67,7 @@ _PUBLICATION = {
     "already_published",
     "auto_approval_disabled",
     "published_terminal_pending",
+    "publication_incomplete",
     "skipped",
     "refused",
     "stale_head",
@@ -84,6 +85,8 @@ _DIAGNOSTICS = {
     "app_authored",
     "qualification_unverified",
     "transaction-publication-complete",
+    "publication_ambiguous",
+    "check_publication_failed",
 }
 _ERROR_KINDS = {
     "interrupted",
@@ -515,6 +518,12 @@ def analysis(value: Any) -> None:
     }
 
 
+def classified_failure(primary: str, cleanup: str | None = None) -> None:
+    current = _ACTIVE.get()
+    if current is not None:
+        current.classified_failure(primary, cleanup)
+
+
 def publication(value: Mapping[str, object]) -> None:
     current = _ACTIVE.get()
     if current is not None:
@@ -525,5 +534,9 @@ def publication(value: Mapping[str, object]) -> None:
             if type(value.get("accounting_terminal")) is bool
             else None,
             "terminal_reason": _label(value.get("terminal_reason"), _REASONS),
+            "thread_resolution": _label(
+                value.get("thread_resolution"),
+                {"resolved", "unconfirmed", "thread_resolution_unconfirmed"},
+            ),
             "diagnostic": _label(value.get("diagnostic"), _DIAGNOSTICS),
         }

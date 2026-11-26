@@ -1158,7 +1158,8 @@ def _inline_checkpoint_read_free(record):
         if (
             snapshot is None
             or snapshot["schema_version"] != "1.0"
-            or snapshot["state_manifest"]["encoding"] != INLINE_ENCODING
+            or snapshot["state_manifest"]["encoding"]
+            not in {INLINE_ENCODING, "partitioned-json-v1"}
         ):
             return False
     return True
@@ -1187,7 +1188,8 @@ def _inline_cas_pricing_eligible(record: Any) -> bool:
         if (
             snapshot is None
             or snapshot["schema_version"] != "1.0"
-            or snapshot["state_manifest"]["encoding"] != INLINE_ENCODING
+            or snapshot["state_manifest"]["encoding"]
+            not in {INLINE_ENCODING, "partitioned-json-v1"}
         ):
             return False
     return True

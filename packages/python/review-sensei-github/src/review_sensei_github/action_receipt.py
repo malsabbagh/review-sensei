@@ -19,7 +19,7 @@ from .errors import GitHubHTTPTransientError, GitHubPublicationTransientError
 from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_PAGES
 
 COMMAND_RECEIPT_WIRE_BOUND = 65536 + 4096
-_RECEIPT_PAGE_SIZES = (100, 20, 10, 5, 1)
+_RECEIPT_PAGE_SIZES = (100, 50, 25, 20, 10, 5, 1)
 _RECEIPT_MARKER_PREFIX = "<!-- reviewsensei:command-receipt:v1 "
 
 

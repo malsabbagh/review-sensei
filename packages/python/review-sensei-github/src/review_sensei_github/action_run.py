@@ -35,7 +35,12 @@ from .api_run_requests import ApiRunRequestTransport
 from .application import GitHubApplication, GitHubWriteOptions
 from .comment_intent import verify_live_comment_source
 from .conversation import ConversationPublisher
-from .errors import GitHubBrokerClientError, GitHubMergeGroupUnsupportedError
+from .errors import (
+    GitHubBrokerClientError,
+    GitHubHTTPError,
+    GitHubMergeGroupUnsupportedError,
+    GitHubPublicationError,
+)
 from .event_routing_contract import (
     MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
     RECONCILIATION_OWNERS,
@@ -805,21 +810,98 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 observed_trust=observed_trust,
             )
         if result.evaluation_failed:
-            raise ReviewInputError(
-                "command effect or required finalization remains unconfirmed: "
-                + result.summary
+            clean_settleable_fn = getattr(
+                app, "last_command_evaluation_clean_settleable", None
             )
-        outcome = (
+            clean_settleable = (
+                clean_settleable_fn() if callable(clean_settleable_fn) else False
+            )
+            if (
+                command.action == "approve-media"
+                or quarantine is not None
+                or historical is not None
+                or clean_settleable is not True
+            ):
+                raise ReviewInputError(
+                    "command effect or required finalization remains unconfirmed: "
+                    + result.summary
+                )
+            from .accepted_semantic_history import _record_has_pending_receipt
+            from .finding_lifecycle import record_has_pending_lifecycle_effects
+
+            effect_record = caller._effect_record
+            has_pending_lifecycle = _record_has_pending_receipt(
+                effect_record
+            ) or record_has_pending_lifecycle_effects(run.ledger, effect_record)
+            if caller.accounting.uncertain > 0 or has_pending_lifecycle:
+                raise ReviewInputError(
+                    "command effect or required finalization remains unconfirmed: "
+                    + result.summary
+                )
+            try:
+                fenced_after = authority.fence()
+                verify_live_comment_source(
+                    bound_source=source,
+                    live_comment=fenced_after,
+                    phase="unstarted_intent",
+                )
+            except (
+                GitHubHTTPError,
+                GitHubPublicationError,
+                GitHubBrokerClientError,
+                ReviewInputError,
+            ):
+                raise ReviewInputError(
+                    "command effect or required finalization remains unconfirmed: "
+                    + result.summary
+                ) from None
+            outcome = {"kind": "explicit_noop", "reason": "evaluation_failed"}
+            require_action_settlement_representable(
+                run,
+                outcome=outcome,
+                result_document=asdict(result),
+                extra_work_requests=0,
+                action_name=command.action,
+            )
+            proof = caller.settle_action_effect(
+                run.ledger,
+                run.identity,
+                boundary,
+                outcome=outcome,
+                result_document=asdict(result),
+            )
+            from review_sensei.source_registry import require_module_seal
+
+            from . import current_quarantine_finalization, historical_terminal_fence
+
+            require_module_seal(current_quarantine_finalization)
+            current_quarantine_finalization.before_terminal(caller, run, proof)
+            require_module_seal(historical_terminal_fence)
+            historical_terminal_fence.before_terminal(caller, run, proof)
+            caller.begin_terminal("action-completion")
+            caller.close_action(run.ledger, run.identity, proof)
+            print(result.summary)
+            return command_exit_code(result)
+        from .accepted_semantic_history import _is_prewrite_capacity_refusal
+
+        is_capacity_refusal = _is_prewrite_capacity_refusal(
+            {"applied": result.applied, "summary": result.summary}
+        )
+        action_outcome: dict[str, Any] = (
             {"kind": "applied", "reason": None}
             if result.applied
             else {
                 "kind": "explicit_noop",
-                "reason": "status" if command.action == "status" else "no_change",
+                "reason": (
+                    "capacity_unavailable"
+                    if is_capacity_refusal
+                    else ("status" if command.action == "status" else "no_change")
+                ),
             }
         )
         require_action_settlement_representable(
             run,
-            outcome=outcome,
+            outcome=action_outcome,
             result_document=asdict(result),
             extra_work_requests=2 if result.receipts else 0,
             action_name=command.action,
@@ -833,7 +915,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             run.ledger,
             run.identity,
             boundary,
-            outcome=outcome,
+            outcome=action_outcome,
             result_document=asdict(result),
         )
         from review_sensei.source_registry import require_module_seal

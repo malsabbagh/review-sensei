@@ -802,6 +802,296 @@ class ReviewRun:
 
     def retained_analysis(self, argv: list[str]) -> CompletedAnalysis | None:
         """Recover a stopped same-run owner's exact checkpoint, without inference."""
+        failed_entry = getattr(self.caller, "_reconciled_failed_transaction", None)
+        if (
+            self.caller.accounting.owner.run_attempt == 1
+            and isinstance(failed_entry, tuple)
+            and len(failed_entry) == 2
+            and self.restart_id is None
+        ):
+            failed_tx, failed_record = failed_entry
+            if (
+                isinstance(failed_tx, ReviewTransaction)
+                and isinstance(failed_record, SessionRecord)
+                and failed_tx.base_sha == self.base_sha
+                and failed_tx.head_sha == self.head_sha
+                and failed_tx.result_sha256 is not None
+            ):
+                from review_sensei.baseline import baseline_from_review
+                from review_sensei.cli import _env_flag, _explicit_cli_value
+                from review_sensei.convergence import resolve_review_convergence_policy
+                from review_sensei.diff import analyze_diff
+                from review_sensei.session import (
+                    checkpoint_review_analysis,
+                    next_session_generation,
+                    prepare_review_transaction,
+                    session_reservation_id,
+                )
+                from review_sensei.validation import read_bounded_utf8
+
+                from .publication_context_recovery import (
+                    RecoveryRefusalError,
+                    measure_staged_recovery_footprint,
+                    reconstruct_publication_contexts,
+                    resolve_recovery_placement_mode,
+                )
+                from .publication_recovery import (
+                    recover_retained_result_for_transaction,
+                    retain_checkpoint_review_result,
+                )
+
+                args = engine_parser(include_hosted=True).parse_args(argv)
+                if args.diff is None:
+                    return None
+                diff = read_bounded_utf8(
+                    args.diff, maximum=1_048_576, label="original diff"
+                )
+                policy = resolve_review_convergence_policy(
+                    mode=args.review_mode, quality=self.plan.policy.review_quality
+                )
+                if policy.digest() != failed_tx.policy_digest:
+                    return None
+                accounting = self.caller.accounting
+                own_startup = sum(
+                    len(slot.requests)
+                    for slot in accounting.startup.slots
+                    if slot.job == accounting.owner.job
+                    and slot.attempt == accounting.owner.run_attempt
+                )
+                other_startup = accounting.startup.liability - own_startup
+                already_consumed = (
+                    other_startup
+                    + accounting.prior_nonstartup_liability
+                    + accounting.confirmed
+                )
+                unknown_usage = accounting.uncertain
+                active_reserved = sum(
+                    block.undispatched
+                    for block in accounting.blocks
+                    if block.issued_by != accounting.owner
+                )
+                ancestor_hashes: tuple[str, ...] = ()
+                ancestor_runs: tuple[int, ...] = ()
+                if accounting.previous_record is not None:
+                    ancestor_hashes = (str(accounting.previous_record["root_sha256"]),)
+                    ancestor_runs = (
+                        int(cast(int, accounting.previous_record["run_id"])),
+                    )
+                (
+                    current_root_bytes,
+                    intermediate_root_bytes,
+                    current_comment_bytes,
+                    result_part_count,
+                    total_decoded_bytes,
+                ) = measure_staged_recovery_footprint(
+                    failed_record, ledger=self.ledger, identity=self.identity
+                )
+                runtime_only_flags = _capture_runtime_only_flags(args, argv)
+                raw_cli_provider = _explicit_cli_value(args, argv, "provider")
+                raw_cli_model = _explicit_cli_value(args, argv, "model")
+                cli_provider = (
+                    raw_cli_provider if isinstance(raw_cli_provider, str) else None
+                )
+                cli_model = raw_cli_model if isinstance(raw_cli_model, str) else None
+                symbol_context_enabled = bool(
+                    getattr(args, "enable_symbol_context", False)
+                ) or _env_flag("REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT")
+                symbol_allowed_paths = tuple(
+                    getattr(args, "symbol_context_allowed_path", ()) or ()
+                )
+                placement_mode = resolve_recovery_placement_mode(
+                    publication_inventory="complete", review_mode=policy.mode
+                )
+                loaded_now = self.ledger.load(self.identity)
+                if loaded_now.status != "ok" or loaded_now.record is None:
+                    return None
+                try:
+                    contexts = reconstruct_publication_contexts(
+                        source_root=Path.cwd(),
+                        diff=diff,
+                        ledger=self.ledger,
+                        identity=self.identity,
+                        base_sha=self.base_sha,
+                        head_sha=self.head_sha,
+                        policy=policy,
+                        cli_provider=cli_provider,
+                        cli_model=cli_model,
+                        environ=os.environ,
+                        evidence_policy=getattr(args, "evidence_policy", "legacy"),
+                        snapshot_sha256=getattr(args, "snapshot_sha256", None),
+                        enable_symbol_context=symbol_context_enabled,
+                        symbol_context_allowed_paths=symbol_allowed_paths or None,
+                        symbol_context_max_files=(
+                            args.symbol_context_max_files
+                            if _has_option(argv, "--symbol-context-max-files")
+                            else None
+                        ),
+                        symbol_context_max_bytes=(
+                            args.symbol_context_max_bytes
+                            if _has_option(argv, "--symbol-context-max-bytes")
+                            else None
+                        ),
+                        symbol_context_max_depth=(
+                            args.symbol_context_max_depth
+                            if _has_option(argv, "--symbol-context-max-depth")
+                            else None
+                        ),
+                        stages_dir=getattr(args, "stages_dir", None),
+                        categories_dir=getattr(args, "categories_dir", None),
+                        use_customization_directories=False,
+                        orchestrate_large_changes=bool(
+                            getattr(args, "orchestrate_large_changes", False)
+                        ),
+                        recovery_store=None,
+                        policy_commit=accounting.configuration.commit,
+                        base_ref=self.base_branch,
+                        placement_mode=placement_mode,
+                        producer="github-actions-review-run",
+                        current_run_id=self.caller.run.run_id,
+                        attempt=accounting.owner.run_attempt,
+                        runtime_only_flags=runtime_only_flags,
+                        current_root_sha256=failed_record.record_sha256,
+                        ancestor_record_sha256s=ancestor_hashes,
+                        ancestor_run_ids=ancestor_runs,
+                        current_root_bytes=current_root_bytes,
+                        intermediate_root_bytes=intermediate_root_bytes,
+                        current_comment_bytes=current_comment_bytes,
+                        result_part_count=result_part_count,
+                        total_decoded_bytes=total_decoded_bytes,
+                        original_api_limit=accounting.configuration.limit,
+                        already_consumed_requests=already_consumed,
+                        unknown_usage_requests=unknown_usage,
+                        active_reserved_requests=active_reserved,
+                        _preloaded_record=failed_record,
+                        _baseline_record=loaded_now.record,
+                    )
+                except (RecoveryRefusalError, ReviewInputError):
+                    return None
+                config_digest = ReviewTransaction.compute_configuration_digest(
+                    contexts.configuration
+                )
+                evidence_digest = ReviewTransaction.compute_evidence_digest(
+                    contexts.evidence
+                )
+                # evidence_digest binds diff_sha256 so any altered or missing local diff refuses.
+                if (
+                    config_digest != failed_tx.configuration_digest
+                    or evidence_digest != failed_tx.evidence_digest
+                ):
+                    return None
+                assert self.identity.repository_id is not None
+                resolved_app_slug = self.ledger.app_slug or "reviewsensei[bot]"
+                try:
+                    recovered = recover_retained_result_for_transaction(
+                        http=self.http,
+                        token=self.ledger.token,
+                        repository_id=self.identity.repository_id,
+                        base_sha=self.base_sha,
+                        head_sha=self.head_sha,
+                        app_slug=resolved_app_slug,
+                        ledger=self.ledger,
+                        identity=self.identity,
+                        transaction=failed_tx,
+                        configuration_context=contexts.configuration,
+                        evidence_context=contexts.evidence,
+                        convergence_policy=policy,
+                        budget=self.caller.budget_view,
+                    )
+                except (RecoveryRefusalError, ReviewInputError):
+                    return None
+                loaded_now = self.ledger.load(self.identity)
+                if loaded_now.status == "ok" and loaded_now.record is not None:
+                    if (
+                        loaded_now.record.transaction is None
+                        or loaded_now.record.transaction.head_sha != self.head_sha
+                        or loaded_now.record.transaction.phase != "analysis_pending"
+                    ):
+                        reservation = session_reservation_id(
+                            repository=self.identity.repository,
+                            pull_request=self.identity.pull_request,
+                            head_sha=self.head_sha,
+                            kind=f"publish:reconciled-failed:{failed_tx.transaction_id}:{loaded_now.record.generation}",
+                        )
+                        prepared_round = prepare_review_transaction(
+                            self.ledger,
+                            self.identity,
+                            policy,
+                            reservation_id=reservation,
+                            base_sha=self.base_sha,
+                            head_sha=self.head_sha,
+                            configuration_digest=config_digest,
+                            evidence_digest=evidence_digest,
+                        )
+                        cleaned_recovered = replace(recovered, transaction=None)
+                        checkpoint_baseline = None
+                        if (
+                            loaded_now.record.convergence_history is not None
+                            and cleaned_recovered.review_status == "complete"
+                            and cleaned_recovered.coverage is not None
+                            and not any(
+                                item.state == "uncertain"
+                                for item in cleaned_recovered.finding_lifecycles
+                            )
+                        ):
+                            candidate_baseline = baseline_from_review(
+                                cleaned_recovered,
+                                cache_key=contexts.current_key,
+                                policy=policy,
+                                generation=next_session_generation(
+                                    prepared_round.record
+                                ),
+                                prior_baseline=contexts.baseline,
+                            )
+                            if candidate_baseline.complete:
+                                checkpoint_baseline = candidate_baseline
+
+                        def _retain_recovered_result(
+                            pending_result: ReviewResult,
+                        ) -> None:
+                            pending_tx = (
+                                pending_result.transaction
+                                if pending_result.transaction is not None
+                                else prepared_round.transaction
+                            )
+                            if pending_tx is None:
+                                raise ReviewInputError(
+                                    "checkpoint review retention requires a transaction"
+                                )
+                            retain_checkpoint_review_result(
+                                http=self.http,
+                                token=self.ledger.token,
+                                result=pending_result,
+                                identity=self.identity,
+                                base_sha=self.base_sha,
+                                head_sha=self.head_sha,
+                                app_slug=resolved_app_slug,
+                                pending_transaction=pending_tx,
+                                configuration_context=contexts.configuration,
+                                evidence_context=contexts.evidence,
+                                policy=policy,
+                                source_app_id=getattr(
+                                    self.ledger, "authenticated_app_id", None
+                                ),
+                            )
+
+                        recovered = checkpoint_review_analysis(
+                            self.ledger,
+                            self.identity,
+                            prepared_round,
+                            cleaned_recovered,
+                            baseline=checkpoint_baseline,
+                            retain_result=_retain_recovered_result,
+                        )
+                    return CompletedAnalysis(
+                        recovered,
+                        contexts.baseline,
+                        contexts.current_key,
+                        contexts.configuration,
+                        contexts.evidence,
+                        policy,
+                        diff,
+                        tuple(analyze_diff(diff, allow_incomplete=True).changed_paths),
+                    )
         if self.caller.accounting.owner.run_attempt != 2:
             return None
         loaded = self.ledger.load(self.identity)
@@ -880,8 +1170,8 @@ class ReviewRun:
         ) = measure_staged_recovery_footprint(
             loaded.record, ledger=self.ledger, identity=self.identity
         )
-        ancestor_hashes: tuple[str, ...] = ()
-        ancestor_runs: tuple[int, ...] = ()
+        ancestor_hashes = ()
+        ancestor_runs = ()
         if accounting.previous_record is not None:
             ancestor_hashes = (str(accounting.previous_record["root_sha256"]),)
             ancestor_runs = (int(cast(int, accounting.previous_record["run_id"])),)
@@ -1364,6 +1654,7 @@ class ReviewRun:
             {
                 "status": publication.status,
                 "publication_status": publication.status,
+                "thread_resolution": publication.thread_resolution,
                 "diagnostic": publication.diagnostic,
             }
         )
@@ -1421,6 +1712,7 @@ class ReviewRun:
             "publication_status": publication.status,
             "accounting_terminal": accounting_terminal,
             "terminal_reason": terminal_reason,
+            "thread_resolution": publication.thread_resolution,
             "review_id": publication.review_id,
             "diagnostic": publication.diagnostic,
         }
