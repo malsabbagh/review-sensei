@@ -10,7 +10,7 @@ import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Mapping, Sequence
 
 from .errors import ReviewInputError
@@ -329,7 +329,9 @@ def _resolve_generator_command(command: Sequence[str]) -> list[str]:
     resolved = list(command)
     if not resolved:
         return resolved
-    exe_name = Path(resolved[0].replace("\\", "/")).name.lower().removesuffix(".exe")
+    exe_name = (
+        PurePosixPath(resolved[0].replace("\\", "/")).name.lower().removesuffix(".exe")
+    )
     if exe_name == "python3" and (
         os.name == "nt"
         or resolved[0] == "python3"
