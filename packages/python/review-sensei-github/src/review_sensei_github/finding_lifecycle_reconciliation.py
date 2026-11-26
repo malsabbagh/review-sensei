@@ -9,7 +9,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.finding_drift import reconcile_uncertain_drift_thread
 
 from .finding_lifecycle_consumers import finding_lifecycle_consumer
-from .publication import NativeFindingReceipt
+from .publication import NativeFindingReceipt, _root_matches_native_head
 from .thread_resolution import graphql_app_author
 
 
@@ -149,7 +149,7 @@ def reconcile_finding_lifecycle(
             and hashlib.sha256(root["body"].encode()).hexdigest() == r["body_sha256"]
             and root.get("edited_by_human") is not True
             and root.get("pullRequestReview") == {"databaseId": r["review_id"]}
-            and root.get("commit") == {"oid": r["native_head_sha"]}
+            and _root_matches_native_head(root, r["native_head_sha"])
             and isinstance(author, dict)
             and author.get("databaseId") == r["producer_id"]
             and author.get("__typename") == "Bot"

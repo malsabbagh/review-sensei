@@ -1047,6 +1047,51 @@ def _comment_matches_prior_with_drift(
     return _comment_prior_match_tier(comment, prior, expected_paths) is not None
 
 
+def _is_unchanged_unsymbolled_tier4_edge(
+    comment: ReviewComment,
+    prior: DriftTrackedObligation,
+    *,
+    tier: int,
+    drift_kind: str,
+) -> bool:
+    """Return whether an edge is a coarse symbol-less Tier 4 match on one unchanged file."""
+    prior_path = prior.present_anchor.path or prior.criterion.origin_path
+    prior_symbol = prior.present_anchor.symbol or prior.criterion.origin_symbol
+    return (
+        tier == 4
+        and drift_kind == "unchanged"
+        and comment.path == prior_path
+        and comment.symbol is None
+        and prior_symbol is None
+    )
+
+
+def _filter_unique_unchanged_tier4_edges(
+    edges: Sequence[tuple[int, DriftTrackedObligation, int, str]],
+    comments: Sequence[ReviewComment],
+) -> list[tuple[int, DriftTrackedObligation, int]]:
+    """Keep Tier 4 matches on an unchanged ``symbol=None`` file only when 1-to-1."""
+    tier4_comments_for_prior: dict[str, int] = {}
+    tier4_priors_for_comment: dict[int, int] = {}
+    for idx, prior, tier, _drift_kind in edges:
+        if tier == 4:
+            tier4_comments_for_prior[prior.obligation_id] = (
+                tier4_comments_for_prior.get(prior.obligation_id, 0) + 1
+            )
+            tier4_priors_for_comment[idx] = tier4_priors_for_comment.get(idx, 0) + 1
+    kept: list[tuple[int, DriftTrackedObligation, int]] = []
+    for idx, prior, tier, drift_kind in edges:
+        if _is_unchanged_unsymbolled_tier4_edge(
+            comments[idx], prior, tier=tier, drift_kind=drift_kind
+        ) and (
+            tier4_comments_for_prior.get(prior.obligation_id, 0) != 1
+            or tier4_priors_for_comment.get(idx, 0) != 1
+        ):
+            continue
+        kept.append((idx, prior, tier))
+    return kept
+
+
 def evaluate_drift_round(
     result: ReviewResult,
     *,
@@ -1188,6 +1233,7 @@ def evaluate_drift_round(
             if prev_p is None or tier < prev_p:
                 min_tier_for_prior[prior.obligation_id] = tier
 
+    surviving_edges: list[tuple[int, DriftTrackedObligation, int, str]] = []
     for idx, prior, tier in raw_edges:
         if tier > min_tier_for_comment[idx]:
             continue
@@ -1198,6 +1244,11 @@ def evaluate_drift_round(
             == (prior.present_anchor.path or prior.criterion.origin_path)
         ):
             continue
+        surviving_edges.append((idx, prior, tier, drift_plan[prior.obligation_id][0]))
+
+    for idx, prior, _tier in _filter_unique_unchanged_tier4_edges(
+        surviving_edges, result.comments
+    ):
         priors_for_comment[idx].append(prior)
         comments_for_prior[prior.obligation_id].append(idx)
 
@@ -1215,23 +1266,35 @@ def evaluate_drift_round(
 
     # Check regressions of previously fixed obligations on unmatched comments,
     # requiring required/evidence parity and preserving multi-comment ambiguity.
-    reopen_candidates_by_prior: dict[str, list[int]] = {}
+    reopen_edges: list[tuple[int, DriftTrackedObligation, int, str]] = []
+    reopen_plan = {
+        p.obligation_id: _expected_paths_for_prior(p, descriptors)
+        for p in reopenable_priors
+    }
     for idx, comment in enumerate(result.comments):
         if priors_for_comment[idx]:
             continue
         comment_required = comment.blocks_approval or comment.needs_human
         comment_ev = "supported-source" if comment_required else "advisory"
-        reopen_matches = [
-            p
-            for p in reopenable_priors
-            if (not p.criterion.required or comment_required)
-            and EVIDENCE_RANKS[comment_ev] <= EVIDENCE_RANKS[p.criterion.evidence]
-            and _comment_matches_prior_with_drift(
-                comment,
-                p,
-                _expected_paths_for_prior(p, descriptors)[1],
-            )
-        ]
+        for p in reopenable_priors:
+            if not (
+                (not p.criterion.required or comment_required)
+                and EVIDENCE_RANKS[comment_ev] <= EVIDENCE_RANKS[p.criterion.evidence]
+            ):
+                continue
+            r_dkind, r_expected = reopen_plan[p.obligation_id]
+            tier = _comment_prior_match_tier(comment, p, r_expected)
+            if tier is not None:
+                reopen_edges.append((idx, p, tier, r_dkind))
+
+    reopen_matches_by_comment: dict[int, list[DriftTrackedObligation]] = {}
+    for idx, p, _tier in _filter_unique_unchanged_tier4_edges(
+        reopen_edges, result.comments
+    ):
+        reopen_matches_by_comment.setdefault(idx, []).append(p)
+
+    reopen_candidates_by_prior: dict[str, list[int]] = {}
+    for idx, reopen_matches in reopen_matches_by_comment.items():
         if len(reopen_matches) == 1:
             rp = reopen_matches[0]
             reopen_candidates_by_prior.setdefault(rp.obligation_id, []).append(idx)
