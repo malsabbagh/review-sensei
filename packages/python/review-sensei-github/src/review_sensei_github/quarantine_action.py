@@ -1141,9 +1141,11 @@ def _require_installed_command_tail(run, authenticated):
                 guard,
             )
             return
+        from .accepted_semantic_history import QUARANTINE_CAPACITY_REFUSAL_PREFIX
+
         raise ReviewInputError(
-            "quarantine command finalization capacity unavailable before business "
-            "writes: installed command tail has no complete lifecycle proof"
+            f"{QUARANTINE_CAPACITY_REFUSAL_PREFIX} "
+            "installed command tail has no complete lifecycle proof"
         )
 
 

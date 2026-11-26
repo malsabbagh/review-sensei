@@ -111,6 +111,13 @@ class Gap2DiagnosticsAndRecoveryTests(unittest.TestCase):
             # Strip any witness from Round 2 and stamp failed_attempts=1
             # so the record models a legacy witnessless `publication_failed` state
             # with retained ResultPartStore result.
+            self.assertTrue(
+                any(
+                    SETTLEMENT_WITNESS_MARKER in str(row.get("body", ""))
+                    for row in fixture.extra_comments.values()
+                ),
+                fixture.extra_comments,
+            )
             fixture.extra_comments = {
                 cid: row
                 for cid, row in fixture.extra_comments.items()
@@ -296,10 +303,21 @@ class Gap3EvaluationFailedTests(unittest.TestCase):
             fixture.external = timeout_put_external
             rc = fixture.invoke_command()
             self.assertEqual(rc, 1)
-            settled = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            fixture.external = original_external
+            saved_body = fixture.comment["body"]
+            reviews_before = len(fixture.reviews)
+            settled = parse_session_comment(saved_body, identity=IDENTITY)
             acct = ApiRunAccounting.from_document(settled.api_run_accounting)
             # Fail-closed when unconfirmed native effects exist: verify must not clear blindly.
             self.assertEqual(acct.action["phase"], "pending")
+            self.assertGreater(acct.uncertain, 0)
+            fixture.SOURCE_ID += 1
+            fixture.select_command("@reviewsensei verify", new_run=True)
+            rc2 = fixture.invoke_command()
+            self.assertEqual(rc2, 1)
+            self.assertIn("previous caller run is not terminal", fixture.error)
+            self.assertEqual(fixture.comment["body"], saved_body)
+            self.assertEqual(len(fixture.reviews), reviews_before)
 
     def test_unfinished_pending_action_stays_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -338,9 +356,7 @@ class Gap3EvaluationFailedTests(unittest.TestCase):
                     request.method == "POST"
                     and path == "/repos/owner/repo/issues/7/comments"
                 ):
-                    import json as _json
-
-                    body = _json.loads(request.data).get("body", "")
+                    body = json.loads(request.data).get("body", "")
                     if "<!-- reviewsensei:command-receipt:v1" in body:
                         fixture._meter(request)
                         return json_response(
@@ -364,7 +380,9 @@ class Gap3EvaluationFailedTests(unittest.TestCase):
             # Predecessor rollover must remain strictly fail-closed on unfinished pending actions.
             fixture.SOURCE_ID += 1
             fixture.select_command("@reviewsensei verify", new_run=True)
-            self.assertNotEqual(fixture.invoke_command(), 0)
+            rc2 = fixture.invoke_command()
+            self.assertEqual(rc2, 1)
+            self.assertIn("previous caller run is not terminal", fixture.error)
             self.assertEqual(fixture.comment["body"], saved_body)
             self.assertEqual(len(fixture.reviews), reviews_before)
 
@@ -507,6 +525,44 @@ class Gap5SemanticHistoryCapacityNoopTests(unittest.TestCase):
             self.assertIn(
                 "accepted_semantic_history_finite_no_progress_stop", fixture.error
             )
+
+    def test_evaluation_failed_with_applied_or_receipts_does_not_reuse_history(
+        self,
+    ) -> None:
+        from review_sensei_github.accepted_semantic_history import (
+            _is_prewrite_non_dispositional_noop,
+        )
+
+        snap = {"schema_version": 1, "active": []}
+        kwargs = {
+            "unchanged_lifecycle": True,
+            "raw_before": snap,
+            "raw_after": snap,
+            "before": snap,
+            "after": snap,
+        }
+        self.assertTrue(
+            _is_prewrite_non_dispositional_noop(
+                {"applied": False, "evaluation_failed": True, "receipts": []},
+                **kwargs,
+            )
+        )
+        self.assertFalse(
+            _is_prewrite_non_dispositional_noop(
+                {"applied": True, "evaluation_failed": True, "receipts": []},
+                **kwargs,
+            )
+        )
+        self.assertFalse(
+            _is_prewrite_non_dispositional_noop(
+                {
+                    "applied": False,
+                    "evaluation_failed": True,
+                    "receipts": [{"reference": "RS-123456"}],
+                },
+                **kwargs,
+            )
+        )
 
 
 class Gap6HierarchicalDriftMatchingTests(unittest.TestCase):

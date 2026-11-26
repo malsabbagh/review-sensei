@@ -194,18 +194,25 @@ def _check_duplicate_terminal_delivery(
                 )
 
 
+COMMAND_CAPACITY_REFUSAL_PREFIX = (
+    "command finalization capacity unavailable before business writes:"
+)
+QUARANTINE_CAPACITY_REFUSAL_PREFIX = (
+    "quarantine command finalization capacity unavailable before business writes:"
+)
+PREWRITE_CAPACITY_REFUSAL_PREFIXES: tuple[str, ...] = (
+    COMMAND_CAPACITY_REFUSAL_PREFIX,
+    QUARANTINE_CAPACITY_REFUSAL_PREFIX,
+)
+
+
 def _is_prewrite_capacity_refusal(result: Mapping[str, Any] | None) -> bool:
     """True for unapplied pre-write command finalization capacity refusals."""
     if not isinstance(result, Mapping) or result.get("applied") is not False:
         return False
     summary = result.get("summary")
-    return isinstance(summary, str) and (
-        summary.startswith(
-            "command finalization capacity unavailable before business writes:"
-        )
-        or summary.startswith(
-            "quarantine command finalization capacity unavailable before business writes:"
-        )
+    return isinstance(summary, str) and summary.startswith(
+        PREWRITE_CAPACITY_REFUSAL_PREFIXES
     )
 
 
@@ -219,12 +226,14 @@ def _is_prewrite_non_dispositional_noop(
     after: Mapping[str, Any],
 ) -> bool:
     """True when a command aborted before business writes without mutating lifecycle state."""
+    if not isinstance(result, Mapping) or result.get("applied") is not False:
+        return False
     if not unchanged_lifecycle or after != before:
         return False
     if raw_before is not None and raw_after != raw_before:
         return False
     return _is_prewrite_capacity_refusal(result) or (
-        result.get("evaluation_failed") is True
+        result.get("evaluation_failed") is True and not result.get("receipts")
     )
 
 

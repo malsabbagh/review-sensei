@@ -50,6 +50,41 @@ _CHECK_RUN_PATH_RE = re.compile(r"/repos/[^/]+/[^/]+/check-runs/[0-9]+")
 _HEX64_RE = re.compile(r"[a-f0-9]{64}")
 
 
+def record_has_pending_lifecycle_effects(ledger: Any, record: Any) -> bool:
+    """Return True if ``record`` has any pending or unreadable lifecycle effects."""
+    if record is None or getattr(record, "finding_lifecycle", None) is None:
+        return False
+    from review_sensei.finding_lifecycle_store import read_finding_lifecycle
+
+    from .errors import (
+        GitHubBrokerClientError,
+        GitHubHTTPError,
+        GitHubPublicationError,
+    )
+    from .finding_lifecycle_dictionary import resolve_stored
+
+    try:
+        stored = read_finding_lifecycle(ledger, record)
+        if stored is None:
+            return True
+        resolved = resolve_stored(ledger, record, stored)
+        journal_doc = _validate(_unpack_journal(resolved))
+    except (
+        GitHubHTTPError,
+        GitHubPublicationError,
+        GitHubBrokerClientError,
+        ReviewInputError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return True
+    return bool(journal_doc.get("unknown_trust_effect")) or any(
+        isinstance(effect, dict) and effect.get("status") == "pending"
+        for effect in journal_doc.get("effects", ())
+    )
+
+
 def _append_unique_state(target: list[Any], candidate: Any) -> None:
     for existing in target:
         if candidate is existing or (
@@ -2801,13 +2836,17 @@ def restore_finding_lifecycle(
                 if prior_record is None or prior_record.finding_lifecycle is None:
                     # A reconciled failed Round 1 with no prior completed rounds or
                     # prior lifecycle intentionally restores an empty Round-0 baseline.
-                    # Never silently drop lifecycle state if completed rounds exist.
+                    # Never silently drop retained state if any review state exists.
                     if (
                         record.completed_initial_reviews != 0
                         or record.completed_verification_rounds != 0
+                        or record.transaction is not None
+                        or bool(record.dispositions)
+                        or record.disposition_snapshot is not None
+                        or record.convergence_history is not None
                     ):
                         raise ReviewInputError(
-                            "reconciled prior finding lifecycle is missing for a session with completed reviews"
+                            "reconciled prior finding lifecycle is missing for a session with retained review state"
                         )
                     return record, None
                 source_record = prior_record

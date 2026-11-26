@@ -187,6 +187,11 @@ function prunePublicWorkflowTokenCache(now = Date.now()): void {
   for (const [key, entry] of publicWorkflowTokenCache.entries()) {
     if (now - entry.cachedAt >= PUBLIC_WORKFLOW_CACHE_IDLE_TTL_MS) {
       publicWorkflowTokenCache.delete(key);
+    } else if (
+      entry.token &&
+      entry.token.expiresAt - now <= PUBLIC_WORKFLOW_TOKEN_SKEW_MS
+    ) {
+      entry.token = undefined;
     }
   }
   while (publicWorkflowTokenCache.size > MAX_PUBLIC_WORKFLOW_TOKEN_CACHE_ENTRIES) {
@@ -534,6 +539,9 @@ function advertisedTagSha(bytes: Uint8Array, tag: string): string {
 /** Bounded GitHub transport shared by the broker and setup adapters. */
 export class GitHubApi {
   private privateKey: Promise<CryptoKey> | undefined;
+  private cachedPublicWorkflowKeyInput:
+    | { apiUrl: string; appId: string; rawKey: string; key: string }
+    | undefined;
   private readonly apiUrl: string;
 
   constructor(private readonly env: WorkerEnv, private readonly dispatchControl?: BrokerDispatchControl, private readonly lifetime?: BrokerLifetime) {
@@ -842,9 +850,20 @@ export class GitHubApi {
   }
 
   private publicWorkflowCacheKey(): string {
+    const appId = this.env.GITHUB_APP_ID ?? "";
     const rawKey = this.env.GITHUB_APP_PRIVATE_KEY ?? "";
-    const keyHash = syncSha256Hex(rawKey);
-    return `${this.apiUrl}|${this.env.GITHUB_APP_ID ?? ""}|${keyHash}`;
+    const memo = this.cachedPublicWorkflowKeyInput;
+    if (
+      memo !== undefined &&
+      memo.apiUrl === this.apiUrl &&
+      memo.appId === appId &&
+      memo.rawKey === rawKey
+    ) {
+      return memo.key;
+    }
+    const key = `${this.apiUrl}|${appId}|${syncSha256Hex(rawKey)}`;
+    this.cachedPublicWorkflowKeyInput = { apiUrl: this.apiUrl, appId, rawKey, key };
+    return key;
   }
 
   private cachedPublicWorkflowReadToken(): { token: string | undefined; fromEnv: boolean } {

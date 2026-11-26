@@ -3315,6 +3315,10 @@ class GitHubApplication:
         )
         publisher.request_review(review_id=review_id, result=result)
 
+    def last_command_evaluation_clean_settleable(self) -> bool:
+        """Whether the most recent command refinalization failed cleanly before native writes."""
+        return self._last_command_evaluation_clean_settleable
+
     def apply_maintainer_command(
         self,
         *,
@@ -5261,6 +5265,8 @@ class GitHubApplication:
             # No dispositions, review-body update, cleanup, check or approval
             # has been attempted. Existing action audit/terminal obligations
             # remain on their original caller allocation.
+            from .accepted_semantic_history import COMMAND_CAPACITY_REFUSAL_PREFIX
+
             breakdown = getattr(error, "reserved_cost_breakdown", None)
             if breakdown is None and "journal" in locals():
                 breakdown = getattr(journal, "last_capacity_breakdown", None)
@@ -5272,10 +5278,7 @@ class GitHubApplication:
                 action=command.action,
                 applied=False,
                 operator_paused=record.operator_paused,
-                summary=(
-                    "command finalization capacity unavailable before business writes: "
-                    + reason
-                ),
+                summary=f"{COMMAND_CAPACITY_REFUSAL_PREFIX} {reason}",
             )
         return _PreparedCommandFinalization(
             plan, prepared_check, plan.can_reuse_retained_lifecycle(preview_record)
@@ -5311,6 +5314,7 @@ class GitHubApplication:
             session_dispositions,
         )
 
+        self._last_command_evaluation_clean_settleable = False
         if not isinstance(result, MaintainerCommandResult):
             return result
         command_result: MaintainerCommandResult = result
@@ -5544,11 +5548,7 @@ class GitHubApplication:
             self._last_command_evaluation_clean_settleable = isinstance(
                 exc, (GitHubHTTPError, GitHubPublicationError, GitHubBrokerClientError)
             ) and (journal is None or len(journal.effects) == before_refinalize_effects)
-            reason = (
-                " ".join(str(exc).split())
-                .encode("utf-8")[:256]
-                .decode("utf-8", errors="ignore")
-            )
+            reason = " ".join(str(exc).split())[:256]
             detail = f": {reason}" if reason else ""
             summary = f"{command_result.summary}; gate re-evaluation failed{detail}"
             return render_command_progress(

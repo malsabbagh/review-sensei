@@ -226,6 +226,29 @@ _GRAPHQL_SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 _SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,64}\Z")
 
 
+def _has_drift_or_non_check_effects(journal: Any, before_count: int) -> bool:
+    """True if the lifecycle journal recorded any pending, new, or non-check-run effect."""
+    if journal is None:
+        return True
+    if bool(getattr(journal, "_initial_had_pending", False)):
+        return True
+    effects = getattr(journal, "effects", None)
+    if not isinstance(effects, Sequence):
+        return True
+    if len(effects) > before_count:
+        return True
+    for effect in effects:
+        if not isinstance(effect, Mapping) or effect.get("status") == "pending":
+            return True
+        path = str(effect.get("path", ""))
+        is_check_run = path.endswith("/check-runs") or (
+            "/check-runs/" in path and path.rsplit("/check-runs/", 1)[1].isdigit()
+        )
+        if not is_check_run:
+            return True
+    return False
+
+
 def _safe_http_error_summary(exc: BaseException) -> str:
     detail = str(exc).replace("\r", " ").replace("\n", " ").strip()[:120]
     if not detail:
@@ -8327,9 +8350,12 @@ class ReviewPublisher:
                             },
                         )
                     )
-            readback_pages = min(
-                MAX_REVIEW_THREAD_PAGES,
-                (len(getattr(self, "_native_binding_nodes", ())) // 100) + 2,
+            binding_nodes = getattr(self, "_native_binding_nodes", None)
+            readback_pages = (
+                min(MAX_REVIEW_THREAD_PAGES, (len(binding_nodes) // 100) + 2)
+                if isinstance(binding_nodes, Sequence)
+                and len(binding_nodes) >= len(updates)
+                else MAX_REVIEW_THREAD_PAGES
             )
             native_calls = (
                 1 + edit_count + reopen_count + readback_pages + following_native_calls
@@ -11520,25 +11546,7 @@ class ReviewPublisher:
             from . import review_lifecycle_diagnostics as lifecycle_diagnostics
 
             lifecycle_diagnostics.classified_failure(exception_kind(exc), None)
-            has_prior_or_new_publication_effect = (
-                drift_journal is None
-                or bool(getattr(drift_journal, "_initial_had_pending", False))
-                or len(drift_journal.effects) > before_drift_effects
-                or any(
-                    effect.get("status") == "pending"
-                    or not (
-                        str(effect.get("path", "")).endswith("/check-runs")
-                        or (
-                            "/check-runs/" in str(effect.get("path", ""))
-                            and str(effect.get("path", ""))
-                            .rsplit("/check-runs/", 1)[1]
-                            .isdigit()
-                        )
-                    )
-                    for effect in drift_journal.effects
-                )
-            )
-            if not has_prior_or_new_publication_effect:
+            if not _has_drift_or_non_check_effects(drift_journal, before_drift_effects):
                 raise
             self._commit_drift_uncertain(
                 repository_id=repository_id,

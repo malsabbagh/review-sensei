@@ -35,7 +35,12 @@ from .api_run_requests import ApiRunRequestTransport
 from .application import GitHubApplication, GitHubWriteOptions
 from .comment_intent import verify_live_comment_source
 from .conversation import ConversationPublisher
-from .errors import GitHubBrokerClientError, GitHubMergeGroupUnsupportedError
+from .errors import (
+    GitHubBrokerClientError,
+    GitHubHTTPError,
+    GitHubMergeGroupUnsupportedError,
+    GitHubPublicationError,
+)
 from .event_routing_contract import (
     MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
     RECONCILIATION_OWNERS,
@@ -805,90 +810,29 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                 observed_trust=observed_trust,
             )
         if result.evaluation_failed:
+            clean_settleable_fn = getattr(
+                app, "last_command_evaluation_clean_settleable", None
+            )
+            clean_settleable = (
+                clean_settleable_fn() if callable(clean_settleable_fn) else False
+            )
             if (
                 command.action == "approve-media"
                 or quarantine is not None
                 or historical is not None
-                or getattr(app, "_last_command_evaluation_clean_settleable", False)
-                is not True
+                or clean_settleable is not True
             ):
                 raise ReviewInputError(
                     "command effect or required finalization remains unconfirmed: "
                     + result.summary
                 )
             from .accepted_semantic_history import _record_has_pending_receipt
+            from .finding_lifecycle import record_has_pending_lifecycle_effects
 
-            has_pending_lifecycle = False
             effect_record = caller._effect_record
-            if _record_has_pending_receipt(effect_record):
-                has_pending_lifecycle = True
-            elif (
-                effect_record is not None
-                and effect_record.finding_lifecycle is not None
-            ):
-                try:
-                    from review_sensei.finding_lifecycle_store import (
-                        read_finding_lifecycle,
-                    )
-
-                    from .finding_lifecycle import _unpack_journal, _validate
-                    from .finding_lifecycle_dictionary import (
-                        _manifest as _dict_manifest,
-                    )
-                    from .finding_lifecycle_dictionary import is_dictionary
-                    from .finding_lifecycle_dictionary import (
-                        unpack as _unpack_dictionary,
-                    )
-
-                    effect_lifecycle = effect_record.finding_lifecycle
-                    stored = read_finding_lifecycle(run.ledger, effect_record)
-                    if stored is None:
-                        has_pending_lifecycle = True
-                    else:
-                        if is_dictionary(stored):
-                            from review_sensei.bounded_evidence import (
-                                read_inline_evidence,
-                            )
-
-                            ref_manifest = (
-                                effect_lifecycle.get("manifest")
-                                if isinstance(effect_lifecycle, Mapping)
-                                else None
-                            )
-                            dict_manifest = stored.get("dictionary_manifest")
-                            if not isinstance(dict_manifest, dict) or not isinstance(
-                                ref_manifest, dict
-                            ):
-                                has_pending_lifecycle = True
-                            else:
-                                base_binding = _dict_manifest(
-                                    dict_manifest, ref_manifest["binding"]
-                                )
-                                base = (
-                                    read_inline_evidence(
-                                        dict_manifest, expected_binding=base_binding
-                                    )
-                                    if dict_manifest.get("encoding") == "inline-json-v1"
-                                    else run.ledger.read_evidence(
-                                        run.identity,
-                                        dict_manifest,
-                                        expected_binding=base_binding,
-                                    )
-                                )
-                                journal_doc = _unpack_dictionary(
-                                    stored,
-                                    base=base,
-                                    current_binding=ref_manifest["binding"],
-                                )
-                        else:
-                            journal_doc = _validate(_unpack_journal(stored))
-                        if journal_doc.get("unknown_trust_effect") or any(
-                            e.get("status") == "pending"
-                            for e in journal_doc.get("effects", ())
-                        ):
-                            has_pending_lifecycle = True
-                except Exception:
-                    has_pending_lifecycle = True
+            has_pending_lifecycle = _record_has_pending_receipt(
+                effect_record
+            ) or record_has_pending_lifecycle_effects(run.ledger, effect_record)
             if caller.accounting.uncertain > 0 or has_pending_lifecycle:
                 raise ReviewInputError(
                     "command effect or required finalization remains unconfirmed: "
@@ -901,7 +845,12 @@ def execute_command(run: ReviewRun, args: Any) -> int:
                     live_comment=fenced_after,
                     phase="unstarted_intent",
                 )
-            except Exception:
+            except (
+                GitHubHTTPError,
+                GitHubPublicationError,
+                GitHubBrokerClientError,
+                ReviewInputError,
+            ):
                 raise ReviewInputError(
                     "command effect or required finalization remains unconfirmed: "
                     + result.summary
@@ -933,17 +882,10 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             caller.close_action(run.ledger, run.identity, proof)
             print(result.summary)
             return command_exit_code(result)
-        is_capacity_refusal = (
-            not result.applied
-            and isinstance(result.summary, str)
-            and (
-                result.summary.startswith(
-                    "command finalization capacity unavailable before business writes:"
-                )
-                or result.summary.startswith(
-                    "quarantine command finalization capacity unavailable before business writes:"
-                )
-            )
+        from .accepted_semantic_history import _is_prewrite_capacity_refusal
+
+        is_capacity_refusal = _is_prewrite_capacity_refusal(
+            {"applied": result.applied, "summary": result.summary}
         )
         action_outcome: dict[str, Any] = (
             {"kind": "applied", "reason": None}

@@ -825,6 +825,7 @@ class ReviewRun:
                 from review_sensei.validation import read_bounded_utf8
 
                 from .publication_context_recovery import (
+                    RecoveryRefusalError,
                     measure_staged_recovery_footprint,
                     reconstruct_publication_contexts,
                     resolve_recovery_placement_mode,
@@ -846,6 +847,31 @@ class ReviewRun:
                 if policy.digest() != failed_tx.policy_digest:
                     return None
                 accounting = self.caller.accounting
+                own_startup = sum(
+                    len(slot.requests)
+                    for slot in accounting.startup.slots
+                    if slot.job == accounting.owner.job
+                    and slot.attempt == accounting.owner.run_attempt
+                )
+                other_startup = accounting.startup.liability - own_startup
+                already_consumed = (
+                    other_startup
+                    + accounting.prior_nonstartup_liability
+                    + accounting.confirmed
+                )
+                unknown_usage = accounting.uncertain
+                active_reserved = sum(
+                    block.undispatched
+                    for block in accounting.blocks
+                    if block.issued_by != accounting.owner
+                )
+                ancestor_hashes: tuple[str, ...] = ()
+                ancestor_runs: tuple[int, ...] = ()
+                if accounting.previous_record is not None:
+                    ancestor_hashes = (str(accounting.previous_record["root_sha256"]),)
+                    ancestor_runs = (
+                        int(cast(int, accounting.previous_record["run_id"])),
+                    )
                 (
                     current_root_bytes,
                     intermediate_root_bytes,
@@ -920,21 +946,21 @@ class ReviewRun:
                         attempt=accounting.owner.run_attempt,
                         runtime_only_flags=runtime_only_flags,
                         current_root_sha256=failed_record.record_sha256,
-                        ancestor_record_sha256s=(),
-                        ancestor_run_ids=(),
+                        ancestor_record_sha256s=ancestor_hashes,
+                        ancestor_run_ids=ancestor_runs,
                         current_root_bytes=current_root_bytes,
                         intermediate_root_bytes=intermediate_root_bytes,
                         current_comment_bytes=current_comment_bytes,
                         result_part_count=result_part_count,
                         total_decoded_bytes=total_decoded_bytes,
                         original_api_limit=accounting.configuration.limit,
-                        already_consumed_requests=0,
-                        unknown_usage_requests=0,
-                        active_reserved_requests=0,
+                        already_consumed_requests=already_consumed,
+                        unknown_usage_requests=unknown_usage,
+                        active_reserved_requests=active_reserved,
                         _preloaded_record=failed_record,
                         _baseline_record=loaded_now.record,
                     )
-                except ReviewSenseiError:
+                except (RecoveryRefusalError, ReviewInputError):
                     return None
                 config_digest = ReviewTransaction.compute_configuration_digest(
                     contexts.configuration
@@ -942,6 +968,7 @@ class ReviewRun:
                 evidence_digest = ReviewTransaction.compute_evidence_digest(
                     contexts.evidence
                 )
+                # evidence_digest binds diff_sha256 so any altered or missing local diff refuses.
                 if (
                     config_digest != failed_tx.configuration_digest
                     or evidence_digest != failed_tx.evidence_digest
@@ -965,7 +992,7 @@ class ReviewRun:
                         convergence_policy=policy,
                         budget=self.caller.budget_view,
                     )
-                except ReviewSenseiError:
+                except (RecoveryRefusalError, ReviewInputError):
                     return None
                 loaded_now = self.ledger.load(self.identity)
                 if loaded_now.status == "ok" and loaded_now.record is not None:
@@ -1138,8 +1165,8 @@ class ReviewRun:
         ) = measure_staged_recovery_footprint(
             loaded.record, ledger=self.ledger, identity=self.identity
         )
-        ancestor_hashes: tuple[str, ...] = ()
-        ancestor_runs: tuple[int, ...] = ()
+        ancestor_hashes = ()
+        ancestor_runs = ()
         if accounting.previous_record is not None:
             ancestor_hashes = (str(accounting.previous_record["root_sha256"]),)
             ancestor_runs = (int(cast(int, accounting.previous_record["run_id"])),)

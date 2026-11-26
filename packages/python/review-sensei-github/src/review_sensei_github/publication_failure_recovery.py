@@ -966,11 +966,13 @@ def _earlier_settled_effects(
     ):
         return _NO_EARLIER_EFFECTS
     expected_archive = prior_archive_ref if prior_archive_ref is not None else archive
+    parts = manifest.get("parts", ())
+    if not isinstance(parts, (list, tuple)):
+        return _NO_EARLIER_EFFECTS
     need_prior_read = prior_record is None
     _protect_tail(
         budget,
-        (_archive_part_count(expected_archive) if need_prior_read else 0)
-        + len(manifest.get("parts", ())),
+        (_archive_part_count(expected_archive) if need_prior_read else 0) + len(parts),
         record=current,
     )
     try:
@@ -983,7 +985,7 @@ def _earlier_settled_effects(
         if (
             candidate.identity() != identity
             or (
-                prior_record is None
+                (prior_record is None or prior_archive_ref is not None)
                 and (
                     candidate.record_sha256 != expected_archive.get("root_sha256")
                     or candidate_caller.identity.run_id
@@ -1233,7 +1235,13 @@ def _inspect_confirmed_failed_tx_lifecycle(
             "finding lifecycle already recorded effects for the failed transaction",
             record=record,
         )
-    _protect_tail(budget, len(manifest.get("parts", ())), record=record)
+    parts = manifest.get("parts", ())
+    if not isinstance(parts, (list, tuple)):
+        raise _hold(
+            "finding lifecycle already recorded effects for the failed transaction",
+            record=record,
+        )
+    _protect_tail(budget, len(parts), record=record)
     try:
         stored = _decode_selected_lifecycle(ledger, record)
         if stored is None:
@@ -1311,11 +1319,14 @@ def _inspect_confirmed_failed_tx_lifecycle(
                 confirmed_check_runs.add(response["id"])
                 continue
             if method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+                suffix = eff_path[len(check_post_path) + 1 :]
                 precond = effect.get("check_update_precondition")
                 if (
-                    isinstance(precond, dict)
+                    suffix.isdigit()
+                    and isinstance(precond, dict)
                     and precond.get("head_sha") == tx.head_sha
                     and _positive_id(precond.get("check_run_id"))
+                    and int(suffix) == precond.get("check_run_id")
                     and (
                         not slug_short
                         or str(precond.get("app_slug", "")).casefold() == slug_short
@@ -1390,12 +1401,12 @@ def _verify_legacy_witnessless_retained_result(
         return False
     from review_sensei.models import ReviewResult
 
-    from .publication_recovery import _event_key, _payload, _store
+    from .publication_recovery import _event_key, _payload, _store, publication_http
 
     _protect_tail(budget, 2, record=record)
     try:
         store = _store(
-            ledger.http,
+            publication_http(ledger.http, budget),
             token=ledger.token,
             identity=identity,
             app_slug=app_slug,
@@ -1891,11 +1902,14 @@ def _settled_effects_from_journal(
             ):
                 check_runs.add(response["id"])
         elif method == "PATCH" and eff_path.startswith(check_post_path + "/"):
+            suffix = eff_path[len(check_post_path) + 1 :]
             precond = effect.get("check_update_precondition")
             if (
-                isinstance(precond, dict)
+                suffix.isdigit()
+                and isinstance(precond, dict)
                 and precond.get("head_sha") == head_sha
                 and _positive_id(precond.get("check_run_id"))
+                and int(suffix) == precond.get("check_run_id")
                 and (
                     not normalized_slug
                     or str(precond.get("app_slug", "")).casefold() == normalized_slug

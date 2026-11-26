@@ -420,6 +420,18 @@ describe("GitHubApi public workflow resolution", () => {
         "/repos/malsabbagh/review-sensei/git/ref/tags/v5",
         "ghs_env_read_token",
       );
+
+      // Configured env read token must not silently fall back to installation minting on 403 rate-limit.
+      envReq.mockResolvedValueOnce({
+        status: 403,
+        data: { message: "API rate limit exceeded" },
+        lookupMetadata: { rate_limit_remaining: 0 },
+      });
+      await expect(envClient.publicWorkflowRuntimeShas("v5")).rejects.toMatchObject({
+        message: "github_workflow_tag_unavailable_403",
+        status: 403,
+      });
+      expect(envInstFor).not.toHaveBeenCalled();
     } finally {
       resetPublicWorkflowTokenCacheForTesting();
       fetchMock.mockRestore();

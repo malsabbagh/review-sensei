@@ -2111,7 +2111,11 @@ class GitHubIssueCommentSessionLedger:
             )
 
     def _discover(
-        self, identity: SessionIdentity, *, now: datetime | None = None
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+        _reuse_fresh_listing: bool = False,
     ) -> tuple[int | None, SessionRecord | None]:
         self._last_selected_row = None
         self._observed_consumed_grants = set()
@@ -2288,9 +2292,8 @@ class GitHubIssueCommentSessionLedger:
                     SessionLoadReason.INTEGRITY_FAILED,
                     "partition session requires shared read budget",
                 )
-            replace_reuse = bool(getattr(self, "_replace_reuse_listed", False))
             reuse_listed = (
-                (full_census or replace_reuse)
+                (full_census or _reuse_fresh_listing)
                 and self._inventory_complete
                 and not self._fencing()
             )
@@ -2454,7 +2457,6 @@ class GitHubIssueCommentSessionLedger:
         self._verify_mutation_grant(identity)
         selected_reader = getattr(self, "_consume_plain_finding_input", None)
         selected = selected_reader(identity) if callable(selected_reader) else None
-        prior_replace_reuse = bool(getattr(self, "_replace_reuse_listed", False))
         prior_reuse = self._reuse_listed_parts
         manage_reuse = (
             selected is None
@@ -2462,20 +2464,22 @@ class GitHubIssueCommentSessionLedger:
             and not self._fencing()
             and not self._reuse_listed_parts
         )
-        if manage_reuse:
-            self._replace_reuse_listed = True
         try:
             if selected is None:
                 self._list_refresh = True
                 self._verified_parts = {}
-                comment_id, record = self._discover(identity, now=now)
+                comment_id, record = self._discover(
+                    identity, now=now, _reuse_fresh_listing=manage_reuse
+                )
             else:
                 comment_id, record = selected
             if comment_id is None or record is None:
                 raise ReviewInputError("session record is missing")
             if record.expired(now=now):
                 raise ReviewInputError("session record is missing")
-            latest_comment_id, latest_record = self._discover(identity, now=now)
+            latest_comment_id, latest_record = self._discover(
+                identity, now=now, _reuse_fresh_listing=manage_reuse
+            )
             if (
                 latest_comment_id != comment_id
                 or latest_record is None
@@ -2532,7 +2536,9 @@ class GitHubIssueCommentSessionLedger:
             if self.evidence_budget is not None:
                 self._list_refresh = True
                 self._verified_parts = {}
-                preactivation_id, preactivation = self._discover(identity, now=now)
+                preactivation_id, preactivation = self._discover(
+                    identity, now=now, _reuse_fresh_listing=manage_reuse
+                )
                 if (
                     preactivation_id != comment_id
                     or preactivation is None
@@ -2594,7 +2600,9 @@ class GitHubIssueCommentSessionLedger:
             # treated as our committed generation.
             self._list_refresh = True
             self._verified_parts = {}
-            readback_id, readback = self._discover(identity, now=now)
+            readback_id, readback = self._discover(
+                identity, now=now, _reuse_fresh_listing=manage_reuse
+            )
             if (
                 readback_id != comment_id
                 or readback is None
@@ -2604,7 +2612,6 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError("session comment update lost")
             return readback
         finally:
-            self._replace_reuse_listed = prior_replace_reuse
             self._reuse_listed_parts = prior_reuse
 
     def reserve_for_tail(
