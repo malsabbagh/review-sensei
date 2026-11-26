@@ -804,7 +804,8 @@ class V6ReleaseGateTests(unittest.TestCase):
                 req, progress_guard=restored_guard
             )
         self.assertEqual(caught.exception.stall_count, 3)
-        self.assertEqual(client2.workflow_quota.snapshot().remaining, 999)
+        self.assertEqual(client2.workflow_graphql_quota.snapshot().remaining, 999)
+        self.assertIsNone(client2.workflow_quota.snapshot().remaining)
 
         # Even without passing a restored guard, persisted stall_count >= max halts early.
         client3, _, _ = _build_client(pr)
@@ -1285,6 +1286,219 @@ class V6ReleaseGateTests(unittest.TestCase):
         )
         wrangler = json.loads(wrangler_path.read_text(encoding="utf-8"))
         self.assertEqual(wrangler["vars"]["PUBLIC_WORKFLOW_TAG"], "v5")
+
+    def test_quota_bucket_isolation_for_both_credentials_and_orders(self) -> None:
+        from review_sensei_github.errors import GitHubHTTPRateLimitError
+
+        # Order 1 (GraphQL low -> REST call) + Workflow interleaving.
+        pr1 = SimulatedGitHubPR()
+        app_calls_1 = 0
+
+        def broker_order_1(
+            call: dict[str, Any],
+            default_fn: Callable[[], tuple[int, Mapping[str, str], Any]],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            nonlocal app_calls_1
+            app_calls_1 += 1
+            if call["path"] == "/graphql":
+                return (
+                    200,
+                    {
+                        "X-RateLimit-Resource": "graphql",
+                        "X-RateLimit-Remaining": "5",
+                        "X-RateLimit-Reset": "1764200100",
+                    },
+                    {"data": {"resolveReviewThread": {"thread": {"id": "T1"}}}},
+                )
+            return (
+                200 if call["method"] == "GET" else 201,
+                {
+                    "X-RateLimit-Resource": "core",
+                    "X-RateLimit-Remaining": "4500",
+                    "X-RateLimit-Reset": "1764200000",
+                },
+                {"id": app_calls_1},
+            )
+
+        wf_calls_1 = 0
+
+        def wf_interleaved(
+            call: dict[str, Any],
+            default_fn: Callable[[], tuple[int, Mapping[str, str], Any]],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            nonlocal wf_calls_1
+            wf_calls_1 += 1
+            if call["path"] == "/graphql":
+                return (
+                    200,
+                    {"X-RateLimit-Resource": "graphql", "X-RateLimit-Remaining": "10"},
+                    {
+                        "data": {
+                            "rateLimit": {"limit": 1000, "remaining": 10, "cost": 1}
+                        }
+                    },
+                )
+            return (
+                200,
+                {"X-RateLimit-Resource": "core", "X-RateLimit-Remaining": "950"},
+                [],
+            )
+
+        client1, _, app_tr1 = _build_client(
+            pr1, workflow_interceptor=wf_interleaved, broker_interceptor=broker_order_1
+        )
+        client1.execute(
+            "broker_app_identity",
+            method="GET",
+            path="/app",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        client1.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+        )
+        rest_ok = client1.execute(
+            "pr_review_publish",
+            method="POST",
+            path=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"event": "COMMENT", "body": "ok"},
+        )
+        self.assertEqual(rest_ok.status, 201)
+        self.assertEqual(client1.app_quota.remaining, 4500)
+        self.assertEqual(client1.app_graphql_quota.remaining, 5)
+        with self.assertRaises(GitHubHTTPRateLimitError) as gql_blocked:
+            client1.execute(
+                "review_thread_mutation",
+                method="POST",
+                path="/graphql",
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                body={"query": "mutation {}"},
+                is_graphql=True,
+            )
+        self.assertEqual(gql_blocked.exception.resource, "graphql")
+        self.assertEqual(len(app_tr1.calls), 3)
+
+        client1.execute(
+            "graphql_review_threads",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "query {}"},
+            is_graphql=True,
+        )
+        client1.execute(
+            "pr_issue_comments",
+            method="GET",
+            path=f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        self.assertEqual(client1.workflow_graphql_quota.remaining, 10)
+        self.assertEqual(client1.workflow_quota.remaining, 950)
+        self.assertEqual(
+            client1.total_requests_for(CredentialKind.WORKFLOW_GITHUB_TOKEN), 2
+        )
+        self.assertEqual(client1.total_requests_for(CredentialKind.APP_BROKER), 3)
+
+        # Order 2 (REST low -> GraphQL call).
+        pr2 = SimulatedGitHubPR()
+
+        def broker_order_2(
+            call: dict[str, Any],
+            default_fn: Callable[[], tuple[int, Mapping[str, str], Any]],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            if call["path"] == "/graphql":
+                return (
+                    200,
+                    {
+                        "X-RateLimit-Resource": "graphql",
+                        "X-RateLimit-Remaining": "4500",
+                        "X-RateLimit-Reset": "1764200100",
+                    },
+                    {"data": {"resolveReviewThread": {"thread": {"id": "T2"}}}},
+                )
+            return (
+                200 if call["method"] == "GET" else 201,
+                {
+                    "X-RateLimit-Resource": "core",
+                    "X-RateLimit-Remaining": "5",
+                    "X-RateLimit-Reset": "1764200000",
+                },
+                {"id": 77},
+            )
+
+        client2, _, app_tr2 = _build_client(pr2, broker_interceptor=broker_order_2)
+        client2.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+        )
+        client2.execute(
+            "broker_app_identity",
+            method="GET",
+            path="/app",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+        )
+        gql_ok = client2.execute(
+            "review_thread_mutation",
+            method="POST",
+            path="/graphql",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"query": "mutation {}"},
+            is_graphql=True,
+        )
+        self.assertEqual(gql_ok.status, 200)
+        self.assertEqual(client2.app_graphql_quota.remaining, 4500)
+        self.assertEqual(client2.app_quota.remaining, 5)
+        with self.assertRaises(GitHubHTTPRateLimitError) as core_blocked:
+            client2.execute(
+                "pr_review_publish",
+                method="POST",
+                path=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                body={"event": "COMMENT", "body": "blocked"},
+            )
+        self.assertEqual(core_blocked.exception.resource, "core")
+        self.assertEqual(len(app_tr2.calls), 3)
+        checkpoint_ok = client2.execute(
+            "completion_receipt_comment",
+            method="POST",
+            path=f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            body={"body": "checkpoint"},
+            allow_checkpoint_reserve_override=True,
+        )
+        self.assertEqual(checkpoint_ok.status, 201)
+        self.assertEqual(client2.total_requests_for(CredentialKind.APP_BROKER), 4)
 
 
 if __name__ == "__main__":
