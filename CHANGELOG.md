@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.8.27 - 2026-11-26
+
+Changes since [v0.8.26](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.26), from [71388ea45480c7ba1b41b19ad99ebf02c13713a9](https://github.com/malsabbagh/review-sensei/commit/71388ea45480c7ba1b41b19ad99ebf02c13713a9) through [4b4cea7af07664a85a73788647e8d84f8aacb53b](https://github.com/malsabbagh/review-sensei/commit/4b4cea7af07664a85a73788647e8d84f8aacb53b).
+
+Previous annotated tag object: `cdc5ead4474a682bded330de38d96d5a25e7deec`.
+
+- docs: record released v0.8.26 ([fed5fb462cb20f730d4d66f7f1189037ba9b9056](https://github.com/malsabbagh/review-sensei/commit/fed5fb462cb20f730d4d66f7f1189037ba9b9056)).
+- Show consistent next safe action when a review stalls \(\#500\) ([f9c2dbd7ecfbcc283373cf4d96d8ffd1bde635d4](https://github.com/malsabbagh/review-sensei/commit/f9c2dbd7ecfbcc283373cf4d96d8ffd1bde635d4)).
+- Scope supplemental documents for version-only dependency updates \(\#501\) ([560766ce11459706a687bdd0d18b586fab861984](https://github.com/malsabbagh/review-sensei/commit/560766ce11459706a687bdd0d18b586fab861984)).
+- Test publication recovery after a workflow lookup outage \(\#502\) ([3d0bc8ced59d5c213a23f45ab0b6f863c61d4696](https://github.com/malsabbagh/review-sensei/commit/3d0bc8ced59d5c213a23f45ab0b6f863c61d4696)).
+- Fix hosted lifecycle gaps across broker lookup, publication recovery, command settlement, capacity, and drift matching \(\#503\) ([4b4cea7af07664a85a73788647e8d84f8aacb53b](https://github.com/malsabbagh/review-sensei/commit/4b4cea7af07664a85a73788647e8d84f8aacb53b)).
+
+## review-sensei-github 0.3.33 - 2026-11-26
+
+- Pin `review-sensei==0.8.27`.
+
 ## 0.8.26 - 2026-11-25
 
 Changes since [v0.8.25](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.25), from [9ced89b99d5a25158acbd27fda53f3c696841076](https://github.com/malsabbagh/review-sensei/commit/9ced89b99d5a25158acbd27fda53f3c696841076) through [e8631447482de45ca39c4eef1e817d752da48187](https://github.com/malsabbagh/review-sensei/commit/e8631447482de45ca39c4eef1e817d752da48187).

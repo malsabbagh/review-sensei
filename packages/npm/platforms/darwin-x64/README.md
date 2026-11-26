@@ -8,7 +8,7 @@ Install the public launcher, which selects the matching native package:
 
 <!-- release-installation:package-npm-1:start -->
 ```console
-npm install --save-dev @reviewsensei/cli@0.8.26
+npm install --save-dev @reviewsensei/cli@0.8.27
 npx review-sensei --help
 ```
 <!-- release-installation:package-npm-1:end -->
