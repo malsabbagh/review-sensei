@@ -41,6 +41,7 @@ from review_sensei_github.v6_recovery_ledger import (
     AdvisoryProgressHint,
     CompletionReceiptRecord,
     UnresolvedResultRecord,
+    V6LedgerIntegrityError,
     WriteIntentRecord,
     WriterOwnershipProof,
     canonical_sha256,
@@ -1219,3 +1220,233 @@ class RecoveryEngineTests(unittest.TestCase):
             "restore_and_snapshot_reads=5,body_receipt_calls=1)",
             msg,
         )
+
+    def test_repeated_rest_pagination_url_halts_immediately_without_loop(self) -> None:
+        calls_count = 0
+
+        def wf_loop(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            nonlocal calls_count
+            calls_count += 1
+            return (
+                200,
+                {
+                    "X-RateLimit-Remaining": "999",
+                    "Link": '<https://api.github.com/repos/octo/repo/issues/12/comments?per_page=100&sort=created&direction=asc>; rel="next"',
+                },
+                [{"id": 1, "body": "only-comment"}],
+            )
+
+        paginator = StabilityVerifiedPaginator(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_loop),
+                broker_app_transport=ScriptedTransport(
+                    lambda c: (500, {}, {"message": "unused"})
+                ),
+            )
+        )
+        guard = NoProgressGuard(operation_id="op-repeat-url", max_stall_steps=5)
+        with self.assertRaises(RecoveryStalledError):
+            paginator.scan_rest(
+                endpoint_id="pr_issue_comments",
+                path="/repos/octo/repo/issues/12/comments?per_page=100",
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                progress_guard=guard,
+            )
+        self.assertEqual(calls_count, 1)
+
+    def test_fail_closed_bot_provenance_and_strict_marker_field_types(self) -> None:
+        # Generic Bot user without performed_via_github_app or expected bot identity is rejected.
+        generic_bot_meta = {
+            "performed_via_github_app": None,
+            "user": {"id": 9999, "login": "some-other[bot]", "type": "Bot"},
+        }
+        self.assertFalse(verify_app_authored_record(generic_bot_meta))
+        self.assertTrue(
+            verify_app_authored_record(
+                generic_bot_meta, expected_bot_login="some-other[bot]"
+            )
+        )
+        self.assertFalse(
+            verify_app_authored_record(generic_bot_meta, expected_bot_login=BOT_LOGIN)
+        )
+
+        # Malformed field types in markers raise V6LedgerIntegrityError fail-closed.
+        bad_payloads: list[dict[str, Any]] = [
+            {
+                "schema": INTENT_SCHEMA,
+                "record_id": "intent:1",
+                "operation_id": "op-1",
+                "writer_epoch": "1",
+                "pr_head_sha": HEAD_SHA,
+                "effect_kind": "pr_review_publish",
+                "payload_sha256": "a" * 64,
+                "target_digest": "t1",
+            },
+            {
+                "schema": PROGRESS_HINT_SCHEMA,
+                "operation_id": "op-1",
+                "recovery_phase": "scan",
+                "cursor_hint": None,
+                "verified_prefix_count": True,
+                "verified_prefix_digest": "",
+                "last_verified_id": None,
+                "stall_count": 0,
+                "last_progress_digest": "",
+                "transient_error_count": 0,
+            },
+            {
+                "schema": PROGRESS_HINT_SCHEMA,
+                "operation_id": "op-1",
+                "recovery_phase": "scan",
+                "cursor_hint": "c1",
+                "verified_prefix_count": 1,
+                "verified_prefix_digest": "not-a-sha256-hex-digest",
+                "last_verified_id": 1,
+                "stall_count": 0,
+                "last_progress_digest": "",
+                "transient_error_count": 0,
+            },
+            {
+                "schema": UNRESOLVED_RESULT_SCHEMA,
+                "record_id": "unresolved:op-1",
+                "operation_id": "op-1",
+                "pr_head_sha": HEAD_SHA,
+                "payload_sha256": canonical_sha256([]),
+                "findings_payload": [],
+                "required_evidence_digests": "abc",
+                "artifact_cache_sha256": None,
+            },
+        ]
+        for bad in bad_payloads:
+            bad_marker = (
+                f"<!-- reviewsensei:v6:record sha256={canonical_sha256(bad)} "
+                f"payload={json.dumps(bad)} -->"
+            )
+            with self.assertRaises(V6LedgerIntegrityError):
+                parse_v6_record_marker(bad_marker)
+
+        with self.assertRaises(V6LedgerIntegrityError):
+            canonical_sha256({"bad": float("nan")})
+
+    def test_intent_digest_mismatch_and_ambiguous_broker_200_both_hold(self) -> None:
+        unresolved = _make_unresolved_record()
+        mismatched_intent = WriteIntentRecord(
+            record_id="intent:op-1:1",
+            operation_id="op-1",
+            writer_epoch=1,
+            pr_head_sha=HEAD_SHA,
+            effect_kind="pr_review_publish",
+            payload_sha256="f" * 64,
+            target_digest="t1",
+        )
+
+        def wf_mismatch(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if "/issues/12/comments" in call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "999"},
+                    [
+                        {
+                            "id": 100,
+                            "body": format_v6_record_marker(unresolved),
+                            **_app_meta(),
+                        },
+                        {
+                            "id": 101,
+                            "body": format_v6_record_marker(mismatched_intent),
+                            **_app_meta(),
+                        },
+                    ],
+                )
+            return 200, {"X-RateLimit-Remaining": "998"}, []
+
+        app_never = ScriptedTransport(
+            lambda c: (500, {}, {"message": "must not mutate on mismatch"})
+        )
+        req = RecoveryRequest(
+            owner="octo",
+            repo="repo",
+            repository_id=101,
+            pull_request=12,
+            operation_id="op-1",
+            ownership_proof=_make_proof(epoch=1),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+        )
+        hold_mismatch = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_mismatch),
+                broker_app_transport=app_never,
+            )
+        ).recover_and_publish(req)
+        self.assertIsInstance(hold_mismatch, RecoveryHold)
+        assert isinstance(hold_mismatch, RecoveryHold)
+        self.assertEqual(hold_mismatch.blocker, "pr_result_digest_mismatch_with_intent")
+        self.assertTrue(hold_mismatch.zero_model_calls_started)
+        self.assertEqual(len(app_never.calls), 0)
+
+        # RS-2D226A: broker_effect_verification returning 200 with mismatched payload
+        # must return RecoveryHold(ambiguous_write_outcome) rather than duplicate write.
+        matching_intent = WriteIntentRecord(
+            record_id="intent:op-1:1",
+            operation_id="op-1",
+            writer_epoch=1,
+            pr_head_sha=HEAD_SHA,
+            effect_kind="pr_review_publish",
+            payload_sha256=unresolved.payload_sha256,
+            target_digest="t1",
+        )
+        candidate_review = {
+            "id": 9003,
+            "body": (
+                "ReviewSensei recovery publication (1 finding(s)).\n"
+                f"<!-- reviewsensei:v6:effect op=op-1 sha256={unresolved.payload_sha256} -->"
+            ),
+            **_app_meta(),
+        }
+
+        def wf_candidate(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if "/issues/12/comments" in call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "999"},
+                    [
+                        {
+                            "id": 100,
+                            "body": format_v6_record_marker(unresolved),
+                            **_app_meta(),
+                        },
+                        {
+                            "id": 101,
+                            "body": format_v6_record_marker(matching_intent),
+                            **_app_meta(),
+                        },
+                    ],
+                )
+            return 200, {"X-RateLimit-Remaining": "998"}, [candidate_review]
+
+        def app_ambiguous(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if call["method"] == "GET" and "/pulls/12/reviews/9003" in call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "4999"},
+                    {"id": 9003, "body": "different unverified body", **_app_meta()},
+                )
+            raise AssertionError(f"must not post duplicate review: {call}")
+
+        app_ambig_transport = ScriptedTransport(app_ambiguous)
+        hold_ambig = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_candidate),
+                broker_app_transport=app_ambig_transport,
+            )
+        ).recover_and_publish(req)
+        self.assertIsInstance(hold_ambig, RecoveryHold)
+        assert isinstance(hold_ambig, RecoveryHold)
+        self.assertEqual(hold_ambig.blocker, "ambiguous_write_outcome")
+        self.assertTrue(hold_ambig.zero_model_calls_started)
+        self.assertEqual([c["method"] for c in app_ambig_transport.calls], ["GET"])

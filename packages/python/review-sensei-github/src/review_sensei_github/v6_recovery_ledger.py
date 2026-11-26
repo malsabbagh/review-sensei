@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,6 +19,13 @@ from types import MappingProxyType
 from typing import Any, TypeAlias
 
 from review_sensei.errors import ReviewInputError
+
+
+class V6LedgerIntegrityError(ReviewInputError):
+    """Raised when a v6 ledger marker, schema, field type, or digest is invalid."""
+
+    error_category = "v6_ledger_integrity"
+
 
 INTENT_SCHEMA = "reviewsensei:v6:intent:v1"
 RECEIPT_SCHEMA = "reviewsensei:v6:receipt:v1"
@@ -65,6 +73,11 @@ def _to_json_compatible(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
+        if not math.isfinite(value):
+            raise V6LedgerIntegrityError(
+                f"non-finite float in v6 ledger payload: {value!r}",
+                diagnostic="v6_non_finite_float",
+            )
         return value
     if isinstance(value, Mapping):
         return {str(k): _to_json_compatible(v) for k, v in value.items()}
@@ -364,11 +377,10 @@ class AdvisoryProgressHint:
         prefix_count = _require_strict_int(
             self.verified_prefix_count, name="verified_prefix_count", minimum=0
         )
-        _require_single_line_str(
-            self.verified_prefix_digest,
-            name="verified_prefix_digest",
-            allow_empty=(prefix_count == 0),
-        )
+        if prefix_count > 0 or self.verified_prefix_digest != "":
+            _require_sha256_64(
+                self.verified_prefix_digest, name="verified_prefix_digest"
+            )
         if self.last_verified_id is not None:
             _require_effect_or_record_id(self.last_verified_id, name="last_verified_id")
         _require_strict_int(self.stall_count, name="stall_count", minimum=0)
@@ -442,10 +454,60 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
     )
 
 
+def _require_mapping_str(payload: Mapping[str, Any], key: str) -> str:
+    value = payload[key]
+    if type(value) is not str:
+        raise V6LedgerIntegrityError(
+            f"field {key!r} must be str, got {type(value).__name__}",
+            diagnostic="v6_malformed_marker",
+        )
+    return value
+
+
+def _require_mapping_opt_str(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload[key]
+    if value is not None and type(value) is not str:
+        raise V6LedgerIntegrityError(
+            f"field {key!r} must be str or None, got {type(value).__name__}",
+            diagnostic="v6_malformed_marker",
+        )
+    return value
+
+
+def _require_mapping_int(payload: Mapping[str, Any], key: str) -> int:
+    value = payload[key]
+    if type(value) is not int:
+        raise V6LedgerIntegrityError(
+            f"field {key!r} must be strict int, got {type(value).__name__}",
+            diagnostic="v6_malformed_marker",
+        )
+    return value
+
+
+def _require_mapping_id(payload: Mapping[str, Any], key: str) -> str | int:
+    value = payload[key]
+    if type(value) is not int and type(value) is not str:
+        raise V6LedgerIntegrityError(
+            f"field {key!r} must be str or strict int, got {type(value).__name__}",
+            diagnostic="v6_malformed_marker",
+        )
+    return value
+
+
+def _require_mapping_opt_id(payload: Mapping[str, Any], key: str) -> str | int | None:
+    value = payload[key]
+    if value is not None and type(value) is not int and type(value) is not str:
+        raise V6LedgerIntegrityError(
+            f"field {key!r} must be str, strict int, or None, got {type(value).__name__}",
+            diagnostic="v6_malformed_marker",
+        )
+    return value
+
+
 def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
     schema = payload.get("schema")
     if not isinstance(schema, str) or schema not in VALID_V6_RECORD_SCHEMAS:
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             f"unknown v6 ledger record schema: {schema!r}",
             diagnostic="v6_unknown_schema",
         )
@@ -463,19 +525,19 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 "target_digest",
             }
             if set(payload.keys()) != expected_keys:
-                raise ReviewInputError(
+                raise V6LedgerIntegrityError(
                     "WriteIntentRecord has unexpected or missing keys",
                     diagnostic="v6_malformed_marker",
                 )
             return WriteIntentRecord(
                 schema=schema,
-                record_id=payload["record_id"],
-                operation_id=payload["operation_id"],
-                writer_epoch=payload["writer_epoch"],
-                pr_head_sha=payload["pr_head_sha"],
-                effect_kind=payload["effect_kind"],
-                payload_sha256=payload["payload_sha256"],
-                target_digest=payload["target_digest"],
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                writer_epoch=_require_mapping_int(payload, "writer_epoch"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                effect_kind=_require_mapping_str(payload, "effect_kind"),
+                payload_sha256=_require_mapping_str(payload, "payload_sha256"),
+                target_digest=_require_mapping_str(payload, "target_digest"),
             )
 
         if schema == RECEIPT_SCHEMA:
@@ -489,18 +551,18 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 "completed_at",
             }
             if set(payload.keys()) != expected_keys:
-                raise ReviewInputError(
+                raise V6LedgerIntegrityError(
                     "CompletionReceiptRecord has unexpected or missing keys",
                     diagnostic="v6_malformed_marker",
                 )
             return CompletionReceiptRecord(
                 schema=schema,
-                record_id=payload["record_id"],
-                operation_id=payload["operation_id"],
-                writer_epoch=payload["writer_epoch"],
-                github_effect_id=payload["github_effect_id"],
-                payload_sha256=payload["payload_sha256"],
-                completed_at=payload["completed_at"],
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                writer_epoch=_require_mapping_int(payload, "writer_epoch"),
+                github_effect_id=_require_mapping_id(payload, "github_effect_id"),
+                payload_sha256=_require_mapping_str(payload, "payload_sha256"),
+                completed_at=_require_mapping_str(payload, "completed_at"),
             )
 
         if schema == UNRESOLVED_RESULT_SCHEMA:
@@ -515,25 +577,41 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 "artifact_cache_sha256",
             }
             if set(payload.keys()) != expected_keys:
-                raise ReviewInputError(
+                raise V6LedgerIntegrityError(
                     "UnresolvedResultRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_findings = payload["findings_payload"]
+            if not isinstance(raw_findings, (list, tuple)):
+                raise V6LedgerIntegrityError(
+                    "field 'findings_payload' must be a list or tuple of mappings",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_digests = payload["required_evidence_digests"]
+            if not isinstance(raw_digests, (list, tuple)) or any(
+                type(item) is not str for item in raw_digests
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'required_evidence_digests' must be a list or tuple of strings",
                     diagnostic="v6_malformed_marker",
                 )
             return UnresolvedResultRecord(
                 schema=schema,
-                record_id=payload["record_id"],
-                operation_id=payload["operation_id"],
-                pr_head_sha=payload["pr_head_sha"],
-                payload_sha256=payload["payload_sha256"],
-                findings_payload=payload["findings_payload"],
-                required_evidence_digests=tuple(payload["required_evidence_digests"]),
-                artifact_cache_sha256=payload["artifact_cache_sha256"],
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                payload_sha256=_require_mapping_str(payload, "payload_sha256"),
+                findings_payload=tuple(raw_findings),
+                required_evidence_digests=tuple(raw_digests),
+                artifact_cache_sha256=_require_mapping_opt_str(
+                    payload, "artifact_cache_sha256"
+                ),
             )
 
         # PROGRESS_HINT_SCHEMA
         forbidden = _FORBIDDEN_PROGRESS_HINT_KEYS.intersection(payload.keys())
         if forbidden:
-            raise ReviewInputError(
+            raise V6LedgerIntegrityError(
                 "AdvisoryProgressHint cannot contain write/result fields: "
                 f"{sorted(forbidden)}",
                 diagnostic="v6_forbidden_advisory_payload",
@@ -551,25 +629,38 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
             "transient_error_count",
         }
         if set(payload.keys()) != expected_keys:
-            raise ReviewInputError(
+            raise V6LedgerIntegrityError(
                 "AdvisoryProgressHint has unexpected or missing keys",
                 diagnostic="v6_malformed_marker",
             )
         return AdvisoryProgressHint(
             schema=schema,
-            operation_id=payload["operation_id"],
-            recovery_phase=payload["recovery_phase"],
-            cursor_hint=payload["cursor_hint"],
-            verified_prefix_count=payload["verified_prefix_count"],
-            verified_prefix_digest=payload["verified_prefix_digest"],
-            last_verified_id=payload["last_verified_id"],
-            stall_count=payload["stall_count"],
-            last_progress_digest=payload["last_progress_digest"],
-            transient_error_count=payload["transient_error_count"],
+            operation_id=_require_mapping_str(payload, "operation_id"),
+            recovery_phase=_require_mapping_str(payload, "recovery_phase"),
+            cursor_hint=_require_mapping_opt_str(payload, "cursor_hint"),
+            verified_prefix_count=_require_mapping_int(
+                payload, "verified_prefix_count"
+            ),
+            verified_prefix_digest=_require_mapping_str(
+                payload, "verified_prefix_digest"
+            ),
+            last_verified_id=_require_mapping_opt_id(payload, "last_verified_id"),
+            stall_count=_require_mapping_int(payload, "stall_count"),
+            last_progress_digest=_require_mapping_str(payload, "last_progress_digest"),
+            transient_error_count=_require_mapping_int(
+                payload, "transient_error_count"
+            ),
         )
     except KeyError as error:
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             f"missing field {error} in v6 ledger record",
+            diagnostic="v6_malformed_marker",
+        ) from error
+    except V6LedgerIntegrityError:
+        raise
+    except ReviewInputError as error:
+        raise V6LedgerIntegrityError(
+            str(error),
             diagnostic="v6_malformed_marker",
         ) from error
 
@@ -707,8 +798,13 @@ def verify_app_authored_record(
             if not isinstance(login, str) or login != expected_bot_login:
                 return False
         if not has_verified_app:
-            has_verified_app = str(user_type or "").lower() == "bot" and (
+            has_explicit_bot_identity = (
+                expected_bot_user_id is not None or expected_bot_login is not None
+            )
+            has_verified_app = (
                 expected_app_id is None
+                and has_explicit_bot_identity
+                and str(user_type or "").lower() == "bot"
             )
 
     return has_verified_app

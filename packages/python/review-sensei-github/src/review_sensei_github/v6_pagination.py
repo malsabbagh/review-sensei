@@ -588,7 +588,13 @@ class StabilityVerifiedPaginator:
                         {"repeated_url": next_path, "count": len(ordered_records)}
                     ),
                 )
-                continue
+                raise RecoveryStalledError(
+                    f"Repeated pagination URL detected without progress: {next_path!r}",
+                    stall_count=progress_guard.stall_count,
+                    transient_error_count=progress_guard.transient_error_count,
+                    recovery_phase=progress_guard.recovery_phase,
+                    last_progress_digest=progress_guard.last_progress_digest,
+                )
             visited_paths.add(next_path)
 
             caller = self.client.execute if execute_fn is None else execute_fn

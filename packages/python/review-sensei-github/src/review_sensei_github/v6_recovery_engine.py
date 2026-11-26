@@ -26,6 +26,7 @@ from .v6_credential_matrix import (
     CredentialKind,
     GitHubEventKind,
     RepositoryVisibility,
+    authorize_v6_endpoint_credential,
 )
 from .v6_pagination import (
     NoProgressGuard,
@@ -445,6 +446,13 @@ class V6RecoveryEngine:
         current_hint = guard.to_advisory_hint()
         if request.advisory_comment_id is None:
             return current_hint, False
+        authorize_v6_endpoint_credential(
+            "advisory_progress_hint",
+            CredentialKind.APP_BROKER,
+            event=request.event,
+            visibility=request.visibility,
+            granted_scopes=request.granted_scopes,
+        )
         try:
             self.mutation_bound.consume(
                 "advisory_progress_hint", "advisory_progress_hint"
@@ -471,6 +479,8 @@ class V6RecoveryEngine:
                 now_epoch=now_epoch,
             )
             return current_hint, False
+        except GitHubHTTPPermissionError:
+            raise
         except (GitHubHTTPRateLimitError, GitHubHTTPTransientError, TimeoutError):
             fallback = (
                 prior_durable_hint if prior_durable_hint is not None else current_hint
@@ -741,7 +751,7 @@ class V6RecoveryEngine:
         except (GitHubHTTPTransientError, TimeoutError, ConnectionError):
             return False, False, None
 
-        if resp.status == 404:
+        if resp.status in (404, 410):
             return True, False, None
         if resp.status not in (200, 201) or not isinstance(resp.body, Mapping):
             return False, False, None
@@ -755,7 +765,7 @@ class V6RecoveryEngine:
         ):
             verified_id = resp.body.get("id", candidate_effect_id)
             return True, True, verified_id
-        return True, False, None
+        return False, False, None
 
     def _reconcile_effect_surface(
         self,
@@ -1061,6 +1071,20 @@ class V6RecoveryEngine:
                 return validated
             pr_result = validated
             payload_sha256 = pr_result.payload_sha256
+
+            if (
+                existing_intent is not None
+                and existing_intent.payload_sha256 != payload_sha256
+            ):
+                return RecoveryHold(
+                    operation_id=request.operation_id,
+                    blocker="pr_result_digest_mismatch_with_intent",
+                    missing_evidence=(
+                        f"intent_digest_match:{existing_intent.record_id}:"
+                        f"{existing_intent.payload_sha256}",
+                    ),
+                    zero_model_calls_started=True,
+                )
 
             if existing_intent is None:
                 self._verify_write_boundary(
