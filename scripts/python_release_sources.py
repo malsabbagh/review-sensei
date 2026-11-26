@@ -59,6 +59,8 @@ REGISTRY_ONLY_WORKFLOWS = frozenset(
         "6e973aeff23cc6df24315b5cae4841dc62cdd0ed0d10fc6da775092c90a273f3",
         # Routing step display label only; all execution and installer bytes unchanged.
         "c90e6eaeff347f01be8ad9ac044a3bbb893d17553b7e586b480a46ffa975e91a",
+        # Hosted --skip-benign-races invocation; all four core installation lanes retain their exact registry contract.
+        "21d3ccc23de2cb80f850de0236c64305fb1e8e26307d55dc3286be10e80cca39",
     }
 )
 

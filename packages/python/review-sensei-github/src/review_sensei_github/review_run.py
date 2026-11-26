@@ -38,7 +38,11 @@ from review_sensei.cli import _parser as engine_parser
 from review_sensei.cli import main as engine_main
 from review_sensei.configuration import MAX_CONFIG_BYTES, load_configuration
 from review_sensei.disposition import MAINTAINER_ACTIONS
-from review_sensei.errors import ReviewInputError, ReviewSenseiError
+from review_sensei.errors import (
+    BenignLifecycleRace,
+    ReviewInputError,
+    ReviewSenseiError,
+)
 from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.models import ReviewResult, ReviewTransaction
 from review_sensei.outcomes import DEFAULT_RECOVERY_TTL_SECONDS
@@ -71,6 +75,7 @@ from .review_finalization_diagnostics import close_not_entered, close_review_run
 from .review_guidance import (
     mark_step_summary_written,
     resolve_next_action_guidance,
+    write_benign_race_step_summary,
     write_publication_failure_step_summary,
 )
 from .run_authority import request_authority
@@ -212,6 +217,104 @@ def _write_migration_hold_outcome(publication_output: Path, *, reason: str) -> i
     lifecycle_diagnostics.publication(migration_outcome)
     publication_output.write_text(json.dumps(migration_outcome, indent=2) + "\n")
     return 1
+
+
+def _handle_benign_review_race(
+    error: BenignLifecycleRace,
+    *,
+    publication_output: Path | None,
+    repository: str | None,
+    pull_request: int | None,
+) -> int:
+    """Record diagnostics, outcome, and step summary for a skipped benign race."""
+    lifecycle_diagnostics.skipped_benign_race(error.reason)
+    is_terminal = error.reason == "caller_run_already_terminal"
+    status = "already_published" if is_terminal else "skipped_stale"
+    outcome: dict[str, object] = {
+        "status": status,
+        "publication_status": status,
+        "accounting_terminal": is_terminal,
+        "terminal_reason": None,
+        "review_id": None,
+        "diagnostic": None,
+        "reason": error.reason,
+    }
+    lifecycle_diagnostics.publication(outcome)
+    if publication_output is not None:
+        publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
+    write_benign_race_step_summary(
+        operation="review",
+        reason=error.reason,
+        repository=repository,
+        pull_request=pull_request,
+    )
+    return 0
+
+
+def _is_benign_terminal_rerun(
+    *,
+    purpose: str,
+    record: SessionRecord,
+    previous: ApiRunAccounting,
+    caller: ApiRunRequestTransport,
+    frozen: FrozenApiConfiguration,
+    args: argparse.Namespace,
+    restart_registration: Mapping[str, Any] | None,
+    command_action: str | None,
+    source: Mapping[str, Any] | None,
+) -> bool:
+    """Return True only when an already-terminal same-run predecessor is safe to skip."""
+    if (
+        record.quarantine_lineage is not None
+        or restart_registration is not None
+        or previous.uncertain != 0
+    ):
+        return False
+    if purpose == "review":
+        tx = record.transaction
+        return (
+            previous.terminal_transaction is not None
+            and previous.action is None
+            and tx is not None
+            and tx.phase in {"publication_succeeded", "publication_suppressed"}
+            and tx.transaction_id == previous.terminal_transaction
+            and tx.base_sha == args.base_sha
+            and tx.head_sha == args.head_sha
+        )
+    if purpose in {"command", "reply"}:
+        if command_action == "approve-media":
+            return False
+        action = previous.action
+        if (
+            previous.terminal_transaction is not None
+            or not isinstance(action, Mapping)
+            or action.get("phase") != "terminal"
+        ):
+            return False
+        outcome = action.get("outcome")
+        if isinstance(outcome, Mapping) and outcome.get("kind") == "canceled_unstarted":
+            return False
+        intent = action.get("intent")
+        target = getattr(caller, "_accepted_semantic_target", None)
+        op_key = (
+            target[5]
+            if isinstance(target, tuple)
+            and len(target) >= 6
+            and isinstance(target[5], str)
+            else None
+        )
+        return (
+            isinstance(intent, Mapping)
+            and intent.get("purpose") == purpose
+            and intent.get("run_id") == caller.run.run_id
+            and intent.get("head_sha") == args.head_sha
+            and intent.get("configuration_digest") == frozen.digest
+            and isinstance(op_key, str)
+            and intent.get("operation_key") == op_key
+            and isinstance(source, Mapping)
+            and intent.get("source") == dict(source)
+        )
+    return False
 
 
 def _is_ordinary_terminal_predecessor(
@@ -1375,7 +1478,13 @@ class ReviewRun:
             or binding["configuration_digest"] != expected_configuration
         )
 
-    def execute(self, argv: list[str], *, publication_output: Path) -> int:
+    def execute(
+        self,
+        argv: list[str],
+        *,
+        publication_output: Path,
+        skip_benign_races: bool = False,
+    ) -> int:
         lifecycle_diagnostics.phase("analysis")
         retained = self.retained_analysis(argv)
         if retained is None and self.finding_inventory_migration_required():
@@ -1581,6 +1690,8 @@ class ReviewRun:
                 observed_trust=observed_trust,
             )
         except ReviewSenseiError as pub_error:
+            if skip_benign_races and isinstance(pub_error, BenignLifecycleRace):
+                raise
             # A durable native intent may stop a later effect before the
             # publisher returns. Preserve an outcome without promoting the
             # attempted publication or its journal into a confirmed receipt.
@@ -1821,12 +1932,19 @@ def _configuration(
     obj = reference.get("object")
     if isinstance(obj, dict) and obj.get("type") == "commit":
         lifecycle_diagnostics.observed_policy(branch, obj.get("sha"))
+    obj_sha = obj.get("sha") if isinstance(obj, dict) else None
     if (
         not isinstance(obj, dict)
         or obj.get("type") != "commit"
-        or obj.get("sha") != policy_commit
+        or not isinstance(obj_sha, str)
+        or _SHA.fullmatch(obj_sha) is None
     ):
         raise ReviewInputError("trusted policy commit changed before admission")
+    if obj_sha != policy_commit:
+        raise BenignLifecycleRace(
+            "trusted policy commit changed before admission",
+            reason="policy_commit_superseded",
+        )
     lifecycle_diagnostics.step("policy_content")
     status, document = http.request(
         "GET",
@@ -2171,23 +2289,25 @@ def bootstrap(
         args.base_sha = base.get("sha")
     if args.head_sha is None:
         args.head_sha = head.get("sha")
+    live_base_sha = base.get("sha")
+    live_head_sha = head.get("sha")
     if (
-        not isinstance(base, dict)
-        or not isinstance(head, dict)
-        or not isinstance(args.base_sha, str)
+        not isinstance(args.base_sha, str)
         or _SHA.fullmatch(args.base_sha) is None
         or not isinstance(args.head_sha, str)
         or _SHA.fullmatch(args.head_sha) is None
-        or base.get("sha") != args.base_sha
-        or head.get("sha") != args.head_sha
+        or not isinstance(live_base_sha, str)
+        or _SHA.fullmatch(live_base_sha) is None
+        or not isinstance(live_head_sha, str)
+        or _SHA.fullmatch(live_head_sha) is None
         or not isinstance(base.get("repo"), dict)
         or type(base["repo"].get("id")) is not int
         or base["repo"].get("id") != args.repository_id
         or base["repo"].get("full_name") != args.repository
         or type(pull.get("number")) is not int
         or pull.get("number") != args.pull_request
-        or pull.get("state") != "open"
-        or pull.get("draft") is not False
+        or pull.get("state") not in {"open", "closed"}
+        or type(pull.get("draft")) is not bool
         or not isinstance(base.get("ref"), str)
         or re.fullmatch(r"[A-Za-z0-9._/-]+", base["ref"]) is None
         or ".." in base["ref"]
@@ -2199,6 +2319,24 @@ def bootstrap(
         or head["repo"].get("fork") is not False
     ):
         raise ReviewInputError("live reviewed base or head conflicts")
+    if pull["state"] == "closed":
+        raise BenignLifecycleRace(
+            "live reviewed base or head conflicts",
+            reason="pr_closed_before_admission",
+            reply_status="skipped_pr_state",
+        )
+    if pull["draft"] is True:
+        raise BenignLifecycleRace(
+            "live reviewed base or head conflicts",
+            reason="pr_draft_before_admission",
+            reply_status="skipped_pr_state",
+        )
+    if live_base_sha != args.base_sha or live_head_sha != args.head_sha:
+        raise BenignLifecycleRace(
+            "live reviewed base or head conflicts",
+            reason="pr_revision_superseded_before_admission",
+            reply_status="skipped_stale_head",
+        )
     if purpose in {"command", "reply"}:
         from .accepted_semantic_history import action_operation_key
 
@@ -2620,6 +2758,22 @@ def bootstrap(
             or previous.action is not None
             and previous.action["phase"] == "terminal"
         ):
+            if _is_benign_terminal_rerun(
+                purpose=purpose,
+                record=loaded.record,
+                previous=previous,
+                caller=caller,
+                frozen=frozen,
+                args=args,
+                restart_registration=restart_registration,
+                command_action=command_action,
+                source=source,
+            ):
+                raise BenignLifecycleRace(
+                    "caller run is already terminal",
+                    reason="caller_run_already_terminal",
+                    reply_status="already_replied",
+                )
             raise ReviewInputError("caller run is already terminal")
         prior = loaded.record
         from .api_run_history import inherited_preprovider_reference
@@ -2816,8 +2970,13 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     )
     if controlled_restart:
         parser.add_argument("--restart-id", required=True)
+    else:
+        parser.add_argument("--skip-benign-races", action="store_true", default=False)
     parser.add_argument("engine_args", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
+    skip_benign_races = (
+        bool(getattr(options, "skip_benign_races", False)) and not controlled_restart
+    )
     core = options.engine_args
     if core and core[0] == "--":
         core = core[1:]
@@ -2880,32 +3039,45 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
                 **actor_role_kwargs,
                 input_directory=Path(working_directory),
             )
+            core = [*core]
+            if not _has_option(core, "--base-sha"):
+                core.extend(["--base-sha", selected.base_sha])
+            if not _has_option(core, "--head-sha"):
+                core.extend(["--head-sha", selected.head_sha])
+            if not _has_option(core, "--title") and selected.title:
+                core.append("--title=" + selected.title)
+            if args.config is None and selected.configuration_path is not None:
+                core.extend(["--config", str(selected.configuration_path)])
+            if not _has_option(core, "--diff"):
+                core.extend(["--diff", str(args.diff)])
+            if not args.transaction:
+                core.append("--transaction")
+            if not args.github_session_ledger:
+                core.append("--github-session-ledger")
+            if args.output is None:
+                core.extend(["--output", str(options.run_directory / "review.json")])
+            if not _has_option(core, "--format"):
+                core.extend(["--format", "json"])
+            if not _has_option(core, "--exit-semantics"):
+                core.extend(["--exit-semantics", "operational"])
+            return selected.execute(
+                core,
+                publication_output=options.publication_outcome,
+                skip_benign_races=skip_benign_races,
+            )
         except _PreRolloverMigrationHold as error:
             return _write_migration_hold_outcome(
                 options.publication_outcome, reason=error.reason
             )
-        core = [*core]
-        if not _has_option(core, "--base-sha"):
-            core.extend(["--base-sha", selected.base_sha])
-        if not _has_option(core, "--head-sha"):
-            core.extend(["--head-sha", selected.head_sha])
-        if not _has_option(core, "--title") and selected.title:
-            core.append("--title=" + selected.title)
-        if args.config is None and selected.configuration_path is not None:
-            core.extend(["--config", str(selected.configuration_path)])
-        if not _has_option(core, "--diff"):
-            core.extend(["--diff", str(args.diff)])
-        if not args.transaction:
-            core.append("--transaction")
-        if not args.github_session_ledger:
-            core.append("--github-session-ledger")
-        if args.output is None:
-            core.extend(["--output", str(options.run_directory / "review.json")])
-        if not _has_option(core, "--format"):
-            core.extend(["--format", "json"])
-        if not _has_option(core, "--exit-semantics"):
-            core.extend(["--exit-semantics", "operational"])
-        return selected.execute(core, publication_output=options.publication_outcome)
+        except BenignLifecycleRace as error:
+            if not skip_benign_races:
+                raise
+            return _handle_benign_review_race(
+                error,
+                publication_output=options.publication_outcome,
+                repository=getattr(args, "repository", None),
+                pull_request=getattr(args, "pull_request", None),
+            )
 
 
 # Pin genuine subclass writers once at source module initialization.

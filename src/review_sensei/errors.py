@@ -14,6 +14,37 @@ class ReviewInputError(ReviewSenseiError, ValueError):
         self.diagnostic = diagnostic
 
 
+BENIGN_LIFECYCLE_RACE_REASONS = frozenset(
+    {
+        "policy_commit_superseded",
+        "pr_closed_before_admission",
+        "pr_draft_before_admission",
+        "pr_revision_superseded_before_admission",
+        "caller_run_already_terminal",
+        "pr_closed_during_review",
+        "pr_revision_superseded_during_review",
+    }
+)
+
+
+class BenignLifecycleRace(ReviewInputError):
+    """Raised on benign PR/base/policy lifecycle races or terminal reruns."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str,
+        reply_status: str | None = None,
+        diagnostic: str | None = None,
+    ) -> None:
+        if reason not in BENIGN_LIFECYCLE_RACE_REASONS:
+            raise ValueError(f"unsupported benign lifecycle race reason: {reason!r}")
+        super().__init__(message, diagnostic=diagnostic)
+        self.reason = reason
+        self.reply_status = reply_status
+
+
 class ChunkPreflightError(ReviewInputError):
     """Raised when a chunked sub-run diff fails bounded planning preflight."""
 

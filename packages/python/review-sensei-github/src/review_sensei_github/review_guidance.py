@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from review_sensei.convergence import DEFAULT_MAX_FAILED_ATTEMPTS, MAX_FAILED_ATTEMPTS
 from review_sensei.disposition import session_honors_coverage_uncertainty
+from review_sensei.errors import BENIGN_LIFECYCLE_RACE_REASONS
 from review_sensei.human_file_review import (
     coverage_only_binary,
     is_human_confirmable_file,
@@ -1160,6 +1161,19 @@ def render_publication_failure_step_summary(
     return "\n".join(lines) + "\n"
 
 
+def _append_step_summary(body: str) -> bool:
+    """Append sanitized Markdown to ``GITHUB_STEP_SUMMARY`` if configured."""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
+    if not summary_path:
+        return False
+    try:
+        with Path(summary_path).open("a", encoding="utf-8") as handle:
+            handle.write(body)
+        return True
+    except OSError:
+        return False
+
+
 def write_publication_failure_step_summary(
     guidance: NextActionGuidance,
     *,
@@ -1169,22 +1183,49 @@ def write_publication_failure_step_summary(
     diagnostic: str | None = None,
 ) -> bool:
     """Append sanitized publication failure guidance to ``GITHUB_STEP_SUMMARY`` if set."""
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
-    if not summary_path:
-        return False
-    body = render_publication_failure_step_summary(
-        guidance,
-        repository=repository,
-        pull_request=pull_request,
-        head_sha=head_sha,
-        diagnostic=diagnostic,
+    return _append_step_summary(
+        render_publication_failure_step_summary(
+            guidance,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            diagnostic=diagnostic,
+        )
     )
-    try:
-        with Path(summary_path).open("a", encoding="utf-8") as handle:
-            handle.write(body)
-        return True
-    except OSError:
-        return False
+
+
+_BENIGN_RACE_NOTICES = {
+    "policy_commit_superseded": "Default-branch policy commit advanced before admission; rerun or fresh dispatch will evaluate the current branch state.",
+    "pr_closed_before_admission": "Pull request was closed before review admission.",
+    "pr_draft_before_admission": "Pull request converted to draft before review admission.",
+    "pr_revision_superseded_before_admission": "Pull request base or head revision was superseded before admission; the newer run owns the current revision.",
+    "caller_run_already_terminal": "Caller run already reached a terminal state; skipping duplicate attempt replay.",
+    "pr_closed_during_review": "Pull request was closed before review publication.",
+    "pr_revision_superseded_during_review": "Pull request base or head revision was superseded during review; skipping stale publication.",
+}
+
+
+def write_benign_race_step_summary(
+    *,
+    operation: str,
+    reason: str,
+    repository: str | None = None,
+    pull_request: int | None = None,
+) -> bool:
+    """Append a neutral Actions job summary notice for a skipped benign lifecycle race."""
+    if reason not in BENIGN_LIFECYCLE_RACE_REASONS:
+        raise ValueError(f"unsupported benign lifecycle race reason: {reason!r}")
+    notice = _BENIGN_RACE_NOTICES[reason]
+    lines = [
+        f"## ReviewSensei {operation} skipped ({_clean_text(reason, max_bytes=64)})"
+    ]
+    if isinstance(repository, str) and repository:
+        lines.append(f"- repository: `{_clean_text(repository, max_bytes=128)}`")
+    if type(pull_request) is int and pull_request > 0:
+        lines.append(f"- pull_request: #{pull_request}")
+    lines.append(f"- reason: `{_clean_text(reason, max_bytes=64)}`")
+    lines.append(notice)
+    return _append_step_summary("\n".join(lines) + "\n")
 
 
 _STEP_SUMMARY_WRITTEN_ATTR = "_step_summary_written"
