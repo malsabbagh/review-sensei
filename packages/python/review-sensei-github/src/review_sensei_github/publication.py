@@ -11520,10 +11520,25 @@ class ReviewPublisher:
             from . import review_lifecycle_diagnostics as lifecycle_diagnostics
 
             lifecycle_diagnostics.classified_failure(exception_kind(exc), None)
-            if (
-                drift_journal is not None
-                and len(drift_journal.effects) == before_drift_effects
-            ):
+            has_prior_or_new_publication_effect = (
+                drift_journal is None
+                or bool(getattr(drift_journal, "_initial_had_pending", False))
+                or len(drift_journal.effects) > before_drift_effects
+                or any(
+                    effect.get("status") == "pending"
+                    or not (
+                        str(effect.get("path", "")).endswith("/check-runs")
+                        or (
+                            "/check-runs/" in str(effect.get("path", ""))
+                            and str(effect.get("path", ""))
+                            .rsplit("/check-runs/", 1)[1]
+                            .isdigit()
+                        )
+                    )
+                    for effect in drift_journal.effects
+                )
+            )
+            if not has_prior_or_new_publication_effect:
                 raise
             self._commit_drift_uncertain(
                 repository_id=repository_id,
