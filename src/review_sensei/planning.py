@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping, Sequence
 
 from .budgets import EffectiveWorkBudget
+from .context import PromptContextOverflow
 from .coverage import (
     COVERAGE_OUTCOMES,
     CoverageManifest,
@@ -362,7 +363,7 @@ def plan_work(
     unprocessed_diagnostics: list[PromptOverflowDetail] = []
     current: tuple[WorkRequirement, ...] = ()
     failure_reason = "required-evidence-oversized"
-    last_overflow: object | None = None
+    last_overflow: PromptContextOverflow | None = None
     planning_expired = False
 
     def batch_for(candidates: tuple[WorkRequirement, ...]) -> WorkBatch:
@@ -393,9 +394,11 @@ def plan_work(
         try:
             request = render(batch)
         except ReviewInputError as exc:
-            if exc.error_category == "mandatory_context_oversized":
+            if isinstance(exc, PromptContextOverflow):
                 failure_reason = "mandatory-context-and-evidence-oversized"
                 last_overflow = exc
+            elif exc.error_category == "mandatory_context_oversized":
+                failure_reason = "mandatory-context-and-evidence-oversized"
             elif exc.error_category == "planning_deadline_exhausted":
                 failure_reason = "planning-deadline-exceeded"
                 planning_expired = True
@@ -409,34 +412,41 @@ def plan_work(
         prompt = request.prompt + ("\n\n" + correction if correction else "")
         return budgets.fits_prompt(prompt, output_tokens=request.max_output_tokens)
 
-    def _overflow_detail(item: WorkRequirement, reason: str) -> PromptOverflowDetail:
+    def _overflow_detail(
+        item: WorkRequirement,
+        reason: str,
+        overflow: PromptContextOverflow | None,
+    ) -> PromptOverflowDetail:
         item_records = tuple(
             records[key] for key in item.evidence_ids if key in records
         )
         default_ceiling, default_clamped = budgets.effective_prompt_ceiling_bytes(
             output_tokens=budgets.max_output_tokens
         )
-        raw_ceiling = getattr(last_overflow, "prompt_ceiling_bytes", None)
-        ceiling = raw_ceiling if isinstance(raw_ceiling, int) else default_ceiling
-        rendered = getattr(last_overflow, "rendered_prompt_bytes", None)
-        over_budget = getattr(last_overflow, "over_budget_bytes", None)
-        if (
-            over_budget is None
-            and isinstance(rendered, int)
-            and isinstance(ceiling, int)
-        ):
+        ceiling = (
+            overflow.prompt_ceiling_bytes
+            if overflow is not None and overflow.prompt_ceiling_bytes is not None
+            else default_ceiling
+        )
+        rendered = overflow.rendered_prompt_bytes if overflow is not None else None
+        over_budget = overflow.over_budget_bytes if overflow is not None else None
+        if over_budget is None and rendered is not None:
             over_budget = max(0, rendered - ceiling)
-        raw_evidence = getattr(last_overflow, "evidence_bytes", None)
         evidence_bytes = (
-            raw_evidence
-            if isinstance(raw_evidence, int)
+            overflow.evidence_bytes
+            if overflow is not None and overflow.evidence_bytes is not None
             else sum(utf8_size(rec.diff, label="evidence diff") for rec in item_records)
         )
-        raw_mandatory = getattr(last_overflow, "mandatory_doc_bytes", None)
-        raw_mandatory_paths = getattr(last_overflow, "mandatory_doc_paths", ())
-        raw_framing = getattr(last_overflow, "framing_bytes", None)
-        raw_clamped = getattr(last_overflow, "clamped_by_legacy_48k", None)
-        clamped = bool(raw_clamped) if raw_clamped is not None else default_clamped
+        mandatory_doc_bytes = (
+            overflow.mandatory_doc_bytes if overflow is not None else None
+        )
+        mandatory_doc_paths = (
+            overflow.mandatory_doc_paths if overflow is not None else ()
+        )
+        framing_bytes = overflow.framing_bytes if overflow is not None else None
+        clamped = (
+            overflow.clamped_by_legacy_48k if overflow is not None else default_clamped
+        )
         stop_reason = None
         if subdivision_stop_reasons:
             for eid in item.evidence_ids:
@@ -447,16 +457,12 @@ def plan_work(
             requirement_identity=item.identity,
             reason=reason,
             prompt_ceiling_bytes=ceiling,
-            rendered_prompt_bytes=rendered if isinstance(rendered, int) else None,
-            over_budget_bytes=over_budget if isinstance(over_budget, int) else None,
-            mandatory_doc_bytes=raw_mandatory
-            if isinstance(raw_mandatory, int)
-            else None,
-            mandatory_doc_paths=tuple(raw_mandatory_paths)
-            if raw_mandatory_paths
-            else (),
+            rendered_prompt_bytes=rendered,
+            over_budget_bytes=over_budget,
+            mandatory_doc_bytes=mandatory_doc_bytes,
+            mandatory_doc_paths=mandatory_doc_paths,
             evidence_bytes=evidence_bytes,
-            framing_bytes=raw_framing if isinstance(raw_framing, int) else None,
+            framing_bytes=framing_bytes,
             clamped_by_legacy_48k=clamped,
             rejected_paths=tuple(dict.fromkeys(rec.path for rec in item_records)),
             hunk_indexes=item.hunk_indexes,
@@ -491,7 +497,9 @@ def plan_work(
         if not fits((item,)):
             unprocessed.append((item.identity, failure_reason))
             if failure_reason == "mandatory-context-and-evidence-oversized":
-                unprocessed_diagnostics.append(_overflow_detail(item, failure_reason))
+                unprocessed_diagnostics.append(
+                    _overflow_detail(item, failure_reason, last_overflow)
+                )
             continue
         if current and not fits(current + (item,)):
             flush()

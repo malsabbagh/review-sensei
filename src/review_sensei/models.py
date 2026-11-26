@@ -565,19 +565,11 @@ class ReviewRequest:
         if len(mirror_rule_names) != len(set(mirror_rule_names)):
             raise ReviewInputError("verified_mirrors rule names must be unique")
         for attestation in self.verified_mirrors:
-            if (
-                self.base_sha
-                and attestation.base_sha
-                and attestation.base_sha != self.base_sha
-            ):
+            if self.base_sha and attestation.base_sha != self.base_sha:
                 raise ReviewInputError(
                     "verified_mirrors base_sha does not match request base_sha"
                 )
-            if (
-                self.head_sha
-                and attestation.head_sha
-                and attestation.head_sha != self.head_sha
-            ):
+            if self.head_sha and attestation.head_sha != self.head_sha:
                 raise ReviewInputError(
                     "verified_mirrors head_sha does not match request head_sha"
                 )

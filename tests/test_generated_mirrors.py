@@ -26,6 +26,8 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.generated_mirrors import (
     SnapshotMirrorVerification,
     VerifiedMirrorAttestation,
+    _generator_subprocess_env,
+    _resolve_generator_command,
     verify_generated_mirrors,
 )
 from review_sensei.models import ProviderRequest, ProviderResponse, ReviewRequest
@@ -47,7 +49,11 @@ src = Path("docs/operations.md").read_text(encoding="utf-8")
 lines = [line.strip() for line in src.splitlines() if line.strip()]
 out = Path("resources/docs/guides.json")
 out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps({"entries": lines}, sort_keys=True) + "\\n", encoding="utf-8")
+out.write_text(
+    json.dumps({"entries": lines}, sort_keys=True) + "\\n",
+    encoding="utf-8",
+    newline="\\n",
+)
 """
 
 
@@ -76,9 +82,10 @@ class _RecordingProvider(ReviewProvider):
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", "-C", str(repo), "-c", "core.hooksPath=", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     )
     return proc.stdout.strip()
@@ -88,13 +95,15 @@ def _init_repo(repo: Path) -> None:
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI Bot")
+    _git(repo, "config", "core.autocrlf", "false")
+    _git(repo, "config", "core.eol", "lf")
 
 
 def _commit_files(repo: Path, files: dict[str, str], message: str) -> str:
     for rel, content in files.items():
         target = repo / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="\n")
     _git(repo, "add", *files.keys())
     _git(repo, "commit", "-m", message)
     return _git(repo, "rev-parse", "HEAD")
@@ -459,11 +468,11 @@ class GeneratedMirrorVerifierTests(unittest.TestCase):
                     "docs/extra.txt": "base0\n",
                     "scripts/build_guides.py": (
                         "import json\nfrom pathlib import Path\n"
-                        "ops = Path('docs/operations.md').read_text().strip()\n"
-                        "extra = Path('docs/extra.txt').read_text().strip()\n"
+                        "ops = Path('docs/operations.md').read_text(encoding='utf-8').strip()\n"
+                        "extra = Path('docs/extra.txt').read_text(encoding='utf-8').strip()\n"
                         "out = Path('resources/docs/guides.json')\n"
                         "out.parent.mkdir(parents=True, exist_ok=True)\n"
-                        "out.write_text(json.dumps({'ops': ops, 'extra': extra}) + '\\n')\n"
+                        "out.write_text(json.dumps({'ops': ops, 'extra': extra}) + '\\n', encoding='utf-8', newline='\\n')\n"
                     ),
                     "resources/docs/guides.json": json.dumps(
                         {"ops": "alpha", "extra": "base0"}
@@ -518,12 +527,12 @@ class GeneratedMirrorVerifierTests(unittest.TestCase):
                     "docs/operations.md": "alpha\n",
                     "scripts/build_guides.py": (
                         "import json\nfrom pathlib import Path\n"
-                        "ops = Path('docs/operations.md').read_text().strip()\n"
-                        "extra = Path('docs/extra.txt').read_text().strip() "
+                        "ops = Path('docs/operations.md').read_text(encoding='utf-8').strip()\n"
+                        "extra = Path('docs/extra.txt').read_text(encoding='utf-8').strip() "
                         "if (ops == 'beta' and Path('docs/extra.txt').exists()) else None\n"
                         "out = Path('resources/docs/guides.json')\n"
                         "out.parent.mkdir(parents=True, exist_ok=True)\n"
-                        "out.write_text(json.dumps({'ops': ops, 'extra': extra}) + '\\n')\n"
+                        "out.write_text(json.dumps({'ops': ops, 'extra': extra}) + '\\n', encoding='utf-8', newline='\\n')\n"
                     ),
                     "resources/docs/guides.json": json.dumps(
                         {"ops": "alpha", "extra": None}
@@ -566,12 +575,26 @@ class GeneratedMirrorVerifierTests(unittest.TestCase):
 
     def test_symlink_mutating_generator_and_timeout_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            # 1. Symlink in tree -> unsupported-tree-entry
+            # 1. Symlink in tree (mode 120000 created portably) -> unsupported-tree-entry
             repo1 = Path(tmp) / "repo1"
             _, base_sha, _ = self._build_fixture_repo(repo1)
             _git(repo1, "checkout", "-b", "sym", base_sha)
-            (repo1 / "docs" / "link.md").symlink_to("operations.md")
-            _git(repo1, "add", "docs/link.md")
+            sym_blob = (
+                subprocess.check_output(
+                    ["git", "-C", str(repo1), "hash-object", "-w", "--stdin"],
+                    input=b"operations.md",
+                    stderr=subprocess.PIPE,
+                )
+                .decode("ascii")
+                .strip()
+            )
+            _git(
+                repo1,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"120000,{sym_blob},docs/link.md",
+            )
             _git(repo1, "commit", "-m", "add symlink")
             sym_head = _git(repo1, "rev-parse", "HEAD")
             att1 = verify_generated_mirrors(
@@ -590,7 +613,7 @@ class GeneratedMirrorVerifierTests(unittest.TestCase):
             _init_repo(repo2)
             mut_script = (
                 "from pathlib import Path\n"
-                "Path('docs/operations.md').write_text('mutated\\n', encoding='utf-8')\n"
+                "Path('docs/operations.md').write_text('mutated\\n', encoding='utf-8', newline='\\n')\n"
                 + GENERATOR_SCRIPT
             )
             b2 = _commit_files(
@@ -811,6 +834,40 @@ index 3333333..4444444 100644
                 head_sha="3" * 40,
                 verified_mirrors=(att,),
             )
+        blank_att = replace(att, base_sha="")
+        with self.assertRaises(ReviewInputError):
+            ReviewRequest(
+                diff=self.DIFF_CANONICAL_AND_MIRROR,
+                base_sha="2" * 40,
+                head_sha="3" * 40,
+                verified_mirrors=(blank_att,),
+            )
+
+    def test_windows_command_and_env_portability_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            with (
+                patch("review_sensei.generated_mirrors.os.name", "nt"),
+                patch.dict(
+                    os.environ,
+                    {
+                        "SYSTEMROOT": "C:\\Windows",
+                        "COMSPEC": "C:\\Windows\\System32\\cmd.exe",
+                        "PATHEXT": ".COM;.EXE;.BAT",
+                        "GITHUB_TOKEN": "secret",
+                    },
+                    clear=True,
+                ),
+            ):
+                env = _generator_subprocess_env(work_dir)
+                self.assertEqual(env["SYSTEMROOT"], "C:\\Windows")
+                self.assertEqual(env["COMSPEC"], "C:\\Windows\\System32\\cmd.exe")
+                self.assertEqual(env["PATHEXT"], ".COM;.EXE;.BAT")
+                self.assertNotIn("GITHUB_TOKEN", env)
+                self.assertEqual(
+                    _resolve_generator_command(("python3", "scripts/build_guides.py")),
+                    [sys.executable, "scripts/build_guides.py"],
+                )
 
     def test_verified_mirror_deferred_and_promoted_when_canonical_reviewed(
         self,
@@ -943,7 +1000,7 @@ index 3333333..4444444 100644
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
             _init_repo(repo)
-            cfg_text = f"""schema: 1
+            cfg_text = """schema: 1
 inference:
   backend: local-ollama
   model: qwen3.5:4b
@@ -959,7 +1016,7 @@ advanced:
       generator_sources:
         - scripts/build_guides.py
       generator_command:
-        - {sys.executable}
+        - python3
         - scripts/build_guides.py
 """
             base_sha = _commit_files(
@@ -987,10 +1044,12 @@ advanced:
                 "head",
             )
             diff_text = subprocess.check_output(
-                ["git", "-C", str(repo), "diff", base_sha, head_sha], text=True
+                ["git", "-C", str(repo), "diff", base_sha, head_sha],
+                text=True,
+                encoding="utf-8",
             )
             diff_file = Path(tmp) / "pr.diff"
-            diff_file.write_text(diff_text, encoding="utf-8")
+            diff_file.write_text(diff_text, encoding="utf-8", newline="\n")
             fixture_resp = Path(tmp) / "resp.json"
             fixture_resp.write_text(
                 json.dumps(
@@ -1001,6 +1060,7 @@ advanced:
                     }
                 ),
                 encoding="utf-8",
+                newline="\n",
             )
             out_file = Path(tmp) / "result.json"
             code = cli_main(

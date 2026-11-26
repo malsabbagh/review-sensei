@@ -3419,7 +3419,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     "-C",
                     str(mirror_candidate),
                     "-c",
-                    "core.hooksPath=/dev/null",
+                    "core.hooksPath=",
                     "rev-parse",
                     "--show-toplevel",
                 ],

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -115,9 +117,12 @@ def _git_command(
     *,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    # Every git invocation inspecting `merge_tree` OIDs MUST pass `env=merge_env`
+    # (carrying GIT_OBJECT_DIRECTORY + GIT_ALTERNATE_OBJECT_DIRECTORIES) because
+    # synthetic merge-tree objects live only in that ephemeral object directory.
     run_env = os.environ.copy() if env is None else dict(env)
     return subprocess.run(
-        ["git", "-C", str(repo_root), "-c", "core.hooksPath=/dev/null", *args],
+        ["git", "-C", str(repo_root), "-c", "core.hooksPath=", *args],
         capture_output=True,
         env=run_env,
         check=False,
@@ -216,7 +221,7 @@ def _extract_tree_safely(
                 "-C",
                 str(repo_root),
                 "-c",
-                "core.hooksPath=/dev/null",
+                "core.hooksPath=",
                 "archive",
                 "--format=tar",
                 tree_oid,
@@ -319,6 +324,48 @@ def _clear_matching_files(work_dir: Path, prefixes: Sequence[str]) -> str | None
     return None
 
 
+def _resolve_generator_command(command: Sequence[str]) -> list[str]:
+    """Resolve bare ``python3`` on Windows or when missing from PATH to ``sys.executable``."""
+    resolved = list(command)
+    if not resolved:
+        return resolved
+    exe_name = Path(resolved[0].replace("\\", "/")).name.lower().removesuffix(".exe")
+    if exe_name == "python3" and (
+        os.name == "nt"
+        or resolved[0] == "python3"
+        and shutil.which(resolved[0]) is None
+    ):
+        resolved[0] = sys.executable
+    return resolved
+
+
+def _generator_subprocess_env(work_dir: Path) -> dict[str, str]:
+    """Build a minimal credential-free environment for isolated generator runs."""
+    run_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(work_dir),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TZ": "UTC",
+        "PYTHONHASHSEED": "0",
+        "NO_COLOR": "1",
+    }
+    if os.name == "nt":
+        for win_var in (
+            "SYSTEMROOT",
+            "COMSPEC",
+            "PATHEXT",
+            "WINDIR",
+            "OS",
+            "TMP",
+            "TEMP",
+        ):
+            value = os.environ.get(win_var)
+            if value is not None:
+                run_env[win_var] = value
+    return run_env
+
+
 def _verify_snapshot(
     repo_root: Path,
     *,
@@ -327,6 +374,8 @@ def _verify_snapshot(
     rule: GeneratedMirrorRule,
     git_env: Mapping[str, str] | None = None,
 ) -> SnapshotMirrorVerification:
+    # `git_env` must be `merge_env` when inspecting the synthetic `merge` tree
+    # so ls-tree, archive, and cat-file can read its ephemeral tree/blob OIDs.
     entries, inspect_error = _inspect_tree_entries(repo_root, tree_oid, env=git_env)
     if inspect_error is not None or entries is None:
         return SnapshotMirrorVerification(
@@ -372,18 +421,11 @@ def _verify_snapshot(
                 verified=False,
                 reason=clear_err,
             )
-        run_env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(work_dir),
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "TZ": "UTC",
-            "PYTHONHASHSEED": "0",
-            "NO_COLOR": "1",
-        }
+        run_env = _generator_subprocess_env(work_dir)
+        command = _resolve_generator_command(rule.generator_command)
         try:
             gen_proc = subprocess.run(
-                list(rule.generator_command),
+                command,
                 cwd=work_dir,
                 env=run_env,
                 shell=False,

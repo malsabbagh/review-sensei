@@ -819,6 +819,9 @@ def admit_prompt_context(
         mandatory_bytes = sum(
             doc_sizes[path] for path in mandatory_paths if path in doc_sizes
         )
+        # Custom/mocked renderers (e.g., in tests) may omit part of the raw
+        # diff or mandatory payloads; clamp framing_bytes at zero so the
+        # breakdown stays non-negative rather than underflowing.
         framing_bytes = (
             max(0, rendered_bytes - evidence_bytes - mandatory_bytes)
             if rendered_bytes is not None
