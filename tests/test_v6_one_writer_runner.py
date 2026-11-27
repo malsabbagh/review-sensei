@@ -2808,6 +2808,70 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         self.assertEqual(direct_outcome.blocker, "missing_pr_unresolved_result")
         self.assertTrue(direct_outcome.zero_model_calls_started)
 
+        # If target_result_record_id already exists on the PR (even if head mismatch triggers
+        # missing_pr_unresolved_result), initial_result_loader MUST NOT be invoked.
+        pr_colliding_res = _SimulatedPRSurface(head_sha=HEAD_A)
+        colliding_result = UnresolvedResultRecord(
+            record_id=f"result:op-collide-1:{HEAD_A[:12]}",
+            operation_id="op-collide-1",
+            pr_head_sha=HEAD_B,
+            payload_sha256=unresolved.payload_sha256,
+            findings_payload=unresolved.findings_payload,
+            required_evidence_digests=(),
+        )
+        pr_colliding_res.add_comment(
+            format_v6_record_marker(colliding_result), is_app=True
+        )
+        collide_client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr_colliding_res.handle_wf),
+            broker_app_transport=_ScriptedTransport(pr_colliding_res.handle_app),
+        )
+        collide_engine = V6RecoveryEngine(
+            collide_client,
+            now_fn=lambda: now,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": 2,
+                "active_run_id": 6003,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        collide_req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-collide-1",
+            ownership_proof=WriterOwnershipProof(
+                operation_id="op-collide-1",
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                pr_head_sha=HEAD_A,
+                writer_epoch=2,
+                run_id=6003,
+                run_attempt=1,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=grant_1.slot_key,
+            generation=2,
+            token_expires_at_ms=int((now + 3600) * 1000),
+            initial_result_loader=_forbidden_loader,
+        )
+        collide_outcome = collide_engine.recover_and_publish(collide_req)
+        self.assertEqual(collide_outcome.blocker, "missing_pr_unresolved_result")
+        self.assertTrue(collide_outcome.zero_model_calls_started)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2629,11 +2629,19 @@ class V6RecoveryEngine:
                 request=request,
                 unresolved_results=unresolved_results,
             )
+            target_result_record_id = f"result:{request.operation_id}:{request.ownership_proof.pr_head_sha[:12]}"
+            result_id_absent = (
+                target_result_record_id not in collected.comment_ids_by_record_id
+                and not any(
+                    r.record_id == target_result_record_id for r in unresolved_results
+                )
+            )
             if (
                 existing_intent is None
                 and request.operation_id not in summary.completed_operations
                 and isinstance(validated, RecoveryHold)
                 and validated.blocker == "missing_pr_unresolved_result"
+                and result_id_absent
                 and request.initial_result_loader is not None
                 and request.has_active_write_lease
             ):
@@ -2654,9 +2662,7 @@ class V6RecoveryEngine:
                 model_calls_started = 1
                 findings_tuple = tuple(dict(entry) for entry in raw_findings)
                 new_result = UnresolvedResultRecord(
-                    record_id=(
-                        f"result:{request.operation_id}:{request.ownership_proof.pr_head_sha[:12]}"
-                    ),
+                    record_id=target_result_record_id,
                     operation_id=request.operation_id,
                     pr_head_sha=request.ownership_proof.pr_head_sha,
                     payload_sha256=canonical_sha256(findings_tuple),

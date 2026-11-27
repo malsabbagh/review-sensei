@@ -220,6 +220,67 @@ def _verify_rs256_jwt(public_key: rsa.RSAPublicKey, token: str) -> dict[str, Any
     )
 
 
+def _normalize_dist_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _parse_direct_dep_name(req_str: str) -> str | None:
+    """Return normalized distribution name if ``req_str`` applies to current env without extras."""
+
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        Requirement = None  # type: ignore[assignment,misc]
+
+    if Requirement is not None:
+        req = Requirement(req_str)
+        if req.marker is not None:
+            if "extra" in str(req.marker) or not req.marker.evaluate():
+                return None
+        return _normalize_dist_name(req.name)
+
+    head, sep, marker = req_str.partition(";")
+    if sep and "extra" in marker:
+        return None
+    match = re.match(r"^\s*([A-Za-z0-9._-]+)", head)
+    return _normalize_dist_name(match.group(1)) if match else None
+
+
+def _collect_transitive_deps(roots: tuple[str, ...]) -> list[str]:
+    """Recursively resolve non-extra runtime dependencies starting from ``roots``."""
+
+    visited = {_normalize_dist_name(root) for root in roots}
+    queue = list(roots)
+    deps: list[str] = []
+    while queue:
+        current = queue.pop(0)
+        dist = importlib_metadata.distribution(current)
+        for req_str in dist.requires or ():
+            dep_name = _parse_direct_dep_name(req_str)
+            if dep_name is None or dep_name in visited:
+                continue
+            visited.add(dep_name)
+            deps.append(dep_name)
+            queue.append(dep_name)
+    return deps
+
+
+def _select_compatible_wheel_tag(tags: list[str]) -> str:
+    """Choose the highest-priority compatible tag from ``WHEEL`` metadata."""
+
+    if not tags:
+        return "py3-none-any"
+    try:
+        from packaging.tags import sys_tags
+    except ImportError:
+        return tags[0]
+    rank = {str(t): idx for idx, t in enumerate(sys_tags())}
+    compatible = [t for t in tags if t in rank]
+    if compatible:
+        return min(compatible, key=lambda t: rank[t])
+    return tags[0]
+
+
 def _materialize_installed_dist_wheel(dist_name: str, wheel_dir: Path) -> None:
     """Repack an already-installed distribution into ``wheel_dir`` for offline --no-index install."""
 
@@ -230,11 +291,12 @@ def _materialize_installed_dist_wheel(dist_name: str, wheel_dir: Path) -> None:
             f"cannot locate files for installed distribution {dist_name!r}"
         )
     wheel_meta = dist.read_text("WHEEL") or ""
-    tag = "py3-none-any"
-    for line in wheel_meta.splitlines():
-        if line.startswith("Tag:"):
-            tag = line.split(":", 1)[1].strip()
-            break
+    tags = [
+        line.split(":", 1)[1].strip()
+        for line in wheel_meta.splitlines()
+        if line.startswith("Tag:") and line.split(":", 1)[1].strip()
+    ]
+    tag = _select_compatible_wheel_tag(tags)
     norm_name = re.sub(r"[-_.]+", "_", dist.metadata["Name"])
     wheel_path = wheel_dir / f"{norm_name}-{dist.version}-{tag}.whl"
     if wheel_path.exists():
@@ -290,42 +352,38 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
         text=True,
     )
-    for dep_name in (
-        "cryptography",
-        "cffi",
-        "pycparser",
-        "certifi",
-        "jsonschema",
-        "jsonschema-specifications",
-        "referencing",
-        "rpds-py",
-        "attrs",
-    ):
+    for dep_name in _collect_transitive_deps(("review-sensei", "review-sensei-github")):
         _materialize_installed_dist_wheel(dep_name, wheelhouse)
 
     venv_dir = temp_root / "venv"
     venv.EnvBuilder(with_pip=True, clear=True).create(venv_dir)
     venv_python = venv_dir / "bin" / "python"
     clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
-    subprocess.run(
-        [
-            str(venv_python),
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--find-links",
-            str(wheelhouse),
-            "review-sensei",
-            "review-sensei-github",
-        ],
-        check=True,
-        cwd=str(temp_root),
-        env=clean_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--find-links",
+                str(wheelhouse),
+                "review-sensei",
+                "review-sensei-github",
+            ],
+            check=True,
+            cwd=str(temp_root),
+            env=clean_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"offline pip install failed (exit {exc.returncode}):\n"
+            f"STDOUT:\n{exc.stdout}\nSTDERR:\n{exc.stderr}"
+        ) from exc
     subprocess.run(
         [str(venv_python), "-m", "pip", "check"],
         check=True,
@@ -550,6 +608,9 @@ def _make_github_handler(
                 meta = state.active_tokens.get(token)
                 if meta is None or meta["revoked"]:
                     return False, 401, "bad_credentials"
+                expires_dt = _parse_iso_utc(str(meta["expires_at"]))
+                if datetime.now(tz=timezone.utc) >= expires_dt:
+                    return False, 401, "token_expired"
                 return True, 200, "app"
 
         def _maybe_trigger_crash(
@@ -913,6 +974,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             self.tmp_path
         )
         self.ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         self.ssl_ctx.load_verify_locations(cafile=str(self.ca_pem))
 
         self.oidc_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -927,6 +989,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             oidc_key=self.oidc_key, app_key=self.app_key
         )
         server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         server_ctx.load_cert_chain(
             certfile=str(self.cert_pem), keyfile=str(self.key_pem)
         )
@@ -1308,9 +1371,13 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
                 pid=proc_42_r1.pid,
             )
         rc_42_r1 = proc_42_r1.wait(timeout=30)
+        stdout_42_r1 = ""
+        stderr_42_r1 = ""
         if proc_42_r1.stdout is not None:
+            stdout_42_r1 = proc_42_r1.stdout.read()
             proc_42_r1.stdout.close()
         if proc_42_r1.stderr is not None:
+            stderr_42_r1 = proc_42_r1.stderr.read()
             proc_42_r1.stderr.close()
         self.assertEqual(rc_42_r1, -signal.SIGKILL)
         self.assertTrue(self.gh_state.crash_hook.triggered)
@@ -1400,7 +1467,15 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         ]
         self.assertEqual(len(pr42_receipts), 1)
         self._assert_no_secret_leaks(
-            self.worker_log, res_42_r2.stdout, res_42_r2.stderr, out_42_r2, sum_42_r2
+            self.worker_log,
+            stdout_42_r1,
+            stderr_42_r1,
+            out_42_r1,
+            sum_42_r1,
+            res_42_r2.stdout,
+            res_42_r2.stderr,
+            out_42_r2,
+            sum_42_r2,
         )
 
         # =====================================================================
@@ -1453,9 +1528,13 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
                 pid=proc_43_r1.pid,
             )
         rc_43_r1 = proc_43_r1.wait(timeout=30)
+        stdout_43_r1 = ""
+        stderr_43_r1 = ""
         if proc_43_r1.stdout is not None:
+            stdout_43_r1 = proc_43_r1.stdout.read()
             proc_43_r1.stdout.close()
         if proc_43_r1.stderr is not None:
+            stderr_43_r1 = proc_43_r1.stderr.read()
             proc_43_r1.stderr.close()
         self.assertEqual(rc_43_r1, -signal.SIGKILL)
         self.assertTrue(self.gh_state.crash_hook.triggered)
@@ -1583,6 +1662,10 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             self.worker_log,
             rh_raw,
             acq43_raw,
+            stdout_43_r1,
+            stderr_43_r1,
+            out_43_r1,
+            sum_43_r1,
             res_43_r2.stdout,
             res_43_r2.stderr,
             out_43_r2,
