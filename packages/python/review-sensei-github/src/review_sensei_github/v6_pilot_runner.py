@@ -402,7 +402,9 @@ class V6PilotRunConfig:
 
 
 def _is_valid_call_report_value(value: Any) -> bool:
-    return value == "unknown" or (type(value) is int and value >= 0)
+    return (type(value) is str and value == "unknown") or (
+        type(value) is int and value >= 0
+    )
 
 
 def _format_operation_calls(
@@ -710,7 +712,7 @@ class V6PilotRunner:
 
         if current_state == "HOLD":
             diag = slot_status.last_reason_code or "v6_lease_hold"
-            hold_op_total: int | Literal["unknown"] = 0
+            hold_op_total: int | Literal["unknown"] = "unknown"
             try:
                 ro_total, ro_unknown = (
                     read_only_engine.summarize_operation_provider_calls_read_only(
@@ -730,7 +732,7 @@ class V6PilotRunner:
                     ro_total, ro_unknown, fallback=0
                 )
             except Exception:
-                hold_op_total = 0
+                hold_op_total = "unknown"
             self._emit_hold_summary(config, slot_key=slot_key, blocker=diag)
             return self._write_outcome(
                 config,
@@ -1312,11 +1314,14 @@ class V6PilotRunner:
                 if recovery_outcome.model_calls_started is not None
                 else "unknown"
             )
-            operation_model_calls_total = _format_operation_calls(
-                recovery_outcome.operation_model_calls_total,
-                recovery_outcome.operation_model_calls_unknown,
-                fallback=model_calls_started,
-            )
+            if model_calls_started == "unknown":
+                operation_model_calls_total = "unknown"
+            else:
+                operation_model_calls_total = _format_operation_calls(
+                    recovery_outcome.operation_model_calls_total,
+                    recovery_outcome.operation_model_calls_unknown,
+                    fallback=model_calls_started,
+                )
         elif isinstance(recovery_outcome, RecoveryCompleted):
             model_calls_started = recovery_outcome.model_calls_started
             operation_model_calls_total = (
@@ -1326,15 +1331,33 @@ class V6PilotRunner:
             )
         elif isinstance(recovery_outcome, RecoveryPaused):
             model_calls_started = recovery_outcome.model_calls_started
-            operation_model_calls_total = (
-                _format_operation_calls(
+            if takeover_recon is not None:
+                operation_model_calls_total = _format_operation_calls(
                     takeover_recon.operation_model_calls_total,
                     takeover_recon.operation_model_calls_unknown,
                     fallback=0,
                 )
-                if takeover_recon is not None
-                else 0
-            )
+            else:
+                try:
+                    ro_total, ro_unknown = (
+                        read_only_engine.summarize_operation_provider_calls_read_only(
+                            owner=config.owner,
+                            repo=config.repo,
+                            pull_request=config.pull_request,
+                            operation_id=config.operation_id,
+                            event=config.event,
+                            visibility=config.visibility,
+                            granted_scopes=config.granted_scopes,
+                            expected_app_id=effective_expected_app_id,
+                            expected_bot_login=config.expected_bot_login,
+                            expected_bot_user_id=config.expected_bot_user_id,
+                        )
+                    )
+                    operation_model_calls_total = _format_operation_calls(
+                        ro_total, ro_unknown, fallback=0
+                    )
+                except Exception:
+                    operation_model_calls_total = "unknown"
         return self._write_outcome(
             config,
             V6PilotRunOutcome(

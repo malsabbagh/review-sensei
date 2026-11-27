@@ -3518,6 +3518,59 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
             for err in opened_errors:
                 err.close()
 
+    def test_pilot_outcome_call_report_edge_cases(self) -> None:
+        from review_sensei_github.v6_pilot_runner import V6PilotRunOutcome
+
+        class _FakeUnknown:
+            def __eq__(self, other: object) -> bool:
+                return other == "unknown"
+
+        with self.assertRaises(ValueError):
+            V6PilotRunOutcome(status="hold", model_calls_started=_FakeUnknown())  # type: ignore[arg-type]
+
+        # When coordinator is already in HOLD and PR comments read fails transiently,
+        # operation_model_calls_total must be "unknown" rather than 0.
+        pr_hold = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_hold = _SimulatedCoordinatorStore(
+            clock=lambda: 1_700_000_000.0, pr=pr_hold
+        )
+        coord_hold.state = "HOLD"
+        coord_hold.last_reason_code = "v6_lease_hold"
+        client_hold = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_hold.opener,
+            clock=lambda: 1_700_000_000.0,
+        )
+
+        def _failing_wf(call: Mapping[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            if call["method"] == "GET" and "/comments" in call["path"]:
+                return 503, {}, {"message": "transient"}
+            return pr_hold.handle_wf(call)
+
+        out_hold = V6PilotRunner(
+            coordinator=client_hold,
+            workflow_token_transport=_ScriptedTransport(_failing_wf),
+            clock=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+        ).run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-hold-scan-err",
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+            )
+        )
+        self.assertEqual(out_hold.status, "hold")
+        self.assertEqual(out_hold.model_calls_started, 0)
+        self.assertEqual(out_hold.operation_model_calls_total, "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()
