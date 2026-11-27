@@ -3434,7 +3434,10 @@ export class V6PrCoordinatorEngine {
       return (
         items.length >= 1 &&
         items.every(
-          (item) => item.resolution === "receipt_present" || item.resolution === "adopted_effect",
+          (item) =>
+            item.resolution === "receipt_present" ||
+            item.resolution === "adopted_effect" ||
+            item.resolution === "proved_not_submitted",
         ) &&
         items.some((item) => item.resolution === "adopted_effect")
       );
@@ -3608,7 +3611,7 @@ export class V6PrCoordinatorEngine {
           slot_key: slotKey,
           generation: slot.generation,
           lease_epoch: slot.lease_epoch,
-          owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
+          owner_head_sha: slot.owner_head_sha ?? reqHeadSha,
         });
         oldOwnerSha256 = verifiedOldOwner.parsed.sha256;
         verifiedOwnerAcquiredAtMs = parsePositiveTimestampMs(
@@ -3639,7 +3642,7 @@ export class V6PrCoordinatorEngine {
             slot_key: slotKey,
             generation: slot.generation,
             lease_epoch: slot.lease_epoch,
-            owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
+            owner_head_sha: slot.owner_head_sha ?? reqHeadSha,
           });
         }
         oldOwnerSha256 = verifiedPriorOwner.parsed.sha256;
@@ -3832,6 +3835,34 @@ export class V6PrCoordinatorEngine {
     const anchorCommentId = body.anchor_comment_id as number | undefined;
     const reqHeadSha = body.head_sha as string | undefined;
 
+    let initialSlot: SlotRecord | null;
+    try {
+      initialSlot = await this.withSlotLock(slotKey, async () => this.readSlot(slotKey));
+    } catch (err) {
+      if (err instanceof Error && err.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+      }
+      throw err;
+    }
+    if (initialSlot === null) {
+      return diagnosticResponse(409, "v6_lease_rollback_blocked", {
+        slotState: "IDLE",
+        rayId,
+      });
+    }
+    if (initialSlot.state !== "RECONCILING") {
+      return diagnosticResponse(409, stateConflictDiagnostic(initialSlot.state, initialSlot), {
+        slotState: initialSlot.state,
+        rayId,
+      });
+    }
+    if (initialSlot.generation !== reqGeneration) {
+      return diagnosticResponse(409, "v6_lease_rollback_blocked", {
+        slotState: "RECONCILING",
+        rayId,
+      });
+    }
+
     let verifiedAnchor: ParsedPrLedgerRecord | null = null;
     if (anchorCommentId !== undefined) {
       try {
@@ -3840,7 +3871,8 @@ export class V6PrCoordinatorEngine {
         assertRecordMatchesSlot(verifiedAnchor.payload, {
           slot_key: slotKey,
           generation: reqGeneration,
-          owner_head_sha: reqHeadSha,
+          lease_epoch: initialSlot.lease_epoch,
+          owner_head_sha: initialSlot.owner_head_sha ?? reqHeadSha,
         });
       } catch {
         try {
@@ -3909,7 +3941,7 @@ export class V6PrCoordinatorEngine {
               slot_key: slotKey,
               generation: slot.generation,
               lease_epoch: slot.lease_epoch,
-              owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
+              owner_head_sha: slot.owner_head_sha ?? reqHeadSha,
             });
           } catch {
             await this.store.putSlot({
@@ -3926,26 +3958,6 @@ export class V6PrCoordinatorEngine {
               }),
             };
           }
-        }
-        if (
-          reqHeadSha !== undefined &&
-          slot.owner_head_sha !== null &&
-          reqHeadSha !== slot.owner_head_sha
-        ) {
-          const held: SlotRecord = {
-            ...slot,
-            state: "HOLD",
-            last_reason_code: "v6_lease_slot_continuity_unproved",
-            updated_at_ms: this.clock.nowMs(),
-          };
-          await this.store.putSlot(held);
-          return {
-            kind: "done" as const,
-            result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
-              slotState: "HOLD",
-              rayId,
-            }),
-          };
         }
 
         if (parsedEvidence === null || parsedEvidence.old_generation !== slot.generation) {

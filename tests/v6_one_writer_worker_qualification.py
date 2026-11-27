@@ -17,7 +17,9 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
+import socket
 import socketserver
 import ssl
 import subprocess
@@ -63,11 +65,23 @@ BOT_LOGIN = "reviewsensei[bot]"
 BOT_USER_ID = 777001
 INSTALLATION_ID = 67890
 HEAD_SHA = "a" * 40
+HEAD_SHA_B = "d" * 40
+BASE_SHA = "0" * 40
 WORKFLOW_SHA = "b" * 40
 WORKFLOW_REF = f"malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@{WORKFLOW_SHA}"
 SIGNING_KEY = "v6-integrated-acceptance-signing-key-material-32bytes"
 WF_READ_TOKEN = "ghp_wf_readonly_acceptance_token_0001"
+PROVIDER_API_KEY = "sk-test-v6-provider-key-0001"
 OIDC_REQUEST_PREFIX = "actions-oidc-req:"
+DEFAULT_PR_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n"
+    "--- a/src/app.py\n"
+    "+++ b/src/app.py\n"
+    "@@ -1,2 +1,3 @@\n"
+    " def pick(items, idx):\n"
+    "+    # validate index\n"
+    "     return items[idx]\n"
+)
 
 
 def _b64url(data: bytes) -> str:
@@ -330,7 +344,102 @@ def _materialize_installed_dist_wheel(dist_name: str, wheel_dir: Path) -> None:
 
 
 def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
-    """Build wheels from this checkout and install into an isolated clean venv."""
+    """Replicate v6 workflow's git-archive source install into an isolated clean venv."""
+
+    git_origin = temp_root / "workflow-origin"
+    git_origin.mkdir(parents=True, exist_ok=True)
+    for filename in ("pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md"):
+        src_file = ROOT / filename
+        if src_file.is_file():
+            shutil.copy2(src_file, git_origin / filename)
+    shutil.copytree(
+        ROOT / "src",
+        git_origin / "src",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    pkg_dst = git_origin / "packages" / "python" / "review-sensei-github"
+    pkg_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        ROOT / "packages" / "python" / "review-sensei-github",
+        pkg_dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
+    )
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "ReviewSensei Test",
+        "GIT_AUTHOR_EMAIL": "test@reviewsensei.invalid",
+        "GIT_COMMITTER_NAME": "ReviewSensei Test",
+        "GIT_COMMITTER_EMAIL": "test@reviewsensei.invalid",
+    }
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(git_origin),
+        env=git_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["git", "add", "-A"],
+        cwd=str(git_origin),
+        env=git_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "v6 workflow archive snapshot"],
+        cwd=str(git_origin),
+        env=git_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    commit_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(git_origin),
+        env=git_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+    source_dir = temp_root / "review-sensei-v6-source"
+    src_checkout = temp_root / "review-sensei-v6-src"
+    src_checkout.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "--bare", str(source_dir)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={source_dir}",
+            "fetch",
+            "--depth=1",
+            str(git_origin),
+            commit_sha,
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    archive_proc = subprocess.run(
+        ["git", f"--git-dir={source_dir}", "archive", commit_sha],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["tar", "-x", "-C", str(src_checkout)],
+        input=archive_proc.stdout,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
     wheelhouse = temp_root / "wheelhouse"
     wheelhouse.mkdir(parents=True, exist_ok=True)
@@ -344,8 +453,8 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
             "--no-deps",
             "--wheel-dir",
             str(wheelhouse),
-            str(ROOT),
-            str(ROOT / "packages" / "python" / "review-sensei-github"),
+            str(src_checkout),
+            str(src_checkout / "packages" / "python" / "review-sensei-github"),
         ],
         check=True,
         stdout=subprocess.PIPE,
@@ -393,7 +502,17 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
         text=True,
     )
-    return venv_dir, venv_dir / "bin" / "review-sensei-github"
+    cli_bin = venv_dir / "bin" / "review-sensei-github"
+    subprocess.run(
+        [str(cli_bin), "v6-pilot-run", "--help"],
+        check=True,
+        cwd=str(temp_root),
+        env=clean_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return venv_dir, cli_bin
 
 
 @dataclass
@@ -403,6 +522,13 @@ class _CrashHook:
     pid: int
     body_contains: str | None = None
     kill_before_write: bool = True
+    triggered: bool = False
+
+
+@dataclass
+class _DropReplyHook:
+    method: str
+    path: str
     triggered: bool = False
 
 
@@ -422,14 +548,26 @@ class _SimulatedGitHubState:
     next_comment_id: int = 1000
     next_review_id: int = 5000
     crash_hook: _CrashHook | None = None
+    drop_reply_hook: _DropReplyHook | None = None
 
-    def ensure_pr(self, pr_number: int) -> dict[str, Any]:
+    def ensure_pr(
+        self,
+        pr_number: int,
+        *,
+        head_sha: str = HEAD_SHA,
+        base_sha: str = BASE_SHA,
+        title: str = "Fix bounds check",
+        diff: str = DEFAULT_PR_DIFF,
+    ) -> dict[str, Any]:
         with self.lock:
             pr = self.prs.get(pr_number)
             if pr is None:
                 pr = {
                     "number": pr_number,
-                    "head_sha": HEAD_SHA,
+                    "head_sha": head_sha,
+                    "base_sha": base_sha,
+                    "title": title,
+                    "diff": diff,
                     "state": "open",
                     "comments": [],
                     "reviews": [],
@@ -631,6 +769,16 @@ def _make_github_handler(
             os.kill(pid, signal.SIGKILL)
             return True
 
+        def _should_drop_reply(self, method: str, path: str) -> bool:
+            with state.lock:
+                hook = state.drop_reply_hook
+                if hook is None or hook.triggered:
+                    return False
+                if hook.method != method or hook.path != path:
+                    return False
+                hook.triggered = True
+                return True
+
         def do_GET(self) -> None:
             parsed = urllib.parse.urlsplit(self.path)
             path = parsed.path
@@ -716,11 +864,20 @@ def _make_github_handler(
             if pr_match:
                 pr_num = int(pr_match.group(1))
                 pr = state.ensure_pr(pr_num)
+                if "application/vnd.github.v3.diff" in self.headers.get("Accept", ""):
+                    diff_bytes = str(pr.get("diff", DEFAULT_PR_DIFF)).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(diff_bytes)))
+                    self.end_headers()
+                    self.wfile.write(diff_bytes)
+                    return
                 self._send_json(
                     200,
                     {
                         "id": pr_num,
                         "number": pr_num,
+                        "title": pr.get("title", "Fix bounds check"),
                         "state": pr["state"],
                         "head": {
                             "sha": pr["head_sha"],
@@ -731,14 +888,22 @@ def _make_github_handler(
                             },
                         },
                         "base": {
+                            "sha": pr.get("base_sha", BASE_SHA),
                             "repo": {
                                 "id": REPO_ID,
                                 "full_name": REPO_FULL,
                                 "fork": False,
-                            }
+                            },
                         },
                     },
                 )
+                return
+
+            pr_files_match = re.fullmatch(
+                rf"/repos/{re.escape(REPO_FULL)}/pulls/(\d+)/files", path
+            )
+            if pr_files_match:
+                self._send_json(200, [])
                 return
 
             attempt_match = re.fullmatch(
@@ -938,6 +1103,13 @@ def _make_github_handler(
                         "performed_via_github_app": {"id": APP_ID, "slug": APP_SLUG},
                     }
                     pr["reviews"].append(review)
+                if self._should_drop_reply("POST", path):
+                    self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
                 self._send_json(200, review)
                 return
 
@@ -961,6 +1133,81 @@ def _make_github_handler(
             self._send_empty(204)
 
     return Handler
+
+
+@dataclass
+class _MockOpenAIProviderState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    calls: int = 0
+    expected_api_key: str = PROVIDER_API_KEY
+    model: str = "gpt-4o-mini"
+
+
+def _make_openai_provider_handler(
+    provider_state: _MockOpenAIProviderState,
+) -> type[http.server.BaseHTTPRequestHandler]:
+    class ProviderHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _send_json(self, status: int, payload: Any) -> None:
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self) -> None:
+            path = urllib.parse.urlsplit(self.path).path
+            if path != "/v1/chat/completions":
+                self._send_json(404, {"error": "not_found"})
+                return
+            auth = self.headers.get("Authorization", "")
+            if auth != f"Bearer {provider_state.expected_api_key}":
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length) if length > 0 else b""
+            with provider_state.lock:
+                provider_state.calls += 1
+                call_num = provider_state.calls
+            review_json = json.dumps(
+                {
+                    "summary": f"ReviewSensei analysis pass #{call_num}: validate index bounds.",
+                    "comments": [
+                        {
+                            "path": "src/app.py",
+                            "line": 2,
+                            "body": "Ensure `idx` is within `[0, len(items))` before indexing.",
+                            "blocking": False,
+                            "severity": "medium",
+                            "fix_effort": "small",
+                            "category": "correctness",
+                        }
+                    ],
+                    "learning_proposals": [],
+                }
+            )
+            self._send_json(
+                200,
+                {
+                    "id": f"chatcmpl-v6-test-{call_num}",
+                    "object": "chat.completion",
+                    "model": provider_state.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": review_json},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+    return ProviderHandler
 
 
 class V6OneWriterWorkerQualificationTests(unittest.TestCase):
@@ -1106,6 +1353,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         repository: str = REPO_FULL,
         repository_id: int = REPO_ID,
         workflow_sha: str = WORKFLOW_SHA,
+        extra_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
         env = {
             "PATH": f"{self.venv_dir / 'bin'}:{os.environ.get('PATH', '')}",
@@ -1122,17 +1370,23 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             "GITHUB_RUN_ATTEMPT": str(run_attempt),
             "REVIEW_SENSEI_WORKFLOW_SHA": workflow_sha,
         }
+        if extra_env:
+            env.update(extra_env)
         return env
 
     def _runner_argv(
         self,
         *,
         pr_number: int,
-        operation_id: str,
+        operation_id: str | None,
         run_id: int,
+        run_attempt: int = 1,
+        head_sha: str = HEAD_SHA,
         outcome_path: Path,
         step_summary_path: Path,
         initial_findings_path: Path | None = None,
+        analyze_fresh_pr: bool = False,
+        policy_root: Path | None = None,
     ) -> list[str]:
         argv = [
             str(self.cli_bin),
@@ -1144,9 +1398,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             "--pull-request",
             str(pr_number),
             "--head-sha",
-            HEAD_SHA,
-            "--operation-id",
-            operation_id,
+            head_sha,
             "--coordinator-url",
             self.worker_url,
             "--github-api-url",
@@ -1154,7 +1406,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             "--run-id",
             str(run_id),
             "--run-attempt",
-            "1",
+            str(run_attempt),
             "--workflow-sha",
             WORKFLOW_SHA,
             "--expected-bot-login",
@@ -1164,14 +1416,60 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             "--step-summary-path",
             str(step_summary_path),
         ]
+        if operation_id is not None:
+            argv.extend(["--operation-id", operation_id])
         if initial_findings_path is not None:
             argv.extend(["--initial-findings-json", str(initial_findings_path)])
+        if analyze_fresh_pr:
+            argv.append("--analyze-fresh-pr")
+        if policy_root is not None:
+            argv.extend(["--policy-root", str(policy_root)])
         return argv
+
+    def _start_mock_provider(self) -> tuple[_MockOpenAIProviderState, int]:
+        provider_state = _MockOpenAIProviderState()
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        server_ctx.load_cert_chain(
+            certfile=str(self.cert_pem), keyfile=str(self.key_pem)
+        )
+        server = _QuietThreadingHTTPServer(
+            ("127.0.0.1", 0), _make_openai_provider_handler(provider_state)
+        )
+        server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
+        port = int(server.server_address[1])
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def _cleanup() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(_cleanup)
+        return provider_state, port
+
+    def _write_trusted_policy(self, name: str, provider_port: int) -> Path:
+        policy_dir = self.tmp_path / name
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        (policy_dir / ".reviewsensei.yml").write_text(
+            "schema: 1\n"
+            "inference:\n"
+            "  backend: openai-compatible\n"
+            "  model: gpt-4o-mini\n"
+            "advanced:\n"
+            "  endpoint:\n"
+            f"    base_url: https://127.0.0.1:{provider_port}/v1\n"
+            "    allow_custom_endpoint: true\n",
+            encoding="utf-8",
+        )
+        return policy_dir
 
     def _assert_no_secret_leaks(self, *paths_or_texts: Path | str) -> None:
         forbidden = [
             WF_READ_TOKEN,
             SIGNING_KEY,
+            PROVIDER_API_KEY,
             "-----BEGIN PRIVATE KEY-----",
             "ghs_",
             "ghp_",
@@ -1674,6 +1972,334 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             res_43_r3.stderr,
             out_43_r3,
             sum_43_r3,
+        )
+
+    def test_workflow_fresh_pr_analysis_and_cold_rerun_recovery(self) -> None:
+        """Test 1: archive-installed CLI runs fresh PR analysis without --operation-id, crashes before receipt, and cold rerun recovers with 0 extra provider calls."""
+
+        provider_state, provider_port = self._start_mock_provider()
+        policy_dir = self._write_trusted_policy("trusted-policy-t1", provider_port)
+        expected_op_id = f"v6:{REPO_ID}:51:{HEAD_SHA[:12]}:pr_review_publish"
+
+        self.gh_state.ensure_pr(51, head_sha=HEAD_SHA)
+        self.gh_state.set_run_attempt("9101", 1, status="in_progress", conclusion=None)
+        out_r1 = self.tmp_path / "outcome-51-r1.json"
+        sum_r1 = self.tmp_path / "summary-51-r1.md"
+        cwd_r1 = self.tmp_path / "cwd-51-r1"
+        cwd_r1.mkdir()
+
+        provider_env = {
+            "OPENAI_API_KEY": PROVIDER_API_KEY,
+            "REVIEWSENSEI_PROVIDER": "openai-compatible",
+            "REVIEWSENSEI_MODEL": "gpt-4o-mini",
+        }
+        proc_r1 = subprocess.Popen(
+            self._runner_argv(
+                pr_number=51,
+                operation_id=None,
+                run_id=9101,
+                run_attempt=1,
+                head_sha=HEAD_SHA,
+                outcome_path=out_r1,
+                step_summary_path=sum_r1,
+                analyze_fresh_pr=True,
+                policy_root=policy_dir,
+            ),
+            cwd=str(cwd_r1),
+            env=self._runner_env(run_id=9101, run_attempt=1, extra_env=provider_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self.gh_state.lock:
+            self.gh_state.crash_hook = _CrashHook(
+                method="POST",
+                path=f"/repos/{REPO_FULL}/issues/51/comments",
+                body_contains="reviewsensei:v6:receipt:v1",
+                pid=proc_r1.pid,
+            )
+        rc_r1 = proc_r1.wait(timeout=30)
+        stdout_r1 = proc_r1.stdout.read() if proc_r1.stdout else ""
+        stderr_r1 = proc_r1.stderr.read() if proc_r1.stderr else ""
+        if proc_r1.stdout:
+            proc_r1.stdout.close()
+        if proc_r1.stderr:
+            proc_r1.stderr.close()
+        self.assertEqual(rc_r1, -signal.SIGKILL, stderr_r1)
+        self.assertTrue(self.gh_state.crash_hook.triggered)
+
+        with provider_state.lock:
+            self.assertEqual(provider_state.calls, 1)
+        with self.gh_state.lock:
+            reviews_r1 = list(self.gh_state.prs[51]["reviews"])
+            comments_r1 = list(self.gh_state.prs[51]["comments"])
+            gen1_token = self.gh_state.runner_write_tokens[-1]
+        self.assertEqual(len(reviews_r1), 1)
+        self.assertIn("ReviewSensei analysis pass #1", reviews_r1[0]["body"])
+        records_r1 = [
+            rec
+            for c in comments_r1
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        self.assertEqual(
+            sum(1 for r in records_r1 if isinstance(r, UnresolvedResultRecord)), 1
+        )
+        self.assertEqual(
+            sum(1 for r in records_r1 if isinstance(r, WriteIntentRecord)), 1
+        )
+        self.assertEqual(
+            sum(1 for r in records_r1 if isinstance(r, CompletionReceiptRecord)), 0
+        )
+
+        # Run 2: cold successor, NO --operation-id, zero artifacts, must adopt review #1 with 0 model calls.
+        self.gh_state.set_run_attempt(
+            "9101", 1, status="completed", conclusion="failure"
+        )
+        self.gh_state.set_run_attempt("9102", 2, status="in_progress", conclusion=None)
+        out_r2 = self.tmp_path / "outcome-51-r2.json"
+        sum_r2 = self.tmp_path / "summary-51-r2.md"
+        cwd_r2 = self.tmp_path / "cwd-51-r2"
+        cwd_r2.mkdir()
+        res_r2 = subprocess.run(
+            self._runner_argv(
+                pr_number=51,
+                operation_id=None,
+                run_id=9102,
+                run_attempt=2,
+                head_sha=HEAD_SHA,
+                outcome_path=out_r2,
+                step_summary_path=sum_r2,
+                analyze_fresh_pr=True,
+                policy_root=policy_dir,
+            ),
+            cwd=str(cwd_r2),
+            env=self._runner_env(run_id=9102, run_attempt=2, extra_env=provider_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res_r2.returncode, 0, res_r2.stderr + res_r2.stdout)
+        parsed_r2 = json.loads(out_r2.read_text(encoding="utf-8"))
+        self.assertEqual(parsed_r2["status"], "completed")
+        self.assertEqual(parsed_r2["coordinator_state"], "IDLE")
+        self.assertTrue(parsed_r2["lease_released"])
+        self.assertEqual(parsed_r2["model_calls_started"], 0)
+        self.assertTrue(parsed_r2["reconciled_from_existing_effect"])
+        with provider_state.lock:
+            self.assertEqual(provider_state.calls, 1)
+        self.assertIn(gen1_token, self.gh_state.revoked_tokens)
+        self.assertEqual(len(self.gh_state.prs[51]["reviews"]), 1)
+        receipts_r2 = [
+            rec
+            for c in self.gh_state.prs[51]["comments"]
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, CompletionReceiptRecord)
+        ]
+        self.assertEqual(len(receipts_r2), 1)
+        self.assertEqual(receipts_r2[0].operation_id, expected_op_id)
+        self._assert_no_secret_leaks(
+            self.worker_log,
+            stdout_r1,
+            stderr_r1,
+            out_r1,
+            sum_r1,
+            res_r2.stdout,
+            res_r2.stderr,
+            out_r2,
+            sum_r2,
+        )
+
+    def test_head_change_rebase_after_crash_reconciles_and_publishes_new_head(
+        self,
+    ) -> None:
+        """Test 2: Run 1 crashes on HEAD_A after review #1; PR advances to HEAD_B; Run 2 reconciles HEAD_A and publishes review #2 for HEAD_B to IDLE."""
+
+        provider_state, provider_port = self._start_mock_provider()
+        policy_dir = self._write_trusted_policy("trusted-policy-t2", provider_port)
+        op_a = f"v6:{REPO_ID}:52:{HEAD_SHA[:12]}:pr_review_publish"
+        op_b = f"v6:{REPO_ID}:52:{HEAD_SHA_B[:12]}:pr_review_publish"
+
+        self.gh_state.ensure_pr(52, head_sha=HEAD_SHA)
+        self.gh_state.set_run_attempt(
+            "9201", 1, status="in_progress", conclusion=None, head_sha=HEAD_SHA
+        )
+        out_r1 = self.tmp_path / "outcome-52-r1.json"
+        sum_r1 = self.tmp_path / "summary-52-r1.md"
+        cwd_r1 = self.tmp_path / "cwd-52-r1"
+        cwd_r1.mkdir()
+
+        provider_env = {
+            "OPENAI_API_KEY": PROVIDER_API_KEY,
+            "REVIEWSENSEI_PROVIDER": "openai-compatible",
+            "REVIEWSENSEI_MODEL": "gpt-4o-mini",
+        }
+        proc_r1 = subprocess.Popen(
+            self._runner_argv(
+                pr_number=52,
+                operation_id=None,
+                run_id=9201,
+                run_attempt=1,
+                head_sha=HEAD_SHA,
+                outcome_path=out_r1,
+                step_summary_path=sum_r1,
+                analyze_fresh_pr=True,
+                policy_root=policy_dir,
+            ),
+            cwd=str(cwd_r1),
+            env=self._runner_env(run_id=9201, run_attempt=1, extra_env=provider_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self.gh_state.lock:
+            self.gh_state.crash_hook = _CrashHook(
+                method="POST",
+                path=f"/repos/{REPO_FULL}/issues/52/comments",
+                body_contains="reviewsensei:v6:receipt:v1",
+                pid=proc_r1.pid,
+            )
+        rc_r1 = proc_r1.wait(timeout=30)
+        stdout_r1 = proc_r1.stdout.read() if proc_r1.stdout else ""
+        stderr_r1 = proc_r1.stderr.read() if proc_r1.stderr else ""
+        if proc_r1.stdout:
+            proc_r1.stdout.close()
+        if proc_r1.stderr:
+            proc_r1.stderr.close()
+        self.assertEqual(rc_r1, -signal.SIGKILL, stderr_r1)
+        self.assertTrue(self.gh_state.crash_hook.triggered)
+
+        # Mark Run 1 failed and advance PR head to HEAD_SHA_B (rebase / new push).
+        self.gh_state.set_run_attempt(
+            "9201", 1, status="completed", conclusion="failure", head_sha=HEAD_SHA
+        )
+        with self.gh_state.lock:
+            self.gh_state.prs[52]["head_sha"] = HEAD_SHA_B
+        self.gh_state.set_run_attempt(
+            "9202", 1, status="in_progress", conclusion=None, head_sha=HEAD_SHA_B
+        )
+        out_r2 = self.tmp_path / "outcome-52-r2.json"
+        sum_r2 = self.tmp_path / "summary-52-r2.md"
+        cwd_r2 = self.tmp_path / "cwd-52-r2"
+        cwd_r2.mkdir()
+        res_r2 = subprocess.run(
+            self._runner_argv(
+                pr_number=52,
+                operation_id=None,
+                run_id=9202,
+                run_attempt=1,
+                head_sha=HEAD_SHA_B,
+                outcome_path=out_r2,
+                step_summary_path=sum_r2,
+                analyze_fresh_pr=True,
+                policy_root=policy_dir,
+            ),
+            cwd=str(cwd_r2),
+            env=self._runner_env(run_id=9202, run_attempt=1, extra_env=provider_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res_r2.returncode, 0, res_r2.stderr + res_r2.stdout)
+        parsed_r2 = json.loads(out_r2.read_text(encoding="utf-8"))
+        self.assertEqual(parsed_r2["status"], "completed")
+        self.assertEqual(parsed_r2["coordinator_state"], "IDLE")
+        self.assertTrue(parsed_r2["lease_released"])
+        self.assertEqual(parsed_r2["generation"], 2)
+        self.assertEqual(parsed_r2["model_calls_started"], 1)
+        with provider_state.lock:
+            self.assertEqual(provider_state.calls, 2)
+
+        reviews = list(self.gh_state.prs[52]["reviews"])
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual([r["commit_id"] for r in reviews], [HEAD_SHA, HEAD_SHA_B])
+        receipts = [
+            rec
+            for c in self.gh_state.prs[52]["comments"]
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, CompletionReceiptRecord)
+        ]
+        self.assertEqual({r.operation_id for r in receipts}, {op_a, op_b})
+        self._assert_no_secret_leaks(
+            self.worker_log,
+            stdout_r1,
+            stderr_r1,
+            out_r1,
+            sum_r1,
+            res_r2.stdout,
+            res_r2.stderr,
+            out_r2,
+            sum_r2,
+        )
+
+    def test_same_run_lost_reply_after_fresh_analysis_reconciles_cleanly(self) -> None:
+        """Test 3: Fresh PR analysis + GitHub accepts review #1 and drops HTTP reply -> same Run 1 reconciles to IDLE."""
+
+        provider_state, provider_port = self._start_mock_provider()
+        policy_dir = self._write_trusted_policy("trusted-policy-t3", provider_port)
+
+        self.gh_state.ensure_pr(53, head_sha=HEAD_SHA)
+        self.gh_state.set_run_attempt("9301", 1, status="in_progress", conclusion=None)
+        with self.gh_state.lock:
+            self.gh_state.drop_reply_hook = _DropReplyHook(
+                method="POST",
+                path=f"/repos/{REPO_FULL}/pulls/53/reviews",
+            )
+
+        out_r1 = self.tmp_path / "outcome-53-r1.json"
+        sum_r1 = self.tmp_path / "summary-53-r1.md"
+        cwd_r1 = self.tmp_path / "cwd-53-r1"
+        cwd_r1.mkdir()
+        provider_env = {
+            "OPENAI_API_KEY": PROVIDER_API_KEY,
+            "REVIEWSENSEI_PROVIDER": "openai-compatible",
+            "REVIEWSENSEI_MODEL": "gpt-4o-mini",
+        }
+        res_r1 = subprocess.run(
+            self._runner_argv(
+                pr_number=53,
+                operation_id=None,
+                run_id=9301,
+                run_attempt=1,
+                head_sha=HEAD_SHA,
+                outcome_path=out_r1,
+                step_summary_path=sum_r1,
+                analyze_fresh_pr=True,
+                policy_root=policy_dir,
+            ),
+            cwd=str(cwd_r1),
+            env=self._runner_env(run_id=9301, run_attempt=1, extra_env=provider_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res_r1.returncode, 0, res_r1.stderr + res_r1.stdout)
+        self.assertIsNotNone(self.gh_state.drop_reply_hook)
+        assert self.gh_state.drop_reply_hook is not None
+        self.assertTrue(self.gh_state.drop_reply_hook.triggered)
+
+        parsed = json.loads(out_r1.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["status"], "completed")
+        self.assertEqual(parsed["coordinator_state"], "IDLE")
+        self.assertTrue(parsed["lease_released"])
+        self.assertEqual(parsed["model_calls_started"], 1)
+        self.assertTrue(parsed["reconciled_from_existing_effect"])
+        self.assertTrue(parsed["reconciled_after_lost_write"])
+        with provider_state.lock:
+            self.assertEqual(provider_state.calls, 1)
+        self.assertEqual(len(self.gh_state.prs[53]["reviews"]), 1)
+        receipts = [
+            rec
+            for c in self.gh_state.prs[53]["comments"]
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, CompletionReceiptRecord)
+        ]
+        self.assertEqual(len(receipts), 1)
+        self._assert_no_secret_leaks(
+            self.worker_log,
+            res_r1.stdout,
+            res_r1.stderr,
+            out_r1,
+            sum_r1,
         )
 
 

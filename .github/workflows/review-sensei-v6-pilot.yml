@@ -133,7 +133,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install verified ReviewSensei runtime
+      - name: Install ReviewSensei v6 pilot runner
         env:
           REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
@@ -143,7 +143,8 @@ jobs:
             exit 1
           fi
           source_dir="$RUNNER_TEMP/review-sensei-v6-source"
-          rm -rf "$source_dir"
+          src_checkout="$RUNNER_TEMP/review-sensei-v6-src"
+          rm -rf "$source_dir" "$src_checkout"
           git init --bare "$source_dir"
           git --git-dir="$source_dir" fetch --depth=1 \
             https://github.com/malsabbagh/review-sensei.git \
@@ -157,25 +158,25 @@ jobs:
             echo '::error::workflow SHA must resolve to a commit or annotated tag' >&2
             exit 1
           fi
-          package_version="$(git --git-dir="$source_dir" show "$workflow_commit:pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*$/\1/p' | head -n 1)"
-          github_version="$(git --git-dir="$source_dir" show "$workflow_commit:packages/python/review-sensei-github/pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*$/\1/p' | head -n 1)"
-          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$github_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo '::error::workflow commit does not declare exact package versions' >&2
-            exit 1
-          fi
+          mkdir -p "$src_checkout"
+          git --git-dir="$source_dir" archive "$workflow_commit" | tar -x -C "$src_checkout"
           python -m venv "$RUNNER_TEMP/review-sensei-v6-venv"
           python_bin="$RUNNER_TEMP/review-sensei-v6-venv/bin/python"
           "$python_bin" -m pip install --disable-pip-version-check --upgrade pip
-          "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$package_version"
-          if ! "$python_bin" -m pip install --disable-pip-version-check "review-sensei-github==$github_version"; then
-            "$python_bin" -m pip install --disable-pip-version-check --no-deps \
-              "git+https://github.com/malsabbagh/review-sensei.git@$workflow_commit#subdirectory=packages/python/review-sensei-github"
-          fi
-          "$python_bin" -m pip check
+          "$python_bin" -m pip install --disable-pip-version-check \
+            "$src_checkout" \
+            "$src_checkout/packages/python/review-sensei-github"
+          "$RUNNER_TEMP/review-sensei-v6-venv/bin/pip" check
+          "$RUNNER_TEMP/review-sensei-v6-venv/bin/review-sensei-github" v6-pilot-run --help >/dev/null
 
-      - name: Run v6 one-writer-per-PR pilot recovery
+      - name: Run ReviewSensei v6 pilot recovery
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}
+          REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}
@@ -195,6 +196,8 @@ jobs:
             --event "$EVENT_KIND"
             --effect-kind "$EFFECT_KIND"
             --workflow-sha "$REVIEW_SENSEI_WORKFLOW_SHA"
+            --analyze-fresh-pr
+            --policy-root trusted-policy
             --outcome "$RUNNER_TEMP/v6-pilot-outcome.json"
           )
           if [[ -n "$OPERATION_ID" ]]; then

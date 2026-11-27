@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import review_sensei_github
 from review_sensei_github.cli import main as github_main
+from review_sensei_github.errors import GitHubHTTPTransientError
 from review_sensei_github.v6_coordinator_client import (
     ALLOWED_V6_CAPABILITIES,
     ALLOWED_V6_PERMISSION_NAMES,
@@ -376,9 +377,42 @@ class _SimulatedCoordinatorStore:
             else:
                 return "v6_lease_hold"
 
-        if outcome == "clean_receipts" and any(
-            item["resolution"] != "receipt_present" for item in raw_resolutions
-        ):
+        if any(item.get("resolution") == "ambiguous_hold" for item in raw_resolutions):
+            return "v6_lease_reconciliation_evidence_invalid"
+        if outcome == "clean_receipts":
+            if any(
+                item.get("resolution") != "receipt_present" for item in raw_resolutions
+            ):
+                return "v6_lease_reconciliation_evidence_invalid"
+        elif outcome == "adopted_missing_receipt":
+            if (
+                not raw_resolutions
+                or any(
+                    item.get("resolution")
+                    not in {"receipt_present", "adopted_effect", "proved_not_submitted"}
+                    for item in raw_resolutions
+                )
+                or not any(
+                    item.get("resolution") == "adopted_effect"
+                    for item in raw_resolutions
+                )
+            ):
+                return "v6_lease_reconciliation_evidence_invalid"
+        elif outcome == "proved_not_submitted":
+            if (
+                not raw_resolutions
+                or any(
+                    item.get("resolution")
+                    not in {"receipt_present", "proved_not_submitted"}
+                    for item in raw_resolutions
+                )
+                or not any(
+                    item.get("resolution") == "proved_not_submitted"
+                    for item in raw_resolutions
+                )
+            ):
+                return "v6_lease_reconciliation_evidence_invalid"
+        else:
             return "v6_lease_reconciliation_evidence_invalid"
         return None
 
@@ -2871,6 +2905,280 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         collide_outcome = collide_engine.recover_and_publish(collide_req)
         self.assertEqual(collide_outcome.blocker, "missing_pr_unresolved_result")
         self.assertTrue(collide_outcome.zero_model_calls_started)
+
+    def test_same_run_lost_reply_after_fresh_analysis_reconciles_to_idle(self) -> None:
+        now = 1_700_050_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        client = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run1",
+            opener=coord.opener,
+            clock=lambda: now,
+        )
+
+        findings = ({"path": "src/app.py", "line": 4, "body": "Bounds check"},)
+        loader_calls = 0
+
+        def _initial_loader() -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+            nonlocal loader_calls
+            loader_calls += 1
+            return findings, ("ev-diff-lost-reply",)
+
+        dropped_once = False
+
+        def _app_with_lost_reply(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            nonlocal dropped_once
+            if (
+                call["method"] == "POST"
+                and call["path"] == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews"
+                and not dropped_once
+            ):
+                dropped_once = True
+                status, headers, body = pr.handle_app(call)
+                assert status in (200, 201) and body is not None
+                raise GitHubHTTPTransientError("simulated dropped HTTP reply")
+            return pr.handle_app(call)
+
+        runner = V6PilotRunner(
+            coordinator=client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(
+                _app_with_lost_reply
+            ),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord.lease_epoch,
+                "active_run_id": 5002,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-lost-reply-same-run",
+                run_id=5002,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=_initial_loader,
+            )
+        )
+        self.assertTrue(dropped_once)
+        self.assertEqual(loader_calls, 1)
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(outcome.coordinator_state, "IDLE")
+        self.assertTrue(outcome.lease_released)
+        self.assertEqual(outcome.model_calls_started, 1)
+        self.assertIsInstance(outcome.recovery_outcome, RecoveryCompleted)
+        assert isinstance(outcome.recovery_outcome, RecoveryCompleted)
+        self.assertTrue(outcome.recovery_outcome.reconciled_from_existing_effect)
+        self.assertTrue(outcome.recovery_outcome.reconciled_after_lost_write)
+        self.assertEqual(outcome.to_dict()["reconciled_after_lost_write"], True)
+        self.assertEqual(len(pr.reviews), 1)
+        receipts = [
+            rec
+            for comment in pr.comments
+            for rec in extract_v6_record_markers(comment["body"], strict=True)
+            if isinstance(rec, CompletionReceiptRecord)
+            and rec.operation_id == "op-lost-reply-same-run"
+        ]
+        self.assertEqual(len(receipts), 1)
+
+    def test_mixed_adopted_effect_and_proved_not_submitted_passes_gate2_and_rejects_hold(
+        self,
+    ) -> None:
+        now = 1_700_060_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        client = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run2",
+            opener=coord.opener,
+            clock=lambda: now,
+        )
+
+        # Simulate crashed Gen 1 ACTIVE slot with 1 adopted review + 1 proved_not_submitted intent.
+        coord.state = "ACTIVE"
+        coord.generation = 1
+        coord.lease_epoch = 1
+        coord.reservation_id = "res-1-1"
+        coord.owner_head_sha = HEAD_A
+        coord.owner_run_id = "5001"
+        coord.owner_run_attempt = 1
+
+        owner1 = _make_owner_record(
+            slot_key=coord.slot_key,
+            generation=1,
+            lease_epoch=1,
+            operation_id="op-gen1-a",
+            pr_head_sha=HEAD_A,
+        )
+        owner_comment = pr.add_comment(format_v6_record_marker(owner1), is_app=True)
+        coord.owner_comment_id = owner_comment["id"]
+
+        sha_a = canonical_sha256(({"path": "a.py", "line": 1, "body": "A"},))
+        sha_b = canonical_sha256(({"path": "b.py", "line": 2, "body": "B"},))
+        intent_a = WriteIntentRecord(
+            record_id="intent:op-gen1-a:1",
+            operation_id="op-gen1-a",
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256=sha_a,
+            target_digest=canonical_sha256({"pr": PR_NUMBER, "op": "a"}),
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        intent_a_comment = pr.add_comment(
+            format_v6_record_marker(intent_a), is_app=True
+        )
+        review_a = pr.add_review(
+            f"Adopted review\n{_effect_tag('op-gen1-a', sha_a)}",
+            commit_id=HEAD_A,
+            is_app=True,
+        )
+
+        intent_b = WriteIntentRecord(
+            record_id="intent:op-gen1-b:1",
+            operation_id="op-gen1-b",
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256=sha_b,
+            target_digest=canonical_sha256({"pr": PR_NUMBER, "op": "b"}),
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        intent_b_comment = pr.add_comment(
+            format_v6_record_marker(intent_b), is_app=True
+        )
+        proof_b = NonSubmissionProofRecord(
+            record_id="nonsub:op-gen1-b:1",
+            slot_key=coord.slot_key,
+            generation=1,
+            operation_id="op-gen1-b",
+            pr_head_sha=HEAD_A,
+            proof_kind="definitive_github_rejection",
+            payload_sha256=sha_b,
+            recorded_at="2026-11-27T00:05:00Z",
+            http_status=422,
+            diagnostic="definitive_github_rejection_422",
+        )
+        proof_b_comment = pr.add_comment(format_v6_record_marker(proof_b), is_app=True)
+
+        # Adding an unproved intent C -> ambiguous_hold must fail closed to HOLD
+        sha_c = canonical_sha256(({"path": "c.py", "line": 3, "body": "C"},))
+        intent_c = WriteIntentRecord(
+            record_id="intent:op-gen1-c:1",
+            operation_id="op-gen1-c",
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256=sha_c,
+            target_digest=canonical_sha256({"pr": PR_NUMBER, "op": "c"}),
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        intent_c_comment = pr.add_comment(
+            format_v6_record_marker(intent_c), is_app=True
+        )
+
+        client.drain(
+            slot_key=coord.slot_key,
+            expected_generation=1,
+            expected_lease_epoch=1,
+            predecessor_anchor_comment_id=owner_comment["id"],
+        )
+        with self.assertRaises(V6CoordinatorError):
+            client.complete_reconcile(
+                slot_key=coord.slot_key,
+                generation=1,
+                reconciliation_outcome="adopted_missing_receipt",
+                reconciliation_evidence={
+                    "old_generation": 1,
+                    "old_owner_comment_id": owner_comment["id"],
+                    "intent_resolutions": [
+                        {
+                            "operation_id": "op-gen1-a",
+                            "intent_comment_id": intent_a_comment["id"],
+                            "resolution": "adopted_effect",
+                            "native_effect_kind": "pull_request_review",
+                            "native_effect_id": review_a["id"],
+                        },
+                        {
+                            "operation_id": "op-gen1-b",
+                            "intent_comment_id": intent_b_comment["id"],
+                            "resolution": "proved_not_submitted",
+                            "proof_comment_id": proof_b_comment["id"],
+                        },
+                        {
+                            "operation_id": "op-gen1-c",
+                            "intent_comment_id": intent_c_comment["id"],
+                            "resolution": "ambiguous_hold",
+                        },
+                    ],
+                },
+                anchor_comment_id=owner_comment["id"],
+                head_sha=HEAD_A,
+            )
+        self.assertEqual(coord.state, "HOLD")
+
+        # Remove ambiguous intent C, restore RECONCILING, and verify read_only_engine + complete_reconcile reach IDLE
+        pr.comments.remove(intent_c_comment)
+        coord.state = "RECONCILING"
+        coord.last_reason_code = None
+
+        ro_client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            broker_app_transport=_ScriptedTransport(pr.handle_app),
+        )
+        ro_engine = V6RecoveryEngine(ro_client, now_fn=lambda: now)
+        recon = ro_engine.reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=coord.slot_key,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            old_generation=1,
+            old_lease_epoch=1,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            operation_id="op-gen1-a",
+        )
+        self.assertEqual(recon.reconciliation_outcome, "adopted_missing_receipt")
+        self.assertEqual(len(recon.adopted_effects), 1)
+        self.assertEqual(len(recon.unsubmitted_intents), 1)
+        assert recon.reconciliation_evidence is not None
+        comp = client.complete_reconcile(
+            slot_key=coord.slot_key,
+            generation=1,
+            reconciliation_outcome=recon.reconciliation_outcome,
+            reconciliation_evidence=recon.reconciliation_evidence,
+            anchor_comment_id=owner_comment["id"],
+            head_sha=HEAD_A,
+        )
+        self.assertEqual(comp.state, "IDLE")
+        self.assertEqual(coord.state, "IDLE")
 
 
 if __name__ == "__main__":

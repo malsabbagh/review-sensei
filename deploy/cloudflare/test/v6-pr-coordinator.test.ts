@@ -2741,6 +2741,345 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       new Date(1_795_000_008_000).toISOString(),
     );
   });
+
+  it("completes reconcile on HEAD_A slot with HEAD_A anchor when req.head_sha is HEAD_B or HEAD_A, then acquires HEAD_B", async () => {
+    for (const reconcileReqHead of [HEAD_SHA_2, HEAD_SHA_1]) {
+      const { env, engine, provider, store, slotKey42 } = createHarness();
+      const crypto = new V6EscrowCrypto(SIGNING_KEY);
+
+      const gen1 = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      expect(gen1.status).toBe(200);
+
+      const mac1 = await crypto.signOwnerAttestation({
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: gen1.body.reservation_id as string,
+        run_id: "10001",
+        run_attempt: 1,
+        pr_head_sha: HEAD_SHA_1,
+        workflow_sha: WORKFLOW_SHA,
+      });
+      provider.comments.set(
+        9601,
+        await buildLedgerComment(crypto, {
+          schema: "reviewsensei:v6:owner:v1",
+          record_id: "rec-owner-heada",
+          slot_key: slotKey42,
+          generation: 1,
+          lease_epoch: 1,
+          reservation_id: gen1.body.reservation_id,
+          operation_id: "op-heada",
+          run_id: "10001",
+          run_attempt: 1,
+          pr_head_sha: HEAD_SHA_1,
+          workflow_sha: WORKFLOW_SHA,
+          acquired_at: "2026-11-27T00:00:00Z",
+          expires_at: "2026-11-27T01:00:00Z",
+          coordinator_attestation_mac: mac1,
+        }),
+      );
+      const shaA = "a".repeat(64);
+      provider.comments.set(
+        9602,
+        await buildLedgerComment(crypto, {
+          schema: "reviewsensei:v6:intent:v1",
+          record_id: "rec-intent-heada",
+          operation_id: "op-heada",
+          writer_epoch: 1,
+          pr_head_sha: HEAD_SHA_1,
+          effect_kind: "pull_request_review",
+          payload_sha256: shaA,
+          target_digest: "b".repeat(64),
+          generation: 1,
+          target_location: "pr:42",
+        }),
+      );
+      provider.reviews.set(5601, {
+        id: 5601,
+        login: "reviewsensei[bot]",
+        userType: "Bot",
+        commit_id: HEAD_SHA_1,
+        body: `Review body <!-- reviewsensei:v6:effect op=op-heada sha256=${shaA} -->`,
+        state: "COMMENTED",
+        performedViaAppId: 12345,
+      });
+
+      // Crash Run 1 and advance PR head to HEAD_B
+      provider.runAttempts.set("10001:1", {
+        run_id: "10001",
+        run_attempt: 1,
+        status: "completed",
+        conclusion: "failure",
+        head_sha: HEAD_SHA_1,
+      });
+      provider.prBindings.set(42, {
+        head_sha: HEAD_SHA_2,
+        base_repo_id: 987654321,
+        state: "open",
+        head_repo_id: 987654321,
+        is_fork_pr: false,
+      });
+
+      const drained = await engine.handleDrain(env, {
+        oidc_token: "oidc-run-2",
+        slot_key: slotKey42,
+        expected_generation: 1,
+        predecessor_anchor_comment_id: 9601,
+      });
+      expect(drained.status).toBe(200);
+      expect(drained.body.state).toBe("RECONCILING");
+
+      const recDone = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-2",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "adopted_missing_receipt",
+        reconciliation_evidence: {
+          old_generation: 1,
+          old_owner_comment_id: 9601,
+          intent_resolutions: [
+            {
+              operation_id: "op-heada",
+              intent_comment_id: 9602,
+              resolution: "adopted_effect",
+              native_effect_kind: "pull_request_review",
+              native_effect_id: 5601,
+            },
+          ],
+        },
+        anchor_comment_id: 9601,
+        head_sha: reconcileReqHead,
+      });
+      expect(recDone.status).toBe(200);
+      expect(recDone.body.state).toBe("IDLE");
+
+      const gen2 = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-2",
+        pull_request: 42,
+        head_sha: HEAD_SHA_2,
+        capabilities: ["review_publish"],
+        predecessor_anchor_comment_id: 9601,
+      });
+      expect(gen2.status).toBe(200);
+      expect(gen2.body.state).toBe("ACTIVE");
+      expect(gen2.body.generation).toBe(2);
+      expect((await store.getSlot(slotKey42))?.owner_head_sha).toBe(HEAD_SHA_2);
+    }
+  });
+
+  it("allows mixed adopted_effect + proved_not_submitted in adopted_missing_receipt and rejects ambiguous_hold", async () => {
+    const { env, engine, provider, store, slotKey42 } = createHarness();
+    const crypto = new V6EscrowCrypto(SIGNING_KEY);
+
+    const gen1 = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(gen1.status).toBe(200);
+
+    const mac1 = await crypto.signOwnerAttestation({
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: gen1.body.reservation_id as string,
+      run_id: "10001",
+      run_attempt: 1,
+      pr_head_sha: HEAD_SHA_1,
+      workflow_sha: WORKFLOW_SHA,
+    });
+    provider.comments.set(
+      9701,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:owner:v1",
+        record_id: "rec-owner-mixed",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: gen1.body.reservation_id,
+        operation_id: "op-mixed-1",
+        run_id: "10001",
+        run_attempt: 1,
+        pr_head_sha: HEAD_SHA_1,
+        workflow_sha: WORKFLOW_SHA,
+        acquired_at: "2026-11-27T00:00:00Z",
+        expires_at: "2026-11-27T01:00:00Z",
+        coordinator_attestation_mac: mac1,
+      }),
+    );
+
+    const sha1 = "1".repeat(64);
+    const sha2 = "2".repeat(64);
+    provider.comments.set(
+      9702,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:intent:v1",
+        record_id: "rec-intent-mixed-1",
+        operation_id: "op-mixed-1",
+        writer_epoch: 1,
+        pr_head_sha: HEAD_SHA_1,
+        effect_kind: "pull_request_review",
+        payload_sha256: sha1,
+        target_digest: "3".repeat(64),
+        generation: 1,
+        target_location: "pr:42",
+      }),
+    );
+    provider.reviews.set(5701, {
+      id: 5701,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      commit_id: HEAD_SHA_1,
+      body: `Review body <!-- reviewsensei:v6:effect op=op-mixed-1 sha256=${sha1} -->`,
+      state: "COMMENTED",
+      performedViaAppId: 12345,
+    });
+    provider.comments.set(
+      9703,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:intent:v1",
+        record_id: "rec-intent-mixed-2",
+        operation_id: "op-mixed-2",
+        writer_epoch: 1,
+        pr_head_sha: HEAD_SHA_1,
+        effect_kind: "pull_request_review",
+        payload_sha256: sha2,
+        target_digest: "4".repeat(64),
+        generation: 1,
+        target_location: "pr:42",
+      }),
+    );
+    provider.comments.set(
+      9704,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:non-submission:v1",
+        record_id: "rec-nonsub-mixed-2",
+        slot_key: slotKey42,
+        generation: 1,
+        operation_id: "op-mixed-2",
+        pr_head_sha: HEAD_SHA_1,
+        proof_kind: "definitive_github_rejection",
+        payload_sha256: sha2,
+        recorded_at: "2026-11-27T00:05:00Z",
+        http_status: 422,
+        diagnostic: "rejected",
+      }),
+    );
+
+    provider.runAttempts.set("10001:1", {
+      run_id: "10001",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "failure",
+      head_sha: HEAD_SHA_1,
+    });
+    const drained = await engine.handleDrain(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      expected_generation: 1,
+      predecessor_anchor_comment_id: 9701,
+    });
+    expect(drained.status).toBe(200);
+
+    // Adding an ambiguous_hold intent must still fail closed to HOLD
+    const sha3 = "5".repeat(64);
+    provider.comments.set(
+      9705,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:intent:v1",
+        record_id: "rec-intent-mixed-3",
+        operation_id: "op-mixed-3",
+        writer_epoch: 1,
+        pr_head_sha: HEAD_SHA_1,
+        effect_kind: "pull_request_review",
+        payload_sha256: sha3,
+        target_digest: "6".repeat(64),
+        generation: 1,
+        target_location: "pr:42",
+      }),
+    );
+    const mixedWithHold = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "adopted_missing_receipt",
+      reconciliation_evidence: {
+        old_generation: 1,
+        old_owner_comment_id: 9701,
+        intent_resolutions: [
+          {
+            operation_id: "op-mixed-1",
+            intent_comment_id: 9702,
+            resolution: "adopted_effect",
+            native_effect_kind: "pull_request_review",
+            native_effect_id: 5701,
+          },
+          {
+            operation_id: "op-mixed-2",
+            intent_comment_id: 9703,
+            resolution: "proved_not_submitted",
+            proof_comment_id: 9704,
+          },
+          {
+            operation_id: "op-mixed-3",
+            intent_comment_id: 9705,
+            resolution: "ambiguous_hold",
+          },
+        ],
+      },
+      anchor_comment_id: 9701,
+      head_sha: HEAD_SHA_1,
+    });
+    expect(mixedWithHold.status).toBe(409);
+    expect(mixedWithHold.body.diagnostic).toMatchObject({
+      code: "v6_lease_reconciliation_evidence_invalid",
+    });
+    expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
+
+    // Without the ambiguous_hold intent, mixed adopted_effect + proved_not_submitted succeeds to IDLE
+    provider.comments.delete(9705);
+    await store.putSlot({
+      ...(await store.getSlot(slotKey42))!,
+      state: "RECONCILING",
+      last_reason_code: null,
+    });
+    const mixedOk = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "adopted_missing_receipt",
+      reconciliation_evidence: {
+        old_generation: 1,
+        old_owner_comment_id: 9701,
+        intent_resolutions: [
+          {
+            operation_id: "op-mixed-1",
+            intent_comment_id: 9702,
+            resolution: "adopted_effect",
+            native_effect_kind: "pull_request_review",
+            native_effect_id: 5701,
+          },
+          {
+            operation_id: "op-mixed-2",
+            intent_comment_id: 9703,
+            resolution: "proved_not_submitted",
+            proof_comment_id: 9704,
+          },
+        ],
+      },
+      anchor_comment_id: 9701,
+      head_sha: HEAD_SHA_1,
+    });
+    expect(mixedOk.status).toBe(200);
+    expect(mixedOk.body.state).toBe("IDLE");
+  });
 });
 
 async function createSignedTestCredentials(claimsOverrides: Partial<OidcClaims> = {}) {

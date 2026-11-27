@@ -129,15 +129,31 @@ class RecoveryCompleted:
     intent_comment_id: int | None = None
     receipt_comment_id: int | None = None
     intent_record: WriteIntentRecord | None = None
+    reconciled_after_lost_write: bool = False
 
     def __post_init__(self) -> None:
         if type(
             self.model_calls_started
         ) is not int or self.model_calls_started not in (0, 1):
             raise ValueError("v6 recovery model_calls_started must be 0 or 1")
-        if self.reconciled_from_existing_effect and self.model_calls_started != 0:
+        if (
+            self.reconciled_after_lost_write
+            and not self.reconciled_from_existing_effect
+        ):
+            raise ValueError(
+                "reconciled_after_lost_write requires reconciled_from_existing_effect"
+            )
+        if (
+            self.reconciled_from_existing_effect
+            and not self.reconciled_after_lost_write
+            and self.model_calls_started != 0
+        ):
             raise ValueError(
                 "v6 recovery from existing effect must never start a fresh model call"
+            )
+        if self.reconciled_after_lost_write and self.model_calls_started > 1:
+            raise ValueError(
+                "v6 recovery after lost write must start at most one model call"
             )
 
 
@@ -2844,15 +2860,45 @@ class V6RecoveryEngine:
                 target_path=effect_path,
             )
 
-            rendered_body = (
-                f"ReviewSensei recovery publication ({len(pr_result.findings_payload)} finding(s)).\n"
-                f"{_effect_tag(request.operation_id, payload_sha256)}"
-            )
+            effect_tag = _effect_tag(request.operation_id, payload_sha256)
+            if (
+                len(pr_result.findings_payload) == 1
+                and isinstance(pr_result.findings_payload[0].get("review_body"), str)
+                and isinstance(pr_result.findings_payload[0].get("comments"), Sequence)
+                and not isinstance(
+                    pr_result.findings_payload[0].get("comments"),
+                    (str, bytes, bytearray),
+                )
+            ):
+                envelope = pr_result.findings_payload[0]
+                raw_review_body = str(envelope["review_body"]).rstrip()
+                rendered_body = (
+                    f"{raw_review_body}\n\n{effect_tag}"
+                    if effect_tag not in raw_review_body
+                    else raw_review_body
+                )
+                raw_event = envelope.get("event")
+                review_event = (
+                    raw_event
+                    if isinstance(raw_event, str)
+                    and raw_event in {"COMMENT", "REQUEST_CHANGES", "APPROVE"}
+                    else "COMMENT"
+                )
+                review_comments_payload = [dict(c) for c in envelope["comments"]]
+            else:
+                rendered_body = (
+                    f"ReviewSensei recovery publication ({len(pr_result.findings_payload)} finding(s)).\n"
+                    f"{effect_tag}"
+                )
+                review_event = "COMMENT"
+                review_comments_payload = [
+                    dict(entry) for entry in pr_result.findings_payload
+                ]
             effect_payload = {
                 "commit_id": request.ownership_proof.pr_head_sha,
-                "event": "COMMENT",
+                "event": review_event,
                 "body": rendered_body,
-                "comments": [dict(entry) for entry in pr_result.findings_payload],
+                "comments": review_comments_payload,
             }
 
             self.mutation_bound.consume(request.effect_endpoint_id, request.effect_kind)
@@ -2924,6 +2970,36 @@ class V6RecoveryEngine:
                     expected_operation_id=request.operation_id,
                     expected_payload_sha256=payload_sha256,
                 )
+            except (
+                _AmbiguousWriteOutcomeError,
+                TimeoutError,
+                ConnectionError,
+                GitHubHTTPTransientError,
+            ):
+                outcome_known, landed, verified_id, gets = (
+                    self._reconcile_effect_surface(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        expected_payload_sha256=payload_sha256,
+                        scanned_reviews=review_records,
+                        expected_head_sha=request.ownership_proof.pr_head_sha,
+                        rescan_before_verify=True,
+                    )
+                )
+                readback_gets += gets
+                if not outcome_known or not landed or verified_id is None:
+                    return self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        blocker="lost_write_outcome_unverified",
+                        missing_evidence=(
+                            f"effect_verification:{request.operation_id}:{payload_sha256}",
+                        ),
+                    )
+                effect_id = verified_id
+                reconciled_after_lost_write = True
             except GitHubHTTPError as http_err:
                 if (
                     not isinstance(
@@ -2971,36 +3047,6 @@ class V6RecoveryEngine:
                         zero_model_calls_started=True,
                     )
                 raise
-            except (
-                _AmbiguousWriteOutcomeError,
-                TimeoutError,
-                ConnectionError,
-                GitHubHTTPTransientError,
-            ):
-                outcome_known, landed, verified_id, gets = (
-                    self._reconcile_effect_surface(
-                        request=request,
-                        guard=guard,
-                        prior_hint=prior_hint,
-                        expected_payload_sha256=payload_sha256,
-                        scanned_reviews=review_records,
-                        expected_head_sha=request.ownership_proof.pr_head_sha,
-                        rescan_before_verify=True,
-                    )
-                )
-                readback_gets += gets
-                if not outcome_known or not landed or verified_id is None:
-                    return self._finalize_hold(
-                        request=request,
-                        guard=guard,
-                        prior_hint=prior_hint,
-                        blocker="lost_write_outcome_unverified",
-                        missing_evidence=(
-                            f"effect_verification:{request.operation_id}:{payload_sha256}",
-                        ),
-                    )
-                effect_id = verified_id
-                reconciled_after_lost_write = True
 
             try:
                 receipt, receipt_gets, receipt_cid = self._persist_completion_receipt(
@@ -3035,6 +3081,7 @@ class V6RecoveryEngine:
                 intent_comment_id=intent_cid,
                 receipt_comment_id=receipt_cid,
                 intent_record=current_intent,
+                reconciled_after_lost_write=reconciled_after_lost_write,
             )
         except _ThrottlePausedSignal as paused:
             return paused.outcome
