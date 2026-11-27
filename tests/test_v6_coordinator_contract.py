@@ -1,4 +1,4 @@
-"""Validation tests for the frozen v6 one-writer-per-PR contract and Phase 0-1 docs."""
+"""Validation tests for the frozen v6 one-writer-per-PR two-gate contract."""
 
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ EXPECTED_DIAGNOSTIC_CODES = frozenset(
         "v6_lease_unauthorized_tuple",
         "v6_lease_rollback_blocked",
         "v6_lease_mint_uncertain",
+        "v6_lease_reconciliation_evidence_invalid",
     }
 )
 
@@ -96,7 +97,7 @@ def _markdown_heading_anchors(content: str) -> set[str]:
 
 
 class V6CoordinatorContractTests(unittest.TestCase):
-    """Verify frozen Phase 1 contract, diagnostics catalog, and docs invariants."""
+    """Verify frozen Phase 1 two-gate contract, diagnostics catalog, and docs."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -170,7 +171,7 @@ class V6CoordinatorContractTests(unittest.TestCase):
         ):
             self.assertIsNone(pattern.fullmatch(bad), bad)
 
-    def test_state_machine_transitions_and_guards_are_complete(self) -> None:
+    def test_state_machine_two_gate_transitions_and_guards(self) -> None:
         states = tuple(self.contract["coordinator_states"])
         self.assertEqual(states, EXPECTED_STATES)
         transitions = self.contract["state_transitions"]
@@ -182,6 +183,11 @@ class V6CoordinatorContractTests(unittest.TestCase):
             for target in targets:
                 self.assertIn(target, states)
                 expected_edges.add(f"{state}->{target}")
+
+        # Gate 1 invariant: DRAINING must NEVER transition directly to IDLE.
+        self.assertEqual(transitions["DRAINING"], ["RECONCILING", "HOLD"])
+        self.assertNotIn("IDLE", transitions["DRAINING"])
+
         # HOLD cannot bypass reconciliation/release directly into ACTIVE or MINTING.
         self.assertNotIn("ACTIVE", transitions["HOLD"])
         self.assertNotIn("MINTING", transitions["HOLD"])
@@ -189,15 +195,19 @@ class V6CoordinatorContractTests(unittest.TestCase):
 
         rules = self.contract["transition_rules"]
         self.assertEqual(set(rules.keys()), expected_edges)
+        self.assertNotIn("DRAINING->IDLE", rules)
         for edge, spec in rules.items():
             self.assertTrue(spec["routes"], edge)
             for route in spec["routes"]:
                 self.assertIn(route, EXPECTED_ROUTES, edge)
             self.assertTrue(spec["guard"].strip(), edge)
+
         self.assertEqual(
             rules["RECONCILING->IDLE"]["routes"],
             ["/github/v6/lease/complete-reconcile"],
         )
+        self.assertIn("token_cleared", rules["RECONCILING->IDLE"]["guard"])
+        self.assertIn("reconciliation_evidence", rules["RECONCILING->IDLE"]["guard"])
         self.assertEqual(
             rules["HOLD->IDLE"]["routes"],
             ["/github/v6/lease/resolve-hold"],
@@ -215,6 +225,10 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertTrue(coord_never)
         self.assertEqual(coord_keep & coord_never, set())
         self.assertEqual(coord_keep, set(coord["slot_state_fields"].keys()))
+        self.assertIn("token_cleared", coord_keep)
+        self.assertIn("acquired_at_ms", coord_keep)
+        self.assertEqual(coord["slot_state_fields"]["token_cleared"], "boolean")
+        self.assertEqual(coord["slot_state_fields"]["acquired_at_ms"], "integer|null")
         for banned in (
             "github_app_private_key",
             "reviewsensei_signing_key",
@@ -249,10 +263,12 @@ class V6CoordinatorContractTests(unittest.TestCase):
 
         all_schema_fields = set()
         for entry in ledger["record_schemas"].values():
-            all_schema_fields.update(entry["required_fields"])
-            self.assertEqual(
-                set(entry["required_fields"]), set(entry["properties"].keys())
-            )
+            props = set(entry["properties"].keys())
+            reqs = set(entry["required_fields"])
+            opts = set(entry.get("optional_fields", ()))
+            self.assertTrue(reqs.issubset(props))
+            self.assertEqual(reqs | opts, props)
+            all_schema_fields.update(props)
         self.assertEqual(ledger_keep, all_schema_fields)
 
     def test_pr_ledger_schemas_and_marker_comment_safety(self) -> None:
@@ -266,11 +282,43 @@ class V6CoordinatorContractTests(unittest.TestCase):
         schemas = ledger["record_schemas"]
         self.assertEqual(
             set(schemas.keys()),
-            {"owner", "intent", "receipt", "hold", "unresolved", "progress"},
+            {
+                "owner",
+                "intent",
+                "receipt",
+                "non_submission",
+                "hold",
+                "unresolved",
+                "progress",
+            },
         )
         self.assertEqual(schemas["owner"]["schema"], "reviewsensei:v6:owner:v1")
+        self.assertEqual(
+            schemas["non_submission"]["schema"], "reviewsensei:v6:non-submission:v1"
+        )
+        self.assertEqual(
+            schemas["non_submission"]["required_fields"],
+            [
+                "schema",
+                "record_id",
+                "slot_key",
+                "generation",
+                "operation_id",
+                "pr_head_sha",
+                "proof_kind",
+                "payload_sha256",
+                "recorded_at",
+            ],
+        )
+        self.assertEqual(
+            schemas["non_submission"]["proof_kinds"],
+            ["definitive_github_rejection", "pre_dispatch_terminal_abort"],
+        )
         self.assertEqual(schemas["hold"]["schema"], "reviewsensei:v6:hold:v1")
         self.assertEqual(schemas["intent"]["schema"], INTENT_SCHEMA)
+        self.assertEqual(
+            schemas["intent"]["optional_fields"], ["generation", "target_location"]
+        )
         self.assertEqual(schemas["receipt"]["schema"], RECEIPT_SCHEMA)
         self.assertEqual(schemas["unresolved"]["schema"], UNRESOLVED_RESULT_SCHEMA)
         self.assertEqual(schemas["progress"]["schema"], PROGRESS_HINT_SCHEMA)
@@ -350,7 +398,8 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertEqual(revocation["endpoint"], "DELETE /installation/token")
         self.assertEqual(revocation["clock_margin_ms_default"], 300000)
         outcomes = revocation["outcomes"]
-        self.assertEqual(outcomes["http_204"]["next_state"], "IDLE")
+        self.assertEqual(outcomes["http_204"]["next_state"], "RECONCILING")
+        self.assertTrue(outcomes["http_204"]["sets_token_cleared"])
         self.assertEqual(outcomes["http_401"]["null_expiry_next_state"], "HOLD")
         self.assertEqual(
             outcomes["http_401"]["null_expiry_diagnostic"], "v6_lease_escrow_lost"
@@ -358,6 +407,12 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertIn(
             "clock_margin_ms", outcomes["http_401"]["expiry_fallback_condition"]
         )
+        self.assertEqual(outcomes["http_401"]["next_state_after_expiry"], "RECONCILING")
+        self.assertTrue(outcomes["http_401"]["sets_token_cleared_after_expiry"])
+        self.assertEqual(
+            outcomes["http_401"]["next_state_before_expiry"], "RECONCILING"
+        )
+        self.assertFalse(outcomes["http_401"]["sets_token_cleared_before_expiry"])
         self.assertTrue(
             outcomes["http_429_or_ratelimit_403"]["requires_rate_limit_indicator"]
         )
@@ -382,15 +437,39 @@ class V6CoordinatorContractTests(unittest.TestCase):
             for code in spec["reason_codes"]:
                 self.assertIn(code, self.diagnostics, f"{route}: {code}")
 
+        for route in (
+            "/github/v6/lease/drain",
+            "/github/v6/lease/release",
+            "/github/v6/lease/status",
+        ):
+            self.assertIn("token_cleared", routes[route]["response_fields"]["success"])
+
         self.assertEqual(
             routes["/github/v6/lease/release"]["allowed_states"], ["ACTIVE"]
         )
+        reconcile = routes["/github/v6/lease/complete-reconcile"]
+        self.assertIn(
+            "reconciliation_evidence", reconcile["request_fields"]["required"]
+        )
         self.assertEqual(
-            routes["/github/v6/lease/complete-reconcile"]["reconciliation_outcomes"],
-            {
-                "terminal": ["adopted", "proved_not_submitted"],
-                "non_terminal": ["ambiguous_hold", "incomplete"],
-            },
+            reconcile["reconciliation_outcomes"],
+            [
+                "clean_receipts",
+                "adopted_missing_receipt",
+                "proved_not_submitted",
+                "ambiguous_hold",
+                "incomplete",
+            ],
+        )
+        self.assertIn(
+            "v6_lease_reconciliation_evidence_invalid", reconcile["reason_codes"]
+        )
+        self.assertTrue(
+            reconcile["worker_independent_verification"]["zero_worker_pr_writes"]
+        )
+        self.assertIn(
+            "v6_lease_reconciliation_evidence_invalid",
+            routes["/github/v6/lease/resolve-hold"]["reason_codes"],
         )
         self.assertEqual(
             routes["/github/v6/lease/resolve-hold"]["resolution_kinds"],
@@ -402,6 +481,7 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertEqual(absent["state"], "IDLE")
         self.assertEqual(absent["generation"], 0)
         self.assertEqual(absent["lease_epoch"], 0)
+        self.assertIs(absent["token_cleared"], False)
         absent_fields = set(absent.keys()) - {"status"}
         self.assertEqual(absent_fields, set(status_route["response_fields"]["success"]))
         for nullable_key in absent_fields - {
@@ -409,6 +489,7 @@ class V6CoordinatorContractTests(unittest.TestCase):
             "state",
             "generation",
             "lease_epoch",
+            "token_cleared",
         }:
             self.assertIsNone(absent[nullable_key], nullable_key)
 
@@ -460,6 +541,14 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertEqual(
             self.diagnostics["v6_lease_clock_untrusted"]["action"], "reconcile_slot"
         )
+        self.assertEqual(
+            self.diagnostics["v6_lease_reconciliation_evidence_invalid"]["stage"],
+            "v6_reconcile",
+        )
+        self.assertEqual(
+            self.diagnostics["v6_lease_reconciliation_evidence_invalid"]["action"],
+            "reconcile_slot",
+        )
 
     def test_blockers_and_doc_links_are_valid(self) -> None:
         blockers = self.contract["blockers"]
@@ -489,9 +578,9 @@ class V6CoordinatorContractTests(unittest.TestCase):
             self.assertNotIn("file://", content)
             self.assertNotIn("/Users/", content)
             expected_phrase = (
-                "15 Codes: 1 Pilot Code + 14"
+                "16 Codes: 1 Pilot Code + 15"
                 if doc_path == PROPOSAL_PATH
-                else "15 sanitized diagnostic codes"
+                else "16 sanitized diagnostic codes"
             )
             self.assertIn(expected_phrase, content)
             for target in link_pattern.findall(content):

@@ -1,0 +1,203 @@
+name: ReviewSensei v6 pilot runner
+
+# Opt-in callable workflow for ReviewSensei v6 per-PR coordinator recovery.
+# Never referenced by v5 callers (review-sensei-review.yml / setup-v5).
+#
+# Security & isolation invariants:
+#  * Read-only GITHUB_TOKEN scopes plus id-token: write only.
+#  * Never checks out pull-request head code, actions, or config in the write job.
+#  * Rejects fork-controlled pull requests before any OIDC/coordinator call.
+#  * Pins every third-party Action to an exact 40-hex commit SHA + release tag.
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      repository_id:
+        required: true
+        type: string
+      pull_request_number:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      head_repository:
+        required: false
+        default: ''
+        type: string
+      operation_id:
+        required: false
+        default: ''
+        type: string
+      event:
+        required: false
+        default: pull_request
+        type: string
+      effect_kind:
+        required: false
+        default: pr_review_publish
+        type: string
+    secrets:
+      OLLAMA_API_KEY:
+        required: false
+      OPENROUTER_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  checks: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: reviewsensei-v6-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  v6-pilot:
+    if: >-
+      (github.event_name != 'pull_request' ||
+       (github.event.pull_request.draft != true &&
+        github.event.pull_request.head.repo.fork != true &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Validate trusted v6 inputs and reject fork head execution
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+          EVENT_KIND: ${{ inputs.event }}
+          EFFECT_KIND: ${{ inputs.effect_kind }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo '::error::repository input is invalid' >&2
+            exit 1
+          fi
+          if [[ -n "$HEAD_REPOSITORY" && "$HEAD_REPOSITORY" != "$REPOSITORY" ]]; then
+            echo '::error::v6 pilot refuses fork/untrusted head repository execution in write job' >&2
+            exit 1
+          fi
+          if [[ ! "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::repository_id must be a positive decimal integer' >&2
+            exit 1
+          fi
+          if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::pull_request_number must be a positive decimal integer' >&2
+            exit 1
+          fi
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::head_sha must be a 40-hex SHA-1' >&2
+            exit 1
+          fi
+          case "$EVENT_KIND" in
+            pull_request|issue_comment|workflow_dispatch) ;;
+            *) echo '::error::unsupported v6 event input' >&2; exit 1 ;;
+          esac
+          if [[ -n "$OPERATION_ID" && ! "$OPERATION_ID" =~ ^[A-Za-z0-9._:/-]{1,128}$ ]]; then
+            echo '::error::operation_id contains unsupported characters' >&2
+            exit 1
+          fi
+          if [[ ! "$EFFECT_KIND" =~ ^[a-z0-9_]{1,64}$ ]]; then
+            echo '::error::effect_kind is invalid' >&2
+            exit 1
+          fi
+
+      - name: Check out trusted default-branch policy only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted-policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Install verified ReviewSensei runtime
+        env:
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::workflow SHA is invalid' >&2
+            exit 1
+          fi
+          source_dir="$RUNNER_TEMP/review-sensei-v6-source"
+          rm -rf "$source_dir"
+          git init --bare "$source_dir"
+          git --git-dir="$source_dir" fetch --depth=1 \
+            https://github.com/malsabbagh/review-sensei.git \
+            "$REVIEW_SENSEI_WORKFLOW_SHA"
+          object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
+          if [[ "$object_type" == "tag" ]]; then
+            workflow_commit="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
+          elif [[ "$object_type" == "commit" ]]; then
+            workflow_commit="$REVIEW_SENSEI_WORKFLOW_SHA"
+          else
+            echo '::error::workflow SHA must resolve to a commit or annotated tag' >&2
+            exit 1
+          fi
+          package_version="$(git --git-dir="$source_dir" show "$workflow_commit:pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*$/\1/p' | head -n 1)"
+          github_version="$(git --git-dir="$source_dir" show "$workflow_commit:packages/python/review-sensei-github/pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*$/\1/p' | head -n 1)"
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$github_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo '::error::workflow commit does not declare exact package versions' >&2
+            exit 1
+          fi
+          python -m venv "$RUNNER_TEMP/review-sensei-v6-venv"
+          python_bin="$RUNNER_TEMP/review-sensei-v6-venv/bin/python"
+          "$python_bin" -m pip install --disable-pip-version-check --upgrade pip
+          "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$package_version"
+          if ! "$python_bin" -m pip install --disable-pip-version-check "review-sensei-github==$github_version"; then
+            "$python_bin" -m pip install --disable-pip-version-check --no-deps \
+              "git+https://github.com/malsabbagh/review-sensei.git@$workflow_commit#subdirectory=packages/python/review-sensei-github"
+          fi
+          "$python_bin" -m pip check
+
+      - name: Run v6 one-writer-per-PR pilot recovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+          EVENT_KIND: ${{ inputs.event }}
+          EFFECT_KIND: ${{ inputs.effect_kind }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          args=(
+            v6-pilot-run
+            --repository "$REPOSITORY"
+            --repository-id "$REPOSITORY_ID"
+            --pull-request "$PULL_REQUEST"
+            --head-sha "$HEAD_SHA"
+            --event "$EVENT_KIND"
+            --effect-kind "$EFFECT_KIND"
+            --workflow-sha "$REVIEW_SENSEI_WORKFLOW_SHA"
+            --outcome "$RUNNER_TEMP/v6-pilot-outcome.json"
+          )
+          if [[ -n "$OPERATION_ID" ]]; then
+            args+=(--operation-id "$OPERATION_ID")
+          fi
+          "$RUNNER_TEMP/review-sensei-v6-venv/bin/review-sensei-github" "${args[@]}"
