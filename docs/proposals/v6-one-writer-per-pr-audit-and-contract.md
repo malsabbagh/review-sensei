@@ -45,12 +45,16 @@ Every external write emitted by the ReviewSensei GitHub writer (`packages/python
 
 *(Read-only broker capabilities `review_status` (`contents: read, pull_requests: read`) and `review_actions` (`actions: read`) emit zero mutations.)*
 
-### 1.4 Pilot Isolation & GitHub Installation-Token Boundary
+### 1.4 Pilot Isolation, Rollback Invariant & GitHub Installation-Token Boundary
 
 1. **Channel isolation:** `PUBLIC_WORKFLOW_TAG` stays pinned to `v5` (`40b4f52f`). Non-pilot repositories continue executing `review-sensei-run.yml@v5` against `POST /github/token` unchanged.
 2. **Hard v5 writer block for pilots:** Any repository present in `V6_PILOT_REPOSITORIES` is rejected by v5 `TokenBroker.exchange` with sanitized diagnostic `broker_v6_pilot_v5_writer_disabled` so a v5 runner and a v6 runner can never hold active write tokens for the same PR simultaneously.
 3. **Pre-admission 1-hour drain:** Because GitHub installation tokens have up to a 60-minute lifetime, a repository newly added to `V6_PILOT_REPOSITORIES` must complete a 1-hour (`3600` seconds) drain window (with zero v5 writer tokens issued) before any v6 coordinator lease is admitted.
-4. **GitHub token scoping caveat:** GitHub scopes installation access tokens to `(repository, permissions)` — **not** to a single pull request number. Therefore, the `v6-pr:...` slot key is a **ReviewSensei coordination invariant** that relies on:
+4. **Ordered `v6 -> v5` rollback invariant:** To roll back a pilot repository cleanly without v5/v6 token overlap:
+   1. Add the repository to `V6_PILOT_ROLLBACK_REPOSITORIES` first to block all new v6 lease acquisitions (`IDLE -> RESERVED`) immediately.
+   2. Drain and reconcile every active, draining, or reconciling slot for that repository until all slots are `IDLE` with zero unresolved `HOLD` obligations.
+   3. Only once every slot is `IDLE` and free of `HOLD` obligations, remove the repository from `V6_PILOT_REPOSITORIES` and `V6_PILOT_ROLLBACK_REPOSITORIES`, re-enabling `v5` `TokenBroker.exchange`.
+5. **GitHub token scoping caveat:** GitHub scopes installation access tokens to `(repository, permissions)` — **not** to a single pull request number. Therefore, the `v6-pr:...` slot key is a **ReviewSensei coordination boundary** (not a GitHub-enforced per-PR token restriction) that relies on:
    - trusted, tag/SHA-pinned v6 reusable workflow and package code,
    - zero independent write credentials (no App private key or PAT on runners), and
    - strict fork-PR isolation (fork PRs never execute PR-controlled code, actions, or config in any job holding OIDC or write capabilities).
@@ -71,8 +75,8 @@ The Worker verifies every lease operation independently without adding GitHub Ap
 
 | Blocker ID | Blocker | Phase 0 Status | Required Closure |
 | --- | --- | --- | --- |
-| `callable_v6_workflow` | Callable v6 reusable & caller workflow | `OPEN` | Published pinned v6 workflow preserving fork/policy isolation and `actions: read`/`checks: read` read-only token split |
-| `fenced_issuance` | Fenced per-PR coordinator issuance | `OPEN` | `V6PrCoordinator` Durable Object + `/github/v6/lease/*` routes + escrow/revocation tests |
+| `callable_v6_workflow` | Callable v6 workflow | `OPEN` | Published pinned v6 workflow preserving fork/policy isolation and `actions: read`/`checks: read` read-only token split |
+| `fenced_issuance` | Fenced issuance | `OPEN` | `V6PrCoordinator` Durable Object + `/github/v6/lease/*` routes + escrow/revocation tests |
 | `reproducible_ambiguous_write_recovery` | Reproducible ambiguous-write recovery | `OPEN` | Deterministic reconcile-before-retry and artifact-free recovery on lost/timeout writes |
 | `opt_in_github_qualification` | Opt-in GitHub qualification | `OPEN` | End-to-end live pilot verification against all Phase 4 gates before expanding beyond pilot |
 
@@ -88,14 +92,21 @@ Every PR coordination slot is identified by:
 v6-pr:{host}:{app_id}:{installation_id}:{base_repo_id}:{pr_number}
 ```
 
-- Regex: `^v6-pr:[a-z0-9.-]+:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$`
-- Example: `v6-pr:github.com:12345:67890:987654321:42`
+- **Host canonicalization:** `host` MUST be normalized to a lowercase ASCII hostname with no port, path, or whitespace before constructing `slot_key` (e.g., `github.com`, `api.github.example.com`).
+- **Regex:** `^v6-pr:[a-z0-9.-]+:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$`
+- **Example:** `v6-pr:github.com:12345:67890:987654321:42`
 
 ### 2.2 Two-Records Separation: Keep vs. Never-Keep
 
 #### A. PR Ledger (`reviewsensei:v6:record`) — Sole Durable Recovery Ledger
 
-All durable PR recovery state lives in App-authored PR HTML comment markers (`<!-- reviewsensei:v6:record sha256=<64-hex> payload=<canonical-json> -->`):
+All durable PR recovery state lives in App-authored PR HTML comment markers:
+
+```text
+<!-- reviewsensei:v6:record sha256={sha256_hex} payload={canonical_json} -->
+```
+
+- **Marker safety & size ceiling:** Encoded markers MUST be `<= 65536` UTF-8 bytes (`max_encoded_bytes: 65536`). `canonical_json` MUST escape `<` as `\u003c` and `>` as `\u003e` so literal `-->` and `<!--` can never appear inside `payload`; trailing ` -->` is the sole allowed terminator, and parsers MUST reject any embedded `-->` or `<!--`. SHA-256 is computed over the canonical JSON of the decoded record (`v6_recovery_ledger.py` already escapes `<`/`>` and rejects `-->`; strict `<!--` rejection and the 64 KiB cap are enforced alongside Owner C's runner updates).
 
 | Record Type | Schema ID | Purpose & Required Fields |
 | --- | --- | --- |
@@ -116,44 +127,72 @@ All durable PR recovery state lives in App-authored PR HTML comment markers (`<!
 
 - **Persisted Slot State Schema:**
   - `slot_key` (`string`), `state` (`IDLE | RESERVED | MINTING | ACTIVE | DRAINING | RECONCILING | HOLD`), `generation` (`integer >= 0`), `lease_epoch` (`integer >= 0`), `reservation_id` (`string | null`), `owner_run_id` (`string | null`), `owner_run_attempt` (`integer | null`), `owner_head_sha` (`sha1_hex40 | null`), `owner_workflow_sha` (`sha1_hex40 | null`), `owner_job` (`string | null`), `owner_comment_id` (`integer | null`), `owner_record_sha256` (`sha256_hex64 | null`), `token_expires_at_ms` (`integer | null`), `clock_margin_ms` (`integer`, default `300000`), `encrypted_escrow` (`object | null`), `last_reason_code` (`diagnostic_code | null`), `updated_at_ms` (`integer >= 0`).
-- **Encrypted Escrow Format:**
-  - KDF: `HKDF-SHA256` derived from `REVIEWSENSEI_SIGNING_KEY` (`salt`: `"v6-pr-coordinator-escrow-v1"`, `info`: `"reviewsensei:v6:token-escrow:v1"`).
-  - Cipher: `AES-GCM-256` with fresh 12-byte random IV per encryption (`iv_b64`, `ciphertext_b64`).
-  - AAD: canonical UTF-8 JSON `{slot_key, generation, reservation_id}` (sorted keys).
+- **Cryptographic Key Derivation & Domain Separation:**
+  - Both subkeys derive from `REVIEWSENSEI_SIGNING_KEY` via `HKDF-SHA256` using **distinct domain-separation `salt` and `info` values**:
+    - **Token escrow (`AES-GCM-256`):** `salt = "v6-pr-coordinator-escrow-v1"`, `info = "reviewsensei:v6:token-escrow:v1"`, fresh 12-byte random IV per encryption (`iv_b64`, `ciphertext_b64`), and AAD = canonical UTF-8 JSON `{slot_key, generation, reservation_id}` (sorted keys).
+    - **Owner anchor attestation (`HMAC-SHA256`):** `salt = "v6-pr-coordinator-owner-attestation-v1"`, `info = "reviewsensei:v6:owner-attestation:v1"`.
+- **Signing Key Rotation Procedure:**
+  - To rotate `REVIEWSENSEI_SIGNING_KEY`: quiesce acquisitions (via `V6_PILOT_ROLLBACK_REPOSITORIES` or admission hold), drain or expire all active slots to `IDLE` or `HOLD`, and then rotate the secret. Any leftover ciphertext encrypted under the old key fails closed to `HOLD` with `v6_lease_escrow_lost` until `token_expires_at_ms + clock_margin_ms` elapses.
 - **Clock Safety Margin:** `clock_margin_ms = 300000` (5 minutes).
 
 | Coordinator Keep | Coordinator Never-Keep |
 | --- | --- |
 | `slot_key`, `state`, `generation`, `lease_epoch`, `reservation_id`, `owner_*` metadata, `token_expires_at_ms`, `clock_margin_ms`, `encrypted_escrow` (AES-GCM-256 ciphertext), `last_reason_code`, `updated_at_ms` | `github_app_private_key`, `reviewsensei_signing_key`, `raw_aes_key`, `oidc_token`, `plaintext_installation_token`, `workflow_github_token`, `provider_api_key`, `ollama_api_key`, `openrouter_api_key`, `openai_api_key`, `pr_diff`, `source_file_contents`, `review_comment_body`, `model_response`, `raw_github_error_body` |
 
-### 2.3 State Machine & `DELETE /installation/token` Revocation Rules
+### 2.3 State Machine, Transition Guards & `DELETE /installation/token` Revocation Rules
 
-- **Allowed transitions:**
-  - `IDLE` → `RESERVED`
-  - `RESERVED` → `MINTING` | `IDLE`
-  - `MINTING` → `ACTIVE` | `RECONCILING` | `HOLD` | `IDLE`
-  - `ACTIVE` → `DRAINING` | `RECONCILING` | `HOLD`
-  - `DRAINING` → `IDLE` | `RECONCILING` | `HOLD`
-  - `RECONCILING` → `DRAINING` | `IDLE` | `HOLD`
-  - `HOLD` → `RECONCILING` | `IDLE`
+- **Allowed transitions and strict guards:**
+  - `IDLE → RESERVED`: Only via `/github/v6/lease/acquire` after independent proof checks pass and the repository is not in `V6_PILOT_ROLLBACK_REPOSITORIES`.
+  - `RESERVED → MINTING` | `IDLE`: Inside `/github/v6/lease/acquire` (`MINTING` persisted durably prior to calling `access_tokens`; `IDLE` if aborted pre-mint).
+  - `MINTING → ACTIVE` | `RECONCILING` | `HOLD` | `IDLE`: `ACTIVE` on verified mint + escrow persistence; `RECONCILING` on uncertain timeout/`5xx` (`v6_lease_mint_uncertain`); `HOLD` on escrow encryption/storage failure; `IDLE` only on deterministic `4xx` pre-issuance rejection.
+  - `ACTIVE → DRAINING` | `RECONCILING` | `HOLD`: `/github/v6/lease/release` is valid **only** in `ACTIVE` for the matching verified owner (`slot_key`, `generation`, `lease_epoch`, `reservation_id`); calling `/release` in any non-`ACTIVE` state fails closed with HTTP `409`. `/drain` initiates revocation on takeover or head change.
+  - `DRAINING → IDLE` | `RECONCILING` | `HOLD`: Transitions per the `DELETE /installation/token` outcome rules below.
+  - `RECONCILING → IDLE`: Valid **only** via `/github/v6/lease/complete-reconcile` when `reconciliation_outcome` is terminal (`"adopted"` or `"proved_not_submitted"`) **and** credential clearance (`204` or verified expiry past `token_expires_at_ms + clock_margin_ms`) is already confirmed.
+  - `RECONCILING → HOLD`: Via `/github/v6/lease/complete-reconcile` when `reconciliation_outcome` is non-terminal (`"ambiguous_hold"` or `"incomplete"`), or on conflicting records/escrow loss/unproved continuity; **never** clears obligations or advances generation.
+  - `RECONCILING → DRAINING`: When reconciliation discovers an unrevoked escrowed token whose expiry + `clock_margin_ms` has not elapsed.
+  - `HOLD → IDLE` | `RECONCILING`: Valid **only** via `/github/v6/lease/resolve-hold` with confirmed credential clearance and verified named proof (`"reconciled_clean"` → `IDLE`, or `"enter_reconcile"` → read-only `RECONCILING`), never an unconditional bypass, preventing `RECONCILING ↔ HOLD` oscillation.
+
 - **Revocation rules (`DELETE /installation/token`):**
   - **HTTP `204`:** Revocation confirmed → clear escrow and transition `DRAINING` → `IDLE`.
-  - **HTTP `401`:** Token already invalid/expired. Transition `DRAINING` → `IDLE` **only** if `now_ms >= token_expires_at_ms + clock_margin_ms`; otherwise transition to `RECONCILING` with `v6_lease_revocation_uncertain`.
+  - **HTTP `401`:**
+    - **Null/invalid expiry guard:** If `token_expires_at_ms` is `null` or not a positive finite integer `> 0`, **never** compare against `null`/`0` as expired; fail closed to `HOLD` with `v6_lease_escrow_lost` and preserve slot uncertainty.
+    - Otherwise, transition `DRAINING` → `IDLE` **only** if `now_ms >= token_expires_at_ms + clock_margin_ms`; if before `token_expires_at_ms + clock_margin_ms`, transition to `RECONCILING` with `v6_lease_revocation_uncertain`.
   - **HTTP `429` or rate-limit `403`** (explicit rate-limit header/body indicator): Distinct from permission `403`. Execute bounded retry/reset backoff; if exhausted, transition to `RECONCILING` with `v6_lease_revocation_uncertain`.
   - **Permission `403`** (no rate-limit indicator): Fail closed immediately with no retry → transition to `HOLD` with `v6_lease_revocation_uncertain`.
+  - **HTTP `other 4xx`** (`400..499` excluding `401`, `403`, `429`, e.g., `404`, `410`, `422`): Fail closed immediately with no retry, preserve escrow, and transition to `HOLD` with `v6_lease_revocation_uncertain`.
   - **HTTP `5xx` or timeout:** Execute bounded retry within request lifetime; if exhausted without `204`, transition to `RECONCILING` with `v6_lease_revocation_uncertain` (never treat an uncertain timeout as revoked).
 
-### 2.4 Frozen HTTP Wire Endpoints & Sanitized Reason Codes
+### 2.4 Frozen HTTP Wire Endpoints
 
 All six coordinator endpoints require `POST`, `Content-Length`, non-CORS requests, and verified GitHub Actions OIDC identity:
 
-| Endpoint | Required Request Fields | Optional Request Fields | Success Response Fields (`200`) | Sanitized Reason Codes |
+| Endpoint | Required Request Fields | Optional Request Fields | Success Response Fields (`200`) | Error Statuses & Sanitized Reason Codes |
 | --- | --- | --- | --- | --- |
-| `/github/v6/lease/acquire` | `oidc_token`, `pull_request`, `head_sha`, `capabilities` | `operation_id`, `predecessor_anchor_comment_id`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `reservation_id`, `token`, `token_expires_at_ms`, `app_id`, `installation_id`, `base_repo_id`, `pull_request`, `head_sha`, `coordinator_attestation_mac` | `v6_lease_reserved`, `v6_lease_active_other_owner`, `v6_lease_draining`, `v6_lease_reconciling`, `v6_lease_hold`, `v6_lease_head_changed`, `v6_lease_predecessor_not_terminal`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked`, `v6_lease_mint_uncertain` |
-| `/github/v6/lease/drain` | `oidc_token`, `slot_key` | `expected_generation`, `expected_lease_epoch`, `predecessor_anchor_comment_id`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `revocation_status` | `v6_lease_active_other_owner`, `v6_lease_draining`, `v6_lease_reconciling`, `v6_lease_hold`, `v6_lease_predecessor_not_terminal`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
-| `/github/v6/lease/complete-reconcile` | `oidc_token`, `slot_key`, `generation`, `reconciliation_outcome` | `anchor_comment_id`, `head_sha`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch` | `v6_lease_hold`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
-| `/github/v6/lease/release` | `oidc_token`, `slot_key`, `generation`, `lease_epoch`, `reservation_id` | `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `revocation_status` | `v6_lease_active_other_owner`, `v6_lease_draining`, `v6_lease_reconciling`, `v6_lease_hold`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
-| `/github/v6/lease/status` | `oidc_token`, `pull_request` | `slot_key`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `owner_run_id`, `owner_run_attempt`, `owner_head_sha`, `token_expires_at_ms`, `last_reason_code`, `updated_at_ms` | `v6_lease_unauthorized_tuple` |
-| `/github/v6/lease/resolve-hold` | `oidc_token`, `slot_key`, `generation`, `hold_record_comment_id`, `resolution_kind` | `anchor_comment_id`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch` | `v6_lease_hold`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
+| `/github/v6/lease/acquire` | `oidc_token`, `pull_request`, `head_sha`, `capabilities` | `operation_id`, `predecessor_anchor_comment_id`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `reservation_id`, `token`, `token_expires_at_ms`, `app_id`, `installation_id`, `base_repo_id`, `pull_request`, `head_sha`, `coordinator_attestation_mac` | `400, 403, 409, 411, 413, 429, 503`: `v6_lease_reserved`, `v6_lease_active_other_owner`, `v6_lease_draining`, `v6_lease_reconciling`, `v6_lease_hold`, `v6_lease_head_changed`, `v6_lease_predecessor_not_terminal`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked`, `v6_lease_mint_uncertain` |
+| `/github/v6/lease/drain` | `oidc_token`, `slot_key` | `expected_generation`, `expected_lease_epoch`, `predecessor_anchor_comment_id`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `revocation_status` | `400, 403, 409, 411, 413, 429, 503`: `v6_lease_active_other_owner`, `v6_lease_draining`, `v6_lease_reconciling`, `v6_lease_hold`, `v6_lease_predecessor_not_terminal`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
+| `/github/v6/lease/complete-reconcile` | `oidc_token`, `slot_key`, `generation`, `reconciliation_outcome` (`adopted` \| `proved_not_submitted` \| `ambiguous_hold` \| `incomplete`) | `anchor_comment_id`, `head_sha`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch` | `400, 403, 409, 411, 413, 429, 503`: `v6_lease_hold`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
+| `/github/v6/lease/release` | `oidc_token`, `slot_key`, `generation`, `lease_epoch`, `reservation_id` *(valid only in `ACTIVE`)* | `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `revocation_status` | `400, 403, 409, 411, 413, 429, 503`: `v6_lease_reserved`, `v6_lease_mint_uncertain`, `v6_lease_active_other_owner`, `v6_lease_draining`, `v6_lease_reconciling`, `v6_lease_hold`, `v6_lease_revocation_uncertain`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
+| `/github/v6/lease/status` | `oidc_token`, `pull_request` | `slot_key`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch`, `reservation_id`, `owner_run_id`, `owner_run_attempt`, `owner_head_sha`, `owner_workflow_sha`, `owner_job`, `owner_comment_id`, `owner_record_sha256`, `token_expires_at_ms`, `last_reason_code`, `updated_at_ms` *(if no slot row exists yet, returns synthesized `200` view with `state: "IDLE"`, `generation: 0`, `lease_epoch: 0`, and `null` for all `reservation_id`, `owner_*`, `token_expires_at_ms`, `last_reason_code`, `updated_at_ms`)* | `400, 403, 411, 413, 429, 503`: `v6_lease_unauthorized_tuple` |
+| `/github/v6/lease/resolve-hold` | `oidc_token`, `slot_key`, `generation`, `hold_record_comment_id`, `resolution_kind` (`reconciled_clean` \| `enter_reconcile`) | `anchor_comment_id`, `control_budget` | `slot_key`, `state`, `generation`, `lease_epoch` | `400, 403, 409, 411, 413, 429, 503`: `v6_lease_hold`, `v6_lease_escrow_lost`, `v6_lease_clock_untrusted`, `v6_lease_slot_continuity_unproved`, `v6_lease_unauthorized_tuple`, `v6_lease_rollback_blocked` |
 
-All 15 diagnostic codes (`broker_v6_pilot_v5_writer_disabled` plus the 14 `v6_lease_*` codes) are frozen in [broker-diagnostics.json](../../src/review_sensei/schemas/broker-diagnostics.json) and [v6-coordinator-contract.json](../../src/review_sensei/schemas/v6-coordinator-contract.json).
+### 2.5 Sanitized Diagnostic Catalog (15 Codes: 1 Pilot Code + 14 `v6_lease_*` Codes)
+
+All 15 diagnostic codes are frozen in [broker-diagnostics.json](../../src/review_sensei/schemas/broker-diagnostics.json) and [v6-coordinator-contract.json](../../src/review_sensei/schemas/v6-coordinator-contract.json):
+
+| # | Diagnostic Code | Stage | Action | Scope |
+| --- | --- | --- | --- | --- |
+| 1 | `broker_v6_pilot_v5_writer_disabled` | `pilot_isolation` | `check_workflow` | v5 `TokenBroker.exchange` refusal for `V6_PILOT_REPOSITORIES` |
+| 2 | `v6_lease_reserved` | `v6_lease` | `retry_later` | Slot currently in `RESERVED` |
+| 3 | `v6_lease_active_other_owner` | `v6_lease` | `inspect_owner` | Active lease owned by a different run/attempt |
+| 4 | `v6_lease_draining` | `v6_lease` | `retry_later` | Slot currently in `DRAINING` |
+| 5 | `v6_lease_reconciling` | `v6_lease` | `reconcile_slot` | Slot currently in `RECONCILING` |
+| 6 | `v6_lease_hold` | `v6_hold` | `resolve_hold` | Slot currently in `HOLD` |
+| 7 | `v6_lease_head_changed` | `v6_lease` | `reanchor_head` | Live PR head SHA differs from requested lease head |
+| 8 | `v6_lease_predecessor_not_terminal` | `v6_lease` | `wait_predecessor` | Predecessor run/attempt not yet completed on GitHub Actions |
+| 9 | `v6_lease_revocation_uncertain` | `v6_revocation` | `reconcile_slot` | `DELETE /installation/token` not confirmed before expiry |
+| 10 | `v6_lease_escrow_lost` | `v6_hold` | `reconcile_slot` | Encrypted escrow missing/undecryptable or `401` with `null` expiry |
+| 11 | `v6_lease_clock_untrusted` | `v6_hold` | `reconcile_slot` | Clock or expiry margin integrity unverified |
+| 12 | `v6_lease_slot_continuity_unproved` | `v6_hold` | `reconcile_slot` | O(1) PR ledger anchor verification failed |
+| 13 | `v6_lease_unauthorized_tuple` | `v6_authorization` | `check_workflow` | OIDC workflow/repo/event/runner tuple rejected |
+| 14 | `v6_lease_rollback_blocked` | `v6_authorization` | `check_workflow` | Stale generation/epoch or `V6_PILOT_ROLLBACK_REPOSITORIES` block |
+| 15 | `v6_lease_mint_uncertain` | `v6_issuance` | `reconcile_slot` | Uncertain `access_tokens` mint outcome |

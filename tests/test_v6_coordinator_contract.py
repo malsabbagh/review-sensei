@@ -18,10 +18,13 @@ from review_sensei_github.v6_recovery_ledger import (
     CompletionReceiptRecord,
     UnresolvedResultRecord,
     WriteIntentRecord,
+    format_v6_record_marker,
+    parse_v6_record_marker,
     record_to_dict,
 )
 
 from review_sensei.broker_diagnostics import BrokerDiagnostic, parse_broker_diagnostic
+from review_sensei.errors import ReviewInputError
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = (
@@ -78,6 +81,20 @@ EXPECTED_ROUTES = frozenset(
 )
 
 
+def _markdown_heading_anchors(content: str) -> set[str]:
+    anchors: set[str] = set()
+    for line in content.splitlines():
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        heading = re.sub(r"`([^`]+)`", r"\1", match.group(1))
+        slug = re.sub(r"[^\w\s-]", "", heading.lower()).strip()
+        slug = re.sub(r"\s+", "-", slug)
+        if slug:
+            anchors.add(slug)
+    return anchors
+
+
 class V6CoordinatorContractTests(unittest.TestCase):
     """Verify frozen Phase 1 contract, diagnostics catalog, and docs invariants."""
 
@@ -107,27 +124,45 @@ class V6CoordinatorContractTests(unittest.TestCase):
             )
         )
         self.assertEqual(wrangler["vars"]["PUBLIC_WORKFLOW_TAG"], "v5")
+        pilot = self.contract["pilot_isolation"]
+        self.assertEqual(pilot["env_var"], "V6_PILOT_REPOSITORIES")
+        self.assertEqual(pilot["rollback_env_var"], "V6_PILOT_ROLLBACK_REPOSITORIES")
         self.assertEqual(
-            self.contract["pilot_isolation"]["v5_writer_disabled_diagnostic"],
+            pilot["v5_writer_disabled_diagnostic"],
             "broker_v6_pilot_v5_writer_disabled",
         )
-        self.assertEqual(
-            self.contract["pilot_isolation"]["pre_admission_drain_seconds"], 3600
-        )
+        self.assertEqual(pilot["pre_admission_drain_seconds"], 3600)
+        self.assertGreaterEqual(len(pilot["rollback_procedure"]), 3)
 
-    def test_slot_key_template_and_pattern(self) -> None:
+    def test_slot_key_template_canonicalization_and_pattern(self) -> None:
         slot = self.contract["slot_key"]
         self.assertEqual(
             slot["template"],
             "v6-pr:{host}:{app_id}:{installation_id}:{base_repo_id}:{pr_number}",
         )
         self.assertEqual(
+            slot["host_canonicalization"],
+            "lowercase_ascii_hostname_no_port_or_path",
+        )
+        self.assertEqual(
             slot["components"],
             ["host", "app_id", "installation_id", "base_repo_id", "pr_number"],
         )
         pattern = re.compile(slot["pattern"])
-        self.assertIsNotNone(pattern.fullmatch("v6-pr:github.com:123:456:789:42"))
+        for host in ("github.com", "api.github.example.com", "ghe-01.internal"):
+            sample = slot["template"].format(
+                host=host,
+                app_id=123,
+                installation_id=456,
+                base_repo_id=789,
+                pr_number=42,
+            )
+            self.assertIsNotNone(pattern.fullmatch(sample), sample)
         for bad in (
+            "v6-pr:GitHub.com:123:456:789:42",
+            "v6-pr:github.com:443:123:456:789:42",
+            "v6-pr:github.com/api:123:456:789:42",
+            "v6-pr:github.com :123:456:789:42",
             "v6-pr:github.com:0:456:789:42",
             "v6-pr:github.com:123:456:789",
             "v5-pr:github.com:123:456:789:42",
@@ -135,20 +170,42 @@ class V6CoordinatorContractTests(unittest.TestCase):
         ):
             self.assertIsNone(pattern.fullmatch(bad), bad)
 
-    def test_state_machine_transitions_are_complete_and_safe(self) -> None:
+    def test_state_machine_transitions_and_guards_are_complete(self) -> None:
         states = tuple(self.contract["coordinator_states"])
         self.assertEqual(states, EXPECTED_STATES)
         transitions = self.contract["state_transitions"]
         self.assertEqual(set(transitions.keys()), set(states))
+        expected_edges: set[str] = set()
         for state, targets in transitions.items():
             self.assertTrue(targets, f"{state} must have at least one outgoing edge")
             self.assertEqual(len(targets), len(set(targets)))
             for target in targets:
                 self.assertIn(target, states)
+                expected_edges.add(f"{state}->{target}")
         # HOLD cannot bypass reconciliation/release directly into ACTIVE or MINTING.
         self.assertNotIn("ACTIVE", transitions["HOLD"])
         self.assertNotIn("MINTING", transitions["HOLD"])
         self.assertNotIn("RESERVED", transitions["HOLD"])
+
+        rules = self.contract["transition_rules"]
+        self.assertEqual(set(rules.keys()), expected_edges)
+        for edge, spec in rules.items():
+            self.assertTrue(spec["routes"], edge)
+            for route in spec["routes"]:
+                self.assertIn(route, EXPECTED_ROUTES, edge)
+            self.assertTrue(spec["guard"].strip(), edge)
+        self.assertEqual(
+            rules["RECONCILING->IDLE"]["routes"],
+            ["/github/v6/lease/complete-reconcile"],
+        )
+        self.assertEqual(
+            rules["HOLD->IDLE"]["routes"],
+            ["/github/v6/lease/resolve-hold"],
+        )
+        self.assertEqual(
+            rules["HOLD->RECONCILING"]["routes"],
+            ["/github/v6/lease/resolve-hold"],
+        )
 
     def test_keep_vs_never_keep_disjointness_and_secret_bans(self) -> None:
         coord = self.contract["coordinator_storage"]
@@ -198,8 +255,15 @@ class V6CoordinatorContractTests(unittest.TestCase):
             )
         self.assertEqual(ledger_keep, all_schema_fields)
 
-    def test_pr_ledger_schemas_match_v6_recovery_ledger_module(self) -> None:
-        schemas = self.contract["pr_ledger"]["record_schemas"]
+    def test_pr_ledger_schemas_and_marker_comment_safety(self) -> None:
+        ledger = self.contract["pr_ledger"]
+        self.assertEqual(ledger["max_encoded_bytes"], 65536)
+        self.assertEqual(ledger["forbid_embedded_sequences"], ["-->", "<!--"])
+        self.assertEqual(ledger["sole_terminator"], " -->")
+        self.assertIn("\\u003c", ledger["escape_rules"])
+        self.assertIn("\\u003e", ledger["escape_rules"])
+
+        schemas = ledger["record_schemas"]
         self.assertEqual(
             set(schemas.keys()),
             {"owner", "intent", "receipt", "hold", "unresolved", "progress"},
@@ -218,8 +282,14 @@ class V6CoordinatorContractTests(unittest.TestCase):
             pr_head_sha="a" * 40,
             effect_kind="pr_review_publish",
             payload_sha256="b" * 64,
-            target_digest="c" * 64,
+            target_digest="c-->d<!--e",
         )
+        marker = format_v6_record_marker(sample_intent)
+        self.assertNotIn("-->", marker[:-4])
+        self.assertEqual(parse_v6_record_marker(marker), sample_intent)
+        with self.assertRaises(ReviewInputError):
+            parse_v6_record_marker(marker.replace("\\u003e", ">"))
+
         sample_receipt = CompletionReceiptRecord(
             record_id="rec-2",
             operation_id="op-1",
@@ -259,22 +329,32 @@ class V6CoordinatorContractTests(unittest.TestCase):
                 set(schemas[key]["required_fields"]),
             )
 
-    def test_escrow_revocation_and_routes_contract(self) -> None:
+    def test_escrow_domain_separation_revocation_and_routes_contract(self) -> None:
         coord = self.contract["coordinator_storage"]
         self.assertEqual(coord["clock_margin_ms_default"], 300000)
         escrow = coord["escrow"]
+        attestation = coord["owner_attestation"]
         self.assertEqual(escrow["kdf"], "HKDF-SHA256")
         self.assertEqual(escrow["cipher"], "AES-GCM-256")
         self.assertEqual(escrow["key_root_env"], "REVIEWSENSEI_SIGNING_KEY")
         self.assertEqual(
             escrow["aad_fields"], ["slot_key", "generation", "reservation_id"]
         )
+        self.assertTrue(escrow["key_rotation_procedure"].strip())
+        self.assertEqual(attestation["kdf"], "HKDF-SHA256")
+        self.assertEqual(attestation["mac"], "HMAC-SHA256")
+        self.assertNotEqual(escrow["hkdf_salt"], attestation["hkdf_salt"])
+        self.assertNotEqual(escrow["hkdf_info"], attestation["hkdf_info"])
 
         revocation = self.contract["revocation_rules"]
         self.assertEqual(revocation["endpoint"], "DELETE /installation/token")
         self.assertEqual(revocation["clock_margin_ms_default"], 300000)
         outcomes = revocation["outcomes"]
         self.assertEqual(outcomes["http_204"]["next_state"], "IDLE")
+        self.assertEqual(outcomes["http_401"]["null_expiry_next_state"], "HOLD")
+        self.assertEqual(
+            outcomes["http_401"]["null_expiry_diagnostic"], "v6_lease_escrow_lost"
+        )
         self.assertIn(
             "clock_margin_ms", outcomes["http_401"]["expiry_fallback_condition"]
         )
@@ -283,6 +363,11 @@ class V6CoordinatorContractTests(unittest.TestCase):
         )
         self.assertFalse(outcomes["permission_403"]["requires_rate_limit_indicator"])
         self.assertEqual(outcomes["permission_403"]["action"], "fail_closed_no_retry")
+        self.assertEqual(outcomes["http_other_4xx"]["next_state"], "HOLD")
+        self.assertEqual(
+            outcomes["http_other_4xx"]["diagnostic"], "v6_lease_revocation_uncertain"
+        )
+        self.assertFalse(outcomes["http_other_4xx"]["clear_escrow"])
         self.assertTrue(outcomes["http_5xx_or_timeout"]["includes_timeout"])
 
         routes = self.contract["http_routes"]
@@ -291,7 +376,41 @@ class V6CoordinatorContractTests(unittest.TestCase):
         for route, spec in routes.items():
             self.assertEqual(spec["method"], "POST", route)
             self.assertIn("oidc_token", spec["request_fields"]["required"], route)
+            self.assertIn(429, spec["error_statuses"], route)
+            self.assertIn(503, spec["error_statuses"], route)
             self.assertTrue(set(spec["reason_codes"]).issubset(contract_codes), route)
+            for code in spec["reason_codes"]:
+                self.assertIn(code, self.diagnostics, f"{route}: {code}")
+
+        self.assertEqual(
+            routes["/github/v6/lease/release"]["allowed_states"], ["ACTIVE"]
+        )
+        self.assertEqual(
+            routes["/github/v6/lease/complete-reconcile"]["reconciliation_outcomes"],
+            {
+                "terminal": ["adopted", "proved_not_submitted"],
+                "non_terminal": ["ambiguous_hold", "incomplete"],
+            },
+        )
+        self.assertEqual(
+            routes["/github/v6/lease/resolve-hold"]["resolution_kinds"],
+            ["reconciled_clean", "enter_reconcile"],
+        )
+        status_route = routes["/github/v6/lease/status"]
+        absent = status_route["absent_slot_default"]
+        self.assertEqual(absent["status"], 200)
+        self.assertEqual(absent["state"], "IDLE")
+        self.assertEqual(absent["generation"], 0)
+        self.assertEqual(absent["lease_epoch"], 0)
+        absent_fields = set(absent.keys()) - {"status"}
+        self.assertEqual(absent_fields, set(status_route["response_fields"]["success"]))
+        for nullable_key in absent_fields - {
+            "slot_key",
+            "state",
+            "generation",
+            "lease_epoch",
+        }:
+            self.assertIsNone(absent[nullable_key], nullable_key)
 
     def test_broker_diagnostics_covers_all_contract_codes(self) -> None:
         contract_codes = set(self.contract["diagnostic_codes"])
@@ -335,6 +454,13 @@ class V6CoordinatorContractTests(unittest.TestCase):
                 self.assertEqual(parsed.stage, diagnostic.stage)
                 self.assertEqual(parsed.action, diagnostic.action)
 
+        self.assertEqual(
+            self.diagnostics["v6_lease_escrow_lost"]["action"], "reconcile_slot"
+        )
+        self.assertEqual(
+            self.diagnostics["v6_lease_clock_untrusted"]["action"], "reconcile_slot"
+        )
+
     def test_blockers_and_doc_links_are_valid(self) -> None:
         blockers = self.contract["blockers"]
         self.assertEqual(
@@ -357,18 +483,45 @@ class V6CoordinatorContractTests(unittest.TestCase):
         )
 
         link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+        scheme_pattern = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*):")
         for doc_path in (PROPOSAL_PATH, ADR_PATH):
             content = doc_path.read_text(encoding="utf-8")
             self.assertNotIn("file://", content)
             self.assertNotIn("/Users/", content)
+            expected_phrase = (
+                "15 Codes: 1 Pilot Code + 14"
+                if doc_path == PROPOSAL_PATH
+                else "15 sanitized diagnostic codes"
+            )
+            self.assertIn(expected_phrase, content)
             for target in link_pattern.findall(content):
-                if target.startswith(("http://", "https://", "#")):
+                scheme = scheme_pattern.match(target)
+                if scheme is not None:
+                    self.assertIn(
+                        scheme.group(1).lower(),
+                        {"http", "https"},
+                        f"disallowed URI scheme in {doc_path}: {target!r}",
+                    )
                     continue
-                resolved = (doc_path.parent / target.split("#", 1)[0]).resolve()
+                if target.startswith("#"):
+                    self.assertIn(
+                        target[1:],
+                        _markdown_heading_anchors(content),
+                        f"broken same-file anchor {target!r} in {doc_path}",
+                    )
+                    continue
+                path_part, _, fragment = target.partition("#")
+                resolved = (doc_path.parent / path_part).resolve()
                 self.assertTrue(
                     resolved.exists(),
                     f"broken relative link {target!r} in {doc_path}",
                 )
+                if fragment:
+                    self.assertIn(
+                        fragment,
+                        _markdown_heading_anchors(resolved.read_text(encoding="utf-8")),
+                        f"broken relative anchor {target!r} in {doc_path}",
+                    )
 
 
 if __name__ == "__main__":

@@ -521,13 +521,13 @@
   },
   "v6_lease_escrow_lost": {
     "stage": "v6_hold",
-    "action": "contact_operator",
-    "hint": "Encrypted token escrow could not be decrypted or was lost for an unrevoked slot. Hold until expiry or operator resolution."
+    "action": "reconcile_slot",
+    "hint": "Encrypted token escrow could not be decrypted or was lost for an unrevoked slot. Wait for token expiry plus clock margin and reconcile the slot, or contact the operator if the hold persists."
   },
   "v6_lease_clock_untrusted": {
     "stage": "v6_hold",
-    "action": "contact_operator",
-    "hint": "Coordinator clock or token expiry safety margin could not be trusted. Hold until clock integrity and expiry bounds are restored."
+    "action": "reconcile_slot",
+    "hint": "Coordinator clock or token expiry safety margin could not be trusted. Reconcile after clock integrity and expiry bounds are verified, or contact the operator if the condition persists."
   },
   "v6_lease_slot_continuity_unproved": {
     "stage": "v6_hold",

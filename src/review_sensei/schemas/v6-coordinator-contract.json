@@ -11,13 +11,20 @@
   },
   "pilot_isolation": {
     "env_var": "V6_PILOT_REPOSITORIES",
+    "rollback_env_var": "V6_PILOT_ROLLBACK_REPOSITORIES",
     "v5_writer_disabled_diagnostic": "broker_v6_pilot_v5_writer_disabled",
     "pre_admission_drain_seconds": 3600,
-    "github_token_scope_note": "GitHub installation tokens are scoped to repository+permissions, not PR; per-PR exclusivity is a ReviewSensei coordination rule assuming trusted, pinned writer code, no independent write credential, and no PR-controlled code execution in the write job."
+    "rollback_procedure": [
+      "Add target repository to V6_PILOT_ROLLBACK_REPOSITORIES to block new v6 lease acquisitions immediately.",
+      "Drain and reconcile every active, draining, or reconciling slot for that repository until all slots are IDLE with zero unresolved HOLD obligations.",
+      "Only after all slots are IDLE and free of HOLD obligations, remove the repository from V6_PILOT_REPOSITORIES and V6_PILOT_ROLLBACK_REPOSITORIES to re-enable v5 TokenBroker.exchange."
+    ],
+    "github_token_scope_note": "GitHub installation tokens are scoped to repository+permissions, not PR; per-PR slot keys are a ReviewSensei coordination boundary assuming trusted, pinned workflow code, no independent write credential, and no PR-controlled code execution in the write job."
   },
   "slot_key": {
     "template": "v6-pr:{host}:{app_id}:{installation_id}:{base_repo_id}:{pr_number}",
     "pattern": "^v6-pr:[a-z0-9.-]+:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$",
+    "host_canonicalization": "lowercase_ascii_hostname_no_port_or_path",
     "components": [
       "host",
       "app_id",
@@ -69,6 +76,124 @@
       "IDLE"
     ]
   },
+  "transition_rules": {
+    "IDLE->RESERVED": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "Authorized OIDC/App/repo/PR/head/continuity checks succeed and repo is not in V6_PILOT_ROLLBACK_REPOSITORIES."
+    },
+    "RESERVED->MINTING": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "Reservation persisted durably before calling GitHub POST /app/installations/{id}/access_tokens."
+    },
+    "RESERVED->IDLE": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "Pre-mint validation aborted prior to dispatching GitHub access_tokens request."
+    },
+    "MINTING->ACTIVE": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "GitHub access_tokens succeeded with exact requested permissions and encrypted_escrow persisted."
+    },
+    "MINTING->RECONCILING": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "Mint request timed out or failed with uncertain outcome (v6_lease_mint_uncertain)."
+    },
+    "MINTING->HOLD": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "Escrow encryption/persistence failed or unrecoverable trust failure occurred."
+    },
+    "MINTING->IDLE": {
+      "routes": [
+        "/github/v6/lease/acquire"
+      ],
+      "guard": "Confirmed deterministic 4xx pre-issuance rejection from GitHub access_tokens with zero token minted."
+    },
+    "ACTIVE->DRAINING": {
+      "routes": [
+        "/github/v6/lease/drain",
+        "/github/v6/lease/release"
+      ],
+      "guard": "/release is valid ONLY in ACTIVE for the matching verified owner (slot_key, generation, lease_epoch, reservation_id); any non-ACTIVE state fails closed with HTTP 409. /drain initiates revocation on takeover or head drift."
+    },
+    "ACTIVE->RECONCILING": {
+      "routes": [
+        "/github/v6/lease/acquire",
+        "/github/v6/lease/drain"
+      ],
+      "guard": "Ambiguous write or lease continuity check requires bounded PR ledger reconciliation."
+    },
+    "ACTIVE->HOLD": {
+      "routes": [
+        "/github/v6/lease/acquire",
+        "/github/v6/lease/drain",
+        "/github/v6/lease/release"
+      ],
+      "guard": "Escrow lost/corrupt, clock untrusted, or PR ledger slot continuity unproved."
+    },
+    "DRAINING->IDLE": {
+      "routes": [
+        "/github/v6/lease/drain",
+        "/github/v6/lease/release"
+      ],
+      "guard": "DELETE /installation/token confirmed 204, OR returned 401 with token_expires_at_ms > 0 and now_ms >= token_expires_at_ms + clock_margin_ms."
+    },
+    "DRAINING->RECONCILING": {
+      "routes": [
+        "/github/v6/lease/drain",
+        "/github/v6/lease/release"
+      ],
+      "guard": "DELETE /installation/token returned 401 before expiry+margin, or exhausted retries on 429/rate-limit-403/5xx/timeout (v6_lease_revocation_uncertain)."
+    },
+    "DRAINING->HOLD": {
+      "routes": [
+        "/github/v6/lease/drain",
+        "/github/v6/lease/release"
+      ],
+      "guard": "DELETE /installation/token returned permission 403 or http_other_4xx, or 401 with null/invalid token_expires_at_ms (v6_lease_escrow_lost), or clock untrusted."
+    },
+    "RECONCILING->IDLE": {
+      "routes": [
+        "/github/v6/lease/complete-reconcile"
+      ],
+      "guard": "Valid ONLY via /complete-reconcile when reconciliation_outcome is terminal ('adopted' or 'proved_not_submitted') AND credential clearance (204 or verified expiry past token_expires_at_ms + clock_margin_ms) is already confirmed."
+    },
+    "RECONCILING->DRAINING": {
+      "routes": [
+        "/github/v6/lease/complete-reconcile",
+        "/github/v6/lease/drain"
+      ],
+      "guard": "Reconciliation identifies an unrevoked escrowed token whose expiry+margin has not elapsed and enters revocation drain."
+    },
+    "RECONCILING->HOLD": {
+      "routes": [
+        "/github/v6/lease/complete-reconcile"
+      ],
+      "guard": "Non-terminal reconciliation_outcome ('ambiguous_hold' or 'incomplete'), conflicting PR records, escrow loss, or unproved continuity; never clears obligations or advances generation."
+    },
+    "HOLD->RECONCILING": {
+      "routes": [
+        "/github/v6/lease/resolve-hold"
+      ],
+      "guard": "Valid ONLY via /resolve-hold with resolution_kind='enter_reconcile', confirmed credential clearance, and verified named hold-resolution proof; never an unconditional bypass."
+    },
+    "HOLD->IDLE": {
+      "routes": [
+        "/github/v6/lease/resolve-hold"
+      ],
+      "guard": "Valid ONLY via /resolve-hold with resolution_kind='reconciled_clean', confirmed credential clearance, and verified named PR ledger continuity/hold-resolution proof."
+    }
+  },
   "coordinator_storage": {
     "durable_object_class": "V6PrCoordinator",
     "clock_margin_ms_default": 300000,
@@ -83,7 +208,16 @@
         "slot_key",
         "generation",
         "reservation_id"
-      ]
+      ],
+      "key_rotation_procedure": "Quiesce acquisitions (via V6_PILOT_ROLLBACK_REPOSITORIES or admission hold), drain/expire all active slots to IDLE or HOLD, then rotate REVIEWSENSEI_SIGNING_KEY. Unrotated ciphertexts fail closed to HOLD with v6_lease_escrow_lost until expiry+clock_margin_ms."
+    },
+    "owner_attestation": {
+      "kdf": "HKDF-SHA256",
+      "mac": "HMAC-SHA256",
+      "key_root_env": "REVIEWSENSEI_SIGNING_KEY",
+      "hkdf_salt": "v6-pr-coordinator-owner-attestation-v1",
+      "hkdf_info": "reviewsensei:v6:owner-attestation:v1",
+      "domain_separation_note": "Escrow encryption and owner-anchor attestation derive independent subkeys via distinct HKDF-SHA256 salt and info strings."
     },
     "slot_state_fields": {
       "slot_key": "string",
@@ -144,6 +278,13 @@
   "pr_ledger": {
     "marker_prefix": "<!-- reviewsensei:v6:record ",
     "marker_format": "<!-- reviewsensei:v6:record sha256={sha256_hex} payload={canonical_json} -->",
+    "max_encoded_bytes": 65536,
+    "escape_rules": "Canonical JSON payload MUST escape '<' as '\\u003c' and '>' as '\\u003e' so neither '-->' nor '<!--' can appear inside payload; sha256 is computed over the canonical JSON of the decoded record.",
+    "forbid_embedded_sequences": [
+      "-->",
+      "<!--"
+    ],
+    "sole_terminator": " -->",
     "record_schemas": {
       "owner": {
         "schema": "reviewsensei:v6:owner:v1",
@@ -371,7 +512,10 @@
       "http_401": {
         "status": 401,
         "classification": "already_invalid_or_expired",
-        "expiry_fallback_condition": "now_ms >= token_expires_at_ms + clock_margin_ms",
+        "null_expiry_guard": "If token_expires_at_ms is null or not a positive finite integer > 0, NEVER compare against null/0 as expired; fail closed to HOLD with v6_lease_escrow_lost and preserve slot uncertainty.",
+        "null_expiry_next_state": "HOLD",
+        "null_expiry_diagnostic": "v6_lease_escrow_lost",
+        "expiry_fallback_condition": "token_expires_at_ms is integer > 0 AND now_ms >= token_expires_at_ms + clock_margin_ms",
         "next_state_after_expiry": "IDLE",
         "next_state_before_expiry": "RECONCILING",
         "diagnostic_before_expiry": "v6_lease_revocation_uncertain"
@@ -392,6 +536,21 @@
         "requires_rate_limit_indicator": false,
         "classification": "permission_rejected",
         "action": "fail_closed_no_retry",
+        "next_state": "HOLD",
+        "diagnostic": "v6_lease_revocation_uncertain"
+      },
+      "http_other_4xx": {
+        "status_range": "400..499 excluding 401, 403, 429",
+        "statuses_examples": [
+          400,
+          404,
+          409,
+          410,
+          422
+        ],
+        "classification": "unexpected_client_rejection",
+        "action": "fail_closed_no_retry_preserve_escrow",
+        "clear_escrow": false,
         "next_state": "HOLD",
         "diagnostic": "v6_lease_revocation_uncertain"
       },
@@ -548,6 +707,16 @@
           "control_budget"
         ]
       },
+      "reconciliation_outcomes": {
+        "terminal": [
+          "adopted",
+          "proved_not_submitted"
+        ],
+        "non_terminal": [
+          "ambiguous_hold",
+          "incomplete"
+        ]
+      },
       "response_fields": {
         "success": [
           "slot_key",
@@ -570,6 +739,7 @@
         409,
         411,
         413,
+        429,
         503
       ],
       "reason_codes": [
@@ -584,6 +754,9 @@
     },
     "/github/v6/lease/release": {
       "method": "POST",
+      "allowed_states": [
+        "ACTIVE"
+      ],
       "request_fields": {
         "required": [
           "oidc_token",
@@ -619,9 +792,12 @@
         409,
         411,
         413,
+        429,
         503
       ],
       "reason_codes": [
+        "v6_lease_reserved",
+        "v6_lease_mint_uncertain",
         "v6_lease_active_other_owner",
         "v6_lease_draining",
         "v6_lease_reconciling",
@@ -629,6 +805,7 @@
         "v6_lease_revocation_uncertain",
         "v6_lease_escrow_lost",
         "v6_lease_clock_untrusted",
+        "v6_lease_slot_continuity_unproved",
         "v6_lease_unauthorized_tuple",
         "v6_lease_rollback_blocked"
       ]
@@ -651,9 +828,14 @@
           "state",
           "generation",
           "lease_epoch",
+          "reservation_id",
           "owner_run_id",
           "owner_run_attempt",
           "owner_head_sha",
+          "owner_workflow_sha",
+          "owner_job",
+          "owner_comment_id",
+          "owner_record_sha256",
           "token_expires_at_ms",
           "last_reason_code",
           "updated_at_ms"
@@ -663,6 +845,24 @@
           "diagnostic"
         ]
       },
+      "absent_slot_default": {
+        "status": 200,
+        "slot_key": "derived_canonical_slot_key",
+        "state": "IDLE",
+        "generation": 0,
+        "lease_epoch": 0,
+        "reservation_id": null,
+        "owner_run_id": null,
+        "owner_run_attempt": null,
+        "owner_head_sha": null,
+        "owner_workflow_sha": null,
+        "owner_job": null,
+        "owner_comment_id": null,
+        "owner_record_sha256": null,
+        "token_expires_at_ms": null,
+        "last_reason_code": null,
+        "updated_at_ms": null
+      },
       "success_statuses": [
         200
       ],
@@ -671,6 +871,7 @@
         403,
         411,
         413,
+        429,
         503
       ],
       "reason_codes": [
@@ -692,6 +893,10 @@
           "control_budget"
         ]
       },
+      "resolution_kinds": [
+        "reconciled_clean",
+        "enter_reconcile"
+      ],
       "response_fields": {
         "success": [
           "slot_key",
@@ -714,6 +919,7 @@
         409,
         411,
         413,
+        429,
         503
       ],
       "reason_codes": [
