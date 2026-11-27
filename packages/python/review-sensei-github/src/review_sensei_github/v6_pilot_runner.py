@@ -881,8 +881,10 @@ class V6PilotRunner:
                     if outcome_status == "completed":
                         outcome_status = "hold"
                         diag_code = diag_code or "v6_lease_revocation_uncertain"
-            except V6CoordinatorError:
+            except (V6CoordinatorError, ReviewSenseiError, OSError, ValueError) as exc:
                 lease_released = False
+                if diag_code is None:
+                    diag_code = getattr(exc, "diagnostic", None)
 
         return self._write_outcome(
             config,

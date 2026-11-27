@@ -2031,13 +2031,8 @@ class V6RecoveryEngine:
                 if (i.generation is not None and i.generation == old_generation)
                 or (
                     i.generation is None
-                    and (
-                        (
-                            old_lease_epoch is not None
-                            and i.writer_epoch == old_lease_epoch
-                        )
-                        or old_lease_epoch is None
-                    )
+                    and old_lease_epoch is not None
+                    and i.writer_epoch == old_lease_epoch
                 )
             ]
         else:

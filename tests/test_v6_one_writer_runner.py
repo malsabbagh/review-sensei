@@ -316,6 +316,10 @@ class _SimulatedCoordinatorStore:
                 if eff_kind == "pull_request_review":
                     found_native = any(
                         r["id"] == eff_id
+                        and (
+                            r.get("commit_id") is None
+                            or r.get("commit_id") == intent.pr_head_sha
+                        )
                         and verify_app_authored_record(r, expected_app_id=APP_ID)
                         and _effect_tag(intent.operation_id, intent.payload_sha256)
                         in r["body"]
@@ -2324,6 +2328,63 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             bad_eff_kind.exception.diagnostic,
             "v6_lease_reconciliation_evidence_invalid",
         )
+
+        # Mismatched review commit_id must fail Worker verification -> HOLD.
+        pr_mismatch = _SimulatedPRSurface(head_sha=HEAD_A)
+        mismatch_payload_sha = canonical_sha256({"body": "mismatch"})
+        mismatch_intent = WriteIntentRecord(
+            record_id="intent:op-mismatch:1",
+            operation_id="op-mismatch",
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256=mismatch_payload_sha,
+            target_digest="t-mismatch",
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        mismatch_ic = pr_mismatch.add_comment(
+            format_v6_record_marker(mismatch_intent), is_app=True
+        )
+        pr_mismatch.add_review(
+            f"Wrong head review\n{_effect_tag('op-mismatch', mismatch_payload_sha)}",
+            commit_id=HEAD_B,
+            review_id=5099,
+        )
+        mismatch_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr_mismatch)
+        mismatch_store.state = "RECONCILING"
+        mismatch_store.generation = 1
+        mismatch_store.lease_epoch = 1
+        mismatch_store.token_cleared = True
+        mismatch_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=mismatch_store.opener,
+            clock=lambda: now,
+        )
+        with self.assertRaises(V6CoordinatorError) as bad_head_rev:
+            mismatch_client.complete_reconcile(
+                slot_key=slot_key,
+                generation=1,
+                reconciliation_outcome="adopted_missing_receipt",
+                reconciliation_evidence={
+                    "old_generation": 1,
+                    "intent_resolutions": [
+                        {
+                            "operation_id": "op-mismatch",
+                            "intent_comment_id": mismatch_ic["id"],
+                            "resolution": "adopted_effect",
+                            "native_effect_kind": "pull_request_review",
+                            "native_effect_id": 5099,
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(
+            bad_head_rev.exception.diagnostic,
+            "v6_lease_reconciliation_evidence_invalid",
+        )
+        self.assertEqual(mismatch_store.state, "HOLD")
         with self.assertRaises(V6CoordinatorError):
             coord_client.complete_reconcile(
                 slot_key=slot_key,
