@@ -24,6 +24,8 @@ import {
 
 export const V6_CLOCK_MARGIN_MS_DEFAULT = 300_000;
 export const V6_PR_LEDGER_MAX_BYTES = 65_536;
+export const V6_RESERVED_STALE_MS = 30_000;
+export const V6_MINTING_STALE_MS = 30_000;
 export const V6_SLOT_KEY_PATTERN =
   /^v6-pr:[a-z0-9.-]+:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$/;
 const SHA1_HEX40_PATTERN = /^[a-f0-9]{40}$/;
@@ -60,6 +62,36 @@ export type V6DiagnosticCode =
   | "v6_lease_unauthorized_tuple"
   | "v6_lease_rollback_blocked"
   | "v6_lease_mint_uncertain";
+
+const VALID_COORDINATOR_STATES = new Set<CoordinatorState>([
+  "IDLE",
+  "RESERVED",
+  "MINTING",
+  "ACTIVE",
+  "DRAINING",
+  "RECONCILING",
+  "HOLD",
+]);
+
+const VALID_V6_DIAGNOSTIC_CODES = new Set<V6DiagnosticCode>([
+  "configuration_unavailable",
+  "broker_invalid_request",
+  "broker_capability_invalid",
+  "v6_lease_reserved",
+  "v6_lease_active_other_owner",
+  "v6_lease_draining",
+  "v6_lease_reconciling",
+  "v6_lease_hold",
+  "v6_lease_head_changed",
+  "v6_lease_predecessor_not_terminal",
+  "v6_lease_revocation_uncertain",
+  "v6_lease_escrow_lost",
+  "v6_lease_clock_untrusted",
+  "v6_lease_slot_continuity_unproved",
+  "v6_lease_unauthorized_tuple",
+  "v6_lease_rollback_blocked",
+  "v6_lease_mint_uncertain",
+]);
 
 export interface SlotRecord {
   slot_key: string;
@@ -569,6 +601,10 @@ function isValidOwnerRecordShape(record: Record<string, unknown>): boolean {
   if (required.some((field) => !Object.hasOwn(record, field))) {
     return false;
   }
+  const acquiredMs =
+    typeof record.acquired_at === "string" ? Date.parse(record.acquired_at) : Number.NaN;
+  const expiresMs =
+    typeof record.expires_at === "string" ? Date.parse(record.expires_at) : Number.NaN;
   return (
     record.schema === "reviewsensei:v6:owner:v1" &&
     typeof record.record_id === "string" &&
@@ -588,13 +624,48 @@ function isValidOwnerRecordShape(record: Record<string, unknown>): boolean {
     SHA1_HEX40_PATTERN.test(record.pr_head_sha) &&
     typeof record.workflow_sha === "string" &&
     SHA1_HEX40_PATTERN.test(record.workflow_sha) &&
-    typeof record.acquired_at === "string" &&
-    Number.isFinite(Date.parse(record.acquired_at)) &&
-    typeof record.expires_at === "string" &&
-    Number.isFinite(Date.parse(record.expires_at)) &&
+    Number.isFinite(acquiredMs) &&
+    Number.isFinite(expiresMs) &&
+    expiresMs > acquiredMs &&
     typeof record.coordinator_attestation_mac === "string" &&
     SHA256_HEX64_PATTERN.test(record.coordinator_attestation_mac)
   );
+}
+
+function assertRecordMatchesSlot(
+  record: Record<string, unknown>,
+  expected: {
+    slot_key: string;
+    generation?: number;
+    lease_epoch?: number;
+    owner_head_sha?: string | null;
+  },
+): void {
+  if (record.slot_key !== undefined && record.slot_key !== expected.slot_key) {
+    throw new Error("v6_lease_slot_continuity_unproved");
+  }
+  if (
+    expected.generation !== undefined &&
+    record.generation !== undefined &&
+    record.generation !== expected.generation
+  ) {
+    throw new Error("v6_lease_slot_continuity_unproved");
+  }
+  if (
+    expected.lease_epoch !== undefined &&
+    record.lease_epoch !== undefined &&
+    record.lease_epoch !== expected.lease_epoch
+  ) {
+    throw new Error("v6_lease_slot_continuity_unproved");
+  }
+  if (
+    expected.owner_head_sha !== undefined &&
+    expected.owner_head_sha !== null &&
+    record.pr_head_sha !== undefined &&
+    record.pr_head_sha !== expected.owner_head_sha
+  ) {
+    throw new Error("v6_lease_slot_continuity_unproved");
+  }
 }
 
 function isValidHoldRecordShape(record: Record<string, unknown>): boolean {
@@ -667,6 +738,26 @@ export class InMemoryV6CoordinatorStore implements V6CoordinatorStore {
   }
 }
 
+export function validateSlotRecord(record: SlotRecord, expectedSlotKey: string): SlotRecord {
+  if (
+    typeof record.slot_key !== "string" ||
+    record.slot_key !== expectedSlotKey ||
+    typeof record.state !== "string" ||
+    !VALID_COORDINATOR_STATES.has(record.state) ||
+    !isNonNegativeSafeInt(record.generation) ||
+    !isNonNegativeSafeInt(record.lease_epoch) ||
+    !isNonNegativeSafeInt(record.clock_margin_ms) ||
+    !isNonNegativeSafeInt(record.updated_at_ms) ||
+    (record.last_reason_code !== null &&
+      (typeof record.last_reason_code !== "string" ||
+        !VALID_V6_DIAGNOSTIC_CODES.has(record.last_reason_code))) ||
+    (record.encrypted_escrow !== null && !isEncryptedEscrow(record.encrypted_escrow))
+  ) {
+    throw new Error("v6_lease_escrow_lost");
+  }
+  return record;
+}
+
 /**
  * SQLite-backed `ctx.storage` adapter for `V6PrCoordinator` Durable Objects.
  * Columns strictly match `v6-coordinator-contract.json`'s `keep_fields`.
@@ -722,44 +813,63 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
       return null;
     }
     const row = rows[0];
+    if (
+      typeof row.state !== "string" ||
+      !VALID_COORDINATOR_STATES.has(row.state as CoordinatorState)
+    ) {
+      throw new Error("v6_lease_escrow_lost");
+    }
+    if (
+      row.last_reason_code !== null &&
+      (typeof row.last_reason_code !== "string" ||
+        !VALID_V6_DIAGNOSTIC_CODES.has(row.last_reason_code as V6DiagnosticCode))
+    ) {
+      throw new Error("v6_lease_escrow_lost");
+    }
     let parsedEscrow: EncryptedEscrow | null = null;
     if (typeof row.encrypted_escrow === "string" && row.encrypted_escrow.length > 0) {
       try {
         const candidate = JSON.parse(row.encrypted_escrow) as unknown;
-        if (isEncryptedEscrow(candidate)) {
-          parsedEscrow = candidate;
+        if (!isEncryptedEscrow(candidate)) {
+          throw new Error("v6_lease_escrow_lost");
         }
+        parsedEscrow = candidate;
       } catch {
-        parsedEscrow = null;
+        throw new Error("v6_lease_escrow_lost");
       }
+    } else if (row.encrypted_escrow !== null) {
+      throw new Error("v6_lease_escrow_lost");
     }
-    return {
-      slot_key: String(row.slot_key),
-      state: String(row.state) as CoordinatorState,
-      generation: Number(row.generation),
-      lease_epoch: Number(row.lease_epoch),
-      reservation_id: row.reservation_id === null ? null : String(row.reservation_id),
-      owner_run_id: row.owner_run_id === null ? null : String(row.owner_run_id),
-      owner_run_attempt:
-        row.owner_run_attempt === null ? null : Number(row.owner_run_attempt),
-      owner_head_sha: row.owner_head_sha === null ? null : String(row.owner_head_sha),
-      owner_workflow_sha:
-        row.owner_workflow_sha === null ? null : String(row.owner_workflow_sha),
-      owner_job: row.owner_job === null ? null : String(row.owner_job),
-      owner_comment_id:
-        row.owner_comment_id === null ? null : Number(row.owner_comment_id),
-      owner_record_sha256:
-        row.owner_record_sha256 === null ? null : String(row.owner_record_sha256),
-      token_expires_at_ms:
-        row.token_expires_at_ms === null ? null : Number(row.token_expires_at_ms),
-      clock_margin_ms: Number(row.clock_margin_ms),
-      encrypted_escrow: parsedEscrow,
-      last_reason_code:
-        row.last_reason_code === null
-          ? null
-          : (String(row.last_reason_code) as V6DiagnosticCode),
-      updated_at_ms: Number(row.updated_at_ms),
-    };
+    return validateSlotRecord(
+      {
+        slot_key: String(row.slot_key),
+        state: row.state as CoordinatorState,
+        generation: Number(row.generation),
+        lease_epoch: Number(row.lease_epoch),
+        reservation_id: row.reservation_id === null ? null : String(row.reservation_id),
+        owner_run_id: row.owner_run_id === null ? null : String(row.owner_run_id),
+        owner_run_attempt:
+          row.owner_run_attempt === null ? null : Number(row.owner_run_attempt),
+        owner_head_sha: row.owner_head_sha === null ? null : String(row.owner_head_sha),
+        owner_workflow_sha:
+          row.owner_workflow_sha === null ? null : String(row.owner_workflow_sha),
+        owner_job: row.owner_job === null ? null : String(row.owner_job),
+        owner_comment_id:
+          row.owner_comment_id === null ? null : Number(row.owner_comment_id),
+        owner_record_sha256:
+          row.owner_record_sha256 === null ? null : String(row.owner_record_sha256),
+        token_expires_at_ms:
+          row.token_expires_at_ms === null ? null : Number(row.token_expires_at_ms),
+        clock_margin_ms: Number(row.clock_margin_ms),
+        encrypted_escrow: parsedEscrow,
+        last_reason_code:
+          row.last_reason_code === null
+            ? null
+            : (row.last_reason_code as V6DiagnosticCode),
+        updated_at_ms: Number(row.updated_at_ms),
+      },
+      slotKey,
+    );
   }
 
   async putSlot(record: SlotRecord): Promise<void> {
@@ -934,6 +1044,14 @@ export class V6PrCoordinatorEngine {
       options.maxRevocationAttempts ?? DEFAULT_REVOCATION_MAX_ATTEMPTS,
     );
     this.generateReservationId = options.generateReservationId ?? (() => crypto.randomUUID());
+  }
+
+  private async readSlot(slotKey: string): Promise<SlotRecord | null> {
+    const slot = await this.store.getSlot(slotKey);
+    if (slot === null) {
+      return null;
+    }
+    return validateSlotRecord(slot, slotKey);
   }
 
   private async withSlotLock<T>(slotKey: string, fn: () => Promise<T>): Promise<T> {
@@ -1577,7 +1695,7 @@ export class V6PrCoordinatorEngine {
 
     if (!this.clock.isTrusted()) {
       await this.withSlotLock(slotKey, async () => {
-        const existing = await this.store.getSlot(slotKey);
+        const existing = await this.readSlot(slotKey);
         if (existing !== null) {
           await this.store.putSlot({
             ...existing,
@@ -1600,90 +1718,87 @@ export class V6PrCoordinatorEngine {
     let reservationOutcome:
       | { kind: "error"; result: V6RouteResult }
       | { kind: "reused"; slot: SlotRecord }
+      | { kind: "verify_cold_start_anchor" }
       | {
           kind: "reserved";
           slot: SlotRecord;
-          predecessorAnchorRecord: ParsedPrLedgerRecord | null;
+          priorSlotCommentId: number | null;
+          priorSlotRecordSha256: string | null;
+          priorSlotLeaseEpoch: number;
+          priorSlotHeadSha: string | null;
         };
 
-    // Check continuity / PR binding / caller attempt.
-    // Note: reserve first if IDLE, OR check existing slot state before taking a reservation.
     let crashedReservedSlot: SlotRecord | null = null;
-    reservationOutcome = await this.withSlotLock(slotKey, async () => {
-      const existing = await this.store.getSlot(slotKey);
-      if (existing === null || existing.state === "IDLE") {
-        // Guard against coordinator state loss if PR already holds a prior owner anchor.
-        if (
-          existing === null &&
-          predecessorAnchorId !== undefined
-        ) {
+    try {
+      reservationOutcome = await this.withSlotLock(slotKey, async () => {
+        const existing = await this.readSlot(slotKey);
+        if (existing === null || existing.state === "IDLE") {
+          // Guard against coordinator state loss if PR already holds a prior owner anchor.
+          if (existing === null && predecessorAnchorId !== undefined) {
+            return { kind: "verify_cold_start_anchor" };
+          }
+          if (
+            existing !== null &&
+            existing.owner_comment_id !== null &&
+            predecessorAnchorId !== undefined &&
+            predecessorAnchorId !== existing.owner_comment_id
+          ) {
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
+                slotState: existing.state,
+                rayId,
+              }),
+            };
+          }
+          const generation = (existing?.generation ?? 0) + 1;
+          const leaseEpoch = (existing?.lease_epoch ?? 0) + 1;
+          const reservationId = this.generateReservationId();
+          const reserved: SlotRecord = {
+            slot_key: slotKey,
+            state: "RESERVED",
+            generation,
+            lease_epoch: leaseEpoch,
+            reservation_id: reservationId,
+            owner_run_id: edge.claims.run_id,
+            owner_run_attempt: Number(edge.claims.run_attempt),
+            owner_head_sha: headSha,
+            owner_workflow_sha: edge.claims.job_workflow_sha,
+            owner_job: edge.claims.workflow,
+            owner_comment_id: existing?.owner_comment_id ?? null,
+            owner_record_sha256: existing?.owner_record_sha256 ?? null,
+            token_expires_at_ms: null,
+            clock_margin_ms: edge.clockMarginMs,
+            encrypted_escrow: null,
+            last_reason_code: null,
+            updated_at_ms: this.clock.nowMs(),
+          };
+          await this.store.putSlot(reserved);
+          this.activeReservations.add(reservationId);
           return {
             kind: "reserved",
-            slot: {
-              slot_key: slotKey,
-              state: "RESERVED",
-              generation: 1,
-              lease_epoch: 1,
-              reservation_id: this.generateReservationId(),
-              owner_run_id: edge.claims.run_id,
-              owner_run_attempt: Number(edge.claims.run_attempt),
-              owner_head_sha: headSha,
-              owner_workflow_sha: edge.claims.job_workflow_sha,
-              owner_job: edge.claims.workflow,
-              owner_comment_id: null,
-              owner_record_sha256: null,
-              token_expires_at_ms: null,
-              clock_margin_ms: edge.clockMarginMs,
-              encrypted_escrow: null,
-              last_reason_code: null,
-              updated_at_ms: this.clock.nowMs(),
-            },
-            predecessorAnchorRecord: null,
+            slot: reserved,
+            priorSlotCommentId: existing?.owner_comment_id ?? null,
+            priorSlotRecordSha256: existing?.owner_record_sha256 ?? null,
+            priorSlotLeaseEpoch: existing?.lease_epoch ?? 0,
+            priorSlotHeadSha: existing?.owner_head_sha ?? null,
           };
         }
-        if (
-          existing !== null &&
-          existing.owner_comment_id !== null &&
-          predecessorAnchorId !== undefined &&
-          predecessorAnchorId !== existing.owner_comment_id
-        ) {
-          return {
-            kind: "error",
-            result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
-              slotState: existing.state,
-              rayId,
-            }),
-          };
-        }
-        const generation = (existing?.generation ?? 0) + 1;
-        const leaseEpoch = (existing?.lease_epoch ?? 0) + 1;
-        const reservationId = this.generateReservationId();
-        const reserved: SlotRecord = {
-          slot_key: slotKey,
-          state: "RESERVED",
-          generation,
-          lease_epoch: leaseEpoch,
-          reservation_id: reservationId,
-          owner_run_id: edge.claims.run_id,
-          owner_run_attempt: Number(edge.claims.run_attempt),
-          owner_head_sha: headSha,
-          owner_workflow_sha: edge.claims.job_workflow_sha,
-          owner_job: edge.claims.workflow,
-          owner_comment_id: existing?.owner_comment_id ?? null,
-          owner_record_sha256: existing?.owner_record_sha256 ?? null,
-          token_expires_at_ms: null,
-          clock_margin_ms: edge.clockMarginMs,
-          encrypted_escrow: null,
-          last_reason_code: null,
-          updated_at_ms: this.clock.nowMs(),
-        };
-        await this.store.putSlot(reserved);
-        this.activeReservations.add(reservationId);
-        return { kind: "reserved", slot: reserved, predecessorAnchorRecord: null };
-      }
 
-      if (existing.state === "RESERVED") {
-        if (existing.reservation_id !== null && this.activeReservations.has(existing.reservation_id)) {
+        if (existing.state === "RESERVED") {
+          if (
+            existing.reservation_id !== null &&
+            this.activeReservations.has(existing.reservation_id)
+          ) {
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_reserved", {
+                slotState: "RESERVED",
+                rayId,
+              }),
+            };
+          }
+          crashedReservedSlot = existing;
           return {
             kind: "error",
             result: diagnosticResponse(409, "v6_lease_reserved", {
@@ -1692,106 +1807,158 @@ export class V6PrCoordinatorEngine {
             }),
           };
         }
-        crashedReservedSlot = existing;
-        return {
-          kind: "error",
-          result: diagnosticResponse(409, "v6_lease_reserved", {
-            slotState: "RESERVED",
-            rayId,
-          }),
-        };
-      }
 
-      if (existing.state === "MINTING") {
-        if (existing.reservation_id !== null && this.activeReservations.has(existing.reservation_id)) {
+        if (existing.state === "MINTING") {
+          if (
+            (existing.reservation_id !== null &&
+              this.activeReservations.has(existing.reservation_id)) ||
+            this.clock.nowMs() - existing.updated_at_ms < V6_MINTING_STALE_MS
+          ) {
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_reserved", {
+                slotState: "MINTING",
+                rayId,
+              }),
+            };
+          }
+          // Bounded minting timeout elapsed without completing: transition to RECONCILING, never re-mint.
+          const reconciling: SlotRecord = {
+            ...existing,
+            state: "RECONCILING",
+            last_reason_code: "v6_lease_mint_uncertain",
+            updated_at_ms: this.clock.nowMs(),
+          };
+          await this.store.putSlot(reconciling);
           return {
             kind: "error",
             result: diagnosticResponse(409, "v6_lease_mint_uncertain", {
-              slotState: "MINTING",
+              slotState: "RECONCILING",
               rayId,
             }),
           };
         }
-        // Previous instance crashed while MINTING: transition to RECONCILING, never re-mint.
-        const reconciling: SlotRecord = {
-          ...existing,
-          state: "RECONCILING",
-          last_reason_code: "v6_lease_mint_uncertain",
-          updated_at_ms: this.clock.nowMs(),
-        };
-        await this.store.putSlot(reconciling);
+
+        if (existing.state === "ACTIVE") {
+          const sameOwner =
+            existing.owner_run_id === edge.claims.run_id &&
+            existing.owner_run_attempt === Number(edge.claims.run_attempt) &&
+            existing.owner_workflow_sha === edge.claims.job_workflow_sha;
+          if (!sameOwner) {
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_active_other_owner", {
+                slotState: "ACTIVE",
+                rayId,
+              }),
+            };
+          }
+          if (existing.owner_head_sha !== headSha) {
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_head_changed", {
+                slotState: "ACTIVE",
+                rayId,
+              }),
+            };
+          }
+          if (
+            existing.encrypted_escrow === null ||
+            !isPositiveSafeInt(existing.token_expires_at_ms)
+          ) {
+            const held: SlotRecord = {
+              ...existing,
+              state: "HOLD",
+              last_reason_code: "v6_lease_escrow_lost",
+              updated_at_ms: this.clock.nowMs(),
+            };
+            await this.store.putSlot(held);
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_escrow_lost", {
+                slotState: "HOLD",
+                rayId,
+              }),
+            };
+          }
+          if (this.clock.nowMs() >= existing.token_expires_at_ms) {
+            return {
+              kind: "error",
+              result: diagnosticResponse(409, "v6_lease_draining", {
+                slotState: "ACTIVE",
+                rayId,
+              }),
+            };
+          }
+          return { kind: "reused", slot: existing };
+        }
+
+        const code = stateConflictDiagnostic(existing.state, existing);
         return {
           kind: "error",
-          result: diagnosticResponse(409, "v6_lease_mint_uncertain", {
-            slotState: "RECONCILING",
+          result: diagnosticResponse(409, code, {
+            slotState: existing.state,
             rayId,
           }),
         };
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+      }
+      throw error;
+    }
+
+    // Handle cold-start anchor verification when coordinator store has no row for this slot.
+    if (reservationOutcome.kind === "verify_cold_start_anchor") {
+      let verifiedAnchor: ParsedPrLedgerRecord | null = null;
+      try {
+        const verified = await this.verifyLedgerComment(
+          edge,
+          pullRequest,
+          predecessorAnchorId!,
+          "owner",
+        );
+        assertRecordMatchesSlot(verified.parsed.payload, { slot_key: slotKey });
+        verifiedAnchor = verified.parsed;
+      } catch {
+        verifiedAnchor = null;
       }
 
-      if (existing.state === "ACTIVE") {
-        const sameOwner =
-          existing.owner_run_id === edge.claims.run_id &&
-          existing.owner_run_attempt === Number(edge.claims.run_attempt) &&
-          existing.owner_workflow_sha === edge.claims.job_workflow_sha;
-        if (!sameOwner) {
-          return {
-            kind: "error",
-            result: diagnosticResponse(409, "v6_lease_active_other_owner", {
-              slotState: "ACTIVE",
-              rayId,
-            }),
-          };
+      const persistedHold = await this.withSlotLock(slotKey, async () => {
+        const current = await this.readSlot(slotKey);
+        if (current !== null) {
+          return { conflict: true, slot: current };
         }
-        if (existing.owner_head_sha !== headSha) {
-          return {
-            kind: "error",
-            result: diagnosticResponse(409, "v6_lease_head_changed", {
-              slotState: "ACTIVE",
-              rayId,
-            }),
-          };
-        }
-        if (
-          existing.encrypted_escrow === null ||
-          !isPositiveSafeInt(existing.token_expires_at_ms)
-        ) {
-          const held: SlotRecord = {
-            ...existing,
-            state: "HOLD",
-            last_reason_code: "v6_lease_escrow_lost",
-            updated_at_ms: this.clock.nowMs(),
-          };
-          await this.store.putSlot(held);
-          return {
-            kind: "error",
-            result: diagnosticResponse(409, "v6_lease_escrow_lost", {
-              slotState: "HOLD",
-              rayId,
-            }),
-          };
-        }
-        if (this.clock.nowMs() >= existing.token_expires_at_ms) {
-          return {
-            kind: "error",
-            result: diagnosticResponse(409, "v6_lease_draining", {
-              slotState: "ACTIVE",
-              rayId,
-            }),
-          };
-        }
-        return { kind: "reused", slot: existing };
-      }
-
-      const code = stateConflictDiagnostic(existing.state, existing);
-      return {
-        kind: "error",
-        result: diagnosticResponse(409, code, {
-          slotState: existing.state,
-          rayId,
-        }),
-      };
-    });
+        const held: SlotRecord = {
+          slot_key: slotKey,
+          state: "HOLD",
+          generation:
+            verifiedAnchor !== null ? (verifiedAnchor.payload.generation as number) : 1,
+          lease_epoch:
+            verifiedAnchor !== null ? (verifiedAnchor.payload.lease_epoch as number) : 1,
+          reservation_id: null,
+          owner_run_id: edge.claims.run_id,
+          owner_run_attempt: Number(edge.claims.run_attempt),
+          owner_head_sha: headSha,
+          owner_workflow_sha: edge.claims.job_workflow_sha,
+          owner_job: edge.claims.workflow,
+          owner_comment_id: predecessorAnchorId!,
+          owner_record_sha256: verifiedAnchor?.sha256 ?? null,
+          token_expires_at_ms: null,
+          clock_margin_ms: edge.clockMarginMs,
+          encrypted_escrow: null,
+          last_reason_code: "v6_lease_slot_continuity_unproved",
+          updated_at_ms: this.clock.nowMs(),
+        };
+        await this.store.putSlot(held);
+        return { conflict: false, slot: held };
+      });
+      return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
+        slotState: persistedHold.slot.state,
+        rayId,
+      });
+    }
 
     // Handle crash-before-mint recovery (`RESERVED` left behind by a dead engine instance).
     if (crashedReservedSlot !== null) {
@@ -1799,19 +1966,21 @@ export class V6PrCoordinatorEngine {
       const sameCrashedOwner =
         stale.owner_run_id === edge.claims.run_id &&
         stale.owner_run_attempt === Number(edge.claims.run_attempt);
-      let nonMintProofOk = sameCrashedOwner;
-      if (!nonMintProofOk && stale.owner_run_id && stale.owner_run_attempt) {
+      let attemptTerminal = false;
+      if (stale.owner_run_id && stale.owner_run_attempt) {
         const attemptInfo = await this.provider.workflowRunAttempt(
           edge.claims.repository,
           stale.owner_run_id,
           String(stale.owner_run_attempt),
           edge.readToken,
         );
-        nonMintProofOk =
+        attemptTerminal =
           attemptInfo !== null &&
           attemptInfo.status === "completed" &&
           attemptInfo.conclusion !== null;
       }
+      const staleElapsed = this.clock.nowMs() - stale.updated_at_ms >= V6_RESERVED_STALE_MS;
+      const nonMintProofOk = attemptTerminal || (sameCrashedOwner && staleElapsed);
       if (!nonMintProofOk) {
         this.emitAudit("/github/v6/lease/acquire", slotKey, "refused", {
           state: "RESERVED",
@@ -1823,7 +1992,7 @@ export class V6PrCoordinatorEngine {
         });
       }
       reservationOutcome = await this.withSlotLock(slotKey, async () => {
-        const current = await this.store.getSlot(slotKey);
+        const current = await this.readSlot(slotKey);
         if (
           current === null ||
           current.state !== "RESERVED" ||
@@ -1864,7 +2033,14 @@ export class V6PrCoordinatorEngine {
         };
         await this.store.putSlot(reserved);
         this.activeReservations.add(reservationId);
-        return { kind: "reserved", slot: reserved, predecessorAnchorRecord: null };
+        return {
+          kind: "reserved",
+          slot: reserved,
+          priorSlotCommentId: idle.owner_comment_id,
+          priorSlotRecordSha256: idle.owner_record_sha256,
+          priorSlotLeaseEpoch: idle.lease_epoch,
+          priorSlotHeadSha: idle.owner_head_sha,
+        };
       });
     }
 
@@ -2029,7 +2205,7 @@ export class V6PrCoordinatorEngine {
         return await abortReservedToIdle(403, "v6_lease_unauthorized_tuple");
       }
 
-      // 3. Validate optional predecessor_anchor_comment_id continuity & cold-start state loss guard.
+      // 3. Validate optional predecessor_anchor_comment_id continuity against persisted slot state.
       if (predecessorAnchorId !== undefined) {
         let verifiedAnchor: ParsedPrLedgerRecord;
         try {
@@ -2040,52 +2216,19 @@ export class V6PrCoordinatorEngine {
             "owner",
           );
           verifiedAnchor = verified.parsed;
+          assertRecordMatchesSlot(verifiedAnchor.payload, {
+            slot_key: slotKey,
+            generation: myGeneration - 1,
+            lease_epoch: reservationOutcome.priorSlotLeaseEpoch || undefined,
+            owner_head_sha: reservationOutcome.priorSlotHeadSha,
+          });
         } catch {
-          // If no durable slot existed prior to this call, fail closed to HOLD on state loss.
-          const existingPrior = await this.store.getSlot(slotKey);
-          if (existingPrior === null) {
-            await this.store.putSlot({
-              ...reservedSlot,
-              state: "HOLD",
-              reservation_id: null,
-              last_reason_code: "v6_lease_slot_continuity_unproved",
-              updated_at_ms: this.clock.nowMs(),
-            });
-            return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
-              slotState: "HOLD",
-              rayId,
-            });
-          }
           return await abortReservedToIdle(409, "v6_lease_slot_continuity_unproved");
         }
 
-        const anchorGen = verifiedAnchor.payload.generation as number;
-        const anchorSlotKey = verifiedAnchor.payload.slot_key as string;
-        const existingInStore = await this.store.getSlot(slotKey);
-        if (existingInStore === null) {
-          // Coordinator state loss detected: PR holds a valid owner anchor with generation >= 1
-          // while coordinator has no slot row. Fail closed to HOLD without minting.
-          await this.store.putSlot({
-            ...reservedSlot,
-            state: "HOLD",
-            generation: anchorGen,
-            lease_epoch: verifiedAnchor.payload.lease_epoch as number,
-            reservation_id: null,
-            owner_comment_id: predecessorAnchorId,
-            owner_record_sha256: verifiedAnchor.sha256,
-            last_reason_code: "v6_lease_slot_continuity_unproved",
-            updated_at_ms: this.clock.nowMs(),
-          });
-          return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
-            slotState: "HOLD",
-            rayId,
-          });
-        }
+        const existingInStore = await this.readSlot(slotKey);
         if (
-          anchorSlotKey !== slotKey ||
-          (existingInStore.state === "RESERVED" &&
-            existingInStore.reservation_id === myReservationId &&
-            anchorGen !== myGeneration - 1) ||
+          existingInStore === null ||
           (existingInStore.owner_comment_id !== null &&
             predecessorAnchorId !== existingInStore.owner_comment_id) ||
           (existingInStore.owner_record_sha256 !== null &&
@@ -2394,7 +2537,9 @@ export class V6PrCoordinatorEngine {
       (body.expected_lease_epoch !== undefined &&
         !isNonNegativeSafeInt(body.expected_lease_epoch)) ||
       (body.predecessor_anchor_comment_id !== undefined &&
-        !isPositiveSafeInt(body.predecessor_anchor_comment_id))
+        !isPositiveSafeInt(body.predecessor_anchor_comment_id)) ||
+      (body.predecessor_anchor_comment_id !== undefined &&
+        body.expected_generation === undefined)
     ) {
       return diagnosticResponse(400, "broker_invalid_request", { rayId });
     }
@@ -2413,109 +2558,181 @@ export class V6PrCoordinatorEngine {
     const expectedEpoch = body.expected_lease_epoch as number | undefined;
     const anchorCommentId = body.predecessor_anchor_comment_id as number | undefined;
 
+    let verifiedAnchorRecord: ParsedPrLedgerRecord | null = null;
     if (anchorCommentId !== undefined) {
       try {
         const verified = await this.verifyLedgerComment(edge, pullRequest, anchorCommentId, "owner");
-        if (verified.parsed.payload.slot_key !== slotKey) {
-          throw new Error("v6_lease_slot_continuity_unproved");
-        }
-      } catch {
-        await this.withSlotLock(slotKey, async () => {
-          const existing = await this.store.getSlot(slotKey);
-          if (existing !== null && existing.state !== "IDLE") {
-            await this.store.putSlot({
-              ...existing,
-              state: "HOLD",
-              last_reason_code: "v6_lease_slot_continuity_unproved",
-              updated_at_ms: this.clock.nowMs(),
-            });
-          }
+        assertRecordMatchesSlot(verified.parsed.payload, {
+          slot_key: slotKey,
+          generation: expectedGen,
+          lease_epoch: expectedEpoch,
         });
+        verifiedAnchorRecord = verified.parsed;
+      } catch {
+        try {
+          await this.withSlotLock(slotKey, async () => {
+            const existing = await this.readSlot(slotKey);
+            if (existing !== null && existing.state !== "IDLE") {
+              await this.store.putSlot({
+                ...existing,
+                state: "HOLD",
+                last_reason_code: "v6_lease_slot_continuity_unproved",
+                updated_at_ms: this.clock.nowMs(),
+              });
+            }
+          });
+        } catch (err) {
+          if (err instanceof Error && err.message === "v6_lease_escrow_lost") {
+            return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+          }
+          throw err;
+        }
         return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", { rayId });
       }
     }
 
-    const drainPrep = await this.withSlotLock(slotKey, async () => {
-      const slot = await this.store.getSlot(slotKey);
-      if (slot === null || slot.state === "IDLE") {
-        if (expectedGen !== undefined && expectedGen !== (slot?.generation ?? 0)) {
+    let drainPrep:
+      | { kind: "error"; result: V6RouteResult }
+      | { kind: "already_idle"; generation: number; leaseEpoch: number }
+      | {
+          kind: "proceed";
+          slot: SlotRecord;
+          snapshot: {
+            state: CoordinatorState;
+            generation: number;
+            lease_epoch: number;
+            reservation_id: string | null;
+            owner_run_id: string | null;
+            owner_run_attempt: number | null;
+          };
+        };
+
+    try {
+      drainPrep = await this.withSlotLock(slotKey, async () => {
+        const slot = await this.readSlot(slotKey);
+        if (slot === null || slot.state === "IDLE") {
+          if (expectedGen !== undefined && expectedGen !== (slot?.generation ?? 0)) {
+            return {
+              kind: "error" as const,
+              result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+                slotState: "IDLE",
+                rayId,
+              }),
+            };
+          }
+          return {
+            kind: "already_idle" as const,
+            generation: slot?.generation ?? 0,
+            leaseEpoch: slot?.lease_epoch ?? 0,
+          };
+        }
+        if (
+          (expectedGen !== undefined && expectedGen !== slot.generation) ||
+          (expectedEpoch !== undefined && expectedEpoch !== slot.lease_epoch)
+        ) {
           return {
             kind: "error" as const,
             result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
-              slotState: "IDLE",
+              slotState: slot.state,
               rayId,
             }),
           };
         }
-        return {
-          kind: "already_idle" as const,
-          generation: slot?.generation ?? 0,
-          leaseEpoch: slot?.lease_epoch ?? 0,
-        };
-      }
-      if (
-        (expectedGen !== undefined && expectedGen !== slot.generation) ||
-        (expectedEpoch !== undefined && expectedEpoch !== slot.lease_epoch)
-      ) {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
-            slotState: slot.state,
-            rayId,
-          }),
-        };
-      }
-      if (slot.state === "HOLD") {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_hold", { slotState: "HOLD", rayId }),
-        };
-      }
-      if (slot.state === "RESERVED") {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_reserved", {
-            slotState: "RESERVED",
-            rayId,
-          }),
-        };
-      }
-      if (slot.state === "MINTING") {
-        if (slot.reservation_id !== null && this.activeReservations.has(slot.reservation_id)) {
+        if (verifiedAnchorRecord !== null) {
+          try {
+            assertRecordMatchesSlot(verifiedAnchorRecord.payload, {
+              slot_key: slotKey,
+              generation: slot.generation,
+              lease_epoch: slot.lease_epoch,
+              owner_head_sha: slot.owner_head_sha,
+            });
+          } catch {
+            await this.store.putSlot({
+              ...slot,
+              state: "HOLD",
+              last_reason_code: "v6_lease_slot_continuity_unproved",
+              updated_at_ms: this.clock.nowMs(),
+            });
+            return {
+              kind: "error" as const,
+              result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
+                slotState: "HOLD",
+                rayId,
+              }),
+            };
+          }
+        }
+        if (slot.state === "HOLD") {
           return {
             kind: "error" as const,
-            result: diagnosticResponse(409, "v6_lease_draining", {
-              slotState: "MINTING",
+            result: diagnosticResponse(409, "v6_lease_hold", { slotState: "HOLD", rayId }),
+          };
+        }
+        if (slot.state === "RESERVED") {
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, "v6_lease_reserved", {
+              slotState: "RESERVED",
               rayId,
             }),
           };
         }
-        const reconciling: SlotRecord = {
-          ...slot,
-          state: "RECONCILING",
-          last_reason_code: "v6_lease_mint_uncertain",
-          updated_at_ms: this.clock.nowMs(),
-        };
-        await this.store.putSlot(reconciling);
+        if (slot.state === "MINTING") {
+          if (
+            (slot.reservation_id !== null && this.activeReservations.has(slot.reservation_id)) ||
+            this.clock.nowMs() - slot.updated_at_ms < V6_MINTING_STALE_MS
+          ) {
+            return {
+              kind: "error" as const,
+              result: diagnosticResponse(409, "v6_lease_draining", {
+                slotState: "MINTING",
+                rayId,
+              }),
+            };
+          }
+          const reconciling: SlotRecord = {
+            ...slot,
+            state: "RECONCILING",
+            last_reason_code: "v6_lease_mint_uncertain",
+            updated_at_ms: this.clock.nowMs(),
+          };
+          await this.store.putSlot(reconciling);
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, "v6_lease_reconciling", {
+              slotState: "RECONCILING",
+              rayId,
+            }),
+          };
+        }
+        if (slot.state === "RECONCILING" && slot.encrypted_escrow === null) {
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, "v6_lease_reconciling", {
+              slotState: "RECONCILING",
+              rayId,
+            }),
+          };
+        }
         return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_reconciling", {
-            slotState: "RECONCILING",
-            rayId,
-          }),
+          kind: "proceed" as const,
+          slot,
+          snapshot: {
+            state: slot.state,
+            generation: slot.generation,
+            lease_epoch: slot.lease_epoch,
+            reservation_id: slot.reservation_id,
+            owner_run_id: slot.owner_run_id,
+            owner_run_attempt: slot.owner_run_attempt,
+          },
         };
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
       }
-      if (slot.state === "RECONCILING" && slot.encrypted_escrow === null) {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_reconciling", {
-            slotState: "RECONCILING",
-            rayId,
-          }),
-        };
-      }
-      return { kind: "proceed" as const, slot };
-    });
+      throw error;
+    }
 
     if (drainPrep.kind === "error") {
       return drainPrep.result;
@@ -2533,7 +2750,7 @@ export class V6PrCoordinatorEngine {
       };
     }
 
-    const slot = drainPrep.slot;
+    const { slot, snapshot } = drainPrep;
     const isSameOwner =
       slot.owner_run_id === edge.claims.run_id &&
       slot.owner_run_attempt === Number(edge.claims.run_attempt);
@@ -2562,15 +2779,20 @@ export class V6PrCoordinatorEngine {
       }
     }
 
-    // Persist DRAINING durably before revoking token.
+    // Recheck exact captured snapshot before persisting DRAINING.
     const drainingSlot = await this.withSlotLock(slotKey, async () => {
-      const current = await this.store.getSlot(slotKey);
+      const current = await this.readSlot(slotKey);
       if (
         current === null ||
+        current.state !== snapshot.state ||
+        current.generation !== snapshot.generation ||
+        current.lease_epoch !== snapshot.lease_epoch ||
+        current.reservation_id !== snapshot.reservation_id ||
+        current.owner_run_id !== snapshot.owner_run_id ||
+        current.owner_run_attempt !== snapshot.owner_run_attempt ||
         (current.state !== "ACTIVE" &&
           current.state !== "DRAINING" &&
-          current.state !== "RECONCILING") ||
-        current.generation !== slot.generation
+          current.state !== "RECONCILING")
       ) {
         return null;
       }
@@ -2578,6 +2800,7 @@ export class V6PrCoordinatorEngine {
         ...current,
         state: "DRAINING",
         owner_comment_id: anchorCommentId ?? current.owner_comment_id,
+        owner_record_sha256: verifiedAnchorRecord?.sha256 ?? current.owner_record_sha256,
         updated_at_ms: this.clock.nowMs(),
       };
       await this.store.putSlot(next);
@@ -2593,12 +2816,27 @@ export class V6PrCoordinatorEngine {
     const nextStateOnClear = hasPendingObligations ? "RECONCILING" : "IDLE";
 
     const revOutcome = await this.executeRevocation(drainingSlot, edge, nextStateOnClear);
-    await this.withSlotLock(slotKey, async () => {
-      const latest = await this.store.getSlot(slotKey);
-      if (latest !== null && latest.generation === drainingSlot.generation) {
-        await this.store.putSlot(revOutcome.updatedSlot);
+    const applied = await this.withSlotLock(slotKey, async () => {
+      const latest = await this.readSlot(slotKey);
+      if (
+        latest === null ||
+        latest.state !== "DRAINING" ||
+        latest.generation !== drainingSlot.generation ||
+        latest.lease_epoch !== drainingSlot.lease_epoch ||
+        latest.reservation_id !== drainingSlot.reservation_id
+      ) {
+        return { conflict: true, state: latest?.state ?? ("IDLE" as CoordinatorState) };
       }
+      await this.store.putSlot(revOutcome.updatedSlot);
+      return { conflict: false, state: revOutcome.updatedSlot.state };
     });
+
+    if (applied.conflict) {
+      return diagnosticResponse(409, "v6_lease_draining", {
+        slotState: applied.state,
+        rayId,
+      });
+    }
 
     if (revOutcome.errorStatus !== undefined && revOutcome.diagnostic !== undefined) {
       this.emitAudit("/github/v6/lease/drain", slotKey, "refused", {
@@ -2670,71 +2908,96 @@ export class V6PrCoordinatorEngine {
     const reqLeaseEpoch = body.lease_epoch;
     const reqReservationId = body.reservation_id;
 
-    const prep = await this.withSlotLock(slotKey, async () => {
-      const slot = await this.store.getSlot(slotKey);
-      if (slot === null) {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
-            slotState: "IDLE",
-            rayId,
-          }),
+    let prep:
+      | { kind: "error"; result: V6RouteResult }
+      | { kind: "proceed"; slot: SlotRecord };
+    try {
+      prep = await this.withSlotLock(slotKey, async () => {
+        const slot = await this.readSlot(slotKey);
+        if (slot === null) {
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+              slotState: "IDLE",
+              rayId,
+            }),
+          };
+        }
+        if (slot.state !== "ACTIVE") {
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, stateConflictDiagnostic(slot.state, slot), {
+              slotState: slot.state,
+              rayId,
+            }),
+          };
+        }
+        if (
+          slot.owner_run_id !== edge.claims.run_id ||
+          slot.owner_run_attempt !== Number(edge.claims.run_attempt)
+        ) {
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, "v6_lease_active_other_owner", {
+              slotState: "ACTIVE",
+              rayId,
+            }),
+          };
+        }
+        if (
+          slot.generation !== reqGeneration ||
+          slot.lease_epoch !== reqLeaseEpoch ||
+          slot.reservation_id !== reqReservationId
+        ) {
+          return {
+            kind: "error" as const,
+            result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+              slotState: "ACTIVE",
+              rayId,
+            }),
+          };
+        }
+        const draining: SlotRecord = {
+          ...slot,
+          state: "DRAINING",
+          updated_at_ms: this.clock.nowMs(),
         };
+        await this.store.putSlot(draining);
+        return { kind: "proceed" as const, slot: draining };
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
       }
-      if (slot.state !== "ACTIVE") {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, stateConflictDiagnostic(slot.state, slot), {
-            slotState: slot.state,
-            rayId,
-          }),
-        };
-      }
-      if (
-        slot.owner_run_id !== edge.claims.run_id ||
-        slot.owner_run_attempt !== Number(edge.claims.run_attempt)
-      ) {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_active_other_owner", {
-            slotState: "ACTIVE",
-            rayId,
-          }),
-        };
-      }
-      if (
-        slot.generation !== reqGeneration ||
-        slot.lease_epoch !== reqLeaseEpoch ||
-        slot.reservation_id !== reqReservationId
-      ) {
-        return {
-          kind: "error" as const,
-          result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
-            slotState: "ACTIVE",
-            rayId,
-          }),
-        };
-      }
-      const draining: SlotRecord = {
-        ...slot,
-        state: "DRAINING",
-        updated_at_ms: this.clock.nowMs(),
-      };
-      await this.store.putSlot(draining);
-      return { kind: "proceed" as const, slot: draining };
-    });
+      throw error;
+    }
 
     if (prep.kind === "error") {
       return prep.result;
     }
 
     const revOutcome = await this.executeRevocation(prep.slot, edge, "IDLE");
-    await this.withSlotLock(slotKey, async () => {
-      const latest = await this.store.getSlot(slotKey);
-      if (latest !== null && latest.generation === prep.slot.generation) {
-        await this.store.putSlot(revOutcome.updatedSlot);
+    const releaseApplied = await this.withSlotLock(slotKey, async () => {
+      const latest = await this.readSlot(slotKey);
+      if (
+        latest === null ||
+        latest.state !== "DRAINING" ||
+        latest.generation !== prep.slot.generation ||
+        latest.lease_epoch !== prep.slot.lease_epoch ||
+        latest.reservation_id !== prep.slot.reservation_id
+      ) {
+        return { conflict: true, state: latest?.state ?? ("IDLE" as CoordinatorState) };
       }
+      await this.store.putSlot(revOutcome.updatedSlot);
+      return { conflict: false, state: revOutcome.updatedSlot.state };
     });
+
+    if (releaseApplied.conflict) {
+      return diagnosticResponse(409, "v6_lease_draining", {
+        slotState: releaseApplied.state,
+        rayId,
+      });
+    }
 
     if (revOutcome.errorStatus !== undefined && revOutcome.diagnostic !== undefined) {
       this.emitAudit("/github/v6/lease/release", slotKey, "refused", {
@@ -2816,30 +3079,30 @@ export class V6PrCoordinatorEngine {
       try {
         const verified = await this.verifyLedgerComment(edge, pullRequest, anchorCommentId, "any");
         verifiedAnchor = verified.parsed;
-        if (
-          verifiedAnchor.payload.slot_key !== undefined &&
-          verifiedAnchor.payload.slot_key !== slotKey
-        ) {
-          throw new Error("v6_lease_slot_continuity_unproved");
-        }
-        if (
-          verifiedAnchor.payload.generation !== undefined &&
-          verifiedAnchor.payload.generation !== reqGeneration
-        ) {
-          throw new Error("v6_lease_slot_continuity_unproved");
-        }
-      } catch {
-        await this.withSlotLock(slotKey, async () => {
-          const current = await this.store.getSlot(slotKey);
-          if (current !== null && current.state === "RECONCILING") {
-            await this.store.putSlot({
-              ...current,
-              state: "HOLD",
-              last_reason_code: "v6_lease_slot_continuity_unproved",
-              updated_at_ms: this.clock.nowMs(),
-            });
-          }
+        assertRecordMatchesSlot(verifiedAnchor.payload, {
+          slot_key: slotKey,
+          generation: reqGeneration,
+          owner_head_sha: reqHeadSha,
         });
+      } catch {
+        try {
+          await this.withSlotLock(slotKey, async () => {
+            const current = await this.readSlot(slotKey);
+            if (current !== null && current.state === "RECONCILING") {
+              await this.store.putSlot({
+                ...current,
+                state: "HOLD",
+                last_reason_code: "v6_lease_slot_continuity_unproved",
+                updated_at_ms: this.clock.nowMs(),
+              });
+            }
+          });
+        } catch (err) {
+          if (err instanceof Error && err.message === "v6_lease_escrow_lost") {
+            return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+          }
+          throw err;
+        }
         return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
           slotState: "HOLD",
           rayId,
@@ -2847,136 +3110,220 @@ export class V6PrCoordinatorEngine {
       }
     }
 
-    return await this.withSlotLock(slotKey, async () => {
-      const slot = await this.store.getSlot(slotKey);
-      if (slot === null) {
-        return diagnosticResponse(409, "v6_lease_rollback_blocked", {
-          slotState: "IDLE",
-          rayId,
-        });
-      }
-      if (slot.state !== "RECONCILING") {
-        return diagnosticResponse(409, stateConflictDiagnostic(slot.state, slot), {
-          slotState: slot.state,
-          rayId,
-        });
-      }
-      if (slot.generation !== reqGeneration) {
-        return diagnosticResponse(409, "v6_lease_rollback_blocked", {
-          slotState: "RECONCILING",
-          rayId,
-        });
-      }
-      if (
-        reqHeadSha !== undefined &&
-        slot.owner_head_sha !== null &&
-        reqHeadSha !== slot.owner_head_sha
-      ) {
-        const held: SlotRecord = {
-          ...slot,
-          state: "HOLD",
-          last_reason_code: "v6_lease_slot_continuity_unproved",
-          updated_at_ms: this.clock.nowMs(),
-        };
-        await this.store.putSlot(held);
-        return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
-          slotState: "HOLD",
-          rayId,
-        });
-      }
+    let reconcilePrep:
+      | { kind: "done"; result: V6RouteResult }
+      | { kind: "drain"; slot: SlotRecord };
 
-      if (!TERMINAL_RECONCILE_OUTCOMES.has(outcome)) {
-        const held: SlotRecord = {
-          ...slot,
-          state: "HOLD",
-          owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
-          owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
-          last_reason_code: "v6_lease_hold",
-          updated_at_ms: this.clock.nowMs(),
-        };
-        await this.store.putSlot(held);
-        return {
-          status: 200,
-          body: {
-            slot_key: slotKey,
-            state: "HOLD",
-            generation: held.generation,
-            lease_epoch: held.lease_epoch,
-          },
-        };
-      }
-
-      // Terminal reconciliation outcome (`adopted` or `proved_not_submitted`).
-      // Must have confirmed credential clearance before moving to IDLE.
-      const clearance = await this.isCredentialClearedForReconcileOrHold(slot, edge);
-      if (!clearance.cleared) {
-        if (clearance.nextState === "DRAINING") {
-          const draining: SlotRecord = {
+    try {
+      reconcilePrep = await this.withSlotLock(slotKey, async () => {
+        const slot = await this.readSlot(slotKey);
+        if (slot === null) {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+              slotState: "IDLE",
+              rayId,
+            }),
+          };
+        }
+        if (slot.state !== "RECONCILING") {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, stateConflictDiagnostic(slot.state, slot), {
+              slotState: slot.state,
+              rayId,
+            }),
+          };
+        }
+        if (slot.generation !== reqGeneration) {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+              slotState: "RECONCILING",
+              rayId,
+            }),
+          };
+        }
+        if (verifiedAnchor !== null) {
+          try {
+            assertRecordMatchesSlot(verifiedAnchor.payload, {
+              slot_key: slotKey,
+              generation: slot.generation,
+              lease_epoch: slot.lease_epoch,
+              owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
+            });
+          } catch {
+            await this.store.putSlot({
+              ...slot,
+              state: "HOLD",
+              last_reason_code: "v6_lease_slot_continuity_unproved",
+              updated_at_ms: this.clock.nowMs(),
+            });
+            return {
+              kind: "done" as const,
+              result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
+                slotState: "HOLD",
+                rayId,
+              }),
+            };
+          }
+        }
+        if (
+          reqHeadSha !== undefined &&
+          slot.owner_head_sha !== null &&
+          reqHeadSha !== slot.owner_head_sha
+        ) {
+          const held: SlotRecord = {
             ...slot,
-            state: "DRAINING",
+            state: "HOLD",
+            last_reason_code: "v6_lease_slot_continuity_unproved",
             updated_at_ms: this.clock.nowMs(),
           };
-          await this.store.putSlot(draining);
-          const rev = await this.executeRevocation(draining, edge, "IDLE");
-          await this.store.putSlot(rev.updatedSlot);
-          if (rev.errorStatus !== undefined && rev.diagnostic !== undefined) {
-            return diagnosticResponse(rev.errorStatus, rev.diagnostic, {
-              slotState: rev.updatedSlot.state,
-              retryAfterMs: rev.retryAfterMs,
-              rayId,
-            });
-          }
+          await this.store.putSlot(held);
           return {
-            status: 200,
-            body: {
-              slot_key: slotKey,
-              state: rev.updatedSlot.state,
-              generation: rev.updatedSlot.generation,
-              lease_epoch: rev.updatedSlot.lease_epoch,
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
+              slotState: "HOLD",
+              rayId,
+            }),
+          };
+        }
+
+        if (!TERMINAL_RECONCILE_OUTCOMES.has(outcome)) {
+          const held: SlotRecord = {
+            ...slot,
+            state: "HOLD",
+            owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
+            owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
+            last_reason_code: "v6_lease_hold",
+            updated_at_ms: this.clock.nowMs(),
+          };
+          await this.store.putSlot(held);
+          return {
+            kind: "done" as const,
+            result: {
+              status: 200,
+              body: {
+                slot_key: slotKey,
+                state: "HOLD",
+                generation: held.generation,
+                lease_epoch: held.lease_epoch,
+              },
             },
           };
         }
-        const updated: SlotRecord = {
+
+        // Terminal reconciliation outcome (`adopted` or `proved_not_submitted`).
+        // Must have confirmed credential clearance before moving to IDLE.
+        const clearance = await this.isCredentialClearedForReconcileOrHold(slot, edge);
+        if (!clearance.cleared) {
+          if (clearance.nextState === "DRAINING") {
+            const draining: SlotRecord = {
+              ...slot,
+              state: "DRAINING",
+              owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
+              owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
+              updated_at_ms: this.clock.nowMs(),
+            };
+            await this.store.putSlot(draining);
+            return { kind: "drain" as const, slot: draining };
+          }
+          const updated: SlotRecord = {
+            ...slot,
+            state: clearance.nextState,
+            last_reason_code: clearance.reason,
+            updated_at_ms: this.clock.nowMs(),
+          };
+          await this.store.putSlot(updated);
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, clearance.reason, {
+              slotState: updated.state,
+              retryAfterMs: clearance.retryAfterMs,
+              rayId,
+            }),
+          };
+        }
+
+        const idle: SlotRecord = {
           ...slot,
-          state: clearance.nextState,
-          last_reason_code: clearance.reason,
+          state: "IDLE",
+          reservation_id: null,
+          owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
+          owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
+          token_expires_at_ms: null,
+          encrypted_escrow: null,
+          last_reason_code: null,
           updated_at_ms: this.clock.nowMs(),
         };
-        await this.store.putSlot(updated);
-        return diagnosticResponse(409, clearance.reason, {
-          slotState: updated.state,
-          retryAfterMs: clearance.retryAfterMs,
-          rayId,
-        });
-      }
-
-      const idle: SlotRecord = {
-        ...slot,
-        state: "IDLE",
-        reservation_id: null,
-        owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
-        owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
-        token_expires_at_ms: null,
-        encrypted_escrow: null,
-        last_reason_code: null,
-        updated_at_ms: this.clock.nowMs(),
-      };
-      await this.store.putSlot(idle);
-      this.emitAudit("/github/v6/lease/complete-reconcile", slotKey, "success", {
-        state: "IDLE",
-        generation: idle.generation,
-        lease_epoch: idle.lease_epoch,
-      });
-      return {
-        status: 200,
-        body: {
-          slot_key: slotKey,
+        await this.store.putSlot(idle);
+        this.emitAudit("/github/v6/lease/complete-reconcile", slotKey, "success", {
           state: "IDLE",
           generation: idle.generation,
           lease_epoch: idle.lease_epoch,
-        },
-      };
+        });
+        return {
+          kind: "done" as const,
+          result: {
+            status: 200,
+            body: {
+              slot_key: slotKey,
+              state: "IDLE",
+              generation: idle.generation,
+              lease_epoch: idle.lease_epoch,
+            },
+          },
+        };
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+      }
+      throw error;
+    }
+
+    if (reconcilePrep.kind === "done") {
+      return reconcilePrep.result;
+    }
+
+    const drainingSlot = reconcilePrep.slot;
+    const rev = await this.executeRevocation(drainingSlot, edge, "IDLE");
+    const applied = await this.withSlotLock(slotKey, async () => {
+      const latest = await this.readSlot(slotKey);
+      if (
+        latest === null ||
+        latest.state !== "DRAINING" ||
+        latest.generation !== drainingSlot.generation ||
+        latest.lease_epoch !== drainingSlot.lease_epoch ||
+        latest.reservation_id !== drainingSlot.reservation_id
+      ) {
+        return { conflict: true, state: latest?.state ?? ("IDLE" as CoordinatorState) };
+      }
+      await this.store.putSlot(rev.updatedSlot);
+      return { conflict: false, state: rev.updatedSlot.state };
     });
+    if (applied.conflict) {
+      return diagnosticResponse(409, "v6_lease_draining", {
+        slotState: applied.state,
+        rayId,
+      });
+    }
+    if (rev.errorStatus !== undefined && rev.diagnostic !== undefined) {
+      return diagnosticResponse(rev.errorStatus, rev.diagnostic, {
+        slotState: rev.updatedSlot.state,
+        retryAfterMs: rev.retryAfterMs,
+        rayId,
+      });
+    }
+    return {
+      status: 200,
+      body: {
+        slot_key: slotKey,
+        state: rev.updatedSlot.state,
+        generation: rev.updatedSlot.generation,
+        lease_epoch: rev.updatedSlot.lease_epoch,
+      },
+    };
   }
 
   async handleStatus(
@@ -3020,11 +3367,18 @@ export class V6PrCoordinatorEngine {
       return diagnosticResponse(403, "v6_lease_unauthorized_tuple", { rayId });
     }
 
-    const slot = await this.store.getSlot(derivedSlotKey);
-    return {
-      status: 200,
-      body: slot === null ? absentSlotView(derivedSlotKey) : slotStatusView(slot),
-    };
+    try {
+      const slot = await this.readSlot(derivedSlotKey);
+      return {
+        status: 200,
+        body: slot === null ? absentSlotView(derivedSlotKey) : slotStatusView(slot),
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+      }
+      throw error;
+    }
   }
 
   async handleResolveHold(
@@ -3125,107 +3479,184 @@ export class V6PrCoordinatorEngine {
       }
     }
 
-    return await this.withSlotLock(slotKey, async () => {
-      const slot = await this.store.getSlot(slotKey);
-      if (slot === null) {
-        return diagnosticResponse(409, "v6_lease_rollback_blocked", {
-          slotState: "IDLE",
-          rayId,
-        });
-      }
-      if (slot.state !== "HOLD") {
-        return diagnosticResponse(409, stateConflictDiagnostic(slot.state, slot), {
-          slotState: slot.state,
-          rayId,
-        });
-      }
-      if (slot.generation !== reqGeneration) {
-        return diagnosticResponse(409, "v6_lease_rollback_blocked", {
-          slotState: "HOLD",
-          rayId,
-        });
-      }
+    let resolvePrep:
+      | { kind: "done"; result: V6RouteResult }
+      | { kind: "revoke"; slot: SlotRecord };
 
-      if (!this.clock.isTrusted()) {
-        return diagnosticResponse(409, "v6_lease_clock_untrusted", {
-          slotState: "HOLD",
-          rayId,
-        });
-      }
-
-      // Confirm credential clearance: if an escrow ciphertext survives, try revoking it first.
-      if (slot.encrypted_escrow !== null) {
-        const rev = await this.executeRevocation(
-          { ...slot, state: "DRAINING" },
-          edge,
-          resolutionKind === "reconciled_clean" ? "IDLE" : "RECONCILING",
-        );
-        if (rev.errorStatus !== undefined && rev.diagnostic !== undefined) {
-          // Stay in HOLD on failed clearance during resolve-hold.
-          await this.store.putSlot({
-            ...rev.updatedSlot,
-            state: "HOLD",
-          });
-          return diagnosticResponse(rev.errorStatus, rev.diagnostic, {
-            slotState: "HOLD",
-            rayId,
-          });
+    try {
+      resolvePrep = await this.withSlotLock(slotKey, async () => {
+        const slot = await this.readSlot(slotKey);
+        if (slot === null) {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+              slotState: "IDLE",
+              rayId,
+            }),
+          };
         }
-        const resolvedSlot: SlotRecord = {
-          ...rev.updatedSlot,
+        if (slot.state !== "HOLD") {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, stateConflictDiagnostic(slot.state, slot), {
+              slotState: slot.state,
+              rayId,
+            }),
+          };
+        }
+        if (slot.generation !== reqGeneration) {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
+              slotState: "HOLD",
+              rayId,
+            }),
+          };
+        }
+
+        try {
+          assertRecordMatchesSlot(holdRecord.payload, {
+            slot_key: slotKey,
+            generation: slot.generation,
+            lease_epoch: slot.lease_epoch,
+            owner_head_sha: slot.owner_head_sha,
+          });
+          if (verifiedAnchor !== null) {
+            assertRecordMatchesSlot(verifiedAnchor.payload, {
+              slot_key: slotKey,
+              generation: slot.generation,
+              lease_epoch: slot.lease_epoch,
+              owner_head_sha: slot.owner_head_sha,
+            });
+          }
+        } catch {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
+              slotState: "HOLD",
+              rayId,
+            }),
+          };
+        }
+
+        if (!this.clock.isTrusted()) {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_clock_untrusted", {
+              slotState: "HOLD",
+              rayId,
+            }),
+          };
+        }
+
+        if (slot.encrypted_escrow !== null) {
+          return { kind: "revoke" as const, slot };
+        }
+
+        const clearance = await this.isCredentialClearedForReconcileOrHold(slot, edge);
+        if (!clearance.cleared) {
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, clearance.reason, {
+              slotState: "HOLD",
+              retryAfterMs: clearance.retryAfterMs,
+              rayId,
+            }),
+          };
+        }
+
+        const nextState: CoordinatorState =
+          resolutionKind === "reconciled_clean" ? "IDLE" : "RECONCILING";
+        const updated: SlotRecord = {
+          ...slot,
+          state: nextState,
+          reservation_id: null,
           owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
           owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
+          token_expires_at_ms: null,
+          encrypted_escrow: null,
+          last_reason_code: null,
+          updated_at_ms: this.clock.nowMs(),
         };
-        await this.store.putSlot(resolvedSlot);
-        return {
-          status: 200,
-          body: {
-            slot_key: slotKey,
-            state: resolvedSlot.state,
-            generation: resolvedSlot.generation,
-            lease_epoch: resolvedSlot.lease_epoch,
-          },
-        };
-      }
-
-      const clearance = await this.isCredentialClearedForReconcileOrHold(slot, edge);
-      if (!clearance.cleared) {
-        return diagnosticResponse(409, clearance.reason, {
-          slotState: "HOLD",
-          retryAfterMs: clearance.retryAfterMs,
-          rayId,
-        });
-      }
-
-      const nextState: CoordinatorState =
-        resolutionKind === "reconciled_clean" ? "IDLE" : "RECONCILING";
-      const updated: SlotRecord = {
-        ...slot,
-        state: nextState,
-        reservation_id: null,
-        owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
-        owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
-        token_expires_at_ms: null,
-        encrypted_escrow: null,
-        last_reason_code: null,
-        updated_at_ms: this.clock.nowMs(),
-      };
-      await this.store.putSlot(updated);
-      this.emitAudit("/github/v6/lease/resolve-hold", slotKey, "success", {
-        state: nextState,
-        generation: updated.generation,
-        lease_epoch: updated.lease_epoch,
-      });
-      return {
-        status: 200,
-        body: {
-          slot_key: slotKey,
+        await this.store.putSlot(updated);
+        this.emitAudit("/github/v6/lease/resolve-hold", slotKey, "success", {
           state: nextState,
           generation: updated.generation,
           lease_epoch: updated.lease_epoch,
-        },
+        });
+        return {
+          kind: "done" as const,
+          result: {
+            status: 200,
+            body: {
+              slot_key: slotKey,
+              state: nextState,
+              generation: updated.generation,
+              lease_epoch: updated.lease_epoch,
+            },
+          },
+        };
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+        return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+      }
+      throw error;
+    }
+
+    if (resolvePrep.kind === "done") {
+      return resolvePrep.result;
+    }
+
+    const heldSlot = resolvePrep.slot;
+    const rev = await this.executeRevocation(
+      { ...heldSlot, state: "DRAINING" },
+      edge,
+      resolutionKind === "reconciled_clean" ? "IDLE" : "RECONCILING",
+    );
+    const applied = await this.withSlotLock(slotKey, async () => {
+      const latest = await this.readSlot(slotKey);
+      if (
+        latest === null ||
+        latest.state !== "HOLD" ||
+        latest.generation !== heldSlot.generation ||
+        latest.lease_epoch !== heldSlot.lease_epoch ||
+        latest.reservation_id !== heldSlot.reservation_id
+      ) {
+        return { conflict: true, state: latest?.state ?? ("IDLE" as CoordinatorState) };
+      }
+      if (rev.errorStatus !== undefined && rev.diagnostic !== undefined) {
+        await this.store.putSlot({ ...rev.updatedSlot, state: "HOLD" });
+        return { conflict: false, failed: true, state: "HOLD" as CoordinatorState };
+      }
+      const resolvedSlot: SlotRecord = {
+        ...rev.updatedSlot,
+        owner_comment_id: anchorCommentId ?? heldSlot.owner_comment_id,
+        owner_record_sha256: verifiedAnchor?.sha256 ?? heldSlot.owner_record_sha256,
       };
+      await this.store.putSlot(resolvedSlot);
+      return { conflict: false, failed: false, slot: resolvedSlot };
     });
+
+    if (applied.conflict) {
+      return diagnosticResponse(409, "v6_lease_hold", { slotState: applied.state, rayId });
+    }
+    if (applied.failed) {
+      return diagnosticResponse(rev.errorStatus!, rev.diagnostic!, {
+        slotState: "HOLD",
+        rayId,
+      });
+    }
+    const resolvedSlot = applied.slot!;
+    return {
+      status: 200,
+      body: {
+        slot_key: slotKey,
+        state: resolvedSlot.state,
+        generation: resolvedSlot.generation,
+        lease_epoch: resolvedSlot.lease_epoch,
+      },
+    };
   }
 }
 
@@ -3289,21 +3720,28 @@ export class V6PrCoordinator extends DurableObject<WorkerEnv> {
       } catch {
         return diagnosticResponse(503, "configuration_unavailable", { rayId });
       }
-      switch (url.pathname) {
-        case "/github/v6/lease/acquire":
-          return engine.handleAcquire(this.env, body, undefined, rayId);
-        case "/github/v6/lease/drain":
-          return engine.handleDrain(this.env, body, undefined, rayId);
-        case "/github/v6/lease/complete-reconcile":
-          return engine.handleCompleteReconcile(this.env, body, undefined, rayId);
-        case "/github/v6/lease/release":
-          return engine.handleRelease(this.env, body, undefined, rayId);
-        case "/github/v6/lease/status":
-          return engine.handleStatus(this.env, body, undefined, rayId);
-        case "/github/v6/lease/resolve-hold":
-          return engine.handleResolveHold(this.env, body, undefined, rayId);
-        default:
-          return { status: 404, body: { error: "not_found" } };
+      try {
+        switch (url.pathname) {
+          case "/github/v6/lease/acquire":
+            return await engine.handleAcquire(this.env, body, undefined, rayId);
+          case "/github/v6/lease/drain":
+            return await engine.handleDrain(this.env, body, undefined, rayId);
+          case "/github/v6/lease/complete-reconcile":
+            return await engine.handleCompleteReconcile(this.env, body, undefined, rayId);
+          case "/github/v6/lease/release":
+            return await engine.handleRelease(this.env, body, undefined, rayId);
+          case "/github/v6/lease/status":
+            return await engine.handleStatus(this.env, body, undefined, rayId);
+          case "/github/v6/lease/resolve-hold":
+            return await engine.handleResolveHold(this.env, body, undefined, rayId);
+          default:
+            return { status: 404, body: { error: "not_found" } };
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
+          return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
+        }
+        return diagnosticResponse(503, "configuration_unavailable", { rayId });
       }
     });
 

@@ -22,7 +22,10 @@ import {
   sha256Hex,
 } from "../src/v6-escrow-crypto";
 import {
+  DurableObjectSqlV6CoordinatorStore,
   InMemoryV6CoordinatorStore,
+  V6_MINTING_STALE_MS,
+  V6_RESERVED_STALE_MS,
   V6PrCoordinator,
   V6PrCoordinatorEngine,
   buildCanonicalSlotKey,
@@ -30,6 +33,7 @@ import {
   type V6AuditEvent,
   type V6Clock,
   type V6ProviderAdapter,
+  type V6RouteResult,
 } from "../src/v6-pr-coordinator";
 import worker from "../src/worker";
 
@@ -320,6 +324,7 @@ function assertZeroPlaintextSecrets(
   store: InMemoryV6CoordinatorStore,
   auditEvents: V6AuditEvent[],
   disclosedTokens: string[],
+  nonAuthorizedResponses: Array<V6RouteResult | { status: number; body: unknown; headers?: Record<string, string> }> = [],
 ): void {
   const serializedStore = JSON.stringify(store.snapshot());
   const serializedAudit = JSON.stringify(auditEvents);
@@ -331,6 +336,20 @@ function assertZeroPlaintextSecrets(
   expect(serializedAudit).not.toContain("ghs_");
   expect(serializedStore).not.toContain("oidc-");
   expect(serializedAudit).not.toContain("oidc-");
+  for (const res of nonAuthorizedResponses) {
+    const serializedRes = JSON.stringify({
+      status: res.status,
+      body: res.body,
+      headers: "headers" in res ? res.headers ?? {} : {},
+    });
+    for (const tok of disclosedTokens) {
+      expect(serializedRes).not.toContain(tok);
+    }
+    expect(serializedRes).not.toContain("ghs_");
+    expect(serializedRes).not.toContain("ghp_");
+    expect(serializedRes).not.toContain("Bearer ");
+    expect(serializedRes).not.toContain("oidc-");
+  }
   for (const slot of Object.values(store.snapshot())) {
     for (const banned of contract.coordinator_storage.never_keep_fields) {
       expect(slot).not.toHaveProperty(banned);
@@ -483,7 +502,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect(forkPr.body.diagnostic).toMatchObject({ code: "v6_lease_unauthorized_tuple" });
 
     expect(provider.calls.mints).toBe(0);
-    assertZeroPlaintextSecrets(store, auditEvents, []);
+    assertZeroPlaintextSecrets(store, auditEvents, [], [wrongHead, nonPilot, badWf, forkPr]);
   });
 
   it("reuses active escrowed token for same owner (1 mint) and blocks contenders + separates PRs", async () => {
@@ -513,6 +532,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect(reuse.body.token).toBe(token1);
     expect(provider.calls.mints).toBe(1);
 
+    const unauthorizedResponses: V6RouteResult[] = [];
     // Alternative run & alternative attempt rejected without token disclosure
     for (const badToken of ["oidc-run-2", "oidc-run-1-att2"]) {
       const denied = await engine.handleAcquire(env, {
@@ -521,6 +541,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
         head_sha: HEAD_SHA_1,
         capabilities: ["review_publish"],
       });
+      unauthorizedResponses.push(denied);
       expect(denied.status).toBe(409);
       expect(denied.body.diagnostic).toMatchObject({ code: "v6_lease_active_other_owner" });
       expect(denied.body).not.toHaveProperty("token");
@@ -553,7 +574,12 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect(status43.status).toBe(200);
     expect(status43.body.state).toBe("ACTIVE");
 
-    assertZeroPlaintextSecrets(store, auditEvents, [token1, pr43.body.token as string]);
+    assertZeroPlaintextSecrets(
+      store,
+      auditEvents,
+      [token1, pr43.body.token as string],
+      [...unauthorizedResponses, rel42, status43],
+    );
   });
 
   it("blocks simultaneous contender in RESERVED and fences delayed stale mint continuation", async () => {
@@ -590,7 +616,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       capabilities: ["review_publish"],
     });
     expect(contenderB.status).toBe(409);
-    expect(contenderB.body.diagnostic).toMatchObject({ code: "v6_lease_mint_uncertain" });
+    expect(contenderB.body.diagnostic).toMatchObject({ code: "v6_lease_reserved" });
 
     // Simulate timeout/reconcile fencing the slot while contender A's mint was delayed
     const current = await store.getSlot(slotKey42);
@@ -615,7 +641,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect(lateResult.body).not.toHaveProperty("token");
     expect((await store.getSlot(slotKey42))?.state).toBe("RECONCILING");
     expect(provider.calls.revocations).toEqual([{ token: "ghs_late_stale_token" }]);
-    assertZeroPlaintextSecrets(store, auditEvents, ["ghs_late_stale_token"]);
+    assertZeroPlaintextSecrets(store, auditEvents, ["ghs_late_stale_token"], [contenderB, lateResult]);
   });
 
   it("handles all crash points across fresh engine instances over durable store", async () => {
@@ -811,9 +837,17 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       }),
     );
 
+    const drainMissingGen = await engine.handleDrain(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      predecessor_anchor_comment_id: 9001,
+    });
+    expect(drainMissingGen.status).toBe(400);
+
     const drained = await engine.handleDrain(env, {
       oidc_token: "oidc-run-2",
       slot_key: slotKey42,
+      expected_generation: 1,
       predecessor_anchor_comment_id: 9001,
     });
     expect(drained.status).toBe(200);
@@ -1557,5 +1591,294 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect(res503.status).toBe(503);
     expect(await res503.json()).toMatchObject({ error: "configuration_unavailable" });
     expect(execCalls.length).toBe(0);
+  });
+
+  it("fails closed on corrupt SQLite state or last_reason_code rows without proceeding", async () => {
+    const slotKey = "v6-pr:github.com:12345:67890:987654321:42";
+    const badStateSql = {
+      exec: vi.fn((query: string) => {
+        if (query.trim().startsWith("SELECT")) {
+          return {
+            toArray: () => [
+              {
+                slot_key: slotKey,
+                state: "BOGUS_STATE",
+                generation: 1,
+                lease_epoch: 1,
+                reservation_id: "res-1",
+                owner_run_id: "10001",
+                owner_run_attempt: 1,
+                owner_head_sha: HEAD_SHA_1,
+                owner_workflow_sha: WORKFLOW_SHA,
+                owner_job: "ReviewSensei v6",
+                owner_comment_id: null,
+                owner_record_sha256: null,
+                token_expires_at_ms: null,
+                clock_margin_ms: 300_000,
+                encrypted_escrow: null,
+                last_reason_code: null,
+                updated_at_ms: 1_795_000_000_000,
+              },
+            ],
+          };
+        }
+        return { toArray: () => [] };
+      }),
+    } as unknown as SqlStorage;
+
+    const sqlStore = new DurableObjectSqlV6CoordinatorStore(badStateSql);
+    await expect(sqlStore.getSlot(slotKey)).rejects.toThrow("v6_lease_escrow_lost");
+
+    const clock = new MutableClock();
+    const provider = new FakeV6Provider(clock);
+    provider.registerOidc("oidc-run-1", makeClaims({ run_id: "10001", run_attempt: "1" }));
+    const engine = new V6PrCoordinatorEngine({
+      store: sqlStore,
+      provider,
+      clock,
+    });
+    const res = await engine.handleStatus(baseEnv(), {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.diagnostic).toMatchObject({ code: "v6_lease_escrow_lost" });
+    expect(res.body.slot_state).toBe("HOLD");
+  });
+
+  it("rejects owner records with expires_at <= acquired_at or mismatched slot/epoch/head", async () => {
+    const { env, clock, engine, provider, store, slotKey42 } = createHarness();
+    await store.putSlot({
+      slot_key: slotKey42,
+      state: "HOLD",
+      generation: 2,
+      lease_epoch: 2,
+      reservation_id: null,
+      owner_run_id: "10001",
+      owner_run_attempt: 1,
+      owner_head_sha: HEAD_SHA_1,
+      owner_workflow_sha: WORKFLOW_SHA,
+      owner_job: "ReviewSensei v6",
+      owner_comment_id: null,
+      owner_record_sha256: null,
+      token_expires_at_ms: clock.now - 400_000,
+      clock_margin_ms: 300_000,
+      encrypted_escrow: null,
+      last_reason_code: "v6_lease_hold",
+      updated_at_ms: clock.now,
+    });
+
+    const crypto = new V6EscrowCrypto(SIGNING_KEY);
+    provider.comments.set(
+      9101,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:hold:v1",
+        record_id: "rec-hold-ok",
+        slot_key: slotKey42,
+        generation: 2,
+        lease_epoch: 2,
+        operation_id: "op-2",
+        pr_head_sha: HEAD_SHA_1,
+        reason_code: "v6_lease_hold",
+        missing_evidence: [],
+        held_at: "2026-11-27T00:05:00Z",
+        resolved_by_record_id: "rec-receipt-2",
+      }),
+    );
+
+    const mac = await crypto.signOwnerAttestation({
+      slot_key: slotKey42,
+      generation: 2,
+      lease_epoch: 2,
+      reservation_id: "res-2",
+      run_id: "10001",
+      run_attempt: 1,
+      pr_head_sha: HEAD_SHA_1,
+      workflow_sha: WORKFLOW_SHA,
+    });
+    // Inverted acquired_at / expires_at must fail closed
+    provider.comments.set(
+      9102,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:owner:v1",
+        record_id: "rec-owner-bad-time",
+        slot_key: slotKey42,
+        generation: 2,
+        lease_epoch: 2,
+        reservation_id: "res-2",
+        operation_id: "op-2",
+        run_id: "10001",
+        run_attempt: 1,
+        pr_head_sha: HEAD_SHA_1,
+        workflow_sha: WORKFLOW_SHA,
+        acquired_at: "2026-11-27T01:00:00Z",
+        expires_at: "2026-11-27T00:00:00Z",
+        coordinator_attestation_mac: mac,
+      }),
+    );
+    const badTime = await engine.handleResolveHold(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 2,
+      hold_record_comment_id: 9101,
+      resolution_kind: "reconciled_clean",
+      anchor_comment_id: 9102,
+    });
+    expect(badTime.status).toBe(409);
+    expect(badTime.body.diagnostic).toMatchObject({ code: "v6_lease_slot_continuity_unproved" });
+
+    // Mismatched lease_epoch must fail closed
+    const badEpochMac = await crypto.signOwnerAttestation({
+      slot_key: slotKey42,
+      generation: 2,
+      lease_epoch: 99,
+      reservation_id: "res-2",
+      run_id: "10001",
+      run_attempt: 1,
+      pr_head_sha: HEAD_SHA_1,
+      workflow_sha: WORKFLOW_SHA,
+    });
+    provider.comments.set(
+      9103,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:owner:v1",
+        record_id: "rec-owner-bad-epoch",
+        slot_key: slotKey42,
+        generation: 2,
+        lease_epoch: 99,
+        reservation_id: "res-2",
+        operation_id: "op-2",
+        run_id: "10001",
+        run_attempt: 1,
+        pr_head_sha: HEAD_SHA_1,
+        workflow_sha: WORKFLOW_SHA,
+        acquired_at: "2026-11-27T00:00:00Z",
+        expires_at: "2026-11-27T01:00:00Z",
+        coordinator_attestation_mac: badEpochMac,
+      }),
+    );
+    const badEpoch = await engine.handleResolveHold(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 2,
+      hold_record_comment_id: 9101,
+      resolution_kind: "reconciled_clean",
+      anchor_comment_id: 9103,
+    });
+    expect(badEpoch.status).toBe(409);
+    expect(badEpoch.body.diagnostic).toMatchObject({ code: "v6_lease_slot_continuity_unproved" });
+  });
+
+  it("guards live MINTING isolates via bounded freshness and recovers stale RESERVED/MINTING + snapshot-mutated drain", async () => {
+    const { env, clock, store, makeEngine, provider, slotKey42 } = createHarness();
+
+    // Live parallel isolate in MINTING within V6_MINTING_STALE_MS is NOT flipped to RECONCILING
+    await store.putSlot({
+      slot_key: slotKey42,
+      state: "MINTING",
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: "res-live-other-isolate",
+      owner_run_id: "10001",
+      owner_run_attempt: 1,
+      owner_head_sha: HEAD_SHA_1,
+      owner_workflow_sha: WORKFLOW_SHA,
+      owner_job: "ReviewSensei v6",
+      owner_comment_id: null,
+      owner_record_sha256: null,
+      token_expires_at_ms: null,
+      clock_margin_ms: 300_000,
+      encrypted_escrow: null,
+      last_reason_code: null,
+      updated_at_ms: clock.now,
+    });
+
+    const freshEngine = makeEngine();
+    const whileLive = await freshEngine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(whileLive.status).toBe(409);
+    expect(whileLive.body.diagnostic).toMatchObject({ code: "v6_lease_reserved" });
+    expect((await store.getSlot(slotKey42))?.state).toBe("MINTING");
+
+    // Once V6_MINTING_STALE_MS elapses, fresh engine transitions MINTING -> RECONCILING
+    clock.now += V6_MINTING_STALE_MS;
+    const afterStale = await freshEngine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(afterStale.status).toBe(409);
+    expect(afterStale.body.diagnostic).toMatchObject({ code: "v6_lease_mint_uncertain" });
+    expect((await store.getSlot(slotKey42))?.state).toBe("RECONCILING");
+
+    // Same-run crashed RESERVED with non-terminal status recovers after V6_RESERVED_STALE_MS
+    await store.putSlot({
+      slot_key: slotKey42,
+      state: "RESERVED",
+      generation: 2,
+      lease_epoch: 2,
+      reservation_id: "res-same-run-crashed",
+      owner_run_id: "10001",
+      owner_run_attempt: 1,
+      owner_head_sha: HEAD_SHA_1,
+      owner_workflow_sha: WORKFLOW_SHA,
+      owner_job: "ReviewSensei v6",
+      owner_comment_id: null,
+      owner_record_sha256: null,
+      token_expires_at_ms: null,
+      clock_margin_ms: 300_000,
+      encrypted_escrow: null,
+      last_reason_code: null,
+      updated_at_ms: clock.now,
+    });
+    // Fresh (< V6_RESERVED_STALE_MS) while run 10001:1 is in_progress -> refused
+    const sameRunTooEarly = await freshEngine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(sameRunTooEarly.status).toBe(409);
+    expect(sameRunTooEarly.body.diagnostic).toMatchObject({ code: "v6_lease_reserved" });
+
+    // Stale (>= V6_RESERVED_STALE_MS) -> same run recovers cleanly without stranding
+    clock.now += V6_RESERVED_STALE_MS;
+    const sameRunRecovered = await freshEngine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(sameRunRecovered.status).toBe(200);
+    expect(sameRunRecovered.body.generation).toBe(3);
+
+    // Drain aborts with 409 if slot mutates during workflowRunAttempt check
+    provider.runAttempts.set("10001:1", {
+      run_id: "10001",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "success",
+      head_sha: HEAD_SHA_1,
+    });
+    const origRunAttempt = provider.workflowRunAttempt.bind(provider);
+    vi.spyOn(provider, "workflowRunAttempt").mockImplementationOnce(async (repo, runId, att) => {
+      const current = await store.getSlot(slotKey42);
+      await store.putSlot({
+        ...current!,
+        lease_epoch: current!.lease_epoch + 1,
+      });
+      return origRunAttempt(repo, runId, att);
+    });
+    const racedDrain = await freshEngine.handleDrain(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+    });
+    expect(racedDrain.status).toBe(409);
+    expect(racedDrain.body.diagnostic).toMatchObject({ code: "v6_lease_draining" });
   });
 });

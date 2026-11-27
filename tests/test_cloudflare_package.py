@@ -38,7 +38,17 @@ class CloudflarePackageTests(unittest.TestCase):
         config = json.loads((CLOUDFLARE / "wrangler.jsonc").read_text())
         self.assertEqual(config["main"], "src/worker.ts")
         self.assertNotIn("containers", config)
-        self.assertNotIn("durable_objects", config)
+        self.assertEqual(
+            config["durable_objects"],
+            {
+                "bindings": [
+                    {
+                        "name": "V6_PR_COORDINATOR",
+                        "class_name": "V6PrCoordinator",
+                    }
+                ]
+            },
+        )
         self.assertNotIn("kv_namespaces", config)
         self.assertNotIn("d1_databases", config)
         self.assertNotIn("r2_buckets", config)
@@ -46,6 +56,13 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             config["migrations"][2]["deleted_classes"],
             ["DeliveryLedger", "BrokerLedger"],
+        )
+        self.assertEqual(
+            config["migrations"][3],
+            {
+                "tag": "v4",
+                "new_sqlite_classes": ["V6PrCoordinator"],
+            },
         )
         self.assertEqual(
             config["vars"],

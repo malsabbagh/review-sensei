@@ -858,17 +858,19 @@ export class GitHubApi {
       throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
     }
     const baseRepoId = base.repo.id;
-    let headRepoId: number | null = null;
-    let isForkPr = false;
     if (head.repo === null || head.repo === undefined) {
-      isForkPr = true;
-    } else {
-      if (!isObject(head.repo) || typeof head.repo.id !== "number" || !Number.isSafeInteger(head.repo.id) || head.repo.id <= 0) {
-        throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
-      }
-      headRepoId = head.repo.id;
-      isForkPr = headRepoId !== baseRepoId || (head.repo.fork === true && base.repo.fork !== true);
+      return null;
     }
+    if (
+      !isObject(head.repo) ||
+      typeof head.repo.id !== "number" ||
+      !Number.isSafeInteger(head.repo.id) ||
+      head.repo.id <= 0
+    ) {
+      throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
+    }
+    const headRepoId = head.repo.id;
+    const isForkPr = headRepoId !== baseRepoId || (head.repo.fork === true && base.repo.fork !== true);
     return {
       head_sha: head.sha,
       base_repo_id: baseRepoId,
@@ -912,7 +914,12 @@ export class GitHubApi {
     }
     const data = response.data;
     const rawAttempt = data.run_attempt;
-    if (usedFallback && rawAttempt !== expectedAttempt) {
+    if (
+      usedFallback &&
+      (typeof rawAttempt !== "number" ||
+        !Number.isSafeInteger(rawAttempt) ||
+        rawAttempt !== expectedAttempt)
+    ) {
       return null;
     }
     if (

@@ -1229,13 +1229,7 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
         base: { repo: { id: 100, fork: false } },
       },
     });
-    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toEqual({
-      head_sha: SHA,
-      base_repo_id: 100,
-      state: "closed",
-      head_repo_id: null,
-      is_fork_pr: true,
-    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toBeNull();
 
     request.mockResolvedValueOnce({ status: 404, data: null });
     await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toBeNull();
@@ -1276,6 +1270,14 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       .mockResolvedValueOnce({
         status: 200,
         data: { id: 9002, run_attempt: 3, status: "in_progress", conclusion: null, head_sha: SHA },
+      });
+    await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
+
+    request
+      .mockResolvedValueOnce({ status: 404, data: null })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 9002, status: "completed", conclusion: "success", head_sha: SHA },
       });
     await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
   });
