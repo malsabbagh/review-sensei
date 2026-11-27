@@ -1222,6 +1222,7 @@ export class GitHubApi {
           }
         }
         if (hitTooLarge) {
+          lastComments = Array.from(commentsById.values());
           continue;
         }
         if (!unstable) {

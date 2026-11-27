@@ -598,6 +598,18 @@ def _effect_tag(operation_id: str, payload_sha256: str) -> str:
     return f"<!-- reviewsensei:v6:effect op={operation_id} sha256={payload_sha256} -->"
 
 
+_LEDGER_MARKER_PREFIXES: tuple[str, ...] = (
+    "<!-- reviewsensei:v6:intent",
+    "<!-- reviewsensei:v6:receipt",
+    "<!-- reviewsensei:v6:owner",
+    "<!-- reviewsensei:v6:hold",
+    "<!-- reviewsensei:v6:result",
+    "<!-- reviewsensei:v6:batch-",
+    "<!-- reviewsensei:v6:non-submission",
+    "<!-- reviewsensei:v6:hint",
+)
+
+
 def _matches_effect_payload(
     payload: Mapping[str, Any],
     *,
@@ -624,7 +636,7 @@ def _matches_effect_payload(
         return False
     if _effect_tag(operation_id, payload_sha256) in body:
         return True
-    if "<!-- reviewsensei:v6:" in body and "reviewsensei:v6:effect" not in body:
+    if any(prefix in body for prefix in _LEDGER_MARKER_PREFIXES):
         return False
     return operation_id in body and payload_sha256 in body
 

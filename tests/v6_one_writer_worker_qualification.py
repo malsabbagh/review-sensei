@@ -352,7 +352,9 @@ def _materialize_installed_dist_wheel(dist_name: str, wheel_dir: Path) -> None:
         zf.writestr(record_arc, "\n".join(record_rows) + "\n")
 
 
-def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
+def _build_offline_venv_and_install(
+    temp_root: Path,
+) -> tuple[Path, Path, dict[str, Any]]:
     """Execute the actual `.github/workflows/review-sensei-v6-pilot.yml` install step via bash."""
 
     git_origin = temp_root / "workflow-origin"
@@ -627,23 +629,20 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
         text=True,
     )
-    wheel_hashes = {
+    wheel_sha256_by_name = {
         whl.name: hashlib.sha256(whl.read_bytes()).hexdigest()
         for whl in sorted(built_wheel_dir.glob("*.whl"))
     }
-    worker_hasher = hashlib.sha256()
+    worker_digest = hashlib.sha256()
     for ts_file in sorted((ROOT / "deploy" / "cloudflare" / "src").glob("*.ts")):
-        worker_hasher.update(ts_file.name.encode("utf-8"))
-        worker_hasher.update(ts_file.read_bytes())
-    provenance = {
+        worker_digest.update(ts_file.name.encode("utf-8"))
+        worker_digest.update(ts_file.read_bytes())
+    provenance: dict[str, Any] = {
         "workflow_commit_sha": commit_sha,
         "trusted_policy_revision": trusted_policy_rev,
-        "wheel_sha256s": wheel_hashes,
-        "worker_source_sha256": worker_hasher.hexdigest(),
+        "wheel_sha256s": wheel_sha256_by_name,
+        "worker_source_sha256": worker_digest.hexdigest(),
     }
-    (temp_root / "v6-provenance.json").write_text(
-        json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
-    )
 
     cli_bin = venv_dir / "bin" / "review-sensei-github"
     clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -661,7 +660,7 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
             raise RuntimeError(
                 f"v6-pilot-run --help missing expected flag {required_flag}"
             )
-    return venv_dir, cli_bin
+    return venv_dir, cli_bin, provenance
 
 
 @dataclass
@@ -1758,7 +1757,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.worker_port = int(json.loads(ready_line)["port"])
         self.worker_url = f"https://127.0.0.1:{self.worker_port}"
 
-        self.venv_dir, self.cli_bin = _build_offline_venv_and_install(self.tmp_path)
+        self.venv_dir, self.cli_bin, self.provenance = _build_offline_venv_and_install(
+            self.tmp_path
+        )
         self.venv_python = self.venv_dir / "bin" / "python"
 
     def _stop_gh_server(self) -> None:
@@ -1968,9 +1969,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
 
     def test_integrated_worker_and_wheel_runner_acceptance_scenarios(self) -> None:
         # 0. Verify provenance hashes and installed packages inside venv (never repo checkout).
-        provenance = json.loads(
-            (self.tmp_path / "v6-provenance.json").read_text(encoding="utf-8")
-        )
+        provenance = self.provenance
         self.assertRegex(provenance["workflow_commit_sha"], r"^[0-9a-f]{40}$")
         self.assertRegex(provenance["trusted_policy_revision"], r"^[0-9a-f]{40}$")
         self.assertRegex(provenance["worker_source_sha256"], r"^[0-9a-f]{64}$")
