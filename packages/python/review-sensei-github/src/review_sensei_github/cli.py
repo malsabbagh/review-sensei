@@ -40,6 +40,7 @@ from review_sensei_github.review_guidance import (
 _PUBLIC = (
     "review",
     "review-run",
+    "v6-pilot-run",
     "restart-run",
     "restart-handoff",
     "restart-caller",
@@ -58,6 +59,7 @@ _PUBLIC = (
 _HELP = {
     "review": "engine review plus hosted hooks",
     "review-run": "one metered review lifecycle",
+    "v6-pilot-run": "one opt-in v6 per-PR coordinator recovery lifecycle",
     "restart-run": "one registered serialized fresh review",
     "restart-handoff": "offline evidence mapping for a current-head human review",
     "restart-caller": "print an explicit manual launcher caller for review",
@@ -343,6 +345,14 @@ def _main(argv: list[str] | None = None) -> int:
                 return diagnostic.returned(1)
     if command.startswith("-") or command in {"publish", "reply", "command"}:
         return _publication(args)
+    if command == "v6-pilot-run":
+        from .v6_pilot_runner import run_v6_pilot_cli
+
+        try:
+            return run_v6_pilot_cli(rest)
+        except (OSError, ValueError, ReviewSenseiError) as error:
+            print(f"review-sensei: {error}", file=sys.stderr)
+            return 1
     if command in {"review-run", "restart-run"}:
         from .review_lifecycle_diagnostics import lifecycle
         from .review_run import run_review

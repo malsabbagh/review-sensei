@@ -3011,6 +3011,46 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertIn('"$CREDENTIAL_ENV" "$credential_value"', credential)
                 self.assertNotIn("--allow-write", credential)
 
+    def test_v6_pilot_workflow_is_read_only_pinned_and_fork_isolated(self):
+        root = Path(__file__).resolve().parents[1]
+        v6_workflow = root / ".github" / "workflows" / "review-sensei-v6-pilot.yml"
+        self.assertTrue(v6_workflow.is_file(), "missing review-sensei-v6-pilot.yml")
+        text = v6_workflow.read_text(encoding="utf-8")
+        self.assertEqual(check_workflow_text(text, source=v6_workflow.name), [])
+        self.assertIn("workflow_call:", text)
+        for scope in (
+            "contents: read",
+            "pull-requests: read",
+            "issues: read",
+            "checks: read",
+            "actions: read",
+            "id-token: write",
+        ):
+            self.assertIn(scope, text)
+        for forbidden in (
+            "contents: write",
+            "pull-requests: write",
+            "issues: write",
+            "checks: write",
+            "secrets: inherit",
+            "pull_request_target",
+        ):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn("head.repo.fork != true", text)
+        self.assertIn("head.repo.full_name == github.repository", text)
+        self.assertIn("v6-pilot-run", text)
+        for block in _run_blocks(text):
+            self.assertNotIn("${{ inputs.", block)
+        for v5_file in (
+            ".github/workflows/review-sensei-review.yml",
+            ".github/workflows/review-sensei-run.yml",
+            "examples/github-actions/review-sensei-review.yml",
+        ):
+            v5_text = (root / v5_file).read_text(encoding="utf-8")
+            self.assertNotIn("review-sensei-v6-pilot.yml", v5_text)
+
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
     def test_python_and_workflow_review_groups_are_pr_scoped_sha_free_and_latest_wins(

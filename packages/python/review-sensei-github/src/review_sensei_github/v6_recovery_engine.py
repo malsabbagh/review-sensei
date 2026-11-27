@@ -9,11 +9,15 @@ without ever starting a fresh model call as a recovery fallback.
 
 from __future__ import annotations
 
+import os
+import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, TypeAlias
+from urllib.parse import urlsplit
 
 from review_sensei.errors import ReviewInputError
 
@@ -36,7 +40,10 @@ from .v6_pagination import (
 from .v6_recovery_ledger import (
     AdvisoryProgressHint,
     CompletionReceiptRecord,
+    DurableHoldRecord,
+    OwnerMarkerRecord,
     UnresolvedResultRecord,
+    V6LedgerIntegrityError,
     V6LedgerRecord,
     WriteIntentRecord,
     WriterOwnershipProof,
@@ -44,6 +51,8 @@ from .v6_recovery_ledger import (
     extract_v6_record_markers,
     format_v6_record_marker,
     reconcile_immutable_records,
+    redact_secrets,
+    validate_owner_lineage,
     verify_app_authored_record,
 )
 from .v6_transport import (
@@ -55,6 +64,11 @@ from .v6_transport import (
 )
 
 DEFAULT_MUTATION_SANITY_MAX_WRITES = 16
+DEFAULT_CLOCK_MARGIN_MS = 300_000
+_PR_SCOPED_PATH_RE = re.compile(
+    r"^/repos/([^/]+)/([^/]+)/(pulls|issues)/([1-9][0-9]*)(?:/|$)"
+)
+_SHA1_40_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class StaleWriterOwnershipError(ReviewInputError):
@@ -151,6 +165,36 @@ RecoveryOutcome: TypeAlias = RecoveryCompleted | RecoveryPaused | RecoveryHold
 
 
 @dataclass(frozen=True)
+class TakeoverReconciliationResult:
+    """Read-only takeover reconciliation outcome prior to write authority."""
+
+    reconciliation_outcome: str
+    adopted_effects: tuple[tuple[WriteIntentRecord, str | int], ...]
+    unsubmitted_intents: tuple[WriteIntentRecord, ...]
+    pending_unresolved_results: tuple[UnresolvedResultRecord, ...]
+    owner_lineage: tuple[OwnerMarkerRecord, ...]
+    unresolved_holds: tuple[DurableHoldRecord, ...]
+    completed_operations: tuple[str, ...]
+    blocker: str | None = None
+    missing_evidence: tuple[str, ...] = ()
+    anchor_comment_id: int | None = None
+    model_calls_started: int = 0
+
+    def __post_init__(self) -> None:
+        if self.reconciliation_outcome not in {
+            "adopted",
+            "proved_not_submitted",
+            "ambiguous_hold",
+            "incomplete",
+        }:
+            raise ValueError(
+                f"invalid reconciliation_outcome: {self.reconciliation_outcome!r}"
+            )
+        if self.model_calls_started != 0:
+            raise ValueError("takeover reconciliation must never start model calls")
+
+
+@dataclass(frozen=True)
 class RecoveryRequest:
     """Inputs defining a bounded v6 recovery and publication operation."""
 
@@ -177,10 +221,24 @@ class RecoveryRequest:
     known_records: tuple[PaginatedRecord, ...] = ()
     graphql_query: str | None = None
     graphql_stability_probe: Mapping[str, Any] | None = None
+    slot_key: str | None = None
+    generation: int | None = None
+    token_expires_at_ms: int | None = None
+    clock_margin_ms: int = DEFAULT_CLOCK_MARGIN_MS
+    owner_marker: OwnerMarkerRecord | None = None
+    mac_verifier: Callable[[OwnerMarkerRecord], bool] | None = None
+    affirmative_non_submission: bool = False
+    has_active_write_lease: bool = True
+    emit_durable_hold_on_pr: bool = False
+    step_summary_sink: Callable[[str], None] | Path | None = None
 
 
 class _AmbiguousWriteOutcomeError(RuntimeError):
     """Internal signal that a mutation response was lost, 5xx, or unverified."""
+
+
+class _AmbiguousReceiptOutcomeError(RuntimeError):
+    """Internal signal that a receipt write outcome could not be confirmed."""
 
 
 class _ThrottlePausedSignal(Exception):
@@ -189,6 +247,115 @@ class _ThrottlePausedSignal(Exception):
     def __init__(self, outcome: RecoveryPaused) -> None:
         super().__init__(outcome.reason)
         self.outcome = outcome
+
+
+def render_v6_hold_summary(
+    *,
+    operation_id: str,
+    blocker: str,
+    missing_evidence: Sequence[str] = (),
+    slot_key: str | None = None,
+    repository: str | None = None,
+    pull_request: int | None = None,
+    pr_head_sha: str | None = None,
+) -> str:
+    """Render a sanitized Markdown diagnostic summary for ``GITHUB_STEP_SUMMARY``."""
+
+    lines = ["## ReviewSensei v6 recovery hold"]
+    if repository:
+        lines.append(f"- repository: `{redact_secrets(repository)}`")
+    if type(pull_request) is int and pull_request > 0:
+        lines.append(f"- pull_request: #{pull_request}")
+    if slot_key:
+        lines.append(f"- slot_key: `{redact_secrets(slot_key)}`")
+    if pr_head_sha:
+        lines.append(f"- head: `{redact_secrets(pr_head_sha[:12])}`")
+    lines.append(f"- operation_id: `{redact_secrets(operation_id)}`")
+    lines.append(f"- blocker: `{redact_secrets(blocker)}`")
+    if missing_evidence:
+        cleaned = ", ".join(f"`{redact_secrets(item)}`" for item in missing_evidence)
+        lines.append(f"- missing_evidence: {cleaned}")
+    lines.append(
+        "- model_calls: 0 (fail-closed hold without mutating PR or clearing obligations)"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def write_v6_step_summary(
+    markdown: str,
+    *,
+    sink: Callable[[str], None] | Path | None = None,
+) -> bool:
+    """Write sanitized Markdown to a configurable sink or ``GITHUB_STEP_SUMMARY``."""
+
+    sanitized = redact_secrets(markdown)
+    if callable(sink):
+        sink(sanitized)
+        return True
+    target: Path | None = None
+    if isinstance(sink, Path):
+        target = sink
+    else:
+        env_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
+        if env_path:
+            target = Path(env_path)
+    if target is None:
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(sanitized)
+        return True
+    except OSError:
+        return False
+
+
+def _assert_target_pr_binding(
+    request: RecoveryRequest,
+    *,
+    path: str,
+) -> None:
+    """Refuse any cross-repository or cross-PR mutation despite repo-scoped tokens."""
+
+    proof = request.ownership_proof
+    if (
+        proof.repository_id != request.repository_id
+        or proof.pull_request != request.pull_request
+    ):
+        raise StaleWriterOwnershipError(
+            "writer ownership proof target mismatch: "
+            f"proof=({proof.repository_id},{proof.pull_request}) != "
+            f"request=({request.repository_id},{request.pull_request})",
+            diagnostic="v6_cross_pr_write_refused",
+        )
+    if request.owner_marker is not None and (
+        request.owner_marker.pr_head_sha != proof.pr_head_sha
+        or (
+            request.slot_key is not None
+            and request.owner_marker.slot_key != request.slot_key
+        )
+    ):
+        raise StaleWriterOwnershipError(
+            "owner_marker binding does not match active lease slot/head",
+            diagnostic="v6_cross_pr_write_refused",
+        )
+
+    parsed_path = urlsplit(path).path
+    if parsed_path == "/graphql":
+        return
+    expected_prefix = f"/repos/{request.owner}/{request.repo}/"
+    if not parsed_path.startswith(expected_prefix):
+        raise StaleWriterOwnershipError(
+            f"refusing mutation outside leased repository {request.owner}/{request.repo}: {parsed_path!r}",
+            diagnostic="v6_cross_pr_write_refused",
+        )
+    pr_match = _PR_SCOPED_PATH_RE.match(parsed_path)
+    if pr_match is not None and int(pr_match.group(4)) != request.pull_request:
+        raise StaleWriterOwnershipError(
+            f"refusing cross-PR mutation targeting PR #{pr_match.group(4)} "
+            f"under lease for PR #{request.pull_request}",
+            diagnostic="v6_cross_pr_write_refused",
+        )
 
 
 def verify_writer_ownership(
@@ -333,6 +500,41 @@ def _matches_effect_payload(
     expected_app_id: int | None,
     expected_bot_login: str | None,
     expected_bot_user_id: int | None,
+    expected_head_sha: str | None = None,
+) -> bool:
+    if not verify_app_authored_record(
+        payload,
+        expected_app_id=expected_app_id,
+        expected_bot_login=expected_bot_login,
+        expected_bot_user_id=expected_bot_user_id,
+    ):
+        return False
+    if expected_head_sha is not None:
+        commit_id = payload.get("commit_id")
+        if isinstance(commit_id, str) and commit_id != expected_head_sha:
+            return False
+    body = payload.get("body")
+    if not isinstance(body, str):
+        return False
+    if _effect_tag(operation_id, payload_sha256) in body:
+        return True
+    return operation_id in body and payload_sha256 in body
+
+
+_EFFECT_OP_RE = re.compile(
+    r"<!--\s*reviewsensei:v6:effect\s+op=([^\s]+)\s+sha256=([0-9a-f]{64})\s*-->"
+)
+
+
+def _has_contradictory_effect_marker(
+    payload: Mapping[str, Any],
+    *,
+    operation_id: str,
+    payload_sha256: str,
+    expected_head_sha: str | None,
+    expected_app_id: int | None,
+    expected_bot_login: str | None,
+    expected_bot_user_id: int | None,
 ) -> bool:
     if not verify_app_authored_record(
         payload,
@@ -344,9 +546,215 @@ def _matches_effect_payload(
     body = payload.get("body")
     if not isinstance(body, str):
         return False
-    if _effect_tag(operation_id, payload_sha256) in body:
+    match = _EFFECT_OP_RE.search(body)
+    if match is None:
+        return False
+    if match.group(1) != operation_id:
+        return False
+    if match.group(2) != payload_sha256:
         return True
-    return operation_id in body and payload_sha256 in body
+    if expected_head_sha is not None:
+        commit_id = payload.get("commit_id")
+        if isinstance(commit_id, str) and commit_id != expected_head_sha:
+            return True
+    return False
+
+
+def _match_check_run_payload(
+    payload: Mapping[str, Any],
+    *,
+    intent: WriteIntentRecord,
+    expected_app_id: int | None,
+) -> tuple[bool, bool]:
+    """Return ``(matched, contradictory)`` for a GitHub check-run object."""
+
+    app_info = payload.get("app")
+    if expected_app_id is not None:
+        if not isinstance(app_info, Mapping) or app_info.get("id") != expected_app_id:
+            return False, False
+    elif isinstance(app_info, Mapping):
+        if type(app_info.get("id")) is not int or int(app_info["id"]) <= 0:
+            return False, False
+    else:
+        return False, False
+
+    head_sha = payload.get("head_sha")
+    output = payload.get("output")
+    output_text = ""
+    if isinstance(output, Mapping):
+        summary = output.get("summary")
+        text = output.get("text")
+        output_text = "\n".join(
+            part for part in (summary, text) if isinstance(part, str)
+        )
+    ext_id = payload.get("external_id")
+    effect_tag = _effect_tag(intent.operation_id, intent.payload_sha256)
+    has_op = ext_id == intent.operation_id or intent.operation_id in output_text
+    has_sha = intent.payload_sha256 in output_text or effect_tag in output_text
+    if has_op:
+        if head_sha != intent.pr_head_sha:
+            return False, True
+        if has_sha or (ext_id == intent.operation_id and not output_text):
+            return True, False
+        if _EFFECT_OP_RE.search(output_text) is not None:
+            return False, True
+    return False, False
+
+
+def _match_review_thread_node(
+    payload: Mapping[str, Any],
+    *,
+    intent: WriteIntentRecord,
+    expected_app_id: int | None,
+    expected_bot_login: str | None,
+    expected_bot_user_id: int | None,
+) -> tuple[bool, bool]:
+    """Return ``(matched, contradictory)`` for a GraphQL reviewThread node."""
+
+    thread_id = payload.get("id")
+    if not isinstance(thread_id, str) or not thread_id:
+        return False, False
+    candidate_digests = {
+        thread_id,
+        canonical_sha256({"thread_id": thread_id}),
+        canonical_sha256({"thread_id": thread_id, "head": intent.pr_head_sha}),
+    }
+    comments_obj = payload.get("comments")
+    comment_nodes: Sequence[Any] = (
+        comments_obj.get("nodes", ())
+        if isinstance(comments_obj, Mapping)
+        and isinstance(comments_obj.get("nodes"), Sequence)
+        else ()
+    )
+    for node in comment_nodes:
+        if not isinstance(node, Mapping):
+            continue
+        if _has_contradictory_effect_marker(
+            node,
+            operation_id=intent.operation_id,
+            payload_sha256=intent.payload_sha256,
+            expected_head_sha=None,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+        ):
+            return False, True
+        if _matches_effect_payload(
+            node,
+            operation_id=intent.operation_id,
+            payload_sha256=intent.payload_sha256,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+        ):
+            return True, False
+
+    if intent.target_digest in candidate_digests:
+        expected_resolved = intent.effect_kind != "thread_unresolve"
+        if payload.get("isResolved") is expected_resolved:
+            return True, False
+    return False, False
+
+
+def _match_native_effects_for_intent(
+    intent: WriteIntentRecord,
+    *,
+    expected_app_id: int | None,
+    expected_bot_login: str | None,
+    expected_bot_user_id: int | None,
+    reviews: Sequence[PaginatedRecord],
+    issue_comments: Sequence[PaginatedRecord],
+    review_comments: Sequence[PaginatedRecord],
+    check_runs: Sequence[PaginatedRecord],
+    review_threads: Sequence[PaginatedRecord],
+) -> tuple[tuple[str | int, ...], bool]:
+    """Match an unmatched intent against native PR surfaces using ``intent.pr_head_sha``."""
+
+    kind = intent.effect_kind
+    matched_ids: list[str | int] = []
+    contradictory = False
+
+    if kind in {
+        "pr_review_publish",
+        "companion_prose_review_publish",
+        "pr_approval_publish",
+    }:
+        candidates = reviews
+    elif kind in {"issue_comment", "command_reply", "issue_reply", "session_comment"}:
+        candidates = issue_comments
+    elif kind in {"inline_reply", "pr_review_comment"}:
+        candidates = review_comments
+    elif kind in {"check_run_write", "check_publish"}:
+        for rec in check_runs:
+            if not isinstance(rec.payload, Mapping):
+                continue
+            matched, conflict = _match_check_run_payload(
+                rec.payload, intent=intent, expected_app_id=expected_app_id
+            )
+            if conflict:
+                contradictory = True
+            elif matched:
+                matched_ids.append(rec.payload.get("id", rec.record_id))
+        return tuple(matched_ids), contradictory
+    elif kind in {"review_thread_mutation", "thread_resolve", "thread_unresolve"}:
+        for rec in review_threads:
+            if not isinstance(rec.payload, Mapping):
+                continue
+            matched, conflict = _match_review_thread_node(
+                rec.payload,
+                intent=intent,
+                expected_app_id=expected_app_id,
+                expected_bot_login=expected_bot_login,
+                expected_bot_user_id=expected_bot_user_id,
+            )
+            if conflict:
+                contradictory = True
+            elif matched:
+                matched_ids.append(rec.payload.get("id", rec.record_id))
+        return tuple(matched_ids), contradictory
+    else:
+        candidates = reviews
+
+    for rec in candidates:
+        if not isinstance(rec.payload, Mapping):
+            continue
+        body = rec.payload.get("body")
+        if kind in {
+            "issue_comment",
+            "command_reply",
+            "issue_reply",
+            "session_comment",
+        } and isinstance(body, str):
+            # Ignore pure v6 ledger markers when matching native issue comment effects.
+            non_ledger_lines = [
+                line
+                for line in body.splitlines()
+                if not line.strip().startswith("<!-- reviewsensei:v6:record ")
+            ]
+            if not any(line.strip() for line in non_ledger_lines):
+                continue
+        if _has_contradictory_effect_marker(
+            rec.payload,
+            operation_id=intent.operation_id,
+            payload_sha256=intent.payload_sha256,
+            expected_head_sha=intent.pr_head_sha,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+        ):
+            contradictory = True
+            continue
+        if _matches_effect_payload(
+            rec.payload,
+            operation_id=intent.operation_id,
+            payload_sha256=intent.payload_sha256,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+            expected_head_sha=intent.pr_head_sha,
+        ):
+            matched_ids.append(rec.payload.get("id", rec.record_id))
+    return tuple(matched_ids), contradictory
 
 
 class V6RecoveryEngine:
@@ -487,24 +895,83 @@ class V6RecoveryEngine:
             )
             return fallback, True
 
+    def _verify_credential_not_expired(self, request: RecoveryRequest) -> None:
+        if request.token_expires_at_ms is None:
+            return
+        now_ms = int(self.now_fn() * 1000)
+        if (
+            type(request.token_expires_at_ms) is not int
+            or request.token_expires_at_ms <= 0
+            or type(request.clock_margin_ms) is not int
+            or request.clock_margin_ms < 0
+            or now_ms + request.clock_margin_ms >= request.token_expires_at_ms
+        ):
+            raise StaleWriterOwnershipError(
+                "lease installation token expired or within clock_margin_ms safety window",
+                diagnostic="v6_lease_clock_untrusted",
+            )
+
     def _verify_write_boundary(
         self,
         *,
         request: RecoveryRequest,
         guard: NoProgressGuard,
         prior_durable_hint: AdvisoryProgressHint | None,
+        target_path: str | None = None,
     ) -> None:
+        if not request.has_active_write_lease:
+            raise StaleWriterOwnershipError(
+                "refusing write without an active coordinator write lease",
+                diagnostic="v6_no_active_write_lease",
+            )
+        check_path = (
+            target_path
+            if target_path is not None
+            else (
+                f"/repos/{request.owner}/{request.repo}/issues/"
+                f"{request.pull_request}/comments"
+            )
+        )
+        _assert_target_pr_binding(request, path=check_path)
+        self._verify_credential_not_expired(request)
+
         proof = request.ownership_proof
         if self.broker_fence_verifier is not None:
             fence = self.broker_fence_verifier(proof)
+            if not isinstance(fence, Mapping):
+                raise StaleWriterOwnershipError(
+                    "broker fence verifier returned invalid payload",
+                    diagnostic="v6_missing_authoritative_fence",
+                )
+            if fence.get("verified_by_broker") is False:
+                raise StaleWriterOwnershipError(
+                    "broker fence rejected writer ownership verification",
+                    diagnostic="v6_unverified_writer_proof",
+                )
+            live_repo_id = fence.get("repository_id")
+            live_pr = fence.get("pull_request")
+            live_head = fence.get("pr_head_sha")
+            active_epoch = fence.get("active_writer_epoch", fence.get("writer_epoch"))
+            if (
+                type(live_repo_id) is not int
+                or live_repo_id <= 0
+                or type(live_pr) is not int
+                or live_pr <= 0
+                or type(live_head) is not str
+                or _SHA1_40_RE.fullmatch(live_head) is None
+                or type(active_epoch) is not int
+                or active_epoch < 0
+            ):
+                raise StaleWriterOwnershipError(
+                    "broker fence missing authoritative repository, PR, head, or epoch",
+                    diagnostic="v6_missing_authoritative_fence",
+                )
             verify_writer_ownership(
                 proof,
-                live_repository_id=int(
-                    fence.get("repository_id", request.repository_id)
-                ),
-                live_pull_request=int(fence.get("pull_request", request.pull_request)),
-                live_pr_head_sha=str(fence["pr_head_sha"]),
-                active_writer_epoch=int(fence["active_writer_epoch"]),
+                live_repository_id=live_repo_id,
+                live_pull_request=live_pr,
+                live_pr_head_sha=live_head,
+                active_writer_epoch=active_epoch,
                 pr_state=str(fence.get("pr_state", "open")),
                 active_run_id=fence.get("active_run_id"),
                 active_run_attempt=fence.get("active_run_attempt"),
@@ -557,25 +1024,52 @@ class V6RecoveryEngine:
         base_repo: Mapping[str, Any] = (
             raw_base_repo if isinstance(raw_base_repo, Mapping) else {}
         )
-        live_repo_id = base_repo.get("id", request.repository_id)
-        live_head_sha = str(head_info.get("sha", ""))
-        pr_state = str(pr_body.get("state", "open"))
-        active_epoch = run_body.get("writer_epoch", proof.writer_epoch)
-        active_run_id = run_body.get("active_run_id", run_body.get("id"))
+        live_repo_id = base_repo.get("id")
+        live_head_sha = head_info.get("sha")
+        pr_state = pr_body.get("state")
+        active_epoch = (
+            run_body.get("writer_epoch")
+            if "writer_epoch" in run_body
+            else run_body.get("lease_epoch")
+        )
+        active_run_id = (
+            run_body.get("active_run_id")
+            if "active_run_id" in run_body
+            else run_body.get("id")
+        )
         active_attempt = run_body.get("run_attempt")
         run_status = run_body.get("status")
+
+        if (
+            type(live_repo_id) is not int
+            or live_repo_id <= 0
+            or type(live_head_sha) is not str
+            or _SHA1_40_RE.fullmatch(live_head_sha) is None
+            or type(pr_state) is not str
+            or not pr_state.strip()
+            or type(active_epoch) is not int
+            or active_epoch < 0
+            or type(active_run_id) is not int
+            or active_run_id <= 0
+            or type(active_attempt) is not int
+            or active_attempt < 1
+            or type(run_status) is not str
+            or not run_status.strip()
+        ):
+            raise StaleWriterOwnershipError(
+                "missing authoritative coordinator/broker ownership fields at write boundary",
+                diagnostic="v6_missing_authoritative_fence",
+            )
         verify_writer_ownership(
             proof,
-            live_repository_id=int(live_repo_id),
+            live_repository_id=live_repo_id,
             live_pull_request=request.pull_request,
             live_pr_head_sha=live_head_sha,
-            active_writer_epoch=int(active_epoch),
+            active_writer_epoch=active_epoch,
             pr_state=pr_state,
-            active_run_id=(int(active_run_id) if type(active_run_id) is int else None),
-            active_run_attempt=(
-                int(active_attempt) if type(active_attempt) is int else None
-            ),
-            run_status=str(run_status) if run_status is not None else None,
+            active_run_id=active_run_id,
+            active_run_attempt=active_attempt,
+            run_status=run_status,
         )
 
     def _throttled_page_executor(
@@ -674,6 +1168,84 @@ class V6RecoveryEngine:
         )
         return comment_records, review_res.records, latest_hint
 
+    def _collect_full_ledger(
+        self,
+        comment_records: Sequence[PaginatedRecord],
+        *,
+        expected_app_id: int | None,
+        expected_bot_login: str | None,
+        expected_bot_user_id: int | None,
+    ) -> tuple[
+        list[OwnerMarkerRecord],
+        list[WriteIntentRecord],
+        list[CompletionReceiptRecord],
+        list[DurableHoldRecord],
+        list[UnresolvedResultRecord],
+        list[AdvisoryProgressHint],
+        list[PaginatedRecord],
+        int | None,
+    ]:
+        owners: list[OwnerMarkerRecord] = []
+        intents: list[WriteIntentRecord] = []
+        receipts: list[CompletionReceiptRecord] = []
+        holds: list[DurableHoldRecord] = []
+        unresolved_results: list[UnresolvedResultRecord] = []
+        hints: list[AdvisoryProgressHint] = []
+        app_marker_comments: list[PaginatedRecord] = []
+        anchor_comment_id: int | None = None
+
+        for item in comment_records:
+            payload = item.payload
+            if not isinstance(payload, Mapping):
+                continue
+            body = payload.get("body")
+            if not isinstance(body, str) or "<!-- reviewsensei:v6:" not in body:
+                continue
+            if not verify_app_authored_record(
+                payload,
+                expected_app_id=expected_app_id,
+                expected_bot_login=expected_bot_login,
+                expected_bot_user_id=expected_bot_user_id,
+            ):
+                if "reviewsensei:v6:owner" in body:
+                    # Preserve spoofed owner comments so validate_owner_lineage fails closed.
+                    app_marker_comments.append(item)
+                continue
+            parsed = extract_v6_record_markers(body, strict=False)
+            if not parsed:
+                continue
+            app_marker_comments.append(item)
+            raw_cid = payload.get("id", item.record_id)
+            if type(raw_cid) is int and raw_cid > 0:
+                anchor_comment_id = (
+                    raw_cid
+                    if anchor_comment_id is None
+                    else max(anchor_comment_id, raw_cid)
+                )
+            for rec in parsed:
+                if isinstance(rec, OwnerMarkerRecord):
+                    owners.append(rec)
+                elif isinstance(rec, WriteIntentRecord):
+                    intents.append(rec)
+                elif isinstance(rec, CompletionReceiptRecord):
+                    receipts.append(rec)
+                elif isinstance(rec, DurableHoldRecord):
+                    holds.append(rec)
+                elif isinstance(rec, UnresolvedResultRecord):
+                    unresolved_results.append(rec)
+                elif isinstance(rec, AdvisoryProgressHint):
+                    hints.append(rec)
+        return (
+            owners,
+            intents,
+            receipts,
+            holds,
+            unresolved_results,
+            hints,
+            app_marker_comments,
+            anchor_comment_id,
+        )
+
     def _collect_ledger_records(
         self,
         comment_records: Sequence[PaginatedRecord],
@@ -685,37 +1257,14 @@ class V6RecoveryEngine:
         list[UnresolvedResultRecord],
         list[AdvisoryProgressHint],
     ]:
-        intents: list[WriteIntentRecord] = []
-        receipts: list[CompletionReceiptRecord] = []
-        unresolved_results: list[UnresolvedResultRecord] = []
-        hints: list[AdvisoryProgressHint] = []
-
-        for item in comment_records:
-            payload = item.payload
-            if not isinstance(payload, Mapping):
-                continue
-            body = payload.get("body")
-            if not isinstance(body, str) or "<!-- reviewsensei:v6:" not in body:
-                continue
-            parsed = extract_v6_record_markers(body, strict=False)
-            if not parsed:
-                continue
-            if not verify_app_authored_record(
-                payload,
+        _, intents, receipts, _, unresolved_results, hints, _, _ = (
+            self._collect_full_ledger(
+                comment_records,
                 expected_app_id=request.expected_app_id,
                 expected_bot_login=request.expected_bot_login,
                 expected_bot_user_id=request.expected_bot_user_id,
-            ):
-                continue
-            for rec in parsed:
-                if isinstance(rec, WriteIntentRecord):
-                    intents.append(rec)
-                elif isinstance(rec, CompletionReceiptRecord):
-                    receipts.append(rec)
-                elif isinstance(rec, UnresolvedResultRecord):
-                    unresolved_results.append(rec)
-                elif isinstance(rec, AdvisoryProgressHint):
-                    hints.append(rec)
+            )
+        )
         return intents, receipts, unresolved_results, hints
 
     def _verify_candidate_effect_with_broker(
@@ -726,6 +1275,7 @@ class V6RecoveryEngine:
         prior_hint: AdvisoryProgressHint | None,
         candidate_effect_id: str | int,
         expected_payload_sha256: str,
+        expected_head_sha: str | None = None,
     ) -> tuple[bool, bool, str | int | None]:
         """Return ``(outcome_known, landed, verified_effect_id)`` via broker."""
 
@@ -762,6 +1312,7 @@ class V6RecoveryEngine:
             expected_app_id=request.expected_app_id,
             expected_bot_login=request.expected_bot_login,
             expected_bot_user_id=request.expected_bot_user_id,
+            expected_head_sha=expected_head_sha,
         ):
             verified_id = resp.body.get("id", candidate_effect_id)
             return True, True, verified_id
@@ -775,6 +1326,7 @@ class V6RecoveryEngine:
         prior_hint: AdvisoryProgressHint | None,
         expected_payload_sha256: str,
         scanned_reviews: Sequence[PaginatedRecord],
+        expected_head_sha: str | None = None,
         rescan_before_verify: bool = False,
     ) -> tuple[bool, bool, str | int | None, int]:
         """Determine whether the target mutation landed without duplicate writes."""
@@ -804,6 +1356,16 @@ class V6RecoveryEngine:
         for record in reviews:
             if not isinstance(record.payload, Mapping):
                 continue
+            if _has_contradictory_effect_marker(
+                record.payload,
+                operation_id=request.operation_id,
+                payload_sha256=expected_payload_sha256,
+                expected_head_sha=expected_head_sha,
+                expected_app_id=request.expected_app_id,
+                expected_bot_login=request.expected_bot_login,
+                expected_bot_user_id=request.expected_bot_user_id,
+            ):
+                return False, False, None, 0
             if _matches_effect_payload(
                 record.payload,
                 operation_id=request.operation_id,
@@ -811,28 +1373,71 @@ class V6RecoveryEngine:
                 expected_app_id=request.expected_app_id,
                 expected_bot_login=request.expected_bot_login,
                 expected_bot_user_id=request.expected_bot_user_id,
+                expected_head_sha=expected_head_sha,
             ):
                 effect_id = record.payload.get("id", record.record_id)
                 candidate_ids.append(effect_id)
 
         if not candidate_ids:
             return True, False, None, 0
+        if len(candidate_ids) > 1:
+            # Duplicate matches must hold rather than silently picking one.
+            return False, False, None, 0
 
-        readbacks = 0
-        for candidate_id in candidate_ids:
-            readbacks += 1
-            known, landed, verified_id = self._verify_candidate_effect_with_broker(
-                request=request,
-                guard=guard,
-                prior_hint=prior_hint,
-                candidate_effect_id=candidate_id,
-                expected_payload_sha256=expected_payload_sha256,
-            )
-            if not known:
-                return False, False, None, readbacks
-            if landed:
-                return True, True, verified_id, readbacks
+        readbacks = 1
+        known, landed, verified_id = self._verify_candidate_effect_with_broker(
+            request=request,
+            guard=guard,
+            prior_hint=prior_hint,
+            candidate_effect_id=candidate_ids[0],
+            expected_payload_sha256=expected_payload_sha256,
+            expected_head_sha=expected_head_sha,
+        )
+        if not known:
+            return False, False, None, readbacks
+        if landed:
+            return True, True, verified_id, readbacks
         return True, False, None, readbacks
+
+    def _find_existing_receipt_on_pr(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        receipt: CompletionReceiptRecord,
+    ) -> CompletionReceiptRecord | None:
+        exec_fn = self._throttled_page_executor(
+            request=request, guard=guard, prior_hint=prior_hint
+        )
+        rescan = self.paginator.scan_rest(
+            endpoint_id="pr_issue_comments",
+            path=(
+                f"/repos/{request.owner}/{request.repo}/issues/"
+                f"{request.pull_request}/comments?per_page=100"
+            ),
+            event=request.event,
+            visibility=request.visibility,
+            granted_scopes=request.granted_scopes,
+            progress_guard=guard,
+            phase_name="reconcile_receipts",
+            now_epoch=self.now_fn(),
+            execute_fn=exec_fn,
+        )
+        _, _, receipts, _, _, _, _, _ = self._collect_full_ledger(
+            rescan.records,
+            expected_app_id=request.expected_app_id,
+            expected_bot_login=request.expected_bot_login,
+            expected_bot_user_id=request.expected_bot_user_id,
+        )
+        for existing in receipts:
+            if (
+                existing.operation_id == receipt.operation_id
+                and existing.payload_sha256 == receipt.payload_sha256
+                and str(existing.github_effect_id) == str(receipt.github_effect_id)
+            ):
+                return existing
+        return None
 
     def _persist_completion_receipt(
         self,
@@ -842,7 +1447,16 @@ class V6RecoveryEngine:
         prior_hint: AdvisoryProgressHint | None,
         github_effect_id: str | int,
         payload_sha256: str,
+        existing_receipts: Sequence[CompletionReceiptRecord] = (),
     ) -> tuple[CompletionReceiptRecord, int]:
+        for existing in existing_receipts:
+            if (
+                existing.operation_id == request.operation_id
+                and existing.payload_sha256 == payload_sha256
+                and str(existing.github_effect_id) == str(github_effect_id)
+            ):
+                return existing, 0
+
         self._verify_write_boundary(
             request=request,
             guard=guard,
@@ -857,12 +1471,170 @@ class V6RecoveryEngine:
             completed_at=_utc_now_iso(),
         )
         self.mutation_bound.consume("completion_receipt_comment", "completion_receipt")
+        try:
+            resp = self._execute_with_throttle(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_hint,
+                call_fn=lambda ts: self.client.execute(
+                    "completion_receipt_comment",
+                    method="POST",
+                    path=(
+                        f"/repos/{request.owner}/{request.repo}/issues/"
+                        f"{request.pull_request}/comments"
+                    ),
+                    event=request.event,
+                    visibility=request.visibility,
+                    granted_scopes=request.granted_scopes,
+                    credential_kind=CredentialKind.APP_BROKER,
+                    body={"body": format_v6_record_marker(receipt)},
+                    allow_checkpoint_reserve_override=True,
+                    now_epoch=ts,
+                ),
+            )
+            verify_write_response_readback(resp, expected_marker=receipt)
+            return receipt, 0
+        except (
+            _AmbiguousWriteOutcomeError,
+            TimeoutError,
+            ConnectionError,
+            GitHubHTTPTransientError,
+        ) as exc:
+            reconciled = self._find_existing_receipt_on_pr(
+                request=request,
+                guard=guard,
+                prior_hint=prior_hint,
+                receipt=receipt,
+            )
+            if reconciled is not None:
+                return reconciled, 0
+            raise _AmbiguousReceiptOutcomeError(
+                f"receipt write outcome unconfirmed for {request.operation_id!r}"
+            ) from exc
+
+    def _finalize_hold(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        blocker: str,
+        missing_evidence: tuple[str, ...],
+    ) -> RecoveryHold:
+        if (
+            request.emit_durable_hold_on_pr
+            and request.has_active_write_lease
+            and request.slot_key is not None
+            and request.generation is not None
+        ):
+            try:
+                self._verify_write_boundary(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                )
+                hold_record = DurableHoldRecord(
+                    record_id=(
+                        f"hold:{request.operation_id}:{request.generation}:"
+                        f"{request.ownership_proof.writer_epoch}"
+                    ),
+                    slot_key=request.slot_key,
+                    generation=request.generation,
+                    lease_epoch=request.ownership_proof.writer_epoch,
+                    operation_id=request.operation_id,
+                    pr_head_sha=request.ownership_proof.pr_head_sha,
+                    reason_code=blocker,
+                    missing_evidence=missing_evidence or ("unresolved_evidence",),
+                    held_at=_utc_now_iso(),
+                    resolved_by_record_id=None,
+                )
+                self.mutation_bound.consume("write_intent_comment", "durable_hold")
+                hold_resp = self._execute_with_throttle(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                    call_fn=lambda ts: self.client.execute(
+                        "write_intent_comment",
+                        method="POST",
+                        path=(
+                            f"/repos/{request.owner}/{request.repo}/issues/"
+                            f"{request.pull_request}/comments"
+                        ),
+                        event=request.event,
+                        visibility=request.visibility,
+                        granted_scopes=request.granted_scopes,
+                        credential_kind=CredentialKind.APP_BROKER,
+                        body={"body": format_v6_record_marker(hold_record)},
+                        allow_checkpoint_reserve_override=True,
+                        now_epoch=ts,
+                    ),
+                )
+                verify_write_response_readback(hold_resp, expected_marker=hold_record)
+            except (
+                StaleWriterOwnershipError,
+                MutationSanityBoundError,
+                _AmbiguousWriteOutcomeError,
+                GitHubHTTPPermissionError,
+                GitHubHTTPRateLimitError,
+                GitHubHTTPTransientError,
+                TimeoutError,
+                ConnectionError,
+                ReviewInputError,
+            ):
+                pass
+
+        if not request.has_active_write_lease or request.step_summary_sink is not None:
+            write_v6_step_summary(
+                render_v6_hold_summary(
+                    operation_id=request.operation_id,
+                    blocker=blocker,
+                    missing_evidence=missing_evidence,
+                    slot_key=request.slot_key,
+                    repository=f"{request.owner}/{request.repo}",
+                    pull_request=request.pull_request,
+                    pr_head_sha=request.ownership_proof.pr_head_sha,
+                ),
+                sink=request.step_summary_sink,
+            )
+
+        return RecoveryHold(
+            operation_id=request.operation_id,
+            blocker=blocker,
+            missing_evidence=missing_evidence,
+            zero_model_calls_started=True,
+        )
+
+    def _persist_owner_marker_if_needed(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        existing_owners: Sequence[OwnerMarkerRecord],
+    ) -> None:
+        owner_marker = request.owner_marker
+        if owner_marker is None:
+            return
+        if any(
+            o.slot_key == owner_marker.slot_key
+            and o.generation == owner_marker.generation
+            and o.lease_epoch == owner_marker.lease_epoch
+            and o.reservation_id == owner_marker.reservation_id
+            for o in existing_owners
+        ):
+            return
+        self._verify_write_boundary(
+            request=request,
+            guard=guard,
+            prior_durable_hint=prior_hint,
+        )
+        self.mutation_bound.consume("write_intent_comment", "owner_marker")
         resp = self._execute_with_throttle(
             request=request,
             guard=guard,
             prior_durable_hint=prior_hint,
             call_fn=lambda ts: self.client.execute(
-                "completion_receipt_comment",
+                "write_intent_comment",
                 method="POST",
                 path=(
                     f"/repos/{request.owner}/{request.repo}/issues/"
@@ -872,13 +1644,11 @@ class V6RecoveryEngine:
                 visibility=request.visibility,
                 granted_scopes=request.granted_scopes,
                 credential_kind=CredentialKind.APP_BROKER,
-                body={"body": format_v6_record_marker(receipt)},
-                allow_checkpoint_reserve_override=True,
+                body={"body": format_v6_record_marker(owner_marker)},
                 now_epoch=ts,
             ),
         )
-        verify_write_response_readback(resp, expected_marker=receipt)
-        return receipt, 0
+        verify_write_response_readback(resp, expected_marker=owner_marker)
 
     def _validate_pr_resident_result(
         self,
@@ -926,6 +1696,374 @@ class V6RecoveryEngine:
                 )
         return result
 
+    def reconcile_takeover_read_only(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        repository_id: int,
+        pull_request: int,
+        slot_key: str,
+        event: GitHubEventKind,
+        visibility: RepositoryVisibility,
+        granted_scopes: Collection[str],
+        expected_app_id: int | None = None,
+        expected_bot_login: str | None = None,
+        expected_bot_user_id: int | None = None,
+        mac_verifier: Callable[[OwnerMarkerRecord], bool] | None = None,
+        affirmative_non_submission_ops: Collection[str] = (),
+        scan_review_comments: bool = True,
+        scan_check_runs: bool = True,
+        graphql_query: str | None = None,
+        step_summary_sink: Callable[[str], None] | Path | None = None,
+        operation_id: str = "takeover-reconcile",
+    ) -> TakeoverReconciliationResult:
+        """Execute read-only takeover reconciliation strictly on ``GITHUB_TOKEN``."""
+
+        guard = NoProgressGuard(operation_id=operation_id)
+        dummy_proof = WriterOwnershipProof(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            operation_id=operation_id,
+            run_id=1,
+            run_attempt=1,
+            writer_epoch=0,
+            pr_head_sha="0" * 40,
+            verified_by_broker=False,
+        )
+        req = RecoveryRequest(
+            owner=owner,
+            repo=repo,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            operation_id=operation_id,
+            ownership_proof=dummy_proof,
+            event=event,
+            visibility=visibility,
+            granted_scopes=granted_scopes,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+            graphql_query=graphql_query,
+            has_active_write_lease=False,
+            step_summary_sink=step_summary_sink,
+        )
+        exec_fn = self._throttled_page_executor(
+            request=req, guard=guard, prior_hint=None
+        )
+
+        comment_res = self.paginator.scan_rest(
+            endpoint_id="pr_issue_comments",
+            path=f"/repos/{owner}/{repo}/issues/{pull_request}/comments?per_page=100",
+            event=event,
+            visibility=visibility,
+            granted_scopes=granted_scopes,
+            progress_guard=guard,
+            phase_name="takeover_scan_comments",
+            now_epoch=self.now_fn(),
+            execute_fn=exec_fn,
+        )
+        review_res = self.paginator.scan_rest(
+            endpoint_id="pr_reviews",
+            path=f"/repos/{owner}/{repo}/pulls/{pull_request}/reviews?per_page=100",
+            event=event,
+            visibility=visibility,
+            granted_scopes=granted_scopes,
+            progress_guard=guard,
+            phase_name="takeover_scan_reviews",
+            now_epoch=self.now_fn(),
+            execute_fn=exec_fn,
+        )
+        review_comments: tuple[PaginatedRecord, ...] = ()
+        if scan_review_comments:
+            rc_res = self.paginator.scan_rest(
+                endpoint_id="pr_review_comments",
+                path=f"/repos/{owner}/{repo}/pulls/{pull_request}/comments?per_page=100",
+                event=event,
+                visibility=visibility,
+                granted_scopes=granted_scopes,
+                progress_guard=guard,
+                phase_name="takeover_scan_review_comments",
+                now_epoch=self.now_fn(),
+                execute_fn=exec_fn,
+            )
+            review_comments = rc_res.records
+
+        review_threads: tuple[PaginatedRecord, ...] = ()
+        if graphql_query is not None:
+            gql_res = self.paginator.scan_graphql(
+                query=graphql_query,
+                variables={"owner": owner, "repo": repo, "pullNumber": pull_request},
+                event=event,
+                visibility=visibility,
+                granted_scopes=granted_scopes,
+                progress_guard=guard,
+                phase_name="takeover_scan_threads",
+                now_epoch=self.now_fn(),
+                execute_fn=exec_fn,
+            )
+            review_threads = gql_res.records
+
+        (
+            owners,
+            intents,
+            receipts,
+            holds,
+            unresolved_results,
+            _,
+            app_marker_comments,
+            anchor_comment_id,
+        ) = self._collect_full_ledger(
+            comment_res.records,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+        )
+
+        # Validate App-authored owner lineage if slot/bot login is configured or owners exist.
+        validated_owners: tuple[OwnerMarkerRecord, ...] = tuple(owners)
+        if expected_bot_login is not None:
+            try:
+                validated_owners = validate_owner_lineage(
+                    app_marker_comments,
+                    slot_key=slot_key,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    app_login=expected_bot_login,
+                    mac_verifier=mac_verifier,
+                )
+            except V6LedgerIntegrityError as exc:
+                blocker = exc.diagnostic or "v6_lease_slot_continuity_unproved"
+                write_v6_step_summary(
+                    render_v6_hold_summary(
+                        operation_id=operation_id,
+                        blocker=blocker,
+                        missing_evidence=(str(exc),),
+                        slot_key=slot_key,
+                        repository=f"{owner}/{repo}",
+                        pull_request=pull_request,
+                    ),
+                    sink=step_summary_sink,
+                )
+                return TakeoverReconciliationResult(
+                    reconciliation_outcome="ambiguous_hold",
+                    adopted_effects=(),
+                    unsubmitted_intents=(),
+                    pending_unresolved_results=tuple(unresolved_results),
+                    owner_lineage=(),
+                    unresolved_holds=tuple(holds),
+                    completed_operations=(),
+                    blocker=blocker,
+                    missing_evidence=(str(exc),),
+                    anchor_comment_id=anchor_comment_id,
+                )
+
+        unresolved_holds = tuple(h for h in holds if h.resolved_by_record_id is None)
+        if unresolved_holds:
+            blocker = "unresolved_durable_hold"
+            missing = tuple(h.record_id for h in unresolved_holds)
+            write_v6_step_summary(
+                render_v6_hold_summary(
+                    operation_id=operation_id,
+                    blocker=blocker,
+                    missing_evidence=missing,
+                    slot_key=slot_key,
+                    repository=f"{owner}/{repo}",
+                    pull_request=pull_request,
+                ),
+                sink=step_summary_sink,
+            )
+            return TakeoverReconciliationResult(
+                reconciliation_outcome="ambiguous_hold",
+                adopted_effects=(),
+                unsubmitted_intents=(),
+                pending_unresolved_results=tuple(unresolved_results),
+                owner_lineage=validated_owners,
+                unresolved_holds=unresolved_holds,
+                completed_operations=(),
+                blocker=blocker,
+                missing_evidence=missing,
+                anchor_comment_id=anchor_comment_id,
+            )
+
+        summary = reconcile_immutable_records(intents, receipts)
+        if summary.conflicting_records:
+            blocker = "conflicting_immutable_records"
+            missing = tuple(c.record_id for c in summary.conflicting_records)
+            write_v6_step_summary(
+                render_v6_hold_summary(
+                    operation_id=operation_id,
+                    blocker=blocker,
+                    missing_evidence=missing,
+                    slot_key=slot_key,
+                    repository=f"{owner}/{repo}",
+                    pull_request=pull_request,
+                ),
+                sink=step_summary_sink,
+            )
+            return TakeoverReconciliationResult(
+                reconciliation_outcome="ambiguous_hold",
+                adopted_effects=(),
+                unsubmitted_intents=(),
+                pending_unresolved_results=tuple(unresolved_results),
+                owner_lineage=validated_owners,
+                unresolved_holds=(),
+                completed_operations=summary.completed_operations,
+                blocker=blocker,
+                missing_evidence=missing,
+                anchor_comment_id=anchor_comment_id,
+            )
+
+        check_runs_by_head: dict[str, tuple[PaginatedRecord, ...]] = {}
+        if scan_check_runs:
+            for intent in summary.unreconciled_intents:
+                if intent.effect_kind in {"check_run_write", "check_publish"} and (
+                    intent.pr_head_sha not in check_runs_by_head
+                ):
+                    cr_res = self.paginator.scan_rest(
+                        endpoint_id="check_runs_and_suites",
+                        path=(
+                            f"/repos/{owner}/{repo}/commits/"
+                            f"{intent.pr_head_sha}/check-runs?per_page=100"
+                        ),
+                        event=event,
+                        visibility=visibility,
+                        granted_scopes=granted_scopes,
+                        progress_guard=guard,
+                        phase_name=f"takeover_scan_check_runs:{intent.pr_head_sha[:7]}",
+                        now_epoch=self.now_fn(),
+                        execute_fn=exec_fn,
+                        record_extractor=lambda body: tuple(
+                            PaginatedRecord.from_payload(
+                                item.get("id", item.get("node_id")), item
+                            )
+                            for item in (
+                                body.get("check_runs", ())
+                                if isinstance(body, Mapping)
+                                else body
+                            )
+                            if isinstance(item, Mapping)
+                        ),
+                    )
+                    check_runs_by_head[intent.pr_head_sha] = cr_res.records
+
+        adopted: list[tuple[WriteIntentRecord, str | int]] = []
+        unsubmitted: list[WriteIntentRecord] = []
+        non_sub_ops = set(affirmative_non_submission_ops)
+
+        for intent in summary.unreconciled_intents:
+            matched_ids, contradictory = _match_native_effects_for_intent(
+                intent,
+                expected_app_id=expected_app_id,
+                expected_bot_login=expected_bot_login,
+                expected_bot_user_id=expected_bot_user_id,
+                reviews=review_res.records,
+                issue_comments=comment_res.records,
+                review_comments=review_comments,
+                check_runs=check_runs_by_head.get(intent.pr_head_sha, ()),
+                review_threads=review_threads,
+            )
+            if contradictory:
+                blocker = "contradictory_effect_match"
+                missing = (f"contradictory_effect:{intent.operation_id}",)
+                write_v6_step_summary(
+                    render_v6_hold_summary(
+                        operation_id=intent.operation_id,
+                        blocker=blocker,
+                        missing_evidence=missing,
+                        slot_key=slot_key,
+                        repository=f"{owner}/{repo}",
+                        pull_request=pull_request,
+                        pr_head_sha=intent.pr_head_sha,
+                    ),
+                    sink=step_summary_sink,
+                )
+                return TakeoverReconciliationResult(
+                    reconciliation_outcome="ambiguous_hold",
+                    adopted_effects=tuple(adopted),
+                    unsubmitted_intents=(),
+                    pending_unresolved_results=tuple(unresolved_results),
+                    owner_lineage=validated_owners,
+                    unresolved_holds=(),
+                    completed_operations=summary.completed_operations,
+                    blocker=blocker,
+                    missing_evidence=missing,
+                    anchor_comment_id=anchor_comment_id,
+                )
+            if len(matched_ids) > 1:
+                blocker = "duplicate_effect_match"
+                missing = (f"duplicate_effect:{intent.operation_id}",)
+                write_v6_step_summary(
+                    render_v6_hold_summary(
+                        operation_id=intent.operation_id,
+                        blocker=blocker,
+                        missing_evidence=missing,
+                        slot_key=slot_key,
+                        repository=f"{owner}/{repo}",
+                        pull_request=pull_request,
+                        pr_head_sha=intent.pr_head_sha,
+                    ),
+                    sink=step_summary_sink,
+                )
+                return TakeoverReconciliationResult(
+                    reconciliation_outcome="ambiguous_hold",
+                    adopted_effects=tuple(adopted),
+                    unsubmitted_intents=(),
+                    pending_unresolved_results=tuple(unresolved_results),
+                    owner_lineage=validated_owners,
+                    unresolved_holds=(),
+                    completed_operations=summary.completed_operations,
+                    blocker=blocker,
+                    missing_evidence=missing,
+                    anchor_comment_id=anchor_comment_id,
+                )
+            if len(matched_ids) == 1:
+                adopted.append((intent, matched_ids[0]))
+                continue
+            if intent.operation_id in non_sub_ops:
+                unsubmitted.append(intent)
+                continue
+            blocker = "unproved_non_submission_after_intent"
+            missing = (
+                f"effect_verification:{intent.operation_id}:{intent.payload_sha256}",
+            )
+            write_v6_step_summary(
+                render_v6_hold_summary(
+                    operation_id=intent.operation_id,
+                    blocker=blocker,
+                    missing_evidence=missing,
+                    slot_key=slot_key,
+                    repository=f"{owner}/{repo}",
+                    pull_request=pull_request,
+                    pr_head_sha=intent.pr_head_sha,
+                ),
+                sink=step_summary_sink,
+            )
+            return TakeoverReconciliationResult(
+                reconciliation_outcome="ambiguous_hold",
+                adopted_effects=tuple(adopted),
+                unsubmitted_intents=(),
+                pending_unresolved_results=tuple(unresolved_results),
+                owner_lineage=validated_owners,
+                unresolved_holds=(),
+                completed_operations=summary.completed_operations,
+                blocker=blocker,
+                missing_evidence=missing,
+                anchor_comment_id=anchor_comment_id,
+            )
+
+        outcome = "adopted" if adopted else "proved_not_submitted"
+        return TakeoverReconciliationResult(
+            reconciliation_outcome=outcome,
+            adopted_effects=tuple(adopted),
+            unsubmitted_intents=tuple(unsubmitted),
+            pending_unresolved_results=tuple(unresolved_results),
+            owner_lineage=validated_owners,
+            unresolved_holds=(),
+            completed_operations=summary.completed_operations,
+            anchor_comment_id=anchor_comment_id,
+        )
+
     def recover_and_publish(
         self,
         request: RecoveryRequest,
@@ -950,8 +2088,20 @@ class V6RecoveryEngine:
             )
             prior_hint = latest_hint
 
-            intents, receipts, unresolved_results, found_hints = (
-                self._collect_ledger_records(comment_records, request=request)
+            (
+                owners,
+                intents,
+                receipts,
+                holds,
+                unresolved_results,
+                found_hints,
+                app_marker_comments,
+                _,
+            ) = self._collect_full_ledger(
+                comment_records,
+                expected_app_id=request.expected_app_id,
+                expected_bot_login=request.expected_bot_login,
+                expected_bot_user_id=request.expected_bot_user_id,
             )
             matching_hints = [
                 h for h in found_hints if h.operation_id == request.operation_id
@@ -975,6 +2125,43 @@ class V6RecoveryEngine:
                     )
                 guard.ensure_not_stalled()
 
+            if request.slot_key is not None and request.expected_bot_login is not None:
+                try:
+                    validate_owner_lineage(
+                        app_marker_comments,
+                        slot_key=request.slot_key,
+                        repository_id=request.repository_id,
+                        pull_request=request.pull_request,
+                        app_login=request.expected_bot_login,
+                        mac_verifier=request.mac_verifier,
+                    )
+                except V6LedgerIntegrityError as exc:
+                    return self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        blocker=exc.diagnostic or "v6_lease_slot_continuity_unproved",
+                        missing_evidence=(str(exc),),
+                    )
+
+            unresolved_holds = [
+                h
+                for h in holds
+                if h.resolved_by_record_id is None
+                and (
+                    h.operation_id == request.operation_id
+                    or (request.slot_key is not None and h.slot_key == request.slot_key)
+                )
+            ]
+            if unresolved_holds:
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="unresolved_durable_hold",
+                    missing_evidence=tuple(h.record_id for h in unresolved_holds),
+                )
+
             summary = reconcile_immutable_records(intents, receipts)
             op_conflicts = [
                 c
@@ -982,11 +2169,12 @@ class V6RecoveryEngine:
                 if c.operation_id == request.operation_id
             ]
             if op_conflicts:
-                return RecoveryHold(
-                    operation_id=request.operation_id,
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
                     blocker="conflicting_immutable_records",
                     missing_evidence=tuple(c.record_id for c in op_conflicts),
-                    zero_model_calls_started=True,
                 )
 
             if request.operation_id in summary.completed_operations:
@@ -1024,18 +2212,20 @@ class V6RecoveryEngine:
                         prior_hint=prior_hint,
                         expected_payload_sha256=existing_intent.payload_sha256,
                         scanned_reviews=review_records,
+                        expected_head_sha=existing_intent.pr_head_sha,
                         rescan_before_verify=False,
                     )
                 )
                 readback_gets += gets
                 if not outcome_known:
-                    return RecoveryHold(
-                        operation_id=request.operation_id,
+                    return self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
                         blocker="ambiguous_write_outcome",
                         missing_evidence=(
                             f"effect_verification:{request.operation_id}:{existing_intent.payload_sha256}",
                         ),
-                        zero_model_calls_started=True,
                     )
                 if landed and verified_id is not None:
                     guard.record_step(
@@ -1044,13 +2234,25 @@ class V6RecoveryEngine:
                         new_phase="reconcile_landed",
                         state_digest=existing_intent.payload_sha256,
                     )
-                    receipt, receipt_gets = self._persist_completion_receipt(
-                        request=request,
-                        guard=guard,
-                        prior_hint=prior_hint,
-                        github_effect_id=verified_id,
-                        payload_sha256=existing_intent.payload_sha256,
-                    )
+                    try:
+                        receipt, receipt_gets = self._persist_completion_receipt(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            github_effect_id=verified_id,
+                            payload_sha256=existing_intent.payload_sha256,
+                            existing_receipts=receipts,
+                        )
+                    except _AmbiguousReceiptOutcomeError:
+                        return self._finalize_hold(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker="ambiguous_receipt_outcome",
+                            missing_evidence=(
+                                f"receipt_verification:{request.operation_id}:{existing_intent.payload_sha256}",
+                            ),
+                        )
                     return RecoveryCompleted(
                         operation_id=request.operation_id,
                         pr_head_sha=request.ownership_proof.pr_head_sha,
@@ -1068,7 +2270,13 @@ class V6RecoveryEngine:
                 unresolved_results=unresolved_results,
             )
             if isinstance(validated, RecoveryHold):
-                return validated
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker=validated.blocker,
+                    missing_evidence=validated.missing_evidence,
+                )
             pr_result = validated
             payload_sha256 = pr_result.payload_sha256
 
@@ -1076,21 +2284,57 @@ class V6RecoveryEngine:
                 existing_intent is not None
                 and existing_intent.payload_sha256 != payload_sha256
             ):
-                return RecoveryHold(
-                    operation_id=request.operation_id,
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
                     blocker="pr_result_digest_mismatch_with_intent",
                     missing_evidence=(
                         f"intent_digest_match:{existing_intent.record_id}:"
                         f"{existing_intent.payload_sha256}",
                     ),
-                    zero_model_calls_started=True,
+                )
+
+            effect_path = (
+                request.effect_path
+                if request.effect_path is not None
+                else (
+                    f"/repos/{request.owner}/{request.repo}/pulls/"
+                    f"{request.pull_request}/reviews"
+                )
+            )
+            _assert_target_pr_binding(request, path=effect_path)
+
+            if existing_intent is not None and not request.affirmative_non_submission:
+                if request.has_active_write_lease:
+                    self._verify_write_boundary(
+                        request=request,
+                        guard=guard,
+                        prior_durable_hint=prior_hint,
+                        target_path=effect_path,
+                    )
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="unproved_non_submission_after_intent",
+                    missing_evidence=(
+                        f"non_submission_proof:{request.operation_id}:{existing_intent.payload_sha256}",
+                    ),
                 )
 
             if existing_intent is None:
+                self._persist_owner_marker_if_needed(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    existing_owners=owners,
+                )
                 self._verify_write_boundary(
                     request=request,
                     guard=guard,
                     prior_durable_hint=prior_hint,
+                    target_path=effect_path,
                 )
                 target_digest = request.target_digest or canonical_sha256(
                     {
@@ -1138,16 +2382,9 @@ class V6RecoveryEngine:
                 request=request,
                 guard=guard,
                 prior_durable_hint=prior_hint,
+                target_path=effect_path,
             )
 
-            effect_path = (
-                request.effect_path
-                if request.effect_path is not None
-                else (
-                    f"/repos/{request.owner}/{request.repo}/pulls/"
-                    f"{request.pull_request}/reviews"
-                )
-            )
             rendered_body = (
                 f"ReviewSensei recovery publication ({len(pr_result.findings_payload)} finding(s)).\n"
                 f"{_effect_tag(request.operation_id, payload_sha256)}"
@@ -1197,29 +2434,43 @@ class V6RecoveryEngine:
                         prior_hint=prior_hint,
                         expected_payload_sha256=payload_sha256,
                         scanned_reviews=review_records,
+                        expected_head_sha=request.ownership_proof.pr_head_sha,
                         rescan_before_verify=True,
                     )
                 )
                 readback_gets += gets
                 if not outcome_known or not landed or verified_id is None:
-                    return RecoveryHold(
-                        operation_id=request.operation_id,
+                    return self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
                         blocker="lost_write_outcome_unverified",
                         missing_evidence=(
                             f"effect_verification:{request.operation_id}:{payload_sha256}",
                         ),
-                        zero_model_calls_started=True,
                     )
                 effect_id = verified_id
                 reconciled_after_lost_write = True
 
-            receipt, receipt_gets = self._persist_completion_receipt(
-                request=request,
-                guard=guard,
-                prior_hint=prior_hint,
-                github_effect_id=effect_id,
-                payload_sha256=payload_sha256,
-            )
+            try:
+                receipt, receipt_gets = self._persist_completion_receipt(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    github_effect_id=effect_id,
+                    payload_sha256=payload_sha256,
+                    existing_receipts=receipts,
+                )
+            except _AmbiguousReceiptOutcomeError:
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="ambiguous_receipt_outcome",
+                    missing_evidence=(
+                        f"receipt_verification:{request.operation_id}:{payload_sha256}",
+                    ),
+                )
             return RecoveryCompleted(
                 operation_id=request.operation_id,
                 pr_head_sha=request.ownership_proof.pr_head_sha,

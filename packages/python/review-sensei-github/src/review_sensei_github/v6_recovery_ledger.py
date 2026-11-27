@@ -13,8 +13,9 @@ import hmac
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
@@ -27,15 +28,21 @@ class V6LedgerIntegrityError(ReviewInputError):
     error_category = "v6_ledger_integrity"
 
 
+OWNER_SCHEMA = "reviewsensei:v6:owner:v1"
 INTENT_SCHEMA = "reviewsensei:v6:intent:v1"
 RECEIPT_SCHEMA = "reviewsensei:v6:receipt:v1"
+HOLD_SCHEMA = "reviewsensei:v6:hold:v1"
 UNRESOLVED_RESULT_SCHEMA = "reviewsensei:v6:unresolved:v1"
 PROGRESS_HINT_SCHEMA = "reviewsensei:v6:progress:v1"
 
+MAX_MARKER_ENCODED_BYTES = 65536
+
 VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
     {
+        OWNER_SCHEMA,
         INTENT_SCHEMA,
         RECEIPT_SCHEMA,
+        HOLD_SCHEMA,
         UNRESOLVED_RESULT_SCHEMA,
         PROGRESS_HINT_SCHEMA,
     }
@@ -48,6 +55,44 @@ _MARKER_RE = re.compile(
 )
 _SHA1_40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_64_RE = re.compile(r"^[0-9a-f]{64}$")
+_SLOT_KEY_RE = re.compile(
+    r"^v6-pr:[a-z0-9.-]+:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$"
+)
+_POSITIVE_DECIMAL_RE = re.compile(r"^[1-9][0-9]*$")
+_ISO8601_UTC_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
+)
+
+NEVER_KEEP_LEDGER_FIELDS: frozenset[str] = frozenset(
+    {
+        "github_app_private_key",
+        "reviewsensei_signing_key",
+        "raw_aes_key",
+        "oidc_token",
+        "plaintext_installation_token",
+        "encrypted_escrow",
+        "iv_b64",
+        "ciphertext_b64",
+        "workflow_github_token",
+        "provider_api_key",
+        "ollama_api_key",
+        "openrouter_api_key",
+        "openai_api_key",
+        "raw_github_error_body",
+    }
+)
+
+_SECRET_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("github_token", re.compile(r"(?<![A-Za-z0-9_])(?:ghs|ghp)_[A-Za-z0-9_-]{6,}")),
+    ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{6,}")),
+    (
+        "jwt_token",
+        re.compile(
+            r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b"
+        ),
+    ),
+    ("pem_private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+)
 
 _FORBIDDEN_PROGRESS_HINT_KEYS: frozenset[str] = frozenset(
     {
@@ -186,6 +231,86 @@ def _require_sha256_64(value: Any, *, name: str) -> str:
             diagnostic="v6_invalid_ledger_field",
         )
     return value
+
+
+def _require_slot_key(value: Any, *, name: str = "slot_key") -> str:
+    if type(value) is not str or _SLOT_KEY_RE.fullmatch(value) is None:
+        raise ReviewInputError(
+            f"{name} must match canonical v6 slot_key pattern, got {value!r}",
+            diagnostic="v6_invalid_ledger_field",
+        )
+    return value
+
+
+def _require_positive_decimal_str(value: Any, *, name: str) -> str:
+    if type(value) is not str or _POSITIVE_DECIMAL_RE.fullmatch(value) is None:
+        raise ReviewInputError(
+            f"{name} must be a positive decimal string, got {value!r}",
+            diagnostic="v6_invalid_ledger_field",
+        )
+    return value
+
+
+def _require_iso8601_utc(value: Any, *, name: str) -> str:
+    if type(value) is not str or _ISO8601_UTC_RE.fullmatch(value) is None:
+        raise ReviewInputError(
+            f"{name} must be an ISO-8601 UTC timestamp, got {value!r}",
+            diagnostic="v6_invalid_ledger_field",
+        )
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise ReviewInputError(
+            f"{name} is not a valid ISO-8601 UTC timestamp: {error}",
+            diagnostic="v6_invalid_ledger_field",
+        ) from error
+    return value
+
+
+def redact_secrets(text: str) -> str:
+    """Redact GitHub tokens, Bearer headers, raw JWTs, and PEM private keys."""
+
+    if not isinstance(text, str):
+        return ""
+    sanitized = text
+    for _, pattern in _SECRET_VALUE_PATTERNS:
+        sanitized = pattern.sub("[REDACTED]", sanitized)
+    return sanitized
+
+
+def assert_no_secrets_in_text(text: str, *, context: str = "payload") -> None:
+    """Fail closed if ``text`` matches any banned secret/token pattern."""
+
+    if not isinstance(text, str):
+        return
+    for label, pattern in _SECRET_VALUE_PATTERNS:
+        if pattern.search(text) is not None:
+            raise V6LedgerIntegrityError(
+                f"v6 {context} contains forbidden secret pattern ({label})",
+                diagnostic="v6_secret_in_ledger",
+            )
+
+
+def assert_no_secrets_in_mapping(value: Any, *, path: str = "payload") -> None:
+    """Recursively reject banned secret field names or token patterns."""
+
+    if isinstance(value, str):
+        assert_no_secrets_in_text(value, context=path)
+        return
+    if isinstance(value, Mapping):
+        for raw_key, item in value.items():
+            key_str = str(raw_key)
+            if key_str in NEVER_KEEP_LEDGER_FIELDS:
+                raise V6LedgerIntegrityError(
+                    f"forbidden secret field {key_str!r} in v6 ledger {path}",
+                    diagnostic="v6_secret_in_ledger",
+                )
+            assert_no_secrets_in_mapping(item, path=f"{path}.{key_str}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            assert_no_secrets_in_mapping(item, path=f"{path}[{index}]")
 
 
 def _require_effect_or_record_id(value: Any, *, name: str) -> str | int:
@@ -392,9 +517,101 @@ class AdvisoryProgressHint:
         )
 
 
+@dataclass(frozen=True)
+class OwnerMarkerRecord:
+    """Coordinator-attested PR-resident ownership anchor (reviewsensei:v6:owner:v1)."""
+
+    record_id: str
+    slot_key: str
+    generation: int
+    lease_epoch: int
+    reservation_id: str
+    operation_id: str
+    run_id: str
+    run_attempt: int
+    pr_head_sha: str
+    workflow_sha: str
+    acquired_at: str
+    expires_at: str
+    coordinator_attestation_mac: str
+    schema: str = OWNER_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != OWNER_SCHEMA:
+            raise ReviewInputError(
+                f"invalid OwnerMarkerRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_slot_key(self.slot_key, name="slot_key")
+        _require_strict_int(self.generation, name="generation", minimum=1)
+        _require_strict_int(self.lease_epoch, name="lease_epoch", minimum=1)
+        _require_non_empty_str(self.reservation_id, name="reservation_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_positive_decimal_str(self.run_id, name="run_id")
+        _require_strict_int(self.run_attempt, name="run_attempt", minimum=1)
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_sha1_40(self.workflow_sha, name="workflow_sha")
+        _require_iso8601_utc(self.acquired_at, name="acquired_at")
+        _require_iso8601_utc(self.expires_at, name="expires_at")
+        _require_sha256_64(
+            self.coordinator_attestation_mac, name="coordinator_attestation_mac"
+        )
+
+
+@dataclass(frozen=True)
+class DurableHoldRecord:
+    """Explicit PR-resident durable hold marker (reviewsensei:v6:hold:v1)."""
+
+    record_id: str
+    slot_key: str
+    generation: int
+    lease_epoch: int
+    operation_id: str
+    pr_head_sha: str
+    reason_code: str
+    missing_evidence: tuple[str, ...]
+    held_at: str
+    resolved_by_record_id: str | None = None
+    schema: str = HOLD_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != HOLD_SCHEMA:
+            raise ReviewInputError(
+                f"invalid DurableHoldRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_slot_key(self.slot_key, name="slot_key")
+        _require_strict_int(self.generation, name="generation", minimum=1)
+        _require_strict_int(self.lease_epoch, name="lease_epoch", minimum=0)
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_non_empty_str(self.reason_code, name="reason_code")
+        if not isinstance(self.missing_evidence, Sequence) or isinstance(
+            self.missing_evidence, (str, bytes, bytearray)
+        ):
+            raise ReviewInputError(
+                "missing_evidence must be a sequence of strings",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_missing = tuple(
+            _require_non_empty_str(item, name="missing_evidence_item")
+            for item in self.missing_evidence
+        )
+        object.__setattr__(self, "missing_evidence", validated_missing)
+        _require_iso8601_utc(self.held_at, name="held_at")
+        if self.resolved_by_record_id is not None:
+            _require_non_empty_str(
+                self.resolved_by_record_id, name="resolved_by_record_id"
+            )
+
+
 V6LedgerRecord: TypeAlias = (
-    WriteIntentRecord
+    OwnerMarkerRecord
+    | WriteIntentRecord
     | CompletionReceiptRecord
+    | DurableHoldRecord
     | UnresolvedResultRecord
     | AdvisoryProgressHint
 )
@@ -403,6 +620,23 @@ V6LedgerRecord: TypeAlias = (
 def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
     """Convert a v6 ledger record dataclass into a canonical JSON-compatible dict."""
 
+    if isinstance(record, OwnerMarkerRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "slot_key": record.slot_key,
+            "generation": record.generation,
+            "lease_epoch": record.lease_epoch,
+            "reservation_id": record.reservation_id,
+            "operation_id": record.operation_id,
+            "run_id": record.run_id,
+            "run_attempt": record.run_attempt,
+            "pr_head_sha": record.pr_head_sha,
+            "workflow_sha": record.workflow_sha,
+            "acquired_at": record.acquired_at,
+            "expires_at": record.expires_at,
+            "coordinator_attestation_mac": record.coordinator_attestation_mac,
+        }
     if isinstance(record, WriteIntentRecord):
         return {
             "schema": record.schema,
@@ -423,6 +657,20 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "github_effect_id": record.github_effect_id,
             "payload_sha256": record.payload_sha256,
             "completed_at": record.completed_at,
+        }
+    if isinstance(record, DurableHoldRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "slot_key": record.slot_key,
+            "generation": record.generation,
+            "lease_epoch": record.lease_epoch,
+            "operation_id": record.operation_id,
+            "pr_head_sha": record.pr_head_sha,
+            "reason_code": record.reason_code,
+            "missing_evidence": list(record.missing_evidence),
+            "held_at": record.held_at,
+            "resolved_by_record_id": record.resolved_by_record_id,
         }
     if isinstance(record, UnresolvedResultRecord):
         return {
@@ -513,6 +761,92 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
         )
 
     try:
+        assert_no_secrets_in_mapping(payload)
+
+        if schema == OWNER_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "slot_key",
+                "generation",
+                "lease_epoch",
+                "reservation_id",
+                "operation_id",
+                "run_id",
+                "run_attempt",
+                "pr_head_sha",
+                "workflow_sha",
+                "acquired_at",
+                "expires_at",
+                "coordinator_attestation_mac",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "OwnerMarkerRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            return OwnerMarkerRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                slot_key=_require_mapping_str(payload, "slot_key"),
+                generation=_require_mapping_int(payload, "generation"),
+                lease_epoch=_require_mapping_int(payload, "lease_epoch"),
+                reservation_id=_require_mapping_str(payload, "reservation_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                run_id=_require_mapping_str(payload, "run_id"),
+                run_attempt=_require_mapping_int(payload, "run_attempt"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                workflow_sha=_require_mapping_str(payload, "workflow_sha"),
+                acquired_at=_require_mapping_str(payload, "acquired_at"),
+                expires_at=_require_mapping_str(payload, "expires_at"),
+                coordinator_attestation_mac=_require_mapping_str(
+                    payload, "coordinator_attestation_mac"
+                ),
+            )
+
+        if schema == HOLD_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "slot_key",
+                "generation",
+                "lease_epoch",
+                "operation_id",
+                "pr_head_sha",
+                "reason_code",
+                "missing_evidence",
+                "held_at",
+                "resolved_by_record_id",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "DurableHoldRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_missing = payload["missing_evidence"]
+            if not isinstance(raw_missing, (list, tuple)) or any(
+                type(item) is not str for item in raw_missing
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'missing_evidence' must be a list or tuple of strings",
+                    diagnostic="v6_malformed_marker",
+                )
+            return DurableHoldRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                slot_key=_require_mapping_str(payload, "slot_key"),
+                generation=_require_mapping_int(payload, "generation"),
+                lease_epoch=_require_mapping_int(payload, "lease_epoch"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                reason_code=_require_mapping_str(payload, "reason_code"),
+                missing_evidence=tuple(raw_missing),
+                held_at=_require_mapping_str(payload, "held_at"),
+                resolved_by_record_id=_require_mapping_opt_str(
+                    payload, "resolved_by_record_id"
+                ),
+            )
+
         if schema == INTENT_SCHEMA:
             expected_keys = {
                 "schema",
@@ -669,15 +1003,27 @@ def format_v6_record_marker(record: V6LedgerRecord) -> str:
     """Format a v6 record into an integrity-checked HTML comment marker."""
 
     payload_dict = record_to_dict(record)
+    assert_no_secrets_in_mapping(payload_dict)
     digest = canonical_sha256(payload_dict)
     raw_json = canonical_json_dumps(payload_dict)
-    # Escape angle brackets so embedded strings cannot close the HTML comment.
+    # Escape angle brackets so embedded strings cannot close or open HTML comments.
     safe_json = raw_json.replace("<", "\\u003c").replace(">", "\\u003e")
-    return f"{_MARKER_PREFIX}sha256={digest} payload={safe_json} -->"
+    if "-->" in safe_json or "<!--" in safe_json:
+        raise V6LedgerIntegrityError(
+            "escaped marker payload still contains forbidden HTML comment delimiter",
+            diagnostic="v6_malformed_marker",
+        )
+    marker = f"{_MARKER_PREFIX}sha256={digest} payload={safe_json} -->"
+    if len(marker.encode("utf-8")) > MAX_MARKER_ENCODED_BYTES:
+        raise V6LedgerIntegrityError(
+            f"v6 marker exceeds maximum encoded size ({MAX_MARKER_ENCODED_BYTES} bytes)",
+            diagnostic="v6_marker_too_large",
+        )
+    return marker
 
 
 def _reject_json_constant(constant: str) -> Any:
-    raise ReviewInputError(
+    raise V6LedgerIntegrityError(
         f"invalid JSON constant {constant!r} in v6 marker",
         diagnostic="v6_malformed_marker",
     )
@@ -687,40 +1033,46 @@ def parse_v6_record_marker(marker_text: str) -> V6LedgerRecord:
     """Parse and SHA-256 verify a single v6 HTML comment marker (fail-closed)."""
 
     if not isinstance(marker_text, str):
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             "v6 marker must be a string",
             diagnostic="v6_malformed_marker",
         )
     line = marker_text.strip()
+    if len(line.encode("utf-8")) > MAX_MARKER_ENCODED_BYTES:
+        raise V6LedgerIntegrityError(
+            f"v6 marker exceeds maximum encoded size ({MAX_MARKER_ENCODED_BYTES} bytes)",
+            diagnostic="v6_marker_too_large",
+        )
     match = _MARKER_RE.fullmatch(line)
     if match is None:
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             "malformed v6 ledger HTML marker",
             diagnostic="v6_malformed_marker",
         )
     expected_sha = match.group("sha")
     raw_payload = match.group("payload")
-    if "-->" in raw_payload:
-        raise ReviewInputError(
-            "v6 marker payload contains premature HTML comment terminator",
+    if "-->" in raw_payload or "<!--" in raw_payload:
+        raise V6LedgerIntegrityError(
+            "v6 marker payload contains forbidden HTML comment delimiter",
             diagnostic="v6_malformed_marker",
         )
+    assert_no_secrets_in_text(raw_payload, context="marker_payload")
     try:
         parsed = json.loads(raw_payload, parse_constant=_reject_json_constant)
     except ValueError as error:
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             f"invalid JSON in v6 marker: {error}",
             diagnostic="v6_malformed_marker",
         ) from error
     if not isinstance(parsed, Mapping):
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             "v6 marker payload must decode to a JSON object",
             diagnostic="v6_malformed_marker",
         )
     record = _record_from_mapping(parsed)
     actual_sha = canonical_sha256(record_to_dict(record))
     if not hmac.compare_digest(actual_sha, expected_sha):
-        raise ReviewInputError(
+        raise V6LedgerIntegrityError(
             f"v6 marker SHA-256 mismatch: expected {expected_sha}, got {actual_sha}",
             diagnostic="v6_marker_digest_mismatch",
         )
@@ -976,3 +1328,173 @@ def reconcile_immutable_records(
         unique_intents=sorted_intents,
         unique_receipts=sorted_receipts,
     )
+
+
+def parse_v6_slot_key(slot_key: str) -> tuple[str, int, int, int, int]:
+    """Parse and validate a canonical v6 slot key into its five components."""
+
+    _require_slot_key(slot_key, name="slot_key")
+    _, host, app_id, installation_id, base_repo_id, pr_number = slot_key.split(":")
+    return (
+        host,
+        int(app_id),
+        int(installation_id),
+        int(base_repo_id),
+        int(pr_number),
+    )
+
+
+def validate_owner_lineage(
+    records: Iterable[Any],
+    *,
+    slot_key: str,
+    repository_id: int,
+    pull_request: int,
+    app_login: str,
+    mac_verifier: Callable[[OwnerMarkerRecord], bool] | None = None,
+) -> tuple[OwnerMarkerRecord, ...]:
+    """Validate App-authored PR owner marker lineage, MACs, and monotonicity.
+
+    Accepts comment mappings, ``PaginatedRecord`` instances wrapping comment
+    mappings, or ``(OwnerMarkerRecord, metadata)`` pairs. Fails closed with
+    ``V6LedgerIntegrityError`` on spoofed/untrusted authors, malformed owner
+    markers, invalid MACs, slot/repo/PR mismatches, competing owner records,
+    or broken/non-monotonic predecessor lineage.
+    """
+
+    try:
+        _, _, _, slot_repo_id, slot_pr = parse_v6_slot_key(slot_key)
+    except ReviewInputError as error:
+        raise V6LedgerIntegrityError(
+            str(error), diagnostic="v6_invalid_slot_key"
+        ) from error
+    if type(repository_id) is not int or repository_id != slot_repo_id:
+        raise V6LedgerIntegrityError(
+            f"slot_key repo_id {slot_repo_id} != repository_id {repository_id!r}",
+            diagnostic="v6_owner_slot_mismatch",
+        )
+    if type(pull_request) is not int or pull_request != slot_pr:
+        raise V6LedgerIntegrityError(
+            f"slot_key pull_request {slot_pr} != pull_request {pull_request!r}",
+            diagnostic="v6_owner_slot_mismatch",
+        )
+    if type(app_login) is not str or not app_login.strip():
+        raise V6LedgerIntegrityError(
+            "app_login must be a non-empty string for owner lineage verification",
+            diagnostic="v6_untrusted_owner_author",
+        )
+
+    owners: list[OwnerMarkerRecord] = []
+    for item in records:
+        if isinstance(item, OwnerMarkerRecord):
+            raise V6LedgerIntegrityError(
+                "bare OwnerMarkerRecord lacks App authorship metadata",
+                diagnostic="v6_untrusted_owner_author",
+            )
+        if (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and isinstance(item[0], OwnerMarkerRecord)
+            and isinstance(item[1], Mapping)
+        ):
+            rec, meta = item
+            if not verify_app_authored_record(meta, expected_bot_login=app_login):
+                raise V6LedgerIntegrityError(
+                    f"owner marker {rec.record_id!r} failed App authorship check",
+                    diagnostic="v6_untrusted_owner_author",
+                )
+            owners.append(rec)
+            continue
+
+        payload = getattr(item, "payload", item)
+        if not isinstance(payload, Mapping):
+            raise V6LedgerIntegrityError(
+                f"unsupported record item type in owner lineage: {type(item).__name__}",
+                diagnostic="v6_malformed_marker",
+            )
+        body = payload.get("body")
+        if not isinstance(body, str) or "<!-- reviewsensei:v6:" not in body:
+            continue
+        is_app = verify_app_authored_record(payload, expected_bot_login=app_login)
+        if not is_app:
+            if OWNER_SCHEMA in body or "reviewsensei:v6:owner" in body:
+                raise V6LedgerIntegrityError(
+                    "untrusted or non-App author on v6 owner marker",
+                    diagnostic="v6_untrusted_owner_author",
+                )
+            continue
+        try:
+            parsed_records = extract_v6_record_markers(body, strict=True)
+        except ReviewInputError as error:
+            raise V6LedgerIntegrityError(
+                f"malformed App-authored v6 ledger marker: {error}",
+                diagnostic="v6_malformed_marker",
+            ) from error
+        for rec in parsed_records:
+            if isinstance(rec, OwnerMarkerRecord):
+                owners.append(rec)
+
+    seen_record_ids: set[str] = set()
+    seen_reservation_ids: set[str] = set()
+    seen_generations: dict[int, OwnerMarkerRecord] = {}
+    prev: OwnerMarkerRecord | None = None
+
+    for owner in owners:
+        if owner.slot_key != slot_key:
+            raise V6LedgerIntegrityError(
+                f"owner marker slot_key {owner.slot_key!r} != expected {slot_key!r}",
+                diagnostic="v6_owner_slot_mismatch",
+            )
+        if _SHA256_64_RE.fullmatch(owner.coordinator_attestation_mac) is None:
+            raise V6LedgerIntegrityError(
+                f"owner marker {owner.record_id!r} has invalid coordinator_attestation_mac",
+                diagnostic="v6_invalid_owner_attestation",
+            )
+        if mac_verifier is not None and not mac_verifier(owner):
+            raise V6LedgerIntegrityError(
+                f"owner marker {owner.record_id!r} failed MAC verification",
+                diagnostic="v6_invalid_owner_attestation",
+            )
+        if owner.generation in seen_generations:
+            raise V6LedgerIntegrityError(
+                f"competing owner markers detected for generation {owner.generation}",
+                diagnostic="v6_competing_owner_marker",
+            )
+        if owner.record_id in seen_record_ids:
+            raise V6LedgerIntegrityError(
+                f"duplicate owner record_id {owner.record_id!r} in lineage",
+                diagnostic="v6_competing_owner_marker",
+            )
+        if owner.reservation_id in seen_reservation_ids:
+            raise V6LedgerIntegrityError(
+                f"reused reservation_id {owner.reservation_id!r} in owner lineage",
+                diagnostic="v6_competing_owner_marker",
+            )
+        if prev is None:
+            if owner.generation != 1:
+                raise V6LedgerIntegrityError(
+                    f"owner lineage missing predecessor: first observed generation is {owner.generation}",
+                    diagnostic="v6_broken_owner_lineage",
+                )
+        else:
+            if owner.generation < prev.generation:
+                raise V6LedgerIntegrityError(
+                    f"non-monotonic owner generation {owner.generation} after {prev.generation}",
+                    diagnostic="v6_non_monotonic_owner_lineage",
+                )
+            if owner.generation != prev.generation + 1:
+                raise V6LedgerIntegrityError(
+                    f"broken owner predecessor linkage: generation {owner.generation} after {prev.generation}",
+                    diagnostic="v6_broken_owner_lineage",
+                )
+            if owner.lease_epoch < prev.lease_epoch:
+                raise V6LedgerIntegrityError(
+                    f"non-monotonic owner lease_epoch {owner.lease_epoch} after {prev.lease_epoch}",
+                    diagnostic="v6_non_monotonic_owner_lineage",
+                )
+        seen_generations[owner.generation] = owner
+        seen_record_ids.add(owner.record_id)
+        seen_reservation_ids.add(owner.reservation_id)
+        prev = owner
+
+    return tuple(owners)
