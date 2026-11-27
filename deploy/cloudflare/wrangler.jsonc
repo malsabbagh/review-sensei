@@ -23,6 +23,14 @@
 			"service": "reviewsensei-github-app"
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "V6_PR_COORDINATOR",
+				"class_name": "V6PrCoordinator"
+			}
+		]
+	},
 	"migrations": [
 		{
 			"tag": "v1",
@@ -41,6 +49,12 @@
 			"deleted_classes": [
 				"DeliveryLedger",
 				"BrokerLedger"
+			]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": [
+				"V6PrCoordinator"
 			]
 		}
 	],

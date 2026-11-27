@@ -1082,8 +1082,201 @@ describe("current observation extraction uses existing authenticated endpoints",
     await expect(client.repositoryInfo("acme/widgets", "metadata-token", true)).rejects.toThrow(); expect(request).toHaveBeenCalledTimes(1);
   });
   it("returns actual validated token scopes rather than requested-scope fiction", async () => {
-    const client = api(); const request = vi.spyOn(client, "request").mockResolvedValue({ status: 201, data: { token: "synthetic", expires_at: new Date(Date.now() + 60000).toISOString(), permissions: { metadata: "read", pull_requests: "write", contents: "read" } } });
-    await expect(client.capabilityTokenObservation(2468, "acme/widgets", { pull_requests: "write" }, true)).resolves.toEqual({ token: "synthetic", permissions: { metadata: "read", pull_requests: "write", contents: "read" } });
+    const client = api();
+    const expiresAt = new Date(Date.now() + 60000).toISOString();
+    const request = vi.spyOn(client, "request").mockResolvedValue({ status: 201, data: { token: "synthetic", expires_at: expiresAt, permissions: { metadata: "read", pull_requests: "write", contents: "read" } } });
+    await expect(client.capabilityTokenObservation(2468, "acme/widgets", { pull_requests: "write" }, true)).resolves.toEqual({
+      token: "synthetic",
+      permissions: { metadata: "read", pull_requests: "write", contents: "read" },
+      expiresAt,
+      expiresAtMs: Date.parse(expiresAt),
+    });
     expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GitHubApi v6 coordinator read and revocation helpers", () => {
+  it("classifies DELETE /installation/token outcomes without leaking token", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({ status: 204, data: null });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 204,
+      kind: "http_204",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({ status: 401, data: { message: "Bad credentials" } });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 401,
+      kind: "http_401",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 429,
+      data: { message: "rate limit" },
+      lookupMetadata: { retry_after: 12, rate_limit_reset: 1800000100 },
+    });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 429,
+      kind: "http_429_or_ratelimit_403",
+      retryAfterSeconds: 12,
+      rateLimitResetEpoch: 1800000100,
+      isRateLimit: true,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 403,
+      data: { message: "API rate limit exceeded" },
+      lookupMetadata: { rate_limit_remaining: 0, rate_limit_reset: 1800000200 },
+    });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 403,
+      kind: "http_429_or_ratelimit_403",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: 1800000200,
+      isRateLimit: true,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 403,
+      data: { message: "Resource not accessible by integration" },
+      lookupMetadata: { rate_limit_remaining: 4999, rate_limit_reset: 1800000200 },
+    });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 403,
+      kind: "permission_403",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: 1800000200,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({ status: 422, data: { message: "unprocessable" } });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 422,
+      kind: "http_other_4xx",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({ status: 503, data: null });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 503,
+      kind: "http_5xx_or_timeout",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockRejectedValueOnce(new Error("broker_upstream_timeout"));
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: null,
+      kind: "http_5xx_or_timeout",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+  });
+
+  it("parses pullRequestBinding for same-repo, fork, deleted-head-repo, and 404", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        state: "open",
+        head: { sha: SHA, repo: { id: 100, fork: false } },
+        base: { repo: { id: 100, fork: false } },
+      },
+    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toEqual({
+      head_sha: SHA,
+      base_repo_id: 100,
+      state: "open",
+      head_repo_id: 100,
+      is_fork_pr: false,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        state: "open",
+        head: { sha: SHA, repo: { id: 200, fork: true } },
+        base: { repo: { id: 100, fork: false } },
+      },
+    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toEqual({
+      head_sha: SHA,
+      base_repo_id: 100,
+      state: "open",
+      head_repo_id: 200,
+      is_fork_pr: true,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        state: "closed",
+        head: { sha: SHA, repo: null },
+        base: { repo: { id: 100, fork: false } },
+      },
+    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toEqual({
+      head_sha: SHA,
+      base_repo_id: 100,
+      state: "closed",
+      head_repo_id: null,
+      is_fork_pr: true,
+    });
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toBeNull();
+  });
+
+  it("resolves workflowRunAttempt directly and with /actions/runs fallback", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: { id: 9001, run_attempt: 1, status: "completed", conclusion: "failure", head_sha: SHA },
+    });
+    await expect(client.workflowRunAttempt("acme/widgets", "9001", "1", "read-tok")).resolves.toEqual({
+      run_id: "9001",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "failure",
+      head_sha: SHA,
+    });
+
+    request
+      .mockResolvedValueOnce({ status: 404, data: null })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 9002, run_attempt: 2, status: "in_progress", conclusion: null, head_sha: SHA },
+      });
+    await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toEqual({
+      run_id: "9002",
+      run_attempt: 2,
+      status: "in_progress",
+      conclusion: null,
+      head_sha: SHA,
+    });
+
+    request
+      .mockResolvedValueOnce({ status: 404, data: null })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 9002, run_attempt: 3, status: "in_progress", conclusion: null, head_sha: SHA },
+      });
+    await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
   });
 });
