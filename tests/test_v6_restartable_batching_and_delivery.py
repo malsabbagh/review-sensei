@@ -52,8 +52,11 @@ from review_sensei_github.v6_recovery_engine import (
     _evidence_binding_for_request,
 )
 from review_sensei_github.v6_recovery_ledger import (
+    MAX_MARKER_ENCODED_BYTES,
     BatchDispatchRecord,
     BatchOutputRecord,
+    BatchPlanManifestRecord,
+    BatchPlanPartRecord,
     BatchPlanRecord,
     CompletionReceiptRecord,
     DurableHoldRecord,
@@ -62,6 +65,7 @@ from review_sensei_github.v6_recovery_ledger import (
     canonical_sha256,
     extract_v6_record_markers,
     format_v6_record_marker,
+    parse_v6_record_marker,
     record_to_dict,
 )
 from review_sensei_github.v6_transport import DualCredentialGitHubClient
@@ -2181,6 +2185,529 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         self.assertIsInstance(res, RecoveryHold)
         assert isinstance(res, RecoveryHold)
         self.assertEqual(res.blocker, "stale_detail_receipt_payload_mismatch")
+
+    def test_split_batch_plan_inline_vs_parts_resume_and_fail_closed_corruption(
+        self,
+    ) -> None:
+        from review_sensei.configuration import default_configuration
+        from review_sensei.models import ReviewComment, ReviewResult
+
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+
+        # 1. Small plan stays inline BatchPlanRecord (<= MAX_MARKER_ENCODED_BYTES)
+        small_hunk = "src/small.py#h0:1,1+1,1:" + ("a" * 16)
+        small_diff = (
+            "diff --git a/src/small.py b/src/small.py\n"
+            "--- a/src/small.py\n+++ b/src/small.py\n@@ -1 +1 @@\n-1\n+2\n"
+        )
+        small_batch = V6PlannedBatch(
+            batch_id="batch-000",
+            diff_text=small_diff,
+            diff_sha256=canonical_sha256(small_diff),
+            prompt_bytes=200,
+            paths=("src/small.py",),
+            primary_hunk_ids=(small_hunk,),
+            parent_hunk_ids=(small_hunk,),
+        )
+        small_inv = (
+            {
+                "path": "src/small.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [small_hunk],
+            },
+        )
+
+        class _SimpleSvc:
+            def __init__(self, on_call: Callable[[str], None] | None = None) -> None:
+                self.on_call = on_call
+
+            def review(self, req: Any) -> ReviewResult:
+                if self.on_call is not None:
+                    self.on_call(req.diff)
+                return ReviewResult(
+                    summary="OK",
+                    comments=(),
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                )
+
+        small_ctx = V6FreshAnalysisContext(
+            owner=OWNER,
+            repo=REPO,
+            pull_request=PR_NUMBER,
+            pr_title="Small plan",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            head_sha=HEAD_A,
+            inventory_sha256=canonical_sha256(small_inv),
+            inventory=small_inv,
+            non_text_changes=(),
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            planned_batches=(small_batch,),
+            all_expected_hunk_ids=(small_hunk,),
+            sub_hunks_by_parent={},
+            combined_diff_sha256=canonical_sha256(small_diff),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+            service=_SimpleSvc(),
+        )
+        pr_small = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_small = _make_owner_record(
+            operation_id="op-small-plan", pr_head_sha=HEAD_A, slot_key=SLOT_B
+        )
+        pr_small.add_comment(format_v6_record_marker(owner_small), is_app=True)
+        req_small = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-small-plan",
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-small-plan",
+                run_id=701,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_small,
+            fresh_analysis_context_loader=lambda: small_ctx,
+        )
+        eng_small = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_small.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_small.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_small = eng_small.recover_and_publish(req_small)
+        self.assertIsInstance(res_small, RecoveryCompleted)
+        small_recs = [
+            r
+            for c in pr_small.comments
+            for r in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        self.assertEqual(
+            len([r for r in small_recs if isinstance(r, BatchPlanRecord)]), 1
+        )
+        self.assertEqual(
+            len([r for r in small_recs if isinstance(r, BatchPlanPartRecord)]), 0
+        )
+        self.assertEqual(
+            len([r for r in small_recs if isinstance(r, BatchPlanManifestRecord)]), 0
+        )
+        for c in pr_small.comments:
+            self.assertLessEqual(
+                len(c["body"].encode("utf-8")), MAX_MARKER_ENCODED_BYTES
+            )
+
+        # 2. Wide plan whose inline BatchPlanRecord > MAX_MARKER_ENCODED_BYTES (with special chars)
+        # builds 2 batches with many paths/hunk IDs + angle brackets/quotes so JSON escaping is exercised.
+        wide_batches: list[V6PlannedBatch] = []
+        wide_inventory: list[dict[str, Any]] = []
+        all_wide_hunks: list[str] = []
+        for b_idx in range(2):
+            hunk_ids = tuple(
+                f'src/dir_<"{b_idx}_{h_idx}">/module_{h_idx:03d}.py#h0:1,1+1,1:'
+                + hashlib.sha256(f"{b_idx}:{h_idx}".encode()).hexdigest()[:24]
+                for h_idx in range(450)
+            )
+            paths = tuple(
+                f'src/dir_<"{b_idx}_{h_idx}">/module_{h_idx:03d}.py'
+                for h_idx in range(450)
+            )
+            diff_txt = (
+                f"diff --git a/src/b{b_idx}.py b/src/b{b_idx}.py\n"
+                f"--- a/src/b{b_idx}.py\n+++ b/src/b{b_idx}.py\n"
+                f"@@ -1 +1 @@\n-v = {b_idx}\n+v = {b_idx + 10}\n"
+            )
+            wide_batches.append(
+                V6PlannedBatch(
+                    batch_id=f"batch-{b_idx:03d}",
+                    diff_text=diff_txt,
+                    diff_sha256=canonical_sha256(diff_txt),
+                    prompt_bytes=1024,
+                    paths=paths,
+                    primary_hunk_ids=hunk_ids,
+                    parent_hunk_ids=hunk_ids,
+                )
+            )
+            for p, h in zip(paths, hunk_ids):
+                wide_inventory.append(
+                    {
+                        "path": p,
+                        "status": "modified",
+                        "disposition": "text",
+                        "hunk_ids": [h],
+                    }
+                )
+            all_wide_hunks.extend(hunk_ids)
+
+        wide_inv_sha = canonical_sha256(wide_inventory)
+        # Confirm inline BatchPlanRecord indeed exceeds MAX_MARKER_ENCODED_BYTES.
+        raw_inline_plan = BatchPlanRecord(
+            record_id=f"batch-plan:op-wide:{HEAD_A[:12]}:probe",
+            operation_id="op-wide",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            pr_head_sha=HEAD_A,
+            inventory_sha256=wide_inv_sha,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            batches=tuple(b.to_plan_dict() for b in wide_batches),
+            non_text_changes=(),
+        )
+        with self.assertRaises(Exception) as size_err:
+            format_v6_record_marker(raw_inline_plan)
+        self.assertGreater(
+            len(json.dumps(record_to_dict(raw_inline_plan)).encode("utf-8")),
+            MAX_MARKER_ENCODED_BYTES,
+        )
+        del size_err
+
+        model_calls: list[str] = []
+        manifest_present_at_first_call: list[bool] = []
+        pr_wide = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_wide = _make_owner_record(
+            operation_id="op-wide", pr_head_sha=HEAD_A, slot_key=SLOT_B
+        )
+        pr_wide.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+
+        class _WideSvc:
+            def review(self, req: Any) -> ReviewResult:
+                if not model_calls:
+                    recs_now = [
+                        r
+                        for c in pr_wide.comments
+                        for r in extract_v6_record_markers(c["body"], strict=True)
+                    ]
+                    manifest_present_at_first_call.append(
+                        any(isinstance(r, BatchPlanManifestRecord) for r in recs_now)
+                    )
+                model_calls.append(req.diff)
+                b_tag = "src/b0.py" if "src/b0.py" in req.diff else "src/b1.py"
+                return ReviewResult(
+                    summary=f"Wide summary {b_tag}",
+                    comments=(
+                        ReviewComment(
+                            path=b_tag, line=1, side="RIGHT", body=f"Note {b_tag}"
+                        ),
+                    ),
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                )
+
+        wide_ctx = V6FreshAnalysisContext(
+            owner=OWNER,
+            repo=REPO,
+            pull_request=PR_NUMBER,
+            pr_title="Wide plan PR",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            head_sha=HEAD_A,
+            inventory_sha256=wide_inv_sha,
+            inventory=tuple(wide_inventory),
+            non_text_changes=(),
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            planned_batches=tuple(wide_batches),
+            all_expected_hunk_ids=tuple(all_wide_hunks),
+            sub_hunks_by_parent={},
+            combined_diff_sha256=canonical_sha256("wide"),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+            service=_WideSvc(),
+        )
+        req_wide = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-wide",
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-wide",
+                run_id=702,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_wide,
+            fresh_analysis_context_loader=lambda: wide_ctx,
+        )
+
+        # 3. Interrupt runner after only part 0 lands -> 0 model calls started!
+        parts_posted_run1 = 0
+
+        def _kill_after_part0(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            nonlocal parts_posted_run1
+            if call["method"] == "POST" and "batch-plan-part:v1" in str(
+                (call.get("body") or {}).get("body", "")
+            ):
+                parts_posted_run1 += 1
+                if parts_posted_run1 >= 2:
+                    raise RuntimeError("simulated runner kill mid-plan-parts")
+            return pr_wide.handle_app(call)
+
+        eng_killed = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_wide.handle_wf),
+                broker_app_transport=_ScriptedTransport(_kill_after_part0),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        with self.assertRaises(RuntimeError):
+            eng_killed.recover_and_publish(req_wide)
+        self.assertEqual(len(model_calls), 0)
+        recs_after_kill = [
+            r
+            for c in pr_wide.comments
+            for r in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        parts_after_kill = [
+            r for r in recs_after_kill if isinstance(r, BatchPlanPartRecord)
+        ]
+        self.assertEqual(len(parts_after_kill), 1)
+        self.assertGreaterEqual(parts_after_kill[0].total_parts, 2)
+        self.assertEqual(
+            len([r for r in recs_after_kill if isinstance(r, BatchPlanManifestRecord)]),
+            0,
+        )
+
+        # 4. Cold successor reuses part 0 without reposting, finishes remaining parts + manifest,
+        # verifies full plan BEFORE starting any model call, then executes batches and completes!
+        posted_part_bodies: list[str] = []
+
+        def _track_posts(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            if call["method"] == "POST" and "batch-plan-part:v1" in str(
+                (call.get("body") or {}).get("body", "")
+            ):
+                posted_part_bodies.append(str((call.get("body") or {}).get("body", "")))
+            return pr_wide.handle_app(call)
+
+        eng_resume = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_wide.handle_wf),
+                broker_app_transport=_ScriptedTransport(_track_posts),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        res_wide = eng_resume.recover_and_publish(req_wide)
+        self.assertIsInstance(res_wide, RecoveryCompleted)
+        self.assertEqual(manifest_present_at_first_call, [True])
+        self.assertEqual(len(model_calls), 2)
+        total_parts = parts_after_kill[0].total_parts
+        self.assertEqual(len(posted_part_bodies), total_parts - 1)
+        for c in pr_wide.comments:
+            self.assertLessEqual(
+                len(c["body"].encode("utf-8")), MAX_MARKER_ENCODED_BYTES
+            )
+            # Roundtrip parse check
+            for parsed in extract_v6_record_markers(c["body"], strict=True):
+                roundtrip = parse_v6_record_marker(format_v6_record_marker(parsed))
+                self.assertEqual(roundtrip, parsed)
+
+        final_recs = [
+            r
+            for c in pr_wide.comments
+            for r in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        final_parts = [r for r in final_recs if isinstance(r, BatchPlanPartRecord)]
+        final_manifests = [
+            r for r in final_recs if isinstance(r, BatchPlanManifestRecord)
+        ]
+        self.assertEqual(len(final_parts), total_parts)
+        self.assertEqual(len(final_manifests), 1)
+        self.assertEqual(
+            len([r for r in final_recs if isinstance(r, BatchPlanRecord)]), 0
+        )
+
+        # 5. Reconstruct from manifest + parts on a fresh PR surface (with existing outputs) works;
+        # missing part under manifest fails closed with 0 model calls.
+        model_calls.clear()
+        pr_missing_part = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_missing_part.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+        for part_rec in final_parts[:-1]:  # drop last part
+            pr_missing_part.add_comment(format_v6_record_marker(part_rec), is_app=True)
+        pr_missing_part.add_comment(
+            format_v6_record_marker(final_manifests[0]), is_app=True
+        )
+        eng_missing = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_missing_part.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_missing_part.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        hold_missing = eng_missing.recover_and_publish(req_wide)
+        self.assertIsInstance(hold_missing, RecoveryHold)
+        assert isinstance(hold_missing, RecoveryHold)
+        self.assertEqual(
+            hold_missing.blocker, "incomplete_partitioned_batch_plan_missing_part"
+        )
+        self.assertEqual(len(model_calls), 0)
+
+        # 6. Corrupted part digest under manifest fails closed with 0 model calls.
+        pr_corrupt_manifest = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_corrupt_manifest.add_comment(
+            format_v6_record_marker(owner_wide), is_app=True
+        )
+        for idx_p, part_rec in enumerate(final_parts):
+            if idx_p == 0:
+                tampered = replace(part_rec, part_sha256="f" * 64)
+                pr_corrupt_manifest.add_comment(
+                    format_v6_record_marker(tampered), is_app=True
+                )
+            else:
+                pr_corrupt_manifest.add_comment(
+                    format_v6_record_marker(part_rec), is_app=True
+                )
+        pr_corrupt_manifest.add_comment(
+            format_v6_record_marker(final_manifests[0]), is_app=True
+        )
+        eng_corrupt_m = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(
+                    pr_corrupt_manifest.handle_wf
+                ),
+                broker_app_transport=_ScriptedTransport(pr_corrupt_manifest.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        hold_corrupt_m = eng_corrupt_m.recover_and_publish(req_wide)
+        self.assertIsInstance(hold_corrupt_m, RecoveryHold)
+        assert isinstance(hold_corrupt_m, RecoveryHold)
+        self.assertEqual(hold_corrupt_m.blocker, "corrupted_pr_batch_plan")
+        self.assertEqual(len(model_calls), 0)
+
+        # 7. Conflicting part digest when NO manifest exists yet fails closed with 0 model calls.
+        pr_conflict_part = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_conflict_part.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+        tampered_pre = replace(final_parts[0], part_sha256="e" * 64)
+        pr_conflict_part.add_comment(format_v6_record_marker(tampered_pre), is_app=True)
+        eng_conflict = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_conflict_part.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_conflict_part.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        hold_conflict = eng_conflict.recover_and_publish(req_wide)
+        self.assertIsInstance(hold_conflict, RecoveryHold)
+        assert isinstance(hold_conflict, RecoveryHold)
+        self.assertEqual(hold_conflict.blocker, "corrupted_pr_batch_plan_digest")
+        self.assertEqual(len(model_calls), 0)
+
+        # 8. Cold recovery with complete BatchPlanManifestRecord + parts + batch-000 output
+        # reconstructs BatchPlanRecord from manifest+parts (0 plan writes) and executes only batch-001!
+        pr_manifest_resume = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_manifest_resume.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+        for part_rec in final_parts:
+            pr_manifest_resume.add_comment(
+                format_v6_record_marker(part_rec), is_app=True
+            )
+        pr_manifest_resume.add_comment(
+            format_v6_record_marker(final_manifests[0]), is_app=True
+        )
+        b0_dispatch = next(
+            r
+            for r in final_recs
+            if isinstance(r, BatchDispatchRecord) and r.batch_id == "batch-000"
+        )
+        b0_output = next(
+            r
+            for r in final_recs
+            if isinstance(r, BatchOutputRecord) and r.batch_id == "batch-000"
+        )
+        pr_manifest_resume.add_comment(
+            format_v6_record_marker(b0_dispatch), is_app=True
+        )
+        pr_manifest_resume.add_comment(format_v6_record_marker(b0_output), is_app=True)
+        model_calls.clear()
+        eng_manifest_resume = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(
+                    pr_manifest_resume.handle_wf
+                ),
+                broker_app_transport=_ScriptedTransport(pr_manifest_resume.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        res_manifest_resume = eng_manifest_resume.recover_and_publish(req_wide)
+        self.assertIsInstance(res_manifest_resume, RecoveryCompleted)
+        assert isinstance(res_manifest_resume, RecoveryCompleted)
+        self.assertEqual(res_manifest_resume.model_calls_started, 1)
+        self.assertEqual(len(model_calls), 1)
+        self.assertIn("src/b1.py", model_calls[0])
+        # Verify no duplicate plan parts or manifest were posted.
+        resumed_recs = [
+            r
+            for c in pr_manifest_resume.comments
+            for r in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        self.assertEqual(
+            len([r for r in resumed_recs if isinstance(r, BatchPlanPartRecord)]),
+            total_parts,
+        )
+        self.assertEqual(
+            len([r for r in resumed_recs if isinstance(r, BatchPlanManifestRecord)]), 1
+        )
 
 
 if __name__ == "__main__":
