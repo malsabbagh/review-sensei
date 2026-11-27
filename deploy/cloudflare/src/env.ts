@@ -20,6 +20,18 @@ export interface WorkerEnv {
   REVIEWSENSEI_SIGNING_KEY?: string;
   /** Service binding to this Worker. Setup continuation never uses the public URL. */
   SELF?: Fetcher;
+  /** Per-PR v6 coordinator SQLite Durable Object namespace. */
+  V6_PR_COORDINATOR?: DurableObjectNamespace;
+  /** Comma-separated opt-in owner/repo slugs for v6 pilot isolation. */
+  V6_PILOT_REPOSITORIES?: string;
+  /** Pinned v6 reusable workflow ref (owner/repo/path@ref). */
+  V6_PILOT_WORKFLOW_REF?: string;
+  /** Optional validated v6 reusable workflow tag. */
+  V6_PILOT_WORKFLOW_TAG?: string;
+  /** Comma-separated owner/repo slugs blocked from new v6 lease acquisitions during rollback. */
+  V6_PILOT_ROLLBACK_REPOSITORIES?: string;
+  /** Clock safety margin in milliseconds for v6 expiry fallback (default 300000). */
+  V6_CLOCK_MARGIN_MS?: string;
 }
 
 declare global {

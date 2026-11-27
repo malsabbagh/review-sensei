@@ -8,6 +8,7 @@ import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
 import { issueSessionGrant, sessionGrantAuthentic } from "./signed-mac";
 import { RUN_AUTHORITY_AUDIENCE, authorizeRunCapability, authorizeRunSource, bindRunAuthority, canonicalRunAuthority, parseRunAuthority, type RunAuthority } from "./run-authority";
+import { parseRepositoryCsv } from "./v6-escrow-crypto";
 import {
   PUBLIC_REPOSITORY,
   brokerAcceptedPublicWorkflowTags,
@@ -338,6 +339,13 @@ export class TokenBroker {
       dispatchControl: control,
       requestLifetime: lifetime,
     });
+    if (
+      requested !== "review_status" &&
+      requested !== "review_actions" &&
+      parseRepositoryCsv(this.env.V6_PILOT_REPOSITORIES).has(claims.repository.toLowerCase())
+    ) {
+      throw new Error("broker_v6_pilot_v5_writer_disabled");
+    }
     // Reject obsolete or wrong-purpose authority before requesting installation tokens.
     const requestedAuthority = bindRunAuthority(body.session_attestation, claims);
     if (requestedAuthority.version === 4 && (requested !== "review_session" || body.release_only === true)) throw new Error("broker_current_observation_scope_unsupported");

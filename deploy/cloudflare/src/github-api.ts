@@ -40,6 +40,7 @@ export interface JsonObject {
 export interface GitHubApiResponse {
   status: number;
   data: unknown;
+  hasNextPage?: boolean;
   lookupMetadata?: Omit<LookupDiagnostic, "phase" | "failure" | "git_failure">;
 }
 
@@ -90,6 +91,77 @@ export interface LiveIssueComment {
   login: string;
   userType: string;
   association: string;
+}
+
+export interface LiveIssueCommentPage {
+  comments: LiveIssueComment[];
+  truncated: boolean;
+}
+
+export interface LivePullRequestReview {
+  id: number;
+  login: string;
+  userType: string;
+  commit_id: string | null;
+  body: string;
+  state: string;
+  performedViaAppId: number | null;
+}
+
+export interface LivePullRequestReviewComment {
+  id: number;
+  login: string;
+  userType: string;
+  commit_id: string | null;
+  original_commit_id: string | null;
+  body: string;
+  pull_request_url: string;
+  performedViaAppId: number | null;
+}
+
+export interface LiveCheckRun {
+  id: number;
+  appId: number | null;
+  head_sha: string;
+  external_id: string | null;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  outputTitle: string | null;
+  outputSummary: string | null;
+  outputText: string | null;
+}
+
+export type RevocationOutcomeKind =
+  | "http_204"
+  | "http_401"
+  | "http_429_or_ratelimit_403"
+  | "permission_403"
+  | "http_other_4xx"
+  | "http_5xx_or_timeout";
+
+export interface RevocationResult {
+  status: number | null;
+  kind: RevocationOutcomeKind;
+  retryAfterSeconds: number | null;
+  rateLimitResetEpoch: number | null;
+  isRateLimit: boolean;
+}
+
+export interface PullRequestBinding {
+  head_sha: string;
+  base_repo_id: number;
+  state: "open" | "closed";
+  head_repo_id: number | null;
+  is_fork_pr: boolean;
+}
+
+export interface WorkflowRunAttemptInfo {
+  run_id: string;
+  run_attempt: number;
+  status: string;
+  conclusion: string | null;
+  head_sha: string;
 }
 
 const PUBLIC_WORKFLOW_TOKEN_SKEW_MS = 60_000;
@@ -638,8 +710,15 @@ export class GitHubApi {
         const data = await boundedJson(response, scope);
         this.dispatchControl?.check();
         const metadata = lookupHeaders(response.headers);
-        return { status: response.status, data, ...(Object.keys(metadata).length ? {lookupMetadata: metadata} : {}) };
-      }, this.dispatchControl, path.includes("/git/ref/") ? "workflow_ref" : path.includes("/git/tags/") ? "workflow_tag" : path.endsWith("/access_tokens") ? "installation_token" : method === "GET" ? "github_read" : "github_write");
+        const linkHeader = response.headers.get("link");
+        const hasNextPage = typeof linkHeader === "string" && /;\s*rel=["']?next["']?(?:\s*;|\s*,|\s*$)/i.test(linkHeader);
+        return {
+          status: response.status,
+          data,
+          ...(hasNextPage ? { hasNextPage: true } : {}),
+          ...(Object.keys(metadata).length ? {lookupMetadata: metadata} : {}),
+        };
+      }, this.dispatchControl, path.includes("/git/ref/") ? "workflow_ref" : path.includes("/git/tags/") ? "workflow_tag" : path.endsWith("/access_tokens") || path === "/installation/token" ? "installation_token" : method === "GET" ? "github_read" : "github_write");
     } catch (error) {
       if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) throw error;
       if (observed) throw new GitHubResponseError(error instanceof Error && ["github_response_invalid", "github_response_too_large", "broker_upstream_timeout"].includes(error.message) ? error.message : "github_response_unavailable", observed.status, observed.metadata);
@@ -783,6 +862,173 @@ export class GitHubApi {
     throw new PullRequestLookupError("github_pull_request_lookup_failed", "unknown");
   }
 
+  /** Read pull request head/base/fork binding metadata for v6 coordinator validation. */
+  async pullRequestBinding(
+    repository: string,
+    pullRequest: number,
+    token: string,
+  ): Promise<PullRequestBinding | null> {
+    if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
+      throw new Error("github_pull_request_invalid");
+    }
+    const response = await this.request(
+      "GET",
+      `${repositoryPath(repository)}/pulls/${pullRequest}`,
+      token,
+    );
+    if (response.status === 404) {
+      return null;
+    }
+    if (response.status === 403) {
+      throw new PullRequestLookupError("github_pull_request_forbidden", "http", response.status);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new PullRequestLookupError("github_pull_request_lookup_failed", "http", response.status);
+    }
+    if (!isObject(response.data)) {
+      throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
+    }
+    const head = response.data.head;
+    const base = response.data.base;
+    const state = response.data.state;
+    if (
+      !isObject(head) ||
+      typeof head.sha !== "string" ||
+      !PUBLIC_WORKFLOW_SHA_PATTERN.test(head.sha) ||
+      !isObject(base) ||
+      !isObject(base.repo) ||
+      typeof base.repo.id !== "number" ||
+      !Number.isSafeInteger(base.repo.id) ||
+      base.repo.id <= 0 ||
+      (state !== "open" && state !== "closed")
+    ) {
+      throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
+    }
+    const baseRepoId = base.repo.id;
+    if (head.repo === null || head.repo === undefined) {
+      return null;
+    }
+    if (
+      !isObject(head.repo) ||
+      typeof head.repo.id !== "number" ||
+      !Number.isSafeInteger(head.repo.id) ||
+      head.repo.id <= 0
+    ) {
+      throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
+    }
+    const headRepoId = head.repo.id;
+    const isForkPr = headRepoId !== baseRepoId || (head.repo.fork === true && base.repo.fork !== true);
+    return {
+      head_sha: head.sha,
+      base_repo_id: baseRepoId,
+      state,
+      head_repo_id: headRepoId,
+      is_fork_pr: isForkPr,
+    };
+  }
+
+  /** Verify workflow run attempt status using existing `actions: read` permission. */
+  async workflowRunAttempt(
+    repository: string,
+    runId: string,
+    attempt: string,
+    token: string,
+  ): Promise<WorkflowRunAttemptInfo | null> {
+    if (!/^[1-9][0-9]{0,19}$/.test(runId) || !/^[1-9][0-9]{0,9}$/.test(attempt)) {
+      throw new Error("github_workflow_run_invalid");
+    }
+    const expectedRunId = Number(runId);
+    const expectedAttempt = Number(attempt);
+    if (!Number.isSafeInteger(expectedRunId) || !Number.isSafeInteger(expectedAttempt)) {
+      throw new Error("github_workflow_run_invalid");
+    }
+    const root = repositoryPath(repository);
+    let response = await this.request(
+      "GET",
+      `${root}/actions/runs/${runId}/attempts/${attempt}`,
+      token,
+    );
+    let usedFallback = false;
+    if (response.status === 404) {
+      usedFallback = true;
+      response = await this.request("GET", `${root}/actions/runs/${runId}`, token);
+    }
+    if (response.status === 404) {
+      return null;
+    }
+    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+      throw new Error("github_workflow_run_lookup_failed");
+    }
+    const data = response.data;
+    const rawAttempt = data.run_attempt;
+    if (
+      usedFallback &&
+      (typeof rawAttempt !== "number" ||
+        !Number.isSafeInteger(rawAttempt) ||
+        rawAttempt !== expectedAttempt)
+    ) {
+      return null;
+    }
+    if (
+      data.id !== expectedRunId ||
+      (rawAttempt !== undefined && rawAttempt !== expectedAttempt) ||
+      typeof data.status !== "string" ||
+      !data.status.trim() ||
+      (data.conclusion !== null && (typeof data.conclusion !== "string" || !data.conclusion.trim())) ||
+      typeof data.head_sha !== "string" ||
+      !PUBLIC_WORKFLOW_SHA_PATTERN.test(data.head_sha)
+    ) {
+      throw new Error("github_workflow_run_response_invalid");
+    }
+    return {
+      run_id: runId,
+      run_attempt: expectedAttempt,
+      status: data.status,
+      conclusion: (data.conclusion as string | null) ?? null,
+      head_sha: data.head_sha,
+    };
+  }
+
+  private parseIssueCommentObject(
+    raw: unknown,
+    expectedIssueUrl: string,
+    maxBodyBytes: number,
+    expectedId?: number,
+  ): LiveIssueComment {
+    if (!isObject(raw)) {
+      throw new Error("github_issue_comment_response_invalid");
+    }
+    const id = raw.id;
+    const body = raw.body;
+    const association = raw.author_association;
+    const issueUrl = raw.issue_url;
+    const user = raw.user;
+    if (
+      typeof id !== "number" ||
+      !Number.isSafeInteger(id) ||
+      id <= 0 ||
+      (expectedId !== undefined && id !== expectedId) ||
+      typeof body !== "string" ||
+      new TextEncoder().encode(body).byteLength > maxBodyBytes ||
+      typeof association !== "string" ||
+      issueUrl !== expectedIssueUrl ||
+      !isObject(user) ||
+      typeof user.login !== "string" ||
+      user.login.length === 0 ||
+      user.login.length > 256 ||
+      typeof user.type !== "string"
+    ) {
+      throw new Error("github_issue_comment_response_invalid");
+    }
+    return {
+      id,
+      body,
+      login: user.login,
+      userType: user.type,
+      association,
+    };
+  }
+
   /**
    * Read the command comment from GitHub immediately before broker issuance.
    * Event payload identity is deliberately not trusted for a session mutation:
@@ -793,6 +1039,7 @@ export class GitHubApi {
     pullRequest: number,
     commentId: number,
     token: string,
+    maxBodyBytes = 4 * 1024,
   ): Promise<LiveIssueComment | null> {
     if (
       !Number.isSafeInteger(pullRequest) || pullRequest <= 0 ||
@@ -814,31 +1061,249 @@ export class GitHubApi {
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
       throw new Error("github_issue_comment_lookup_failed");
     }
-    const id = response.data.id;
-    const body = response.data.body;
-    const association = response.data.author_association;
-    const issueUrl = response.data.issue_url;
-    const user = response.data.user;
+    const expectedIssueUrl = `${this.apiUrl}${repositoryPath(repository)}/issues/${pullRequest}`;
+    return this.parseIssueCommentObject(response.data, expectedIssueUrl, maxBodyBytes, commentId);
+  }
+
+  /**
+   * Single bounded page of issue comments modified at or after `sinceIso` (per_page=100).
+   * Deliberately never paginates: sets `truncated: true` if Link rel="next" or length === 100.
+   */
+  async issueCommentsSince(
+    repository: string,
+    pullRequest: number,
+    sinceIso: string,
+    token: string,
+    maxBodyBytes = 65536,
+  ): Promise<LiveIssueCommentPage> {
     if (
-      id !== commentId ||
-      typeof body !== "string" ||
-      body.length > 4 * 1024 ||
-      typeof association !== "string" ||
-      issueUrl !== `${this.apiUrl}${repositoryPath(repository)}/issues/${pullRequest}` ||
+      !Number.isSafeInteger(pullRequest) ||
+      pullRequest <= 0 ||
+      typeof sinceIso !== "string" ||
+      !sinceIso.trim() ||
+      !Number.isFinite(Date.parse(sinceIso))
+    ) {
+      throw new Error("github_issue_comment_invalid");
+    }
+    const repoBase = repositoryPath(repository);
+    const response = await this.request(
+      "GET",
+      `${repoBase}/issues/${pullRequest}/comments?per_page=100&since=${encodeURIComponent(sinceIso)}`,
+      token,
+    );
+    if (response.status === 403) {
+      throw new Error("github_issue_comment_forbidden");
+    }
+    if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
+      throw new Error("github_issue_comment_lookup_failed");
+    }
+    const expectedIssueUrl = `${this.apiUrl}${repoBase}/issues/${pullRequest}`;
+    const comments = response.data.map((item) =>
+      this.parseIssueCommentObject(item, expectedIssueUrl, maxBodyBytes),
+    );
+    const truncated = response.hasNextPage === true || response.data.length >= 100;
+    return { comments, truncated };
+  }
+
+  private async getObjectOrNull(
+    path: string,
+    token: string,
+    forbiddenCode: string,
+    failedCode: string,
+  ): Promise<JsonObject | null> {
+    const response = await this.request("GET", path, token);
+    if (response.status === 404) {
+      return null;
+    }
+    if (response.status === 403) {
+      throw new Error(forbiddenCode);
+    }
+    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+      throw new Error(failedCode);
+    }
+    return response.data;
+  }
+
+  private optionalPositiveId(value: unknown): number | null {
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+
+  /** Read a single PR review by ID (O(1) reconciliation verification; zero writes). */
+  async pullRequestReview(
+    repository: string,
+    pullRequest: number,
+    reviewId: number,
+    token: string,
+  ): Promise<LivePullRequestReview | null> {
+    if (
+      !Number.isSafeInteger(pullRequest) ||
+      pullRequest <= 0 ||
+      !Number.isSafeInteger(reviewId) ||
+      reviewId <= 0
+    ) {
+      throw new Error("github_pull_request_review_invalid");
+    }
+    const repoBase = repositoryPath(repository);
+    const data = await this.getObjectOrNull(
+      `${repoBase}/pulls/${pullRequest}/reviews/${reviewId}`,
+      token,
+      "github_pull_request_review_forbidden",
+      "github_pull_request_review_lookup_failed",
+    );
+    if (data === null) {
+      return null;
+    }
+    const user = data.user;
+    const commitId = data.commit_id;
+    const body = data.body === null || data.body === undefined ? "" : data.body;
+    const state = data.state;
+    const prUrl = data.pull_request_url;
+    const appObj = data.performed_via_github_app;
+    if (
+      data.id !== reviewId ||
       !isObject(user) ||
       typeof user.login !== "string" ||
       user.login.length === 0 ||
       user.login.length > 256 ||
-      typeof user.type !== "string"
+      typeof user.type !== "string" ||
+      typeof state !== "string" ||
+      state.length === 0 ||
+      typeof body !== "string" ||
+      new TextEncoder().encode(body).byteLength > 65536 ||
+      (commitId !== null &&
+        commitId !== undefined &&
+        (typeof commitId !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(commitId))) ||
+      (typeof prUrl === "string" && prUrl !== `${this.apiUrl}${repoBase}/pulls/${pullRequest}`)
     ) {
-      throw new Error("github_issue_comment_response_invalid");
+      throw new Error("github_pull_request_review_response_invalid");
     }
     return {
-      id,
-      body,
+      id: reviewId,
       login: user.login,
       userType: user.type,
-      association,
+      commit_id: typeof commitId === "string" ? commitId : null,
+      body,
+      state,
+      performedViaAppId: isObject(appObj) ? this.optionalPositiveId(appObj.id) : null,
+    };
+  }
+
+  /** Read a single PR review comment by ID (O(1) reconciliation verification; zero writes). */
+  async pullRequestReviewComment(
+    repository: string,
+    pullRequest: number,
+    commentId: number,
+    token: string,
+  ): Promise<LivePullRequestReviewComment | null> {
+    if (
+      !Number.isSafeInteger(pullRequest) ||
+      pullRequest <= 0 ||
+      !Number.isSafeInteger(commentId) ||
+      commentId <= 0
+    ) {
+      throw new Error("github_pull_request_comment_invalid");
+    }
+    const repoBase = repositoryPath(repository);
+    const data = await this.getObjectOrNull(
+      `${repoBase}/pulls/comments/${commentId}`,
+      token,
+      "github_pull_request_comment_forbidden",
+      "github_pull_request_comment_lookup_failed",
+    );
+    if (data === null) {
+      return null;
+    }
+    const user = data.user;
+    const commitId = data.commit_id;
+    const originalCommitId = data.original_commit_id;
+    const body = data.body;
+    const prUrl = data.pull_request_url;
+    const appObj = data.performed_via_github_app;
+    if (
+      data.id !== commentId ||
+      !isObject(user) ||
+      typeof user.login !== "string" ||
+      user.login.length === 0 ||
+      user.login.length > 256 ||
+      typeof user.type !== "string" ||
+      typeof body !== "string" ||
+      new TextEncoder().encode(body).byteLength > 65536 ||
+      prUrl !== `${this.apiUrl}${repoBase}/pulls/${pullRequest}` ||
+      (commitId !== null &&
+        commitId !== undefined &&
+        (typeof commitId !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(commitId))) ||
+      (originalCommitId !== null &&
+        originalCommitId !== undefined &&
+        (typeof originalCommitId !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(originalCommitId)))
+    ) {
+      throw new Error("github_pull_request_comment_response_invalid");
+    }
+    return {
+      id: commentId,
+      login: user.login,
+      userType: user.type,
+      commit_id: typeof commitId === "string" ? commitId : null,
+      original_commit_id: typeof originalCommitId === "string" ? originalCommitId : null,
+      body,
+      pull_request_url: prUrl,
+      performedViaAppId: isObject(appObj) ? this.optionalPositiveId(appObj.id) : null,
+    };
+  }
+
+  /** Read a single check run by ID (O(1) reconciliation verification; zero writes). */
+  async checkRun(
+    repository: string,
+    checkRunId: number,
+    token: string,
+  ): Promise<LiveCheckRun | null> {
+    if (!Number.isSafeInteger(checkRunId) || checkRunId <= 0) {
+      throw new Error("github_check_run_invalid");
+    }
+    const data = await this.getObjectOrNull(
+      `${repositoryPath(repository)}/check-runs/${checkRunId}`,
+      token,
+      "github_check_run_forbidden",
+      "github_check_run_lookup_failed",
+    );
+    if (data === null) {
+      return null;
+    }
+    const headSha = data.head_sha;
+    const name = data.name;
+    const status = data.status;
+    const conclusion = data.conclusion ?? null;
+    const externalId = data.external_id ?? null;
+    const appObj = data.app;
+    const output = data.output;
+    if (
+      data.id !== checkRunId ||
+      typeof headSha !== "string" ||
+      !PUBLIC_WORKFLOW_SHA_PATTERN.test(headSha) ||
+      typeof name !== "string" ||
+      name.length === 0 ||
+      name.length > 256 ||
+      typeof status !== "string" ||
+      status.length === 0 ||
+      (conclusion !== null && typeof conclusion !== "string") ||
+      (externalId !== null && typeof externalId !== "string")
+    ) {
+      throw new Error("github_check_run_response_invalid");
+    }
+    const readOutputField = (field: unknown): string | null =>
+      typeof field === "string" && new TextEncoder().encode(field).byteLength <= 65536
+        ? field
+        : null;
+    return {
+      id: checkRunId,
+      appId: isObject(appObj) ? this.optionalPositiveId(appObj.id) : null,
+      head_sha: headSha,
+      external_id: externalId,
+      name,
+      status,
+      conclusion,
+      outputTitle: isObject(output) ? readOutputField(output.title) : null,
+      outputSummary: isObject(output) ? readOutputField(output.summary) : null,
+      outputText: isObject(output) ? readOutputField(output.text) : null,
     };
   }
 
@@ -1161,7 +1626,12 @@ export class GitHubApi {
     repository: string,
     permissions: Record<string, "read" | "write">,
     acceptReturnedContentsRead = false,
-  ): Promise<{ token: string; permissions: Record<string, string> }> {
+  ): Promise<{
+    token: string;
+    permissions: Record<string, string>;
+    expiresAt: string;
+    expiresAtMs: number;
+  }> {
     if (!Number.isSafeInteger(installationId) || installationId <= 0) {
       throw new Error("github_installation_invalid");
     }
@@ -1184,12 +1654,13 @@ export class GitHubApi {
     const token = response.data.token;
     const expiresAt = response.data.expires_at;
     const granted = response.data.permissions;
+    const expiresAtMs = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
     if (
       typeof token !== "string" ||
       token.length === 0 ||
       typeof expiresAt !== "string" ||
-      !Number.isFinite(Date.parse(expiresAt)) ||
-      Date.parse(expiresAt) <= Date.now() ||
+      !Number.isFinite(expiresAtMs) ||
+      expiresAtMs <= Date.now() ||
       !isObject(granted)
     ) {
       throw new Error("github_capability_response_invalid");
@@ -1197,7 +1668,91 @@ export class GitHubApi {
     if (!hasExactPermissions(granted, permissions, acceptReturnedContentsRead)) {
       throw new Error("github_capability_permissions_invalid");
     }
-    return { token, permissions: observationPermissions(normalizePermissionMap(granted)) };
+    return {
+      token,
+      permissions: observationPermissions(normalizePermissionMap(granted)),
+      expiresAt,
+      expiresAtMs,
+    };
+  }
+
+  /**
+   * Revoke an installation token via `DELETE /installation/token`.
+   * Classifies 204, 401, 429/rate-limit-403, permission 403, other 4xx, and 5xx/timeout.
+   */
+  async revokeInstallationToken(token: string): Promise<RevocationResult> {
+    if (typeof token !== "string" || !token.trim()) {
+      throw new Error("github_installation_token_invalid");
+    }
+    const classify = (
+      status: number,
+      metadata: ReturnType<typeof lookupHeaders> | undefined,
+      data: unknown,
+    ): RevocationResult => {
+      const retryAfterSeconds = metadata?.retry_after ?? null;
+      const rateLimitResetEpoch = metadata?.rate_limit_reset ?? null;
+      const hasRateLimitMessage =
+        isObject(data) &&
+        typeof data.message === "string" &&
+        /rate\s*limit|secondary\s*rate|abuse/i.test(data.message);
+      const hasRateLimitHeader =
+        metadata?.rate_limit_remaining === 0 ||
+        (retryAfterSeconds !== null && retryAfterSeconds > 0);
+      if (status === 204) {
+        return { status, kind: "http_204", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
+      }
+      if (status === 401) {
+        return { status, kind: "http_401", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
+      }
+      if (status === 429 || (status === 403 && (hasRateLimitHeader || hasRateLimitMessage))) {
+        return {
+          status,
+          kind: "http_429_or_ratelimit_403",
+          retryAfterSeconds,
+          rateLimitResetEpoch,
+          isRateLimit: true,
+        };
+      }
+      if (status === 403) {
+        return { status, kind: "permission_403", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
+      }
+      if (status >= 400 && status <= 499) {
+        return { status, kind: "http_other_4xx", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
+      }
+      return { status, kind: "http_5xx_or_timeout", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
+    };
+
+    try {
+      const response = await this.request("DELETE", "/installation/token", token);
+      return classify(response.status, response.lookupMetadata, response.data);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /^(broker_control_|broker_request_)/.test(error.message) &&
+        error.message !== "broker_upstream_timeout"
+      ) {
+        throw error;
+      }
+      if (error instanceof GitHubResponseError) {
+        if (error.message === "broker_upstream_timeout") {
+          return {
+            status: null,
+            kind: "http_5xx_or_timeout",
+            retryAfterSeconds: error.metadata.retry_after ?? null,
+            rateLimitResetEpoch: error.metadata.rate_limit_reset ?? null,
+            isRateLimit: false,
+          };
+        }
+        return classify(error.status, error.metadata, null);
+      }
+      return {
+        status: null,
+        kind: "http_5xx_or_timeout",
+        retryAfterSeconds: null,
+        rateLimitResetEpoch: null,
+        isRateLimit: false,
+      };
+    }
   }
 
   async installationToken(

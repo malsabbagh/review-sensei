@@ -2,9 +2,20 @@ import { pullRequestLookupEvidence, temporaryPullRequestLookup } from "./pull-re
 import { BrokerObservation } from "./broker-observation";
 import { WorkflowLookupError, temporaryWorkflowLookup } from "./broker-lookup-diagnostic";
 import { BrokerDispatchControl } from "./broker-dispatch-control";
+import { BrokerLifetime } from "./broker-lifetime";
 import type { WorkerEnv, WorkerExecution } from "./env";
+import { GitHubApi } from "./github-api";
+import { verifyOidcAssertion } from "./oidc";
 import { TokenBroker } from "./token-broker";
 import { brokerDiagnostic } from "./broker-diagnostics";
+import {
+  V6PrCoordinator,
+  buildCanonicalSlotKey,
+  canonicalSlotHost,
+  configuredAppId,
+  parseCanonicalSlotKey,
+} from "./v6-pr-coordinator";
+import { parseRepositoryCsv, redactSensitiveText } from "./v6-escrow-crypto";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
@@ -14,6 +25,8 @@ import {
 } from "./github-app";
 import { freshSetupCursor, signSetupCursor } from "./signed-mac";
 import { runSignedSetupStep, scheduleSetupContinue } from "./setup-step";
+
+export { V6PrCoordinator };
 
 function response(body: unknown, status = 200, noStore = false): Response {
   return new Response(JSON.stringify(body), {
@@ -677,6 +690,251 @@ async function setupContinue(
   }
 }
 
+const V6_LEASE_ROUTES = new Set([
+  "/github/v6/lease/acquire",
+  "/github/v6/lease/drain",
+  "/github/v6/lease/complete-reconcile",
+  "/github/v6/lease/release",
+  "/github/v6/lease/status",
+  "/github/v6/lease/resolve-hold",
+]);
+
+async function v6Lease(
+  request: Request,
+  env: WorkerEnv,
+  pathname: string,
+): Promise<Response> {
+  const rayId = brokerRayId(request);
+  const refuse = (
+    errorCode: string,
+    diagnosticError: Error,
+    status: number,
+  ): Response =>
+    response(
+      {
+        error: errorCode,
+        diagnostic: brokerDiagnostic(diagnosticError, rayId),
+      },
+      status,
+      true,
+    );
+
+  if (
+    request.headers.has("origin") ||
+    request.headers.has("access-control-request-method")
+  ) {
+    return refuse(
+      "cors_not_supported",
+      new Error("broker_cors_not_supported"),
+      400,
+    );
+  }
+  const length = request.headers.get("content-length");
+  if (length === null) {
+    return refuse(
+      "content_length_required",
+      new Error("broker_content_length_required"),
+      411,
+    );
+  }
+  if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
+    return refuse(
+      "payload_too_large",
+      new Error("broker_payload_too_large"),
+      413,
+    );
+  }
+  const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+  const parsedDeadline =
+    deadlineHeader !== null && /^[0-9]{1,13}$/.test(deadlineHeader)
+      ? Number(deadlineHeader)
+      : undefined;
+
+  let body: unknown;
+  try {
+    const bytes = await readBoundedBody(
+      request,
+      MAX_BROKER_REQUEST_BYTES,
+      parsedDeadline,
+    );
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
+      return refuse(
+        "payload_too_large",
+        new Error("broker_payload_too_large"),
+        413,
+      );
+    }
+    body = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    ) as unknown;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "broker_request_deadline_exhausted"
+    ) {
+      return refuse("v6_lease_refused", error, 403);
+    }
+    if (error instanceof Error && error.message === "request_body_too_large") {
+      return refuse(
+        "payload_too_large",
+        new Error("broker_payload_too_large"),
+        413,
+      );
+    }
+    return refuse("invalid_request", new Error("broker_invalid_request"), 400);
+  }
+
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return refuse("invalid_request", new Error("broker_invalid_request"), 400);
+  }
+  const values = body as Record<string, unknown>;
+  if (typeof values.oidc_token !== "string" || !values.oidc_token.trim()) {
+    return refuse("invalid_request", new Error("broker_invalid_request"), 400);
+  }
+
+  if (
+    env.V6_PR_COORDINATOR === undefined ||
+    typeof env.REVIEWSENSEI_SIGNING_KEY !== "string" ||
+    !env.REVIEWSENSEI_SIGNING_KEY.trim()
+  ) {
+    return refuse("configuration_unavailable", new Error("configuration_unavailable"), 503);
+  }
+
+  let appIdValue: number;
+  let host: string;
+  try {
+    appIdValue = configuredAppId(env);
+    host = canonicalSlotHost(env.GITHUB_API_URL);
+  } catch {
+    return refuse("configuration_unavailable", new Error("configuration_unavailable"), 503);
+  }
+
+  let pullRequest: number;
+  if (pathname === "/github/v6/lease/acquire" || pathname === "/github/v6/lease/status") {
+    const rawPr = values.pull_request;
+    if (typeof rawPr !== "number" || !Number.isSafeInteger(rawPr) || rawPr <= 0) {
+      return refuse("invalid_request", new Error("broker_invalid_request"), 400);
+    }
+    pullRequest = rawPr;
+    if (pathname === "/github/v6/lease/status" && values.slot_key !== undefined) {
+      const parsed = parseCanonicalSlotKey(values.slot_key);
+      if (parsed === null || parsed.pullRequest !== pullRequest) {
+        return refuse("v6_lease_unauthorized_tuple", new Error("v6_lease_unauthorized_tuple"), 403);
+      }
+    }
+  } else {
+    const parsed = parseCanonicalSlotKey(values.slot_key);
+    if (parsed === null) {
+      return refuse("invalid_request", new Error("broker_invalid_request"), 400);
+    }
+    pullRequest = parsed.pullRequest;
+  }
+
+  try {
+    if (deadlineHeader !== null && parsedDeadline === undefined) {
+      throw new Error("broker_request_deadline_invalid");
+    }
+    const control =
+      values.control_budget === undefined
+        ? undefined
+        : new BrokerDispatchControl(values.control_budget);
+    const lifetime = new BrokerLifetime(parsedDeadline);
+    lifetime.constrain(control);
+    const slotKey = await lifetime.run(async () => {
+      const claims = await verifyOidcAssertion(values.oidc_token as string, {
+        issuer: "https://token.actions.githubusercontent.com",
+        audience: "sts.reviewsensei.dev",
+        dispatchControl: control,
+        requestLifetime: lifetime,
+      });
+      if (!parseRepositoryCsv(env.V6_PILOT_REPOSITORIES).has(claims.repository.toLowerCase())) {
+        throw new Error("v6_lease_unauthorized_tuple");
+      }
+      const github = new GitHubApi(env).withRequestLifetime(lifetime, control);
+      const installationId = await github.installationFor(claims.repository);
+      if (installationId === null) {
+        throw new Error("v6_lease_unauthorized_tuple");
+      }
+      const readToken = await github.capabilityToken(installationId, claims.repository, {
+        contents: "read",
+        pull_requests: "read",
+      });
+      const repoInfo = await github.repositoryInfo(claims.repository, readToken);
+      if (repoInfo === null || repoInfo.fork || repoInfo.id !== claims.repository_id) {
+        throw new Error("v6_lease_unauthorized_tuple");
+      }
+      return buildCanonicalSlotKey({
+        host,
+        appId: appIdValue,
+        installationId,
+        baseRepoId: repoInfo.id,
+        pullRequest,
+      });
+    });
+
+    if (values.slot_key !== undefined && values.slot_key !== slotKey) {
+      return refuse("v6_lease_unauthorized_tuple", new Error("v6_lease_unauthorized_tuple"), 403);
+    }
+
+    const stub = env.V6_PR_COORDINATOR.get(env.V6_PR_COORDINATOR.idFromName(slotKey));
+    const forwarded = await stub.fetch(
+      new Request(request.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          ...(rayId === undefined ? {} : { "cf-ray": rayId }),
+        },
+        body: JSON.stringify(values),
+      }),
+    );
+    const forwardedText = redactSensitiveText(await forwarded.text());
+    return new Response(forwardedText, {
+      status: forwarded.status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : "v6_lease_unauthorized_tuple";
+    const safeCode = redactSensitiveText(rawMessage);
+    const isTransient =
+      safeCode === "configuration_unavailable" ||
+      safeCode === "oidc_jwks_unavailable" ||
+      safeCode === "oidc_jwks_invalid" ||
+      safeCode === "oidc_jwks_too_large";
+    const status =
+      safeCode === "broker_control_invalid" || safeCode === "broker_invalid_request"
+        ? 400
+        : isTransient
+          ? 503
+          : 403;
+    const diagnosticCode =
+      safeCode === "configuration_unavailable" ||
+      safeCode.startsWith("broker_") ||
+      safeCode.startsWith("oidc_") ||
+      safeCode.startsWith("v6_lease_")
+        ? safeCode
+        : "v6_lease_unauthorized_tuple";
+    const diagnostic = brokerDiagnostic(new Error(diagnosticCode), rayId);
+    console.error("github_v6_lease_failed", {
+      route: pathname,
+      error_code: diagnostic.code,
+      stage: diagnostic.stage,
+      action: diagnostic.action,
+      ...(rayId === undefined ? {} : { cf_ray: rayId }),
+    });
+    return response(
+      {
+        error: diagnostic.code === "configuration_unavailable" ? "configuration_unavailable" : diagnostic.code,
+        diagnostic,
+      },
+      status,
+      true,
+    );
+  }
+}
+
 const worker = {
   async fetch(request: Request, env: WorkerEnv, ctx?: WorkerExecution): Promise<Response> {
     const url = new URL(request.url);
@@ -684,7 +942,8 @@ const worker = {
       return response({ ok: true });
     }
     if (
-      ["/github/token", "/github/session-grant", "/github/webhook", "/github/setup-continue"].includes(url.pathname) &&
+      (["/github/token", "/github/session-grant", "/github/webhook", "/github/setup-continue"].includes(url.pathname) ||
+        V6_LEASE_ROUTES.has(url.pathname)) &&
       env.BROKER_ADMISSION_MODE !== undefined && env.BROKER_ADMISSION_MODE !== "open"
     ) {
       // A sustained operator hold spans caller and Worker cutover. Refuse
@@ -693,6 +952,12 @@ const worker = {
       // completed work. Direct/public/SELF requests all enter this handler.
       // Invalid configured modes fail held. This never revokes existing tokens.
       return response({ error: "broker_admission_held", temporary: true }, 503, true);
+    }
+    if (V6_LEASE_ROUTES.has(url.pathname)) {
+      if (request.method !== "POST") {
+        return response({ error: "method_not_allowed" }, 405, true);
+      }
+      return v6Lease(request, env, url.pathname);
     }
     if (url.pathname === "/github/token") {
       if (request.method !== "POST") {

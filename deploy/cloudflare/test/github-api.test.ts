@@ -1082,8 +1082,338 @@ describe("current observation extraction uses existing authenticated endpoints",
     await expect(client.repositoryInfo("acme/widgets", "metadata-token", true)).rejects.toThrow(); expect(request).toHaveBeenCalledTimes(1);
   });
   it("returns actual validated token scopes rather than requested-scope fiction", async () => {
-    const client = api(); const request = vi.spyOn(client, "request").mockResolvedValue({ status: 201, data: { token: "synthetic", expires_at: new Date(Date.now() + 60000).toISOString(), permissions: { metadata: "read", pull_requests: "write", contents: "read" } } });
-    await expect(client.capabilityTokenObservation(2468, "acme/widgets", { pull_requests: "write" }, true)).resolves.toEqual({ token: "synthetic", permissions: { metadata: "read", pull_requests: "write", contents: "read" } });
+    const client = api();
+    const expiresAt = new Date(Date.now() + 60000).toISOString();
+    const request = vi.spyOn(client, "request").mockResolvedValue({ status: 201, data: { token: "synthetic", expires_at: expiresAt, permissions: { metadata: "read", pull_requests: "write", contents: "read" } } });
+    await expect(client.capabilityTokenObservation(2468, "acme/widgets", { pull_requests: "write" }, true)).resolves.toEqual({
+      token: "synthetic",
+      permissions: { metadata: "read", pull_requests: "write", contents: "read" },
+      expiresAt,
+      expiresAtMs: Date.parse(expiresAt),
+    });
     expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GitHubApi v6 coordinator read and revocation helpers", () => {
+  it("classifies DELETE /installation/token outcomes without leaking token", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({ status: 204, data: null });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 204,
+      kind: "http_204",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({ status: 401, data: { message: "Bad credentials" } });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 401,
+      kind: "http_401",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 429,
+      data: { message: "rate limit" },
+      lookupMetadata: { retry_after: 12, rate_limit_reset: 1800000100 },
+    });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 429,
+      kind: "http_429_or_ratelimit_403",
+      retryAfterSeconds: 12,
+      rateLimitResetEpoch: 1800000100,
+      isRateLimit: true,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 403,
+      data: { message: "API rate limit exceeded" },
+      lookupMetadata: { rate_limit_remaining: 0, rate_limit_reset: 1800000200 },
+    });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 403,
+      kind: "http_429_or_ratelimit_403",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: 1800000200,
+      isRateLimit: true,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 403,
+      data: { message: "Resource not accessible by integration" },
+      lookupMetadata: { rate_limit_remaining: 4999, rate_limit_reset: 1800000200 },
+    });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 403,
+      kind: "permission_403",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: 1800000200,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({ status: 422, data: { message: "unprocessable" } });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 422,
+      kind: "http_other_4xx",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockResolvedValueOnce({ status: 503, data: null });
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: 503,
+      kind: "http_5xx_or_timeout",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+
+    request.mockRejectedValueOnce(new Error("broker_upstream_timeout"));
+    await expect(client.revokeInstallationToken("ghs_secret_token")).resolves.toEqual({
+      status: null,
+      kind: "http_5xx_or_timeout",
+      retryAfterSeconds: null,
+      rateLimitResetEpoch: null,
+      isRateLimit: false,
+    });
+  });
+
+  it("parses pullRequestBinding for same-repo, fork, deleted-head-repo, and 404", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        state: "open",
+        head: { sha: SHA, repo: { id: 100, fork: false } },
+        base: { repo: { id: 100, fork: false } },
+      },
+    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toEqual({
+      head_sha: SHA,
+      base_repo_id: 100,
+      state: "open",
+      head_repo_id: 100,
+      is_fork_pr: false,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        state: "open",
+        head: { sha: SHA, repo: { id: 200, fork: true } },
+        base: { repo: { id: 100, fork: false } },
+      },
+    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toEqual({
+      head_sha: SHA,
+      base_repo_id: 100,
+      state: "open",
+      head_repo_id: 200,
+      is_fork_pr: true,
+    });
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        state: "closed",
+        head: { sha: SHA, repo: null },
+        base: { repo: { id: 100, fork: false } },
+      },
+    });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toBeNull();
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(client.pullRequestBinding("acme/widgets", 42, "read-tok")).resolves.toBeNull();
+  });
+
+  it("resolves workflowRunAttempt directly and with /actions/runs fallback", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: { id: 9001, run_attempt: 1, status: "completed", conclusion: "failure", head_sha: SHA },
+    });
+    await expect(client.workflowRunAttempt("acme/widgets", "9001", "1", "read-tok")).resolves.toEqual({
+      run_id: "9001",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "failure",
+      head_sha: SHA,
+    });
+
+    request
+      .mockResolvedValueOnce({ status: 404, data: null })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 9002, run_attempt: 2, status: "in_progress", conclusion: null, head_sha: SHA },
+      });
+    await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toEqual({
+      run_id: "9002",
+      run_attempt: 2,
+      status: "in_progress",
+      conclusion: null,
+      head_sha: SHA,
+    });
+
+    request
+      .mockResolvedValueOnce({ status: 404, data: null })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 9002, run_attempt: 3, status: "in_progress", conclusion: null, head_sha: SHA },
+      });
+    await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
+
+    request
+      .mockResolvedValueOnce({ status: 404, data: null })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 9002, status: "completed", conclusion: "success", head_sha: SHA },
+      });
+    await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
+  });
+
+  it("reads single bounded issueCommentsSince page without pagination and flags truncation", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: [
+        {
+          id: 501,
+          body: "hello",
+          author_association: "NONE",
+          issue_url: "https://api.example.test/repos/acme/widgets/issues/42",
+          user: { login: "reviewsensei[bot]", type: "Bot" },
+        },
+      ],
+    });
+    const page1 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(page1.truncated).toBe(false);
+    expect(page1.comments).toHaveLength(1);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      "GET",
+      "/repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-27T00%3A00%3A00Z",
+      "read-tok",
+    );
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      hasNextPage: true,
+      data: [],
+    });
+    const pageNext = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(pageNext.truncated).toBe(true);
+    expect(request).toHaveBeenCalledTimes(2);
+
+    const hundred = Array.from({ length: 100 }, (_, idx) => ({
+      id: idx + 1,
+      body: "entry",
+      author_association: "NONE",
+      issue_url: "https://api.example.test/repos/acme/widgets/issues/42",
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    }));
+    request.mockResolvedValueOnce({ status: 200, data: hundred });
+    const page100 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(page100.truncated).toBe(true);
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads pullRequestReview, pullRequestReviewComment, and checkRun O(1) resources", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        id: 5001,
+        user: { login: "reviewsensei[bot]", type: "Bot" },
+        commit_id: SHA,
+        body: "<!-- reviewsensei:v6:effect op=op-1 sha256=deadbeef -->",
+        state: "COMMENTED",
+        pull_request_url: "https://api.example.test/repos/acme/widgets/pulls/42",
+        performed_via_github_app: { id: 12345 },
+      },
+    });
+    await expect(client.pullRequestReview("acme/widgets", 42, 5001, "read-tok")).resolves.toEqual({
+      id: 5001,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      commit_id: SHA,
+      body: "<!-- reviewsensei:v6:effect op=op-1 sha256=deadbeef -->",
+      state: "COMMENTED",
+      performedViaAppId: 12345,
+    });
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(client.pullRequestReviewComment("acme/widgets", 42, 7001, "read-tok")).resolves.toBeNull();
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        id: 7002,
+        user: { login: "reviewsensei[bot]", type: "Bot" },
+        commit_id: SHA,
+        original_commit_id: SHA,
+        body: "inline",
+        pull_request_url: "https://api.example.test/repos/acme/widgets/pulls/42",
+        performed_via_github_app: { id: 12345 },
+      },
+    });
+    await expect(
+      client.pullRequestReviewComment("acme/widgets", 42, 7002, "read-tok"),
+    ).resolves.toMatchObject({ id: 7002, performedViaAppId: 12345 });
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        id: 8001,
+        app: { id: 12345 },
+        head_sha: SHA,
+        external_id: "op-check",
+        name: "ReviewSensei",
+        status: "completed",
+        conclusion: "success",
+        output: { title: "t", summary: "s", text: "x" },
+      },
+    });
+    await expect(client.checkRun("acme/widgets", 8001, "read-tok")).resolves.toEqual({
+      id: 8001,
+      appId: 12345,
+      head_sha: SHA,
+      external_id: "op-check",
+      name: "ReviewSensei",
+      status: "completed",
+      conclusion: "success",
+      outputTitle: "t",
+      outputSummary: "s",
+      outputText: "x",
+    });
   });
 });
