@@ -64,6 +64,63 @@ def _iso_utc_from_ms(epoch_ms: int) -> str:
     )
 
 
+def _app_id_from_slot_key(slot_key: str) -> int | None:
+    """Extract positive GitHub App ID from canonical ``v6-pr:<host>:<app_id>:...`` key."""
+
+    parts = slot_key.split(":")
+    if len(parts) == 6 and parts[0] == "v6-pr" and parts[2].isdigit():
+        parsed = int(parts[2])
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _build_initial_result_loader(
+    config: V6PilotRunConfig,
+) -> Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None:
+    """Return a lazy initial findings loader without touching disk unless invoked."""
+
+    if config.initial_result_loader is not None:
+        return config.initial_result_loader
+    if config.initial_findings_path is None:
+        return None
+    findings_path = config.initial_findings_path
+
+    def _load() -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
+        raw = json.loads(findings_path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            findings_raw: Any = raw
+            digests_raw: Any = ()
+        elif isinstance(raw, Mapping):
+            findings_raw = raw.get("findings", ())
+            digests_raw = raw.get("required_evidence_digests", ())
+        else:
+            raise ReviewInputError(
+                "initial findings JSON must be an object or list",
+                diagnostic="v6_invalid_initial_findings",
+            )
+        if (
+            not isinstance(findings_raw, Sequence)
+            or isinstance(findings_raw, (str, bytes, bytearray))
+            or not all(isinstance(entry, Mapping) for entry in findings_raw)
+        ):
+            raise ReviewInputError(
+                "initial findings entries must be JSON objects",
+                diagnostic="v6_invalid_initial_findings",
+            )
+        if (
+            not isinstance(digests_raw, Sequence)
+            or isinstance(digests_raw, (str, bytes, bytearray))
+            or not all(isinstance(item, str) and item.strip() for item in digests_raw)
+        ):
+            raise ReviewInputError(
+                "required_evidence_digests must be non-empty strings",
+                diagnostic="v6_invalid_initial_findings",
+            )
+        return tuple(dict(entry) for entry in findings_raw), tuple(digests_raw)
+
+    return _load
+
+
 class _FailClosedReadOnlyAppTransport:
     """Stub broker transport used during read-only pre-lease reconciliation."""
 
@@ -211,6 +268,10 @@ class V6PilotRunConfig:
     step_summary_sink: Callable[[str], None] | Path | None = None
     outcome_path: Path | None = None
     clock_margin_ms: int = DEFAULT_CLOCK_MARGIN_MS
+    initial_findings_path: Path | None = None
+    initial_result_loader: (
+        Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -431,6 +492,11 @@ class V6PilotRunner:
             )
 
         slot_key = slot_status.slot_key
+        effective_expected_app_id = (
+            config.expected_app_id
+            if config.expected_app_id is not None
+            else _app_id_from_slot_key(slot_key)
+        )
         current_state = slot_status.state
         current_generation = slot_status.generation
         current_epoch = slot_status.lease_epoch
@@ -539,7 +605,7 @@ class V6PilotRunner:
                 granted_scopes=config.granted_scopes,
                 old_generation=current_generation,
                 old_lease_epoch=current_epoch,
-                expected_app_id=config.expected_app_id,
+                expected_app_id=effective_expected_app_id,
                 expected_bot_login=config.expected_bot_login,
                 expected_bot_user_id=config.expected_bot_user_id,
                 mac_verifier=config.mac_verifier,
@@ -724,7 +790,7 @@ class V6PilotRunner:
                 effect_kind=config.effect_kind,
                 effect_endpoint_id=config.effect_endpoint_id,
                 effect_path=config.effect_path,
-                expected_app_id=config.expected_app_id or grant.app_id,
+                expected_app_id=effective_expected_app_id or grant.app_id,
                 expected_bot_login=config.expected_bot_login,
                 expected_bot_user_id=config.expected_bot_user_id,
                 observed_evidence_digests=config.observed_evidence_digests,
@@ -739,6 +805,7 @@ class V6PilotRunner:
                 has_active_write_lease=True,
                 emit_durable_hold_on_pr=True,
                 step_summary_sink=config.step_summary_sink,
+                initial_result_loader=_build_initial_result_loader(config),
             )
 
             if takeover_recon is not None and takeover_recon.adopted_effects:
@@ -886,6 +953,11 @@ class V6PilotRunner:
                 if diag_code is None:
                     diag_code = getattr(exc, "diagnostic", None)
 
+        model_calls_started = (
+            recovery_outcome.model_calls_started
+            if isinstance(recovery_outcome, (RecoveryCompleted, RecoveryPaused))
+            else 0
+        )
         return self._write_outcome(
             config,
             V6PilotRunOutcome(
@@ -898,7 +970,7 @@ class V6PilotRunner:
                 takeover_reconciliation=takeover_recon,
                 diagnostic=diag_code,
                 lease_released=lease_released,
-                model_calls_started=0,
+                model_calls_started=model_calls_started,
             ),
         )
 
@@ -964,6 +1036,9 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         "--outcome", "--publication-outcome", dest="outcome", type=Path, default=None
     )
     parser.add_argument("--step-summary-path", type=Path, default=None)
+    parser.add_argument("--initial-findings-json", type=Path, default=None)
+    parser.add_argument("--expected-bot-login", default=None)
+    parser.add_argument("--expected-app-id", type=int, default=None)
     parser.add_argument(
         "--affirmative-non-submission", action="store_true", default=False
     )
@@ -973,6 +1048,8 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         raise ReviewInputError("repository slug is invalid")
     if options.repository_id <= 0 or options.pull_request <= 0:
         raise ReviewInputError("repository_id and pull_request must be positive")
+    if options.expected_app_id is not None and options.expected_app_id <= 0:
+        raise ReviewInputError("expected_app_id must be positive")
     if _SHA1_40_RE.fullmatch(options.head_sha) is None:
         raise ReviewInputError("head_sha must be a 40-hex SHA-1")
 
@@ -1024,10 +1101,13 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         run_id=run_id,
         run_attempt=run_attempt,
         workflow_sha=workflow_sha,
+        expected_app_id=options.expected_app_id,
+        expected_bot_login=options.expected_bot_login,
         effect_kind=options.effect_kind,
         affirmative_non_submission=options.affirmative_non_submission,
         step_summary_sink=options.step_summary_path,
         outcome_path=options.outcome,
+        initial_findings_path=options.initial_findings_json,
     )
     outcome = run_v6_pilot(
         config,

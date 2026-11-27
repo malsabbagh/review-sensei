@@ -2593,6 +2593,285 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         self.assertEqual(parsed_dict_err.slot_state["state"], "HOLD")
         self.assertEqual(parsed_dict_err.slot_state["slot_key"], hold_store.slot_key)
 
+    def test_fresh_pr_initial_result_loader_persists_result_before_intent_and_reports_one_model_call(
+        self,
+    ) -> None:
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+        loader_calls = 0
+
+        def _load_initial() -> tuple[list[dict[str, Any]], list[str]]:
+            nonlocal loader_calls
+            loader_calls += 1
+            return (
+                [
+                    {
+                        "path": "src/app.py",
+                        "line": 10,
+                        "body": "Initial fresh-PR finding.",
+                    }
+                ],
+                ["diff_sha256:" + ("e" * 64)],
+            )
+
+        runner = V6PilotRunner(
+            coordinator=coord_client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(pr.handle_app),
+            clock=lambda: now,
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-fresh-1",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=_load_initial,
+            )
+        )
+        self.assertEqual(loader_calls, 1)
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(outcome.model_calls_started, 1)
+        self.assertTrue(outcome.lease_released)
+        self.assertEqual(outcome.coordinator_state, "IDLE")
+        assert isinstance(outcome.recovery_outcome, RecoveryCompleted)
+        self.assertEqual(outcome.recovery_outcome.model_calls_started, 1)
+        self.assertFalse(outcome.recovery_outcome.used_pr_resident_result)
+        self.assertEqual(len(pr.reviews), 1)
+
+        schemas_in_order = [
+            rec.schema
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        self.assertEqual(
+            schemas_in_order,
+            [
+                OWNER_SCHEMA,
+                "reviewsensei:v6:unresolved:v1",
+                "reviewsensei:v6:intent:v1",
+                "reviewsensei:v6:receipt:v1",
+            ],
+        )
+
+        # CLI --help exits cleanly before GITHUB_TOKEN or network checks.
+        with redirect_stdout(io.StringIO()) as help_out:
+            with self.assertRaises(SystemExit) as help_exc:
+                github_main(["v6-pilot-run", "--help"])
+            self.assertEqual(help_exc.exception.code, 0)
+        self.assertIn("--initial-findings-json", help_out.getvalue())
+
+    def test_rerun_after_intent_refuses_initial_result_loader_with_zero_model_calls(
+        self,
+    ) -> None:
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        unresolved = _make_unresolved(operation_id="op-rerun-1")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+        grant_1 = coord_client.acquire(
+            pull_request=PR_NUMBER,
+            head_sha=HEAD_A,
+            capabilities=("review_publish",),
+            operation_id="op-rerun-1",
+        )
+        owner_1 = _make_owner_record(
+            slot_key=grant_1.slot_key,
+            generation=1,
+            lease_epoch=grant_1.lease_epoch,
+            reservation_id=grant_1.reservation_id,
+            operation_id="op-rerun-1",
+            pr_head_sha=HEAD_A,
+        )
+        owner_1_c = pr.add_comment(format_v6_record_marker(owner_1), is_app=True)
+        coord_store.owner_comment_id = owner_1_c["id"]
+        intent_1 = WriteIntentRecord(
+            record_id="intent:op-rerun-1:1",
+            operation_id="op-rerun-1",
+            writer_epoch=grant_1.lease_epoch,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256=unresolved.payload_sha256,
+            target_digest=canonical_sha256(
+                {"repo": REPO_ID, "pr": PR_NUMBER, "head": HEAD_A}
+            ),
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        pr.add_comment(format_v6_record_marker(intent_1), is_app=True)
+        # Simulate crash before review publish (0 reviews landed) and slot drained to RECONCILING -> HOLD.
+        coord_client.drain(
+            slot_key=grant_1.slot_key,
+            expected_generation=1,
+            expected_lease_epoch=grant_1.lease_epoch,
+            predecessor_anchor_comment_id=owner_1_c["id"],
+        )
+
+        def _forbidden_loader() -> tuple[list[dict[str, Any]], list[str]]:
+            raise AssertionError("initial_result_loader must NEVER run on rerun")
+
+        runner = V6PilotRunner(
+            coordinator=coord_client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(pr.handle_app),
+            clock=lambda: now,
+        )
+        hold_outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-rerun-1",
+                run_id=6002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=_forbidden_loader,
+            )
+        )
+        self.assertEqual(hold_outcome.status, "hold")
+        self.assertEqual(hold_outcome.model_calls_started, 0)
+        self.assertEqual(len(pr.reviews), 0)
+
+        # Also verify direct V6RecoveryEngine.recover_and_publish refuses initial_result_loader
+        # when existing_intent is present even if result:v1 is missing.
+        pr_missing_res = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_missing_res.add_comment(format_v6_record_marker(intent_1), is_app=True)
+        direct_client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr_missing_res.handle_wf),
+            broker_app_transport=_ScriptedTransport(pr_missing_res.handle_app),
+        )
+        direct_engine = V6RecoveryEngine(
+            direct_client,
+            now_fn=lambda: now,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": 2,
+                "active_run_id": 6003,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        direct_req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-rerun-1",
+            ownership_proof=WriterOwnershipProof(
+                operation_id="op-rerun-1",
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                pr_head_sha=HEAD_A,
+                writer_epoch=2,
+                run_id=6003,
+                run_attempt=1,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=grant_1.slot_key,
+            generation=2,
+            token_expires_at_ms=int((now + 3600) * 1000),
+            initial_result_loader=_forbidden_loader,
+        )
+        direct_outcome = direct_engine.recover_and_publish(direct_req)
+        self.assertEqual(direct_outcome.blocker, "missing_pr_unresolved_result")
+        self.assertTrue(direct_outcome.zero_model_calls_started)
+
+        # If target_result_record_id already exists on the PR (even if head mismatch triggers
+        # missing_pr_unresolved_result), initial_result_loader MUST NOT be invoked.
+        pr_colliding_res = _SimulatedPRSurface(head_sha=HEAD_A)
+        colliding_result = UnresolvedResultRecord(
+            record_id=f"result:op-collide-1:{HEAD_A[:12]}",
+            operation_id="op-collide-1",
+            pr_head_sha=HEAD_B,
+            payload_sha256=unresolved.payload_sha256,
+            findings_payload=unresolved.findings_payload,
+            required_evidence_digests=(),
+        )
+        pr_colliding_res.add_comment(
+            format_v6_record_marker(colliding_result), is_app=True
+        )
+        collide_client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr_colliding_res.handle_wf),
+            broker_app_transport=_ScriptedTransport(pr_colliding_res.handle_app),
+        )
+        collide_engine = V6RecoveryEngine(
+            collide_client,
+            now_fn=lambda: now,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": 2,
+                "active_run_id": 6003,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        collide_req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-collide-1",
+            ownership_proof=WriterOwnershipProof(
+                operation_id="op-collide-1",
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                pr_head_sha=HEAD_A,
+                writer_epoch=2,
+                run_id=6003,
+                run_attempt=1,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=grant_1.slot_key,
+            generation=2,
+            token_expires_at_ms=int((now + 3600) * 1000),
+            initial_result_loader=_forbidden_loader,
+        )
+        collide_outcome = collide_engine.recover_and_publish(collide_req)
+        self.assertEqual(collide_outcome.blocker, "missing_pr_unresolved_result")
+        self.assertTrue(collide_outcome.zero_model_calls_started)
+
 
 if __name__ == "__main__":
     unittest.main()

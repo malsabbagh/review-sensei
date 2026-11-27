@@ -131,8 +131,14 @@ class RecoveryCompleted:
     intent_record: WriteIntentRecord | None = None
 
     def __post_init__(self) -> None:
-        if self.model_calls_started != 0:
-            raise ValueError("v6 recovery must never start a fresh model call")
+        if type(
+            self.model_calls_started
+        ) is not int or self.model_calls_started not in (0, 1):
+            raise ValueError("v6 recovery model_calls_started must be 0 or 1")
+        if self.reconciled_from_existing_effect and self.model_calls_started != 0:
+            raise ValueError(
+                "v6 recovery from existing effect must never start a fresh model call"
+            )
 
 
 @dataclass(frozen=True)
@@ -241,6 +247,9 @@ class RecoveryRequest:
     has_active_write_lease: bool = True
     emit_durable_hold_on_pr: bool = False
     step_summary_sink: Callable[[str], None] | Path | None = None
+    initial_result_loader: (
+        Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -2615,10 +2624,81 @@ class V6RecoveryEngine:
                     )
 
             # Effect not yet landed: must recover strictly from PR-resident result.
+            model_calls_started = 0
             validated = self._validate_pr_resident_result(
                 request=request,
                 unresolved_results=unresolved_results,
             )
+            target_result_record_id = f"result:{request.operation_id}:{request.ownership_proof.pr_head_sha[:12]}"
+            result_id_absent = (
+                target_result_record_id not in collected.comment_ids_by_record_id
+                and not any(
+                    r.record_id == target_result_record_id for r in unresolved_results
+                )
+            )
+            if (
+                existing_intent is None
+                and request.operation_id not in summary.completed_operations
+                and isinstance(validated, RecoveryHold)
+                and validated.blocker == "missing_pr_unresolved_result"
+                and result_id_absent
+                and request.initial_result_loader is not None
+                and request.has_active_write_lease
+            ):
+                if owner_cid is None:
+                    owner_cid = self._persist_owner_marker_if_needed(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        existing_owners=owners,
+                        comment_ids_by_record_id=collected.comment_ids_by_record_id,
+                    )
+                    if (
+                        request.owner_marker is not None
+                        and request.owner_marker not in owners
+                    ):
+                        owners = (*owners, request.owner_marker)
+                raw_findings, raw_digests = request.initial_result_loader()
+                model_calls_started = 1
+                findings_tuple = tuple(dict(entry) for entry in raw_findings)
+                new_result = UnresolvedResultRecord(
+                    record_id=target_result_record_id,
+                    operation_id=request.operation_id,
+                    pr_head_sha=request.ownership_proof.pr_head_sha,
+                    payload_sha256=canonical_sha256(findings_tuple),
+                    findings_payload=findings_tuple,
+                    required_evidence_digests=tuple(raw_digests),
+                )
+                self._verify_write_boundary(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                )
+                self.mutation_bound.consume("write_intent_comment", "unresolved_result")
+                result_resp = self._execute_with_throttle(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                    call_fn=lambda ts: self.client.execute(
+                        "write_intent_comment",
+                        method="POST",
+                        path=(
+                            f"/repos/{request.owner}/{request.repo}/issues/"
+                            f"{request.pull_request}/comments"
+                        ),
+                        event=request.event,
+                        visibility=request.visibility,
+                        granted_scopes=request.granted_scopes,
+                        credential_kind=CredentialKind.APP_BROKER,
+                        body={"body": format_v6_record_marker(new_result)},
+                        now_epoch=ts,
+                    ),
+                )
+                verify_write_response_readback(result_resp, expected_marker=new_result)
+                validated = self._validate_pr_resident_result(
+                    request=request,
+                    unresolved_results=(*unresolved_results, new_result),
+                )
             if isinstance(validated, RecoveryHold):
                 return self._finalize_hold(
                     request=request,
@@ -2690,13 +2770,14 @@ class V6RecoveryEngine:
                     )
 
             if current_intent is None:
-                owner_cid = self._persist_owner_marker_if_needed(
-                    request=request,
-                    guard=guard,
-                    prior_hint=prior_hint,
-                    existing_owners=owners,
-                    comment_ids_by_record_id=collected.comment_ids_by_record_id,
-                )
+                if owner_cid is None:
+                    owner_cid = self._persist_owner_marker_if_needed(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        existing_owners=owners,
+                        comment_ids_by_record_id=collected.comment_ids_by_record_id,
+                    )
                 self._verify_write_boundary(
                     request=request,
                     guard=guard,
@@ -2947,9 +3028,9 @@ class V6RecoveryEngine:
                 receipt=receipt,
                 github_effect_id=effect_id,
                 reconciled_from_existing_effect=reconciled_after_lost_write,
-                used_pr_resident_result=True,
+                used_pr_resident_result=model_calls_started == 0,
                 readback_gets_emitted=readback_gets + receipt_gets,
-                model_calls_started=0,
+                model_calls_started=model_calls_started,
                 owner_comment_id=owner_cid,
                 intent_comment_id=intent_cid,
                 receipt_comment_id=receipt_cid,

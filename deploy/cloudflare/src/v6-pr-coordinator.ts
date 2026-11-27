@@ -4459,17 +4459,21 @@ export class V6PrCoordinatorEngine {
           };
         }
 
-        const nextState: CoordinatorState =
-          resolutionKind === "reconciled_clean" ? "IDLE" : "RECONCILING";
+        const nextState: CoordinatorState = "RECONCILING";
+        const resolvedAcquiredAtMs =
+          slot.acquired_at_ms ??
+          (verifiedAnchor !== null
+            ? parsePositiveTimestampMs(verifiedAnchor.payload.acquired_at)
+            : null);
         const updated: SlotRecord = {
           ...slot,
           state: nextState,
           reservation_id: null,
           owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
           owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
-          acquired_at_ms: nextState === "IDLE" ? null : slot.acquired_at_ms,
+          acquired_at_ms: resolvedAcquiredAtMs,
           token_expires_at_ms: null,
-          token_cleared: nextState === "RECONCILING",
+          token_cleared: true,
           encrypted_escrow: null,
           last_reason_code: null,
           updated_at_ms: this.clock.nowMs(),
@@ -4508,7 +4512,7 @@ export class V6PrCoordinatorEngine {
     const rev = await this.executeRevocation(
       { ...heldSlot, state: "DRAINING" },
       edge,
-      resolutionKind === "reconciled_clean" ? "IDLE" : "RECONCILING",
+      "RECONCILING",
     );
     const applied = await this.withSlotLock(slotKey, async () => {
       const latest = await this.readSlot(slotKey);
@@ -4525,10 +4529,18 @@ export class V6PrCoordinatorEngine {
         await this.store.putSlot({ ...rev.updatedSlot, state: "HOLD" });
         return { conflict: false, failed: true, state: "HOLD" as CoordinatorState };
       }
+      const resolvedAcquiredAtMs =
+        rev.updatedSlot.acquired_at_ms ??
+        (verifiedAnchor !== null
+          ? parsePositiveTimestampMs(verifiedAnchor.payload.acquired_at)
+          : null);
       const resolvedSlot: SlotRecord = {
         ...rev.updatedSlot,
+        state: "RECONCILING",
         owner_comment_id: anchorCommentId ?? heldSlot.owner_comment_id,
         owner_record_sha256: verifiedAnchor?.sha256 ?? heldSlot.owner_record_sha256,
+        acquired_at_ms: resolvedAcquiredAtMs,
+        token_cleared: true,
       };
       await this.store.putSlot(resolvedSlot);
       return { conflict: false, failed: false, slot: resolvedSlot };

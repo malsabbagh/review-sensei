@@ -160,8 +160,7 @@ stateDiagram-v2
     RECONCILING --> DRAINING: "unrevoked token enters Gate 1 drain"
     RECONCILING --> IDLE: "Gate 2 (/complete-reconcile): token_cleared=true + Worker-verified evidence"
     RECONCILING --> HOLD: "Gate 2 non-terminal / invalid evidence"
-    HOLD --> RECONCILING: "/resolve-hold (enter_reconcile + proof)"
-    HOLD --> IDLE: "/resolve-hold (reconciled_clean + proof)"
+    HOLD --> RECONCILING: "/resolve-hold (enter_reconcile | reconciled_clean + proof)"
 ```
 
 - **Two-Gate Separation Invariant:**
@@ -173,7 +172,7 @@ stateDiagram-v2
 - **Strict Guards on Other Transitions:**
   - `/github/v6/lease/release` is valid **only** in `ACTIVE` for the matching verified owner (`slot_key`, `generation`, `lease_epoch`, `reservation_id`); non-`ACTIVE` states fail closed with HTTP `409`.
   - Non-terminal `reconciliation_outcome` (`"ambiguous_hold"` or `"incomplete"`) or invalid evidence (`v6_lease_reconciliation_evidence_invalid`) transitions `RECONCILING → HOLD` without clearing obligations or advancing generation.
-  - `HOLD → IDLE` | `RECONCILING` is valid **only** via `/github/v6/lease/resolve-hold` with confirmed credential clearance (`token_cleared === true`) and verified named proof (`"reconciled_clean"` or `"enter_reconcile"`), preventing unconditional bypasses or `RECONCILING ↔ HOLD` oscillation.
+  - `HOLD → RECONCILING` is valid **only** via `/github/v6/lease/resolve-hold` (for both `"reconciled_clean"` and `"enter_reconcile"`) with confirmed credential clearance (`token_cleared === true`) and verified named proof, always transitioning `HOLD → RECONCILING` (never directly to `IDLE`) and requiring full Gate 2 `/github/v6/lease/complete-reconcile` verification before reaching `IDLE` or issuing a new token.
 
 - **Revocation rules (`DELETE /installation/token`):**
   - **HTTP `204`:** Revocation confirmed → clear escrow, set `token_cleared = true`, and transition `DRAINING` → `RECONCILING`.

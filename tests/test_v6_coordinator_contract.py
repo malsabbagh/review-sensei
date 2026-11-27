@@ -188,7 +188,9 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertEqual(transitions["DRAINING"], ["RECONCILING", "HOLD"])
         self.assertNotIn("IDLE", transitions["DRAINING"])
 
-        # HOLD cannot bypass reconciliation/release directly into ACTIVE or MINTING.
+        # HOLD cannot bypass reconciliation/release directly into IDLE, ACTIVE, or MINTING.
+        self.assertEqual(transitions["HOLD"], ["RECONCILING"])
+        self.assertNotIn("IDLE", transitions["HOLD"])
         self.assertNotIn("ACTIVE", transitions["HOLD"])
         self.assertNotIn("MINTING", transitions["HOLD"])
         self.assertNotIn("RESERVED", transitions["HOLD"])
@@ -196,6 +198,7 @@ class V6CoordinatorContractTests(unittest.TestCase):
         rules = self.contract["transition_rules"]
         self.assertEqual(set(rules.keys()), expected_edges)
         self.assertNotIn("DRAINING->IDLE", rules)
+        self.assertNotIn("HOLD->IDLE", rules)
         for edge, spec in rules.items():
             self.assertTrue(spec["routes"], edge)
             for route in spec["routes"]:
@@ -209,13 +212,10 @@ class V6CoordinatorContractTests(unittest.TestCase):
         self.assertIn("token_cleared", rules["RECONCILING->IDLE"]["guard"])
         self.assertIn("reconciliation_evidence", rules["RECONCILING->IDLE"]["guard"])
         self.assertEqual(
-            rules["HOLD->IDLE"]["routes"],
-            ["/github/v6/lease/resolve-hold"],
-        )
-        self.assertEqual(
             rules["HOLD->RECONCILING"]["routes"],
             ["/github/v6/lease/resolve-hold"],
         )
+        self.assertIn("complete-reconcile", rules["HOLD->RECONCILING"]["guard"])
 
     def test_keep_vs_never_keep_disjointness_and_secret_bans(self) -> None:
         coord = self.contract["coordinator_storage"]
