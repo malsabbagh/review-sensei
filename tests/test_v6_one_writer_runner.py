@@ -1,0 +1,1523 @@
+"""Phase 4 runner, coordinator, takeover, and PR-only recovery tests for v6."""
+
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+import unittest
+from collections.abc import Callable, Mapping
+from contextlib import redirect_stdout
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
+
+from review_sensei_github.cli import main as github_main
+from review_sensei_github.v6_coordinator_client import (
+    V6CoordinatorClient,
+    V6CoordinatorError,
+    build_v6_slot_key,
+    canonicalize_github_host,
+)
+from review_sensei_github.v6_credential_matrix import (
+    WORKFLOW_READ_ONLY_SCOPES,
+    GitHubEventKind,
+    RepositoryVisibility,
+)
+from review_sensei_github.v6_pilot_runner import (
+    V6PilotRunConfig,
+    V6PilotRunner,
+)
+from review_sensei_github.v6_recovery_engine import (
+    RecoveryCompleted,
+    RecoveryRequest,
+    StaleWriterOwnershipError,
+    V6RecoveryEngine,
+)
+from review_sensei_github.v6_recovery_ledger import (
+    HOLD_SCHEMA,
+    MAX_MARKER_ENCODED_BYTES,
+    OWNER_SCHEMA,
+    CompletionReceiptRecord,
+    DurableHoldRecord,
+    OwnerMarkerRecord,
+    UnresolvedResultRecord,
+    V6LedgerIntegrityError,
+    WriteIntentRecord,
+    WriterOwnershipProof,
+    canonical_sha256,
+    extract_v6_record_markers,
+    format_v6_record_marker,
+    parse_v6_record_marker,
+    reconcile_immutable_records,
+    redact_secrets,
+    validate_owner_lineage,
+)
+from review_sensei_github.v6_transport import DualCredentialGitHubClient
+
+OWNER = "octo"
+REPO = "repo"
+REPO_ID = 101
+PR_NUMBER = 12
+APP_ID = 424242
+INSTALLATION_ID = 7777
+BOT_LOGIN = "reviewsensei[bot]"
+BOT_USER_ID = 9001
+HEAD_A = "a" * 40
+HEAD_B = "b" * 40
+WORKFLOW_SHA = "c" * 40
+MAC_HEX = "d" * 64
+
+
+def _app_meta(*, app_id: int = APP_ID) -> dict[str, Any]:
+    return {
+        "performed_via_github_app": {"id": app_id, "slug": "reviewsensei"},
+        "user": {"id": BOT_USER_ID, "login": BOT_LOGIN, "type": "Bot"},
+    }
+
+
+def _human_meta() -> dict[str, Any]:
+    return {
+        "performed_via_github_app": None,
+        "user": {"id": 55, "login": "contributor", "type": "User"},
+    }
+
+
+def _effect_tag(operation_id: str, payload_sha256: str) -> str:
+    return f"<!-- reviewsensei:v6:effect op={operation_id} sha256={payload_sha256} -->"
+
+
+def _make_unresolved(
+    *,
+    operation_id: str = "op-1",
+    head_sha: str = HEAD_A,
+    findings: tuple[dict[str, Any], ...] = (
+        {"path": "src/app.py", "line": 10, "body": "Check bounds"},
+    ),
+) -> UnresolvedResultRecord:
+    return UnresolvedResultRecord(
+        record_id=f"unresolved:{operation_id}",
+        operation_id=operation_id,
+        pr_head_sha=head_sha,
+        payload_sha256=canonical_sha256(findings),
+        findings_payload=findings,
+        required_evidence_digests=("ev-diff-1",),
+    )
+
+
+def _make_owner_record(
+    *,
+    slot_key: str,
+    generation: int = 1,
+    lease_epoch: int = 1,
+    reservation_id: str | None = None,
+    operation_id: str = "op-1",
+    run_id: str = "5001",
+    run_attempt: int = 1,
+    pr_head_sha: str = HEAD_A,
+    mac: str = MAC_HEX,
+) -> OwnerMarkerRecord:
+    return OwnerMarkerRecord(
+        record_id=f"owner:{operation_id}:{generation}:{lease_epoch}",
+        slot_key=slot_key,
+        generation=generation,
+        lease_epoch=lease_epoch,
+        reservation_id=reservation_id or f"res-{generation}-{lease_epoch}",
+        operation_id=operation_id,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        pr_head_sha=pr_head_sha,
+        workflow_sha=WORKFLOW_SHA,
+        acquired_at="2026-11-27T00:00:00Z",
+        expires_at="2026-11-27T01:00:00Z",
+        coordinator_attestation_mac=mac,
+    )
+
+
+class _ScriptedTransport:
+    def __init__(
+        self,
+        handler: Callable[[dict[str, Any]], tuple[int, Mapping[str, str], Any]],
+    ) -> None:
+        self._handler = handler
+        self.calls: list[dict[str, Any]] = []
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, Mapping[str, str], Any]:
+        call = {
+            "method": method,
+            "path": path,
+            "headers": dict(headers or {}),
+            "body": body,
+            "timeout_seconds": timeout_seconds,
+        }
+        self.calls.append(call)
+        return self._handler(call)
+
+
+class _FakeUrllibResponse:
+    def __init__(
+        self,
+        status: int,
+        body: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self.status = status
+        self._raw = json.dumps(body).encode("utf-8")
+        self.headers = dict(headers or {})
+
+    def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+    def __enter__(self) -> _FakeUrllibResponse:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+
+class _SimulatedCoordinatorStore:
+    """In-memory v6 coordinator state machine implementing frozen contract routes."""
+
+    def __init__(self, *, clock: Callable[[], float]) -> None:
+        self.clock = clock
+        self.slot_key = build_v6_slot_key(
+            host="github.com",
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            base_repo_id=REPO_ID,
+            pr_number=PR_NUMBER,
+        )
+        self.state = "IDLE"
+        self.generation = 0
+        self.lease_epoch = 0
+        self.reservation_id: str | None = None
+        self.owner_run_id: str | None = None
+        self.owner_run_attempt: int | None = None
+        self.owner_head_sha: str | None = None
+        self.owner_comment_id: int | None = None
+        self.token_expires_at_ms: int | None = None
+        self.last_reason_code: str | None = None
+        self.active_token: str | None = None
+        self.rollback_blocked = False
+        self.live_head_sha = HEAD_A
+        self.predecessor_terminal = True
+        self.drain_revocation_outcome = "204"
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def opener(self, request: Any, timeout: float | None = None) -> _FakeUrllibResponse:
+        route = urlsplit(request.full_url).path
+        payload = json.loads(request.data.decode("utf-8"))
+        self.calls.append((route, payload))
+
+        if route == "/github/v6/lease/status":
+            return self._json(
+                200,
+                {
+                    "slot_key": self.slot_key,
+                    "state": self.state,
+                    "generation": self.generation,
+                    "lease_epoch": self.lease_epoch,
+                    "reservation_id": self.reservation_id,
+                    "owner_run_id": self.owner_run_id,
+                    "owner_run_attempt": self.owner_run_attempt,
+                    "owner_head_sha": self.owner_head_sha,
+                    "owner_workflow_sha": WORKFLOW_SHA if self.generation else None,
+                    "owner_job": "v6-pilot" if self.generation else None,
+                    "owner_comment_id": self.owner_comment_id,
+                    "owner_record_sha256": None,
+                    "token_expires_at_ms": self.token_expires_at_ms,
+                    "last_reason_code": self.last_reason_code,
+                    "updated_at_ms": int(self.clock() * 1000),
+                },
+            )
+
+        if self.rollback_blocked and route in {
+            "/github/v6/lease/acquire",
+            "/github/v6/lease/release",
+        }:
+            return self._err(
+                409,
+                "v6_lease_rollback_blocked",
+                "v6_lease_rollback_blocked",
+            )
+
+        if route == "/github/v6/lease/drain":
+            if not self.predecessor_terminal:
+                return self._err(
+                    409,
+                    "v6_lease_predecessor_not_terminal",
+                    "v6_lease_predecessor_not_terminal",
+                )
+            if self.drain_revocation_outcome == "204":
+                self.state = "RECONCILING"
+                self.active_token = None
+                revocation_status = "confirmed_revoked"
+            elif self.drain_revocation_outcome == "401_expired":
+                self.state = "RECONCILING"
+                self.active_token = None
+                revocation_status = "expired"
+            elif self.drain_revocation_outcome == "uncertain":
+                self.state = "RECONCILING"
+                self.last_reason_code = "v6_lease_revocation_uncertain"
+                revocation_status = "revocation_uncertain"
+            else:
+                self.state = "HOLD"
+                self.last_reason_code = "v6_lease_escrow_lost"
+                revocation_status = "escrow_lost"
+            return self._json(
+                200,
+                {
+                    "slot_key": self.slot_key,
+                    "state": self.state,
+                    "generation": self.generation,
+                    "lease_epoch": self.lease_epoch,
+                    "revocation_status": revocation_status,
+                },
+            )
+
+        if route == "/github/v6/lease/complete-reconcile":
+            if self.state != "RECONCILING":
+                return self._err(409, "v6_lease_hold", "v6_lease_hold")
+            outcome = payload["reconciliation_outcome"]
+            if payload.get("anchor_comment_id") is not None:
+                self.owner_comment_id = payload["anchor_comment_id"]
+            if outcome in {"adopted", "proved_not_submitted"}:
+                self.state = "IDLE"
+                self.reservation_id = None
+                self.last_reason_code = None
+            else:
+                self.state = "HOLD"
+                self.last_reason_code = "v6_lease_hold"
+            return self._json(
+                200,
+                {
+                    "slot_key": self.slot_key,
+                    "state": self.state,
+                    "generation": self.generation,
+                    "lease_epoch": self.lease_epoch,
+                },
+            )
+
+        if route == "/github/v6/lease/acquire":
+            if self.state != "IDLE":
+                return self._err(409, "v6_lease_hold", f"v6_lease_{self.state.lower()}")
+            if payload["head_sha"] != self.live_head_sha:
+                return self._err(409, "v6_lease_head_changed", "v6_lease_head_changed")
+            self.generation += 1
+            self.lease_epoch += 1
+            self.state = "ACTIVE"
+            self.reservation_id = f"res-{self.generation}-{self.lease_epoch}"
+            self.owner_head_sha = payload["head_sha"]
+            self.owner_run_id = "5002"
+            self.owner_run_attempt = 1
+            now_ms = int(self.clock() * 1000)
+            self.token_expires_at_ms = now_ms + 3_600_000
+            self.active_token = (
+                f"ghs_leased_{self.generation}_{self.lease_epoch}_secret"
+            )
+            return self._json(
+                200,
+                {
+                    "slot_key": self.slot_key,
+                    "state": self.state,
+                    "generation": self.generation,
+                    "lease_epoch": self.lease_epoch,
+                    "reservation_id": self.reservation_id,
+                    "token": self.active_token,
+                    "token_expires_at_ms": self.token_expires_at_ms,
+                    "app_id": APP_ID,
+                    "installation_id": INSTALLATION_ID,
+                    "base_repo_id": REPO_ID,
+                    "pull_request": payload["pull_request"],
+                    "head_sha": self.live_head_sha,
+                    "coordinator_attestation_mac": MAC_HEX,
+                },
+            )
+
+        if route == "/github/v6/lease/release":
+            if self.state != "ACTIVE":
+                return self._err(409, "v6_lease_not_active", "v6_lease_hold")
+            self.state = "IDLE"
+            self.active_token = None
+            self.reservation_id = None
+            return self._json(
+                200,
+                {
+                    "slot_key": self.slot_key,
+                    "state": self.state,
+                    "generation": self.generation,
+                    "lease_epoch": self.lease_epoch,
+                    "revocation_status": "confirmed_revoked",
+                },
+            )
+
+        raise AssertionError(f"unexpected coordinator route: {route}")
+
+    @staticmethod
+    def _json(status: int, body: dict[str, Any]) -> _FakeUrllibResponse:
+        return _FakeUrllibResponse(status, body, {"cf-ray": "0123456789abcdef-YYZ"})
+
+    def _err(self, status: int, error: str, diagnostic: str) -> _FakeUrllibResponse:
+        raw = json.dumps(
+            {
+                "error": error,
+                "diagnostic": diagnostic,
+                "slot_state": {"slot_key": self.slot_key, "state": self.state},
+            }
+        ).encode("utf-8")
+        raise HTTPError(
+            "https://coordinator.invalid",
+            status,
+            error,
+            {"cf-ray": "0123456789abcdef-YYZ"},  # type: ignore[arg-type]
+            io.BytesIO(raw),
+        )
+
+
+class _SimulatedPRSurface:
+    """In-memory PR ledger and native GitHub surfaces for Phase 4 runner tests."""
+
+    def __init__(self, *, head_sha: str = HEAD_A) -> None:
+        self.head_sha = head_sha
+        self.pr_state = "open"
+        self.comments: list[dict[str, Any]] = []
+        self.reviews: list[dict[str, Any]] = []
+        self.review_comments: list[dict[str, Any]] = []
+        self.check_runs: list[dict[str, Any]] = []
+        self.review_threads: list[dict[str, Any]] = []
+        self.run_id = 5002
+        self.run_attempt = 1
+        self.run_status = "in_progress"
+        self._next_id = 100
+        self.page_size = 100
+
+    def add_comment(self, body: str, *, is_app: bool = True) -> dict[str, Any]:
+        cid = self._next_id
+        self._next_id += 1
+        meta = _app_meta() if is_app else _human_meta()
+        item = {"id": cid, "body": body, **meta}
+        self.comments.append(item)
+        return item
+
+    def add_review(
+        self,
+        body: str,
+        *,
+        commit_id: str,
+        is_app: bool = True,
+        review_id: int | None = None,
+    ) -> dict[str, Any]:
+        rid = review_id if review_id is not None else self._next_id
+        self._next_id = max(self._next_id, rid + 1)
+        meta = _app_meta() if is_app else _human_meta()
+        item = {"id": rid, "body": body, "commit_id": commit_id, **meta}
+        self.reviews.append(item)
+        return item
+
+    def handle_wf(self, call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+        parsed = urlsplit(call["path"])
+        qs = parse_qs(parsed.query)
+        page = int(qs.get("page", ["1"])[0])
+        per_page = min(self.page_size, int(qs.get("per_page", ["100"])[0]))
+
+        def _slice(items: list[dict[str, Any]]) -> tuple[int, dict[str, str], Any]:
+            start = (page - 1) * per_page
+            chunk = [dict(x) for x in items[start : start + per_page]]
+            headers = {"X-RateLimit-Remaining": "999"}
+            if page * per_page < len(items):
+                headers["Link"] = (
+                    f'<https://api.github.com{parsed.path}?page={page + 1}&per_page={per_page}&sort=created&direction=asc>; rel="next"'
+                )
+            return 200, headers, chunk
+
+        if parsed.path == f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments":
+            return _slice(self.comments)
+        if parsed.path == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews":
+            return _slice(self.reviews)
+        if parsed.path == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/comments":
+            return _slice(self.review_comments)
+        if parsed.path.endswith("/check-runs"):
+            ref = parsed.path.split("/")[-2]
+            matching = [dict(cr) for cr in self.check_runs if cr.get("head_sha") == ref]
+            return 200, {"X-RateLimit-Remaining": "999"}, {"check_runs": matching}
+        if call["method"] == "POST" and parsed.path == "/graphql":
+            return (
+                200,
+                {"X-RateLimit-Remaining": "999"},
+                {
+                    "data": {
+                        "connection": {
+                            "nodes": [dict(t) for t in self.review_threads],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                },
+            )
+        raise AssertionError(f"unexpected workflow read: {call}")
+
+    def handle_app(self, call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+        parsed = urlsplit(call["path"])
+        method = call["method"]
+        body = call.get("body") or {}
+        if (
+            method == "GET"
+            and parsed.path == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}"
+        ):
+            return (
+                200,
+                {"X-RateLimit-Remaining": "4999"},
+                {
+                    "state": self.pr_state,
+                    "head": {"sha": self.head_sha},
+                    "base": {"repo": {"id": REPO_ID}},
+                },
+            )
+        if method == "GET" and parsed.path.startswith(
+            f"/repos/{OWNER}/{REPO}/actions/runs/"
+        ):
+            return (
+                200,
+                {"X-RateLimit-Remaining": "4998"},
+                {
+                    "id": self.run_id,
+                    "run_attempt": self.run_attempt,
+                    "status": self.run_status,
+                },
+            )
+        if (
+            method == "POST"
+            and parsed.path == f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments"
+        ):
+            created = self.add_comment(str(body["body"]), is_app=True)
+            return 201, {"X-RateLimit-Remaining": "4997"}, dict(created)
+        if (
+            method == "POST"
+            and parsed.path == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews"
+        ):
+            created_rev = self.add_review(
+                str(body["body"]), commit_id=str(body.get("commit_id", self.head_sha))
+            )
+            return 201, {"X-RateLimit-Remaining": "4996"}, dict(created_rev)
+        if method == "GET" and parsed.path.startswith(
+            f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews/"
+        ):
+            rid = int(parsed.path.rsplit("/", 1)[-1])
+            for r in self.reviews:
+                if r["id"] == rid:
+                    return 200, {"X-RateLimit-Remaining": "4995"}, dict(r)
+            return 404, {"X-RateLimit-Remaining": "4995"}, {"message": "Not Found"}
+        raise AssertionError(f"unexpected App call: {call}")
+
+
+class V6OneWriterRunnerTests(unittest.TestCase):
+    """Comprehensive Phase 4 tests for v6 runner, workflow, and PR-only recovery."""
+
+    def test_marker_escaping_64kib_cap_and_secret_bans(self) -> None:
+        slot_key = build_v6_slot_key(
+            host="GitHub.COM",
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            base_repo_id=REPO_ID,
+            pr_number=PR_NUMBER,
+        )
+        self.assertEqual(
+            slot_key,
+            f"v6-pr:github.com:{APP_ID}:{INSTALLATION_ID}:{REPO_ID}:{PR_NUMBER}",
+        )
+        with self.assertRaises(V6CoordinatorError):
+            canonicalize_github_host("github.com:443")
+        with self.assertRaises(V6CoordinatorError):
+            canonicalize_github_host("github.com/api")
+
+        owner_rec = _make_owner_record(slot_key=slot_key, generation=1, lease_epoch=1)
+        hold_rec = DurableHoldRecord(
+            record_id="hold:op-1:1:1",
+            slot_key=slot_key,
+            generation=1,
+            lease_epoch=1,
+            operation_id="op-1",
+            pr_head_sha=HEAD_A,
+            reason_code="v6_lease_hold",
+            missing_evidence=("a-->b<!--c",),
+            held_at="2026-11-27T00:00:00Z",
+            resolved_by_record_id=None,
+        )
+        self.assertEqual(owner_rec.schema, OWNER_SCHEMA)
+        self.assertEqual(hold_rec.schema, HOLD_SCHEMA)
+
+        for rec in (owner_rec, hold_rec):
+            marker = format_v6_record_marker(rec)
+            self.assertNotIn("-->", marker[:-4])
+            self.assertNotIn("<!--", marker[4:])
+            self.assertEqual(parse_v6_record_marker(marker), rec)
+
+        hold_marker = format_v6_record_marker(hold_rec)
+        with self.assertRaises(V6LedgerIntegrityError):
+            parse_v6_record_marker(hold_marker.replace("\\u003c", "<"))
+        with self.assertRaises(V6LedgerIntegrityError):
+            parse_v6_record_marker(hold_marker.replace("\\u003e", ">"))
+
+        # 64 KiB cap enforced on both format and parse.
+        oversized_findings = tuple(
+            {"path": f"src/f{i}.py", "line": i, "body": "x" * 900} for i in range(80)
+        )
+        oversized = _make_unresolved(operation_id="op-big", findings=oversized_findings)
+        with self.assertRaises(V6LedgerIntegrityError):
+            format_v6_record_marker(oversized)
+        fake_huge = (
+            f"<!-- reviewsensei:v6:record sha256={'a' * 64} "
+            f'payload={{"a":"{"x" * (MAX_MARKER_ENCODED_BYTES + 10)}"}} -->'
+        )
+        with self.assertRaises(V6LedgerIntegrityError):
+            parse_v6_record_marker(fake_huge)
+
+        # Secret patterns & never_keep_fields rejected in marker formatting/parsing.
+        for secret_text in (
+            "ghs_1234567890abcdef",
+            "ghp_1234567890abcdef",
+            "Bearer secret_abc123",
+            "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.sig_abcdef",
+            "-----BEGIN RSA PRIVATE KEY-----",
+        ):
+            with self.subTest(secret=secret_text[:12]):
+                bad_unresolved = _make_unresolved(
+                    findings=({"path": "a.py", "line": 1, "body": secret_text},)
+                )
+                with self.assertRaises(V6LedgerIntegrityError):
+                    format_v6_record_marker(bad_unresolved)
+                self.assertIn("[REDACTED]", redact_secrets(secret_text))
+
+        bad_key_findings = ({"path": "a.py", "ollama_api_key": "secret"},)
+        with self.assertRaises(V6LedgerIntegrityError):
+            format_v6_record_marker(_make_unresolved(findings=bad_key_findings))
+
+    def test_fail_closed_removal_of_proof_writer_epoch_fallback(self) -> None:
+        pr = _SimulatedPRSurface()
+        unresolved = _make_unresolved()
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        proof = WriterOwnershipProof(
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-1",
+            run_id=5002,
+            run_attempt=1,
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            verified_by_broker=True,
+        )
+        req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-1",
+            ownership_proof=proof,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+        )
+
+        # Missing writer_epoch in /actions/runs/{id} MUST fail closed (no proof.writer_epoch fallback).
+        def app_missing_epoch(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            if "/actions/runs/" in call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "4999"},
+                    {"id": 5002, "run_attempt": 1, "status": "in_progress"},
+                )
+            return pr.handle_app(call)
+
+        client1 = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            broker_app_transport=_ScriptedTransport(app_missing_epoch),
+        )
+        with self.assertRaises(StaleWriterOwnershipError):
+            V6RecoveryEngine(client1).recover_and_publish(req)
+
+        # Missing base.repo.id or state in /pulls/{pr} MUST fail closed (no defaults).
+        for mutator in (
+            lambda body: body.pop("state"),
+            lambda body: body["base"]["repo"].pop("id"),
+        ):
+
+            def app_missing_pr_field(
+                call: dict[str, Any], mut: Any = mutator
+            ) -> tuple[int, Mapping[str, str], Any]:
+                st, hdr, body = pr.handle_app(call)
+                if call["method"] == "GET" and f"/pulls/{PR_NUMBER}" in call["path"]:
+                    mut(body)
+                if "/actions/runs/" in call["path"]:
+                    body["writer_epoch"] = 1
+                return st, hdr, body
+
+            client2 = DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=_ScriptedTransport(app_missing_pr_field),
+            )
+            with self.assertRaises(StaleWriterOwnershipError):
+                V6RecoveryEngine(client2).recover_and_publish(req)
+
+    def test_row_3_cross_pr_write_rejected_despite_repo_scoped_token(self) -> None:
+        pr = _SimulatedPRSurface()
+        pr.add_comment(format_v6_record_marker(_make_unresolved()), is_app=True)
+        app_tr = _ScriptedTransport(pr.handle_app)
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            broker_app_transport=app_tr,
+        )
+        engine = V6RecoveryEngine(
+            client,
+            broker_fence_verifier=lambda p: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+        )
+        proof = WriterOwnershipProof(
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-1",
+            run_id=5002,
+            run_attempt=1,
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            verified_by_broker=True,
+        )
+        cross_pr_req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-1",
+            ownership_proof=proof,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            effect_path=f"/repos/{OWNER}/{REPO}/pulls/999/reviews",
+        )
+        with self.assertRaises(StaleWriterOwnershipError) as caught:
+            engine.recover_and_publish(cross_pr_req)
+        self.assertEqual(caught.exception.diagnostic, "v6_cross_pr_write_refused")
+        self.assertEqual([c for c in app_tr.calls if c["method"] != "GET"], [])
+
+    def test_row_5_head_change_during_handoff_reconciles_against_original_head(
+        self,
+    ) -> None:
+        now = 1_764_200_000.0
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        slot_key = coord_store.slot_key
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+
+        # Predecessor (gen=1, epoch=1) acquired on HEAD_A, wrote owner + unresolved + intent,
+        # landed a check-run on HEAD_A, and crashed before writing CompletionReceiptRecord.
+        coord_store.state = "ACTIVE"
+        coord_store.generation = 1
+        coord_store.lease_epoch = 1
+        coord_store.reservation_id = "res-1-1"
+        coord_store.owner_head_sha = HEAD_A
+        owner_1 = _make_owner_record(
+            slot_key=slot_key, generation=1, lease_epoch=1, pr_head_sha=HEAD_A
+        )
+        c_owner = pr.add_comment(format_v6_record_marker(owner_1), is_app=True)
+        coord_store.owner_comment_id = c_owner["id"]
+
+        findings = ({"path": "src/a.py", "line": 1, "body": "Check"},)
+        payload_sha = canonical_sha256(findings)
+        intent_1 = WriteIntentRecord(
+            record_id="intent:op-handoff:1",
+            operation_id="op-handoff",
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            effect_kind="check_run_write",
+            payload_sha256=payload_sha,
+            target_digest=canonical_sha256({"head": HEAD_A}),
+        )
+        pr.add_comment(format_v6_record_marker(intent_1), is_app=True)
+        pr.check_runs.append(
+            {
+                "id": 8801,
+                "head_sha": HEAD_A,
+                "external_id": "op-handoff",
+                "app": {"id": APP_ID},
+                "output": {
+                    "summary": "Check complete",
+                    "text": _effect_tag("op-handoff", payload_sha),
+                },
+            }
+        )
+
+        # PR head moves to HEAD_B before successor runs!
+        pr.head_sha = HEAD_B
+        coord_store.live_head_sha = HEAD_B
+
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+        wf_tr = _ScriptedTransport(pr.handle_wf)
+        app_tr = _ScriptedTransport(pr.handle_app)
+        runner = V6PilotRunner(
+            coordinator=coord_client,
+            workflow_token_transport=wf_tr,
+            app_transport_factory=lambda _g: app_tr,
+            clock=lambda: now,
+        )
+
+        summary_buf: list[str] = []
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_B,
+                operation_id="op-handoff",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                step_summary_sink=summary_buf.append,
+            )
+        )
+        self.assertEqual(outcome.status, "completed")
+        self.assertTrue(outcome.lease_released)
+        self.assertEqual(outcome.model_calls_started, 0)
+        assert isinstance(outcome.recovery_outcome, RecoveryCompleted)
+        self.assertTrue(outcome.recovery_outcome.reconciled_from_existing_effect)
+        self.assertEqual(outcome.recovery_outcome.github_effect_id, 8801)
+        # Confirmed: matched check-run on original HEAD_A, appended receipt ONCE, 0 duplicate effects.
+        self.assertTrue(
+            any(f"/commits/{HEAD_A}/check-runs" in c["path"] for c in wf_tr.calls)
+        )
+        self.assertEqual(len(pr.reviews), 0)
+        receipts = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=False)
+            if isinstance(rec, CompletionReceiptRecord)
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].github_effect_id, 8801)
+
+    def test_row_7_preflight_clock_margin_expiry_race_fails_closed(self) -> None:
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface()
+        pr.add_comment(format_v6_record_marker(_make_unresolved()), is_app=True)
+        app_tr = _ScriptedTransport(pr.handle_app)
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            broker_app_transport=app_tr,
+        )
+        engine = V6RecoveryEngine(
+            client,
+            now_fn=lambda: now,
+            broker_fence_verifier=lambda p: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "active_writer_epoch": 1,
+            },
+        )
+        proof = WriterOwnershipProof(
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-1",
+            run_id=5002,
+            run_attempt=1,
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            verified_by_broker=True,
+        )
+        # Token expires within clock_margin_ms (300_000 ms) -> old run refuses preflight before writing!
+        req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-1",
+            ownership_proof=proof,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            token_expires_at_ms=int(now * 1000) + 120_000,
+            clock_margin_ms=300_000,
+        )
+        with self.assertRaises(StaleWriterOwnershipError) as caught:
+            engine.recover_and_publish(req)
+        self.assertEqual(caught.exception.diagnostic, "v6_lease_clock_untrusted")
+        self.assertEqual(app_tr.calls, [])
+
+    def test_row_8_lost_receipt_reconciled_and_all_native_effect_matchers(self) -> None:
+        # 8A: Lost CompletionReceiptRecord POST response reconciles by stable identity (no duplicate receipt).
+        pr = _SimulatedPRSurface()
+        unresolved = _make_unresolved(operation_id="op-lost-rcpt")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        receipt_posts = 0
+
+        def app_drop_receipt_resp(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            nonlocal receipt_posts
+            if (
+                call["method"] == "POST"
+                and f"/issues/{PR_NUMBER}/comments" in call["path"]
+                and "reviewsensei:v6:receipt:v1" in call["body"]["body"]
+            ):
+                receipt_posts += 1
+                pr.add_comment(call["body"]["body"], is_app=True)
+                raise TimeoutError("dropped receipt HTTP 201")
+            return pr.handle_app(call)
+
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            broker_app_transport=_ScriptedTransport(app_drop_receipt_resp),
+        )
+        engine = V6RecoveryEngine(
+            client,
+            broker_fence_verifier=lambda p: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "active_writer_epoch": 1,
+            },
+        )
+        proof = WriterOwnershipProof(
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-lost-rcpt",
+            run_id=5002,
+            run_attempt=1,
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            verified_by_broker=True,
+        )
+        outcome = engine.recover_and_publish(
+            RecoveryRequest(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-lost-rcpt",
+                ownership_proof=proof,
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                expected_app_id=APP_ID,
+            )
+        )
+        self.assertIsInstance(outcome, RecoveryCompleted)
+        self.assertEqual(receipt_posts, 1)
+
+        # 8B: Operation-specific matchers in takeover reconciliation (issue_comment, inline_reply, thread_resolve).
+        pr_multi = _SimulatedPRSurface(head_sha=HEAD_A)
+        slot_key = build_v6_slot_key(
+            host="github.com",
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            base_repo_id=REPO_ID,
+            pr_number=PR_NUMBER,
+        )
+        pr_multi.add_comment(
+            format_v6_record_marker(_make_owner_record(slot_key=slot_key)), is_app=True
+        )
+        sha1 = "1" * 64
+        sha2 = "2" * 64
+        sha3 = "3" * 64
+        for idx, (op, kind, psha, tdigest) in enumerate(
+            (
+                ("op-ic", "issue_comment", sha1, "td-ic"),
+                ("op-ir", "inline_reply", sha2, "td-ir"),
+                ("op-tr", "review_thread_mutation", sha3, "THREAD-99"),
+            ),
+            start=1,
+        ):
+            pr_multi.add_comment(
+                format_v6_record_marker(
+                    WriteIntentRecord(
+                        record_id=f"intent:{op}:1",
+                        operation_id=op,
+                        writer_epoch=1,
+                        pr_head_sha=HEAD_A,
+                        effect_kind=kind,
+                        payload_sha256=psha,
+                        target_digest=tdigest,
+                    )
+                ),
+                is_app=True,
+            )
+        pr_multi.add_comment(f"Reply\n{_effect_tag('op-ic', sha1)}", is_app=True)
+        pr_multi.review_comments.append(
+            {
+                "id": 701,
+                "body": f"Inline\n{_effect_tag('op-ir', sha2)}",
+                "commit_id": HEAD_A,
+                **_app_meta(),
+            }
+        )
+        pr_multi.review_threads.append(
+            {
+                "id": "THREAD-99",
+                "isResolved": True,
+                "comments": {"nodes": []},
+            }
+        )
+
+        ro_client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(pr_multi.handle_wf),
+            broker_app_transport=_ScriptedTransport(
+                lambda c: (500, {}, {"message": "must not call app"})
+            ),
+        )
+        recon = V6RecoveryEngine(ro_client).reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=slot_key,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            graphql_query="query($after:String){...}",
+        )
+        self.assertEqual(recon.reconciliation_outcome, "adopted")
+        self.assertEqual(len(recon.adopted_effects), 3)
+        self.assertEqual(recon.model_calls_started, 0)
+
+    def test_row_8_negative_scan_duplicate_contradictory_and_shifted_pagination(
+        self,
+    ) -> None:
+        slot_key = build_v6_slot_key(
+            host="github.com",
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            base_repo_id=REPO_ID,
+            pr_number=PR_NUMBER,
+        )
+        # 1) Single empty page / negative scan right after 204 without affirmative non-submission -> HOLD.
+        pr_empty = _SimulatedPRSurface()
+        pr_empty.add_comment(
+            format_v6_record_marker(_make_owner_record(slot_key=slot_key)), is_app=True
+        )
+        unresolved = _make_unresolved(operation_id="op-neg")
+        pr_empty.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        pr_empty.add_comment(
+            format_v6_record_marker(
+                WriteIntentRecord(
+                    record_id="intent:op-neg:1",
+                    operation_id="op-neg",
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    effect_kind="pr_review_publish",
+                    payload_sha256=unresolved.payload_sha256,
+                    target_digest="t1",
+                )
+            ),
+            is_app=True,
+        )
+        summary_lines: list[str] = []
+        recon_neg = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_empty.handle_wf),
+                broker_app_transport=_ScriptedTransport(lambda c: (500, {}, {})),
+            )
+        ).reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=slot_key,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            step_summary_sink=summary_lines.append,
+            operation_id="op-neg",
+        )
+        self.assertEqual(recon_neg.reconciliation_outcome, "ambiguous_hold")
+        self.assertEqual(recon_neg.blocker, "unproved_non_submission_after_intent")
+        self.assertTrue(summary_lines)
+        self.assertEqual(pr_empty.reviews, [])
+
+        # 2) Duplicate matching reviews -> HOLD (no cleanup deletion).
+        pr_dup = _SimulatedPRSurface()
+        pr_dup.add_comment(
+            format_v6_record_marker(_make_owner_record(slot_key=slot_key)), is_app=True
+        )
+        pr_dup.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        pr_dup.add_comment(
+            format_v6_record_marker(
+                WriteIntentRecord(
+                    record_id="intent:op-neg:1",
+                    operation_id="op-neg",
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    effect_kind="pr_review_publish",
+                    payload_sha256=unresolved.payload_sha256,
+                    target_digest="t1",
+                )
+            ),
+            is_app=True,
+        )
+        tag = _effect_tag("op-neg", unresolved.payload_sha256)
+        pr_dup.add_review(f"Review 1\n{tag}", commit_id=HEAD_A, review_id=9101)
+        pr_dup.add_review(f"Review 2\n{tag}", commit_id=HEAD_A, review_id=9102)
+        recon_dup = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_dup.handle_wf),
+                broker_app_transport=_ScriptedTransport(lambda c: (500, {}, {})),
+            )
+        ).reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=slot_key,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            operation_id="op-neg",
+        )
+        self.assertEqual(recon_dup.reconciliation_outcome, "ambiguous_hold")
+        self.assertEqual(recon_dup.blocker, "duplicate_effect_match")
+        self.assertEqual(len(pr_dup.reviews), 2)
+
+        # 2B) Contradictory match (wrong payload_sha256 for op-neg) -> HOLD (no deletion).
+        pr_contra = _SimulatedPRSurface()
+        pr_contra.add_comment(
+            format_v6_record_marker(_make_owner_record(slot_key=slot_key)), is_app=True
+        )
+        pr_contra.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        pr_contra.add_comment(
+            format_v6_record_marker(
+                WriteIntentRecord(
+                    record_id="intent:op-neg:1",
+                    operation_id="op-neg",
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    effect_kind="pr_review_publish",
+                    payload_sha256=unresolved.payload_sha256,
+                    target_digest="t1",
+                )
+            ),
+            is_app=True,
+        )
+        pr_contra.add_review(
+            f"Contradictory\n{_effect_tag('op-neg', 'f' * 64)}",
+            commit_id=HEAD_A,
+            review_id=9201,
+        )
+        recon_contra = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_contra.handle_wf),
+                broker_app_transport=_ScriptedTransport(lambda c: (500, {}, {})),
+            )
+        ).reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=slot_key,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            operation_id="op-neg",
+        )
+        self.assertEqual(recon_contra.reconciliation_outcome, "ambiguous_hold")
+        self.assertEqual(recon_contra.blocker, "contradictory_effect_match")
+        self.assertEqual(len(pr_contra.reviews), 1)
+
+        # 2C) Shifted pagination after earlier comment deletion still recovers landed review.
+        pr_shifted = _SimulatedPRSurface()
+        pr_shifted.page_size = 1
+        early = pr_shifted.add_comment("early-human", is_app=False)
+        pr_shifted.add_comment(
+            format_v6_record_marker(_make_owner_record(slot_key=slot_key)), is_app=True
+        )
+        pr_shifted.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        pr_shifted.add_comment(
+            format_v6_record_marker(
+                WriteIntentRecord(
+                    record_id="intent:op-neg:1",
+                    operation_id="op-neg",
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    effect_kind="pr_review_publish",
+                    payload_sha256=unresolved.payload_sha256,
+                    target_digest="t1",
+                )
+            ),
+            is_app=True,
+        )
+        pr_shifted.add_review(f"Landed\n{tag}", commit_id=HEAD_A, review_id=9301)
+        pr_shifted.comments = [c for c in pr_shifted.comments if c["id"] != early["id"]]
+        recon_shifted = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_shifted.handle_wf),
+                broker_app_transport=_ScriptedTransport(lambda c: (500, {}, {})),
+            )
+        ).reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=slot_key,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            operation_id="op-neg",
+        )
+        self.assertEqual(recon_shifted.reconciliation_outcome, "adopted")
+        self.assertEqual(len(recon_shifted.adopted_effects), 1)
+        self.assertEqual(recon_shifted.adopted_effects[0][1], 9301)
+
+        # 3) Affirmative non-submission proof -> proved_not_submitted -> issues ONCE.
+        now = 1_764_200_000.0
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        coord_store.state = "RECONCILING"
+        coord_store.generation = 1
+        coord_store.lease_epoch = 1
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+        runner = V6PilotRunner(
+            coordinator=coord_client,
+            workflow_token_transport=_ScriptedTransport(pr_empty.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(pr_empty.handle_app),
+            clock=lambda: now,
+        )
+        issued_once = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-neg",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                affirmative_non_submission=True,
+            )
+        )
+        self.assertEqual(issued_once.status, "completed")
+        self.assertEqual(len(pr_empty.reviews), 1)
+
+    def test_row_9_competing_or_spoofed_owner_markers_fail_closed_with_step_summary(
+        self,
+    ) -> None:
+        slot_key = build_v6_slot_key(
+            host="github.com",
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            base_repo_id=REPO_ID,
+            pr_number=PR_NUMBER,
+        )
+        o1 = _make_owner_record(slot_key=slot_key, generation=1, lease_epoch=1)
+        o1_competing = _make_owner_record(
+            slot_key=slot_key,
+            generation=1,
+            lease_epoch=2,
+            reservation_id="res-competing",
+        )
+        o2 = _make_owner_record(slot_key=slot_key, generation=2, lease_epoch=2)
+
+        # Competing generation=1 rejected.
+        with self.assertRaises(V6LedgerIntegrityError):
+            validate_owner_lineage(
+                [
+                    {"body": format_v6_record_marker(o1), **_app_meta()},
+                    {"body": format_v6_record_marker(o1_competing), **_app_meta()},
+                ],
+                slot_key=slot_key,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                app_login=BOT_LOGIN,
+            )
+
+        # Missing predecessor generation=1 rejected.
+        with self.assertRaises(V6LedgerIntegrityError):
+            validate_owner_lineage(
+                [{"body": format_v6_record_marker(o2), **_app_meta()}],
+                slot_key=slot_key,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                app_login=BOT_LOGIN,
+            )
+
+        # Non-App / human-authored owner marker rejected.
+        with self.assertRaises(V6LedgerIntegrityError):
+            validate_owner_lineage(
+                [{"body": format_v6_record_marker(o1), **_human_meta()}],
+                slot_key=slot_key,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                app_login=BOT_LOGIN,
+            )
+
+        # MAC verifier rejection fails closed.
+        with self.assertRaises(V6LedgerIntegrityError):
+            validate_owner_lineage(
+                [{"body": format_v6_record_marker(o1), **_app_meta()}],
+                slot_key=slot_key,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                app_login=BOT_LOGIN,
+                mac_verifier=lambda _rec: False,
+            )
+
+        # End-to-end runner holds without mutating PR and writes sanitized step summary.
+        now = 1_764_200_000.0
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        coord_store.state = "RECONCILING"
+        coord_store.generation = 1
+        pr = _SimulatedPRSurface()
+        pr.add_comment(format_v6_record_marker(o1), is_app=True)
+        pr.add_comment(format_v6_record_marker(o1_competing), is_app=True)
+        before_comments = [dict(c) for c in pr.comments]
+
+        summary_sink: list[str] = []
+        app_calls: list[dict[str, Any]] = []
+        runner = V6PilotRunner(
+            coordinator=V6CoordinatorClient(
+                base_url="https://coordinator.invalid",
+                oidc_token_provider=lambda: "oidc-jwt-token",
+                opener=coord_store.opener,
+                clock=lambda: now,
+            ),
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(
+                lambda c: app_calls.append(c) or pr.handle_app(c)
+            ),
+            clock=lambda: now,
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-row9",
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                step_summary_sink=summary_sink.append,
+            )
+        )
+        self.assertEqual(outcome.status, "hold")
+        self.assertEqual(outcome.coordinator_state, "HOLD")
+        self.assertEqual(pr.comments, before_comments)
+        self.assertEqual(app_calls, [])
+        self.assertTrue(summary_sink)
+        self.assertIn("v6_competing_owner_marker", summary_sink[0])
+
+    def test_row_10_rollback_during_uncertain_write_preserves_ledger_and_obligations(
+        self,
+    ) -> None:
+        now = 1_764_200_000.0
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        pr = _SimulatedPRSurface()
+        unresolved = _make_unresolved(operation_id="op-rb")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+
+        def app_uncertain_and_rollback(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            if (
+                call["method"] == "POST"
+                and f"/pulls/{PR_NUMBER}/reviews" in call["path"]
+            ):
+                # Flip coordinator rollback block mid-flight and drop write response!
+                coord_store.rollback_blocked = True
+                raise TimeoutError("dropped review response during rollback")
+            return pr.handle_app(call)
+
+        summary_sink: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome_path = Path(tmp) / "outcome.json"
+            runner = V6PilotRunner(
+                coordinator=V6CoordinatorClient(
+                    base_url="https://coordinator.invalid",
+                    oidc_token_provider=lambda: "oidc-jwt-token",
+                    opener=coord_store.opener,
+                    clock=lambda: now,
+                ),
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                app_transport_factory=lambda _g: _ScriptedTransport(
+                    app_uncertain_and_rollback
+                ),
+                clock=lambda: now,
+            )
+            outcome = runner.run(
+                V6PilotRunConfig(
+                    owner=OWNER,
+                    repo=REPO,
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    head_sha=HEAD_A,
+                    operation_id="op-rb",
+                    run_id=5002,
+                    workflow_sha=WORKFLOW_SHA,
+                    expected_app_id=APP_ID,
+                    expected_bot_login=BOT_LOGIN,
+                    step_summary_sink=summary_sink.append,
+                    outcome_path=outcome_path,
+                )
+            )
+            self.assertEqual(outcome.status, "hold")
+            self.assertFalse(outcome.lease_released)
+            self.assertEqual(outcome.model_calls_started, 0)
+            self.assertTrue(outcome_path.is_file())
+            written_json = outcome_path.read_text(encoding="utf-8")
+            self.assertNotIn("ghs_", written_json)
+
+        # PR ledger preserved: unresolved + owner + intent + durable hold all intact, 0 receipts cleared.
+        records = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=False)
+        ]
+        self.assertTrue(any(isinstance(r, UnresolvedResultRecord) for r in records))
+        self.assertTrue(any(isinstance(r, WriteIntentRecord) for r in records))
+        self.assertTrue(any(isinstance(r, DurableHoldRecord) for r in records))
+        summary = reconcile_immutable_records(
+            [r for r in records if isinstance(r, WriteIntentRecord)],
+            [r for r in records if isinstance(r, CompletionReceiptRecord)],
+        )
+        self.assertEqual(len(summary.unreconciled_intents), 1)
+        self.assertTrue(summary_sink)
+
+    def test_cli_v6_pilot_run_and_review_run_opt_in_preserve_v5_default(self) -> None:
+        import time
+        from unittest.mock import patch
+
+        now = time.time()
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        pr = _SimulatedPRSurface()
+        pr.add_comment(
+            format_v6_record_marker(_make_unresolved(operation_id="op-cli")),
+            is_app=True,
+        )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "GITHUB_TOKEN": "ghs_wf_readonly_token_xyz",
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-req-token",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.invalid/token",
+                    "GITHUB_RUN_ID": "5002",
+                    "GITHUB_RUN_ATTEMPT": "1",
+                },
+                clear=False,
+            ),
+            patch(
+                "review_sensei_github.v6_pilot_runner.V6CoordinatorClient",
+                return_value=V6CoordinatorClient(
+                    base_url="https://coordinator.invalid",
+                    oidc_token_provider=lambda: "oidc-jwt-token",
+                    opener=coord_store.opener,
+                    clock=lambda: now,
+                ),
+            ),
+            patch(
+                "review_sensei_github.v6_pilot_runner.UrllibGitHubTransport",
+                side_effect=lambda **kw: _ScriptedTransport(
+                    pr.handle_wf if kw["token"].startswith("ghs_wf_") else pr.handle_app
+                ),
+            ),
+            redirect_stdout(io.StringIO()) as stdout_buf,
+        ):
+            code = github_main(
+                [
+                    "v6-pilot-run",
+                    "--repository",
+                    f"{OWNER}/{REPO}",
+                    "--repository-id",
+                    str(REPO_ID),
+                    "--pull-request",
+                    str(PR_NUMBER),
+                    "--head-sha",
+                    HEAD_A,
+                    "--operation-id",
+                    "op-cli",
+                    "--workflow-sha",
+                    WORKFLOW_SHA,
+                ]
+            )
+        self.assertEqual(code, 0)
+        parsed = json.loads(stdout_buf.getvalue())
+        self.assertEqual(parsed["protocol"], "v6")
+        self.assertEqual(parsed["status"], "completed")
+        self.assertNotIn("ghs_", stdout_buf.getvalue())
+
+        # Verify review-run defaults to v5 and routes --recovery-protocol v6 cleanly.
+        with (
+            patch(
+                "review_sensei_github.v6_pilot_runner.run_v6_pilot_cli",
+                return_value=0,
+            ) as mock_v6_cli,
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            rc = github_main(
+                [
+                    "review-run",
+                    "--policy-commit",
+                    WORKFLOW_SHA,
+                    "--run-directory",
+                    tmp,
+                    "--publication-outcome",
+                    str(Path(tmp) / "out.json"),
+                    "--recovery-protocol",
+                    "v6",
+                    "--",
+                    "--repository",
+                    f"{OWNER}/{REPO}",
+                    "--repository-id",
+                    str(REPO_ID),
+                    "--pull-request",
+                    str(PR_NUMBER),
+                    "--head-sha",
+                    HEAD_A,
+                ]
+            )
+        self.assertEqual(rc, 0)
+        mock_v6_cli.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

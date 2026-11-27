@@ -2969,6 +2969,17 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         type=int,
         default=DEFAULT_RECOVERY_TTL_SECONDS,
     )
+    parser.add_argument(
+        "--recovery-protocol",
+        choices=("v5", "v6"),
+        default="v5",
+        help="Opt-in recovery protocol version (default: v5).",
+    )
+    parser.add_argument(
+        "--coordinator-url",
+        default=None,
+        help="Optional v6 coordinator base URL (used only with --recovery-protocol v6).",
+    )
     if controlled_restart:
         parser.add_argument("--restart-id", required=True)
     else:
@@ -2984,6 +2995,38 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     if _SHA.fullmatch(options.policy_commit) is None:
         raise ReviewInputError("trusted policy commit is invalid")
     args = engine_parser(include_hosted=True).parse_args(core)
+    if options.recovery_protocol == "v6":
+        if controlled_restart:
+            raise ReviewInputError(
+                "controlled restart is unsupported with --recovery-protocol v6"
+            )
+        if (
+            not getattr(args, "repository", None)
+            or getattr(args, "repository_id", None) is None
+            or getattr(args, "pull_request", None) is None
+            or not getattr(args, "head_sha", None)
+            or _SHA.fullmatch(str(args.head_sha)) is None
+        ):
+            raise ReviewInputError(
+                "v6 recovery protocol requires repository, repository_id, pull_request, and head_sha"
+            )
+        from .v6_pilot_runner import run_v6_pilot_cli
+
+        v6_argv = [
+            "--repository",
+            str(args.repository),
+            "--repository-id",
+            str(args.repository_id),
+            "--pull-request",
+            str(args.pull_request),
+            "--head-sha",
+            str(args.head_sha),
+            "--outcome",
+            str(options.publication_outcome),
+        ]
+        if options.coordinator_url:
+            v6_argv.extend(["--coordinator-url", str(options.coordinator_url)])
+        return run_v6_pilot_cli(v6_argv)
     if args.session_ledger is not None or getattr(args, "local_session", False):
         raise ReviewInputError("this review lifecycle requires a new hosted review")
     if any(
