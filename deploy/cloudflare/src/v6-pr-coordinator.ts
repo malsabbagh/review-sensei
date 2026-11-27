@@ -4,6 +4,7 @@ import type { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
 import {
   GitHubApi,
+  type IssueCommentsScanOptions,
   type LiveCheckRun,
   type LiveIssueComment,
   type LiveIssueCommentPage,
@@ -99,6 +100,26 @@ const VALID_V6_DIAGNOSTIC_CODES = new Set<V6DiagnosticCode>([
   "v6_lease_reconciliation_evidence_invalid",
 ]);
 
+export interface ReconcileScanIntentDigest {
+  intent_comment_id: number;
+  operation_id_sha256: string;
+}
+
+export interface ReconcileScanCursor {
+  version: 1;
+  slot_key: string;
+  generation: number;
+  lease_epoch: number;
+  evidence_sha256: string;
+  since_iso: string;
+  page_size: number;
+  next_page: number;
+  matched_intents: ReconcileScanIntentDigest[];
+  old_owner_sha256: string | null;
+  retry_after_ms: number | null;
+  cursor_mac: string;
+}
+
 export interface SlotRecord {
   slot_key: string;
   state: CoordinatorState;
@@ -119,6 +140,7 @@ export interface SlotRecord {
   encrypted_escrow: EncryptedEscrow | null;
   last_reason_code: V6DiagnosticCode | null;
   updated_at_ms: number;
+  reconcile_scan_cursor?: ReconcileScanCursor | null;
 }
 
 export interface V6CoordinatorStore {
@@ -175,6 +197,7 @@ export interface V6ProviderAdapter {
     pullRequest: number,
     sinceIso: string,
     token: string,
+    options?: IssueCommentsScanOptions,
   ): Promise<LiveIssueCommentPage>;
   pullRequestReview(
     repository: string,
@@ -498,11 +521,24 @@ function hasExactGrantedPermissions(
   });
 }
 
+function cloneReconcileScanCursor(
+  cursor: ReconcileScanCursor | null | undefined,
+): ReconcileScanCursor | null {
+  if (cursor === null || cursor === undefined) {
+    return null;
+  }
+  return {
+    ...cursor,
+    matched_intents: cursor.matched_intents.map((item) => ({ ...item })),
+  };
+}
+
 function cloneSlot(slot: SlotRecord): SlotRecord {
   return {
     ...slot,
     encrypted_escrow:
       slot.encrypted_escrow === null ? null : { ...slot.encrypted_escrow },
+    reconcile_scan_cursor: cloneReconcileScanCursor(slot.reconcile_scan_cursor),
   };
 }
 
@@ -868,6 +904,48 @@ function isValidNonSubmissionRecordShape(record: Record<string, unknown>): boole
   );
 }
 
+function isValidReconcileScanCursor(
+  value: unknown,
+  expectedSlotKey: string,
+  expectedGeneration: number,
+  expectedLeaseEpoch: number,
+): value is ReconcileScanCursor {
+  if (!isObject(value)) {
+    return false;
+  }
+  if (
+    value.version !== 1 ||
+    value.slot_key !== expectedSlotKey ||
+    value.generation !== expectedGeneration ||
+    value.lease_epoch !== expectedLeaseEpoch ||
+    typeof value.evidence_sha256 !== "string" ||
+    !SHA256_HEX64_PATTERN.test(value.evidence_sha256) ||
+    typeof value.since_iso !== "string" ||
+    !value.since_iso.trim() ||
+    !Number.isFinite(Date.parse(value.since_iso)) ||
+    !isPositiveSafeInt(value.page_size) ||
+    value.page_size > 100 ||
+    !isPositiveSafeInt(value.next_page) ||
+    !Array.isArray(value.matched_intents) ||
+    value.matched_intents.length > 2000 ||
+    (value.old_owner_sha256 !== null &&
+      (typeof value.old_owner_sha256 !== "string" ||
+        !SHA256_HEX64_PATTERN.test(value.old_owner_sha256))) ||
+    (value.retry_after_ms !== null && !isNonNegativeSafeInt(value.retry_after_ms)) ||
+    typeof value.cursor_mac !== "string" ||
+    !SHA256_HEX64_PATTERN.test(value.cursor_mac)
+  ) {
+    return false;
+  }
+  return value.matched_intents.every(
+    (entry) =>
+      isObject(entry) &&
+      isPositiveSafeInt(entry.intent_comment_id) &&
+      typeof entry.operation_id_sha256 === "string" &&
+      SHA256_HEX64_PATTERN.test(entry.operation_id_sha256),
+  );
+}
+
 /**
  * In-memory durable store used by deterministic Phase 4 unit tests.
  * Deep-clones records on every read and write so crash/restart tests see real serialization boundaries.
@@ -881,7 +959,11 @@ export class InMemoryV6CoordinatorStore implements V6CoordinatorStore {
   }
 
   async putSlot(record: SlotRecord): Promise<void> {
-    this.slots.set(record.slot_key, cloneSlot(record));
+    const stored = cloneSlot(record);
+    if (stored.state !== "RECONCILING") {
+      stored.reconcile_scan_cursor = null;
+    }
+    this.slots.set(record.slot_key, stored);
   }
 
   snapshot(): Record<string, SlotRecord> {
@@ -967,6 +1049,13 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
         this.sql.exec("ALTER TABLE v6_pr_slot ADD COLUMN token_cleared INTEGER NOT NULL DEFAULT 0");
       }
     }
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS v6_pr_reconcile_cursor (
+        slot_key TEXT PRIMARY KEY,
+        cursor_json TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      )
+    `);
     this.initialized = true;
   }
 
@@ -1023,7 +1112,7 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
     } else if (row.encrypted_escrow !== null) {
       throw new Error("v6_lease_escrow_lost");
     }
-    return validateSlotRecord(
+    const validated = validateSlotRecord(
       {
         slot_key: String(row.slot_key),
         state: row.state as CoordinatorState,
@@ -1053,9 +1142,36 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
             ? null
             : (row.last_reason_code as V6DiagnosticCode),
         updated_at_ms: Number(row.updated_at_ms),
+        reconcile_scan_cursor: null,
       },
       slotKey,
     );
+    if (validated.state === "RECONCILING") {
+      const cursorRows = this.sql
+        .exec<Record<string, SqlStorageValue>>(
+          `SELECT cursor_json FROM v6_pr_reconcile_cursor WHERE slot_key = ?`,
+          slotKey,
+        )
+        .toArray();
+      if (cursorRows.length > 0 && typeof cursorRows[0].cursor_json === "string") {
+        try {
+          const parsedCursor = JSON.parse(cursorRows[0].cursor_json) as unknown;
+          if (
+            isValidReconcileScanCursor(
+              parsedCursor,
+              validated.slot_key,
+              validated.generation,
+              validated.lease_epoch,
+            )
+          ) {
+            validated.reconcile_scan_cursor = parsedCursor;
+          }
+        } catch {
+          validated.reconcile_scan_cursor = null;
+        }
+      }
+    }
+    return validated;
   }
 
   async putSlot(record: SlotRecord): Promise<void> {
@@ -1110,6 +1226,20 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
       record.last_reason_code,
       record.updated_at_ms,
     );
+    if (record.state === "RECONCILING" && record.reconcile_scan_cursor != null) {
+      this.sql.exec(
+        `INSERT INTO v6_pr_reconcile_cursor (slot_key, cursor_json, updated_at_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT(slot_key) DO UPDATE SET
+           cursor_json = excluded.cursor_json,
+           updated_at_ms = excluded.updated_at_ms`,
+        record.slot_key,
+        JSON.stringify(record.reconcile_scan_cursor),
+        record.updated_at_ms,
+      );
+    } else {
+      this.sql.exec(`DELETE FROM v6_pr_reconcile_cursor WHERE slot_key = ?`, record.slot_key);
+    }
   }
 }
 
@@ -1192,14 +1322,12 @@ export class GitHubV6ProviderAdapter implements V6ProviderAdapter {
     pullRequest: number,
     sinceIso: string,
     token: string,
+    options?: IssueCommentsScanOptions,
   ): Promise<LiveIssueCommentPage> {
-    return this.github.issueCommentsSince(
-      repository,
-      pullRequest,
-      sinceIso,
-      token,
-      V6_PR_LEDGER_MAX_BYTES,
-    );
+    return this.github.issueCommentsSince(repository, pullRequest, sinceIso, token, {
+      ...options,
+      maxBodyBytes: V6_PR_LEDGER_MAX_BYTES,
+    });
   }
 
   async pullRequestReview(
@@ -2147,10 +2275,21 @@ export class V6PrCoordinatorEngine {
         }
 
         const code = stateConflictDiagnostic(existing.state, existing);
+        const retryAfterMs =
+          existing.state === "RECONCILING" &&
+          existing.reconcile_scan_cursor?.retry_after_ms !== null &&
+          existing.reconcile_scan_cursor?.retry_after_ms !== undefined
+            ? Math.max(
+                0,
+                existing.reconcile_scan_cursor.retry_after_ms -
+                  Math.max(0, this.clock.nowMs() - existing.updated_at_ms),
+              )
+            : undefined;
         return {
           kind: "error",
           result: diagnosticResponse(409, code, {
             slotState: existing.state,
+            ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
             rayId,
           }),
         };
@@ -3587,7 +3726,10 @@ export class V6PrCoordinatorEngine {
     evidence: NonNullable<ReturnType<V6PrCoordinatorEngine["parseReconciliationEvidence"]>>,
     anchorCommentId: number | undefined,
     reqHeadSha: string | undefined,
-  ): Promise<{ oldOwnerSha256: string | null }> {
+  ): Promise<
+    | { kind: "verified"; oldOwnerSha256: string | null }
+    | { kind: "incomplete"; cursor: ReconcileScanCursor; retryAfterMs?: number }
+  > {
     if (
       anchorCommentId !== undefined &&
       evidence.old_owner_comment_id !== null &&
@@ -3659,19 +3801,84 @@ export class V6PrCoordinatorEngine {
       }
     }
 
-    const rawSinceMs =
-      slot.acquired_at_ms ?? verifiedOwnerAcquiredAtMs ?? slot.updated_at_ms;
-    const flooredSinceMs = Math.floor(Math.max(0, rawSinceMs - 2000) / 1000) * 1000;
-    const sinceIso = new Date(flooredSinceMs).toISOString();
-    const [botLogin, page] = await Promise.all([
-      this.provider.appBotLogin(),
-      this.provider.issueCommentsSince(edge.claims.repository, pullRequest, sinceIso, edge.readToken),
-    ]);
-    if (page.truncated) {
-      throw new Error("v6_lease_reconciliation_evidence_invalid");
+    const evidenceSha256 = await sha256Hex(
+      canonicalJsonString({
+        old_generation: evidence.old_generation,
+        old_owner_comment_id: evidence.old_owner_comment_id,
+        intent_resolutions: evidence.intent_resolutions,
+        anchor_comment_id: anchorCommentId ?? null,
+      }),
+    );
+
+    const savedCursor = slot.reconcile_scan_cursor ?? null;
+    let validSavedCursor: ReconcileScanCursor | null = null;
+    if (
+      savedCursor !== null &&
+      isValidReconcileScanCursor(savedCursor, slotKey, slot.generation, slot.lease_epoch) &&
+      savedCursor.evidence_sha256 === evidenceSha256
+    ) {
+      const macOk = await edge.crypto.verifyReconcileCursor(
+        {
+          version: 1,
+          slot_key: savedCursor.slot_key,
+          generation: savedCursor.generation,
+          lease_epoch: savedCursor.lease_epoch,
+          evidence_sha256: savedCursor.evidence_sha256,
+          since_iso: savedCursor.since_iso,
+          page_size: savedCursor.page_size,
+          next_page: savedCursor.next_page,
+          matched_intents: savedCursor.matched_intents,
+          old_owner_sha256: savedCursor.old_owner_sha256,
+        },
+        savedCursor.cursor_mac,
+      );
+      if (macOk) {
+        validSavedCursor = savedCursor;
+      }
     }
 
-    const discoveredIntents = new Map<number, string>();
+    const authoritativeSinceAnchorMs = slot.acquired_at_ms ?? verifiedOwnerAcquiredAtMs;
+    const sinceIso =
+      authoritativeSinceAnchorMs !== null
+        ? new Date(
+            Math.floor(Math.max(0, authoritativeSinceAnchorMs - 2000) / 1000) * 1000,
+          ).toISOString()
+        : validSavedCursor !== null
+          ? validSavedCursor.since_iso
+          : new Date(
+              Math.floor(Math.max(0, slot.updated_at_ms - 2000) / 1000) * 1000,
+            ).toISOString();
+
+    const useCursor = validSavedCursor !== null && validSavedCursor.since_iso === sinceIso;
+    const startPage = useCursor ? validSavedCursor!.next_page : 1;
+    const initialPageSize = useCursor ? validSavedCursor!.page_size : 100;
+
+    const resolutionByIntentId = new Map(
+      evidence.intent_resolutions.map((item) => [item.intent_comment_id, item] as const),
+    );
+    const matchedById = new Map<number, string>();
+    if (useCursor) {
+      for (const savedIntent of validSavedCursor!.matched_intents) {
+        const match = resolutionByIntentId.get(savedIntent.intent_comment_id);
+        if (
+          match === undefined ||
+          (await sha256Hex(match.operation_id)) !== savedIntent.operation_id_sha256
+        ) {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+        matchedById.set(savedIntent.intent_comment_id, savedIntent.operation_id_sha256);
+      }
+    }
+
+    const [botLogin, page] = await Promise.all([
+      this.provider.appBotLogin(),
+      this.provider.issueCommentsSince(edge.claims.repository, pullRequest, sinceIso, edge.readToken, {
+        startPage,
+        initialPageSize,
+        nowMs: this.clock.nowMs(),
+      }),
+    ]);
+
     for (const comment of page.comments) {
       if (comment.userType !== "Bot" || comment.login.toLowerCase() !== botLogin.toLowerCase()) {
         continue;
@@ -3690,18 +3897,60 @@ export class V6PrCoordinatorEngine {
         if (!isValidIntentRecordShape(parsed.payload)) {
           throw new Error("v6_lease_reconciliation_evidence_invalid");
         }
-        discoveredIntents.set(comment.id, parsed.payload.operation_id as string);
+        const expectedOpId = parsed.payload.operation_id as string;
+        const match = resolutionByIntentId.get(comment.id);
+        if (match === undefined || match.operation_id !== expectedOpId) {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+        matchedById.set(comment.id, await sha256Hex(expectedOpId));
       }
     }
 
-    const resolutionByIntentId = new Map(
-      evidence.intent_resolutions.map((item) => [item.intent_comment_id, item] as const),
-    );
-    for (const [intentCommentId, expectedOpId] of discoveredIntents.entries()) {
-      const match = resolutionByIntentId.get(intentCommentId);
-      if (match === undefined || match.operation_id !== expectedOpId) {
-        throw new Error("v6_lease_reconciliation_evidence_invalid");
-      }
+    const hasResumablePause =
+      (page.incomplete === true && isPositiveSafeInt(page.nextPage)) ||
+      ((page.rateLimited === true || page.transientFailure === true) &&
+        isPositiveSafeInt(page.nextPage ?? startPage));
+    if (hasResumablePause) {
+      const nextPage = isPositiveSafeInt(page.nextPage) ? page.nextPage : startPage;
+      const pageSize = isPositiveSafeInt(page.pageSize) ? page.pageSize : initialPageSize;
+      const retryAfterMs =
+        page.retryAfterMs !== undefined && Number.isFinite(page.retryAfterMs)
+          ? Math.max(0, Math.round(page.retryAfterMs))
+          : page.rateLimitResetEpoch !== undefined && Number.isFinite(page.rateLimitResetEpoch)
+            ? Math.max(0, page.rateLimitResetEpoch * 1000 - this.clock.nowMs())
+            : undefined;
+      const matchedIntents: ReconcileScanIntentDigest[] = [...matchedById.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([intent_comment_id, operation_id_sha256]) => ({
+          intent_comment_id,
+          operation_id_sha256,
+        }));
+      const cursorFields = {
+        version: 1 as const,
+        slot_key: slotKey,
+        generation: slot.generation,
+        lease_epoch: slot.lease_epoch,
+        evidence_sha256: evidenceSha256,
+        since_iso: sinceIso,
+        page_size: pageSize,
+        next_page: nextPage,
+        matched_intents: matchedIntents,
+        old_owner_sha256: oldOwnerSha256,
+      };
+      const cursorMac = await edge.crypto.signReconcileCursor(cursorFields);
+      return {
+        kind: "incomplete",
+        cursor: {
+          ...cursorFields,
+          retry_after_ms: retryAfterMs ?? null,
+          cursor_mac: cursorMac,
+        },
+        retryAfterMs,
+      };
+    }
+
+    if (page.truncated) {
+      throw new Error("v6_lease_reconciliation_evidence_invalid");
     }
 
     for (const item of evidence.intent_resolutions) {
@@ -3788,7 +4037,7 @@ export class V6PrCoordinatorEngine {
       }
     }
 
-    return { oldOwnerSha256 };
+    return { kind: "verified", oldOwnerSha256 };
   }
 
   async handleCompleteReconcile(
@@ -4136,6 +4385,9 @@ export class V6PrCoordinatorEngine {
 
     // Gate 2 (Write Reconciliation): independently verify old_owner + 100% of old_generation intents.
     let oldOwnerSha256: string | null = null;
+    let incompleteResult:
+      | { cursor: ReconcileScanCursor; retryAfterMs?: number }
+      | null = null;
     let verificationError: string | null = null;
     try {
       const verifiedEvidence = await this.verifyReconciliationEvidence(
@@ -4147,15 +4399,22 @@ export class V6PrCoordinatorEngine {
         anchorCommentId,
         reqHeadSha,
       );
-      oldOwnerSha256 = verifiedEvidence.oldOwnerSha256;
-      if (
-        reqHeadSha !== undefined &&
-        slotToVerify.owner_head_sha !== null &&
-        reqHeadSha !== slotToVerify.owner_head_sha &&
-        verifiedAnchor === null &&
-        oldOwnerSha256 === null
-      ) {
-        throw new Error("v6_lease_slot_continuity_unproved");
+      if (verifiedEvidence.kind === "incomplete") {
+        incompleteResult = {
+          cursor: verifiedEvidence.cursor,
+          retryAfterMs: verifiedEvidence.retryAfterMs,
+        };
+      } else {
+        oldOwnerSha256 = verifiedEvidence.oldOwnerSha256;
+        if (
+          reqHeadSha !== undefined &&
+          slotToVerify.owner_head_sha !== null &&
+          reqHeadSha !== slotToVerify.owner_head_sha &&
+          verifiedAnchor === null &&
+          oldOwnerSha256 === null
+        ) {
+          throw new Error("v6_lease_slot_continuity_unproved");
+        }
       }
     } catch (error) {
       verificationError =
@@ -4187,6 +4446,7 @@ export class V6PrCoordinatorEngine {
           ...latest,
           state: "HOLD",
           last_reason_code: verificationError as V6DiagnosticCode,
+          reconcile_scan_cursor: null,
           updated_at_ms: this.clock.nowMs(),
         };
         await this.store.putSlot(held);
@@ -4210,6 +4470,7 @@ export class V6PrCoordinatorEngine {
           ...latest,
           state: "HOLD",
           last_reason_code: "v6_lease_revocation_uncertain",
+          reconcile_scan_cursor: null,
           updated_at_ms: this.clock.nowMs(),
         };
         await this.store.putSlot(held);
@@ -4217,6 +4478,31 @@ export class V6PrCoordinatorEngine {
           kind: "done" as const,
           result: diagnosticResponse(409, "v6_lease_revocation_uncertain", {
             slotState: "HOLD",
+            rayId,
+          }),
+        };
+      }
+
+      if (incompleteResult !== null) {
+        const reconciling: SlotRecord = {
+          ...latest,
+          state: "RECONCILING",
+          last_reason_code: "v6_lease_reconciling",
+          reconcile_scan_cursor: incompleteResult.cursor,
+          updated_at_ms: this.clock.nowMs(),
+        };
+        await this.store.putSlot(reconciling);
+        this.emitAudit("/github/v6/lease/complete-reconcile", slotKey, "refused", {
+          state: "RECONCILING",
+          generation: reconciling.generation,
+          lease_epoch: reconciling.lease_epoch,
+          diagnostic: "v6_lease_reconciling",
+        });
+        return {
+          kind: "done" as const,
+          result: diagnosticResponse(409, "v6_lease_reconciling", {
+            slotState: "RECONCILING",
+            retryAfterMs: incompleteResult.retryAfterMs,
             rayId,
           }),
         };
@@ -4235,6 +4521,7 @@ export class V6PrCoordinatorEngine {
         token_cleared: false,
         encrypted_escrow: null,
         last_reason_code: null,
+        reconcile_scan_cursor: null,
         updated_at_ms: this.clock.nowMs(),
       };
       await this.store.putSlot(idle);

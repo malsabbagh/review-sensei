@@ -79,6 +79,48 @@ class GitHubResponseError extends Error {
   constructor(message: string, readonly status: number, readonly metadata: ReturnType<typeof lookupHeaders>) { super(message); }
 }
 
+interface GitHubRetrySignal {
+  isRateLimit: boolean;
+  isTransient: boolean;
+  retryAfterSeconds: number | null;
+  rateLimitResetEpoch: number | null;
+  retryAfterMs: number | undefined;
+}
+
+function classifyGitHubRetrySignal(
+  status: number | null,
+  metadata: ReturnType<typeof lookupHeaders> | undefined,
+  data: unknown,
+  nowMs: number,
+): GitHubRetrySignal {
+  const retryAfterSeconds = metadata?.retry_after ?? null;
+  const rateLimitResetEpoch = metadata?.rate_limit_reset ?? null;
+  const hasRateLimitMessage =
+    isObject(data) &&
+    typeof data.message === "string" &&
+    /rate\s*limit|secondary\s*rate|abuse/i.test(data.message);
+  const hasRateLimitHeader =
+    metadata?.rate_limit_remaining === 0 ||
+    (retryAfterSeconds !== null && retryAfterSeconds > 0);
+  const isRateLimit =
+    status === 429 ||
+    (status === 403 && (hasRateLimitHeader || hasRateLimitMessage));
+  const isTransient = status === null || (status >= 500 && status <= 599);
+  const retryAfterMs =
+    retryAfterSeconds !== null && retryAfterSeconds >= 0
+      ? retryAfterSeconds * 1000
+      : rateLimitResetEpoch !== null
+        ? Math.max(0, rateLimitResetEpoch * 1000 - nowMs)
+        : undefined;
+  return {
+    isRateLimit,
+    isTransient,
+    retryAfterSeconds,
+    rateLimitResetEpoch,
+    retryAfterMs,
+  };
+}
+
 export interface InstallationToken {
   token: string;
   expiresAt: number;
@@ -94,9 +136,25 @@ export interface LiveIssueComment {
   performedViaAppId?: number | null;
 }
 
+export interface IssueCommentsScanOptions {
+  maxBodyBytes?: number;
+  maxRequests?: number;
+  maxComments?: number;
+  startPage?: number;
+  initialPageSize?: number;
+  nowMs?: number;
+}
+
 export interface LiveIssueCommentPage {
   comments: LiveIssueComment[];
   truncated: boolean;
+  incomplete?: boolean;
+  nextPage?: number | null;
+  pageSize?: number;
+  retryAfterMs?: number;
+  rateLimitResetEpoch?: number;
+  rateLimited?: boolean;
+  transientFailure?: boolean;
 }
 
 export interface LivePullRequestReview {
@@ -716,7 +774,7 @@ export class GitHubApi {
         return {
           status: response.status,
           data,
-          ...(hasNextPage ? { hasNextPage: true } : {}),
+          ...(hasNextPage ? { hasNextPage: true } : linkHeader !== null ? { hasNextPage: false } : {}),
           ...(Object.keys(metadata).length ? {lookupMetadata: metadata} : {}),
         };
       }, this.dispatchControl, path.includes("/git/ref/") ? "workflow_ref" : path.includes("/git/tags/") ? "workflow_tag" : path.endsWith("/access_tokens") || path === "/installation/token" ? "installation_token" : method === "GET" ? "github_read" : "github_write");
@@ -1071,42 +1129,82 @@ export class GitHubApi {
   }
 
   /**
-   * Bounded adaptive pagination of issue comments modified at or after `sinceIso`.
-   * Steps down page sizes [100, 12, 5, 1] on github_response_too_large, restarting
-   * from page 1 and deduplicating by comment id within bounded ceilings.
-   * When pagination spans multiple pages (N >= 2), verifies page 1..N-1 ordered ID
-   * tuple equality and page N tail monotonicity (with bounded retries) so deletions
-   * cannot silently shift comments across page boundaries.
+   * Bounded adaptive, resumable pagination of issue comments modified at or after `sinceIso`.
+   * Steps down page sizes [100, 12, 5, 1] on github_response_too_large (preserving covered
+   * offset when resuming from `startPage > 1`) and deduplicating by comment id within bounded
+   * ceilings. Honors `Link: rel="next"` / `hasNextPage === false` so an exact full final page
+   * is never treated as truncated. Returns structured resumable state on request/comment
+   * ceilings, 429/rate-limited 403, or 5xx/timeout without discarding scanned progress.
+   * When pagination spans multiple pages in a turn (N >= 2), verifies page ordered ID tuple
+   * equality and tail monotonicity (with bounded retries) so deletions cannot silently shift
+   * comments across page boundaries.
    */
   async issueCommentsSince(
     repository: string,
     pullRequest: number,
     sinceIso: string,
     token: string,
-    maxBodyBytes = 65536,
-    maxRequests = 40,
-    maxComments = 1000,
+    maxBodyBytesOrOptions: number | IssueCommentsScanOptions = 65536,
+    maxRequestsArg = 40,
+    maxCommentsArg = 1000,
   ): Promise<LiveIssueCommentPage> {
+    const options: IssueCommentsScanOptions =
+      typeof maxBodyBytesOrOptions === "number"
+        ? {
+            maxBodyBytes: maxBodyBytesOrOptions,
+            maxRequests: maxRequestsArg,
+            maxComments: maxCommentsArg,
+          }
+        : maxBodyBytesOrOptions;
+    const maxBodyBytes = options.maxBodyBytes ?? 65536;
+    const maxRequests = Math.max(1, options.maxRequests ?? 40);
+    const maxComments = Math.max(1, options.maxComments ?? 1000);
+    const startPage = options.startPage ?? 1;
+    const initialPageSize = options.initialPageSize ?? 100;
+    const nowMs = options.nowMs ?? Date.now();
+
     if (
       !Number.isSafeInteger(pullRequest) ||
       pullRequest <= 0 ||
       typeof sinceIso !== "string" ||
       !sinceIso.trim() ||
-      !Number.isFinite(Date.parse(sinceIso))
+      !Number.isFinite(Date.parse(sinceIso)) ||
+      !Number.isSafeInteger(startPage) ||
+      startPage <= 0 ||
+      !Number.isSafeInteger(initialPageSize) ||
+      initialPageSize <= 0 ||
+      initialPageSize > 100
     ) {
       throw new Error("github_issue_comment_invalid");
     }
     const repoBase = repositoryPath(repository);
     const expectedIssueUrl = `${this.apiUrl}${repoBase}/issues/${pullRequest}`;
     const encodedSince = encodeURIComponent(sinceIso);
-    const pageSizes = [100, 12, 5, 1] as const;
+    const defaultLadder = [100, 12, 5, 1];
+    const pageSizes = defaultLadder.includes(initialPageSize)
+      ? defaultLadder.filter((size) => size <= initialPageSize)
+      : [initialPageSize, ...defaultLadder.filter((size) => size < initialPageSize)];
+    const coveredOffset = (startPage - 1) * initialPageSize;
     const maxStabilityRetries = 2;
     let requests = 0;
 
-    const fetchPage = async (
-      size: number,
-      page: number,
-    ): Promise<{ items: LiveIssueComment[]; hasMorePage: boolean } | "too_large"> => {
+    type FetchPageResult =
+      | {
+          kind: "ok";
+          items: LiveIssueComment[];
+          hasMorePage: boolean;
+          hasNextPageExplicit: boolean | undefined;
+        }
+      | { kind: "too_large" }
+      | {
+          kind: "paused";
+          rateLimited: boolean;
+          transientFailure: boolean;
+          retryAfterMs: number | undefined;
+          rateLimitResetEpoch: number | undefined;
+        };
+
+    const fetchPage = async (size: number, page: number): Promise<FetchPageResult> => {
       requests += 1;
       let response: GitHubApiResponse;
       try {
@@ -1121,64 +1219,177 @@ export class GitHubApi {
           error.message === "github_response_too_large" &&
           size > 1
         ) {
-          return "too_large";
+          return { kind: "too_large" };
+        }
+        if (
+          error instanceof Error &&
+          /^(broker_control_|broker_request_)/.test(error.message) &&
+          error.message !== "broker_upstream_timeout"
+        ) {
+          throw error;
+        }
+        if (error instanceof GitHubResponseError) {
+          const signal = classifyGitHubRetrySignal(error.status, error.metadata, null, nowMs);
+          if (signal.isRateLimit) {
+            return {
+              kind: "paused",
+              rateLimited: true,
+              transientFailure: false,
+              retryAfterMs: signal.retryAfterMs,
+              rateLimitResetEpoch: signal.rateLimitResetEpoch ?? undefined,
+            };
+          }
+          if (
+            error.message === "broker_upstream_timeout" ||
+            error.message === "github_response_unavailable" ||
+            signal.isTransient
+          ) {
+            return {
+              kind: "paused",
+              rateLimited: false,
+              transientFailure: true,
+              retryAfterMs: signal.retryAfterMs,
+              rateLimitResetEpoch: signal.rateLimitResetEpoch ?? undefined,
+            };
+          }
+          throw error;
+        }
+        if (
+          error instanceof Error &&
+          (error.message === "broker_upstream_timeout" ||
+            error.message === "github_response_unavailable")
+        ) {
+          return {
+            kind: "paused",
+            rateLimited: false,
+            transientFailure: true,
+            retryAfterMs: undefined,
+            rateLimitResetEpoch: undefined,
+          };
         }
         throw error;
+      }
+
+      const signal = classifyGitHubRetrySignal(
+        response.status,
+        response.lookupMetadata,
+        response.data,
+        nowMs,
+      );
+      if (signal.isRateLimit) {
+        return {
+          kind: "paused",
+          rateLimited: true,
+          transientFailure: false,
+          retryAfterMs: signal.retryAfterMs,
+          rateLimitResetEpoch: signal.rateLimitResetEpoch ?? undefined,
+        };
       }
       if (response.status === 403) {
         throw new Error("github_issue_comment_forbidden");
       }
+      if (signal.isTransient) {
+        return {
+          kind: "paused",
+          rateLimited: false,
+          transientFailure: true,
+          retryAfterMs: signal.retryAfterMs,
+          rateLimitResetEpoch: signal.rateLimitResetEpoch ?? undefined,
+        };
+      }
       if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
         throw new Error("github_issue_comment_lookup_failed");
       }
-      const hasMorePage = response.hasNextPage === true || response.data.length >= size;
+      const hasMorePage =
+        response.hasNextPage !== undefined
+          ? response.hasNextPage === true
+          : response.data.length >= size;
       const items = response.data.map((entry) =>
         this.parseIssueCommentObject(entry, expectedIssueUrl, maxBodyBytes),
       );
-      return { items, hasMorePage };
+      return {
+        kind: "ok",
+        items,
+        hasMorePage,
+        hasNextPageExplicit: response.hasNextPage,
+      };
     };
 
+    const pausedPage = (
+      comments: LiveIssueComment[],
+      nextPage: number,
+      pageSize: number,
+      paused?: Extract<FetchPageResult, { kind: "paused" }>,
+    ): LiveIssueCommentPage => ({
+      comments,
+      truncated: true,
+      incomplete: true,
+      nextPage,
+      pageSize,
+      ...(paused?.retryAfterMs !== undefined ? { retryAfterMs: paused.retryAfterMs } : {}),
+      ...(paused?.rateLimitResetEpoch !== undefined
+        ? { rateLimitResetEpoch: paused.rateLimitResetEpoch }
+        : {}),
+      ...(paused?.rateLimited ? { rateLimited: true } : {}),
+      ...(paused?.transientFailure ? { transientFailure: true } : {}),
+    });
+
     let lastComments: LiveIssueComment[] = [];
+    let lastPageSize = initialPageSize;
 
     for (let attempt = 0; attempt <= maxStabilityRetries; attempt += 1) {
       let retryForInstability = false;
       let exhausted = false;
 
-      for (const size of pageSizes) {
+      for (let sizeIdx = 0; sizeIdx < pageSizes.length; sizeIdx += 1) {
+        const size = pageSizes[sizeIdx];
+        lastPageSize = size;
+        const resumeStartPage =
+          size === initialPageSize ? startPage : Math.floor(coveredOffset / size) + 1;
         const commentsById = new Map<number, LiveIssueComment>();
         const pageIds: number[][] = [];
         let hitTooLarge = false;
         let scanDone = false;
 
-        for (let page = 1; ; page += 1) {
+        for (let page = resumeStartPage; ; page += 1) {
           if (requests >= maxRequests) {
-            return {
-              comments: Array.from(commentsById.values()),
-              truncated: true,
-            };
+            return pausedPage(Array.from(commentsById.values()), page, size);
           }
           const fetched = await fetchPage(size, page);
-          if (fetched === "too_large") {
+          if (fetched.kind === "too_large") {
             hitTooLarge = true;
             break;
           }
+          if (fetched.kind === "paused") {
+            return pausedPage(Array.from(commentsById.values()), page, size, fetched);
+          }
           const currentPageIds: number[] = [];
+          let hitMaxCommentsMidPage = false;
           for (let idx = 0; idx < fetched.items.length; idx += 1) {
             const parsed = fetched.items[idx];
+            if (!commentsById.has(parsed.id) && commentsById.size >= maxComments) {
+              hitMaxCommentsMidPage = true;
+              break;
+            }
             currentPageIds.push(parsed.id);
             if (!commentsById.has(parsed.id)) {
               commentsById.set(parsed.id, parsed);
             }
-            if (commentsById.size >= maxComments) {
-              const hasMoreItems = idx < fetched.items.length - 1 || fetched.hasMorePage;
-              if (hasMoreItems) {
-                return {
-                  comments: Array.from(commentsById.values()),
-                  truncated: true,
-                };
-              }
-            }
           }
+
+          if (hitMaxCommentsMidPage) {
+            if (page === resumeStartPage && sizeIdx + 1 < pageSizes.length) {
+              const smallerSize = pageSizes[sizeIdx + 1];
+              const steppedPage = Math.floor(((page - 1) * size) / smallerSize) + 1;
+              return pausedPage(Array.from(commentsById.values()), steppedPage, smallerSize);
+            }
+            return pausedPage(Array.from(commentsById.values()), page, size);
+          }
+
+          if (commentsById.size >= maxComments && fetched.hasNextPageExplicit === true) {
+            return pausedPage(Array.from(commentsById.values()), page + 1, size);
+          }
+
           pageIds.push(currentPageIds);
           if (!fetched.hasMorePage) {
             scanDone = true;
@@ -1198,23 +1409,27 @@ export class GitHubApi {
           return {
             comments: lastComments,
             truncated: false,
+            incomplete: false,
+            nextPage: null,
+            pageSize: size,
           };
         }
 
         let unstable = false;
-        for (let verifyPage = 1; verifyPage < pageIds.length; verifyPage += 1) {
+        for (let verifyIdx = 0; verifyIdx < pageIds.length - 1; verifyIdx += 1) {
           if (requests >= maxRequests) {
-            return {
-              comments: lastComments,
-              truncated: true,
-            };
+            return pausedPage(lastComments, resumeStartPage, size);
           }
+          const verifyPage = resumeStartPage + verifyIdx;
           const refetched = await fetchPage(size, verifyPage);
-          if (refetched === "too_large") {
+          if (refetched.kind === "too_large") {
             hitTooLarge = true;
             break;
           }
-          const expectedIds = pageIds[verifyPage - 1];
+          if (refetched.kind === "paused") {
+            return pausedPage(lastComments, resumeStartPage, size, refetched);
+          }
+          const expectedIds = pageIds[verifyIdx];
           if (
             refetched.items.length !== expectedIds.length ||
             refetched.items.some((item, idx) => item.id !== expectedIds[idx])
@@ -1229,17 +1444,17 @@ export class GitHubApi {
         }
         if (!unstable) {
           if (requests >= maxRequests) {
-            return {
-              comments: lastComments,
-              truncated: true,
-            };
+            return pausedPage(lastComments, resumeStartPage, size);
           }
-          const lastPageNumber = pageIds.length;
+          const lastPageNumber = resumeStartPage + pageIds.length - 1;
           const tailRefetched = await fetchPage(size, lastPageNumber);
-          if (tailRefetched === "too_large") {
+          if (tailRefetched.kind === "too_large") {
             continue;
           }
-          const prevTailIds = pageIds[lastPageNumber - 1];
+          if (tailRefetched.kind === "paused") {
+            return pausedPage(lastComments, resumeStartPage, size, tailRefetched);
+          }
+          const prevTailIds = pageIds[pageIds.length - 1];
           const prefixMatches =
             tailRefetched.items.length >= prevTailIds.length &&
             prevTailIds.every((id, idx) => tailRefetched.items[idx].id === id);
@@ -1248,20 +1463,19 @@ export class GitHubApi {
           } else {
             for (let idx = prevTailIds.length; idx < tailRefetched.items.length; idx += 1) {
               const appended = tailRefetched.items[idx];
+              if (!commentsById.has(appended.id) && commentsById.size >= maxComments) {
+                return pausedPage(Array.from(commentsById.values()), lastPageNumber, size);
+              }
               if (!commentsById.has(appended.id)) {
                 commentsById.set(appended.id, appended);
-              }
-              if (commentsById.size >= maxComments) {
-                const hasMoreItems = idx < tailRefetched.items.length - 1;
-                return {
-                  comments: Array.from(commentsById.values()),
-                  truncated: hasMoreItems,
-                };
               }
             }
             return {
               comments: Array.from(commentsById.values()),
               truncated: false,
+              incomplete: false,
+              nextPage: null,
+              pageSize: size,
             };
           }
         }
@@ -1280,6 +1494,9 @@ export class GitHubApi {
         return {
           comments: lastComments,
           truncated: true,
+          incomplete: false,
+          nextPage: null,
+          pageSize: lastPageSize,
         };
       }
       if (!retryForInstability) {
@@ -1873,22 +2090,15 @@ export class GitHubApi {
       metadata: ReturnType<typeof lookupHeaders> | undefined,
       data: unknown,
     ): RevocationResult => {
-      const retryAfterSeconds = metadata?.retry_after ?? null;
-      const rateLimitResetEpoch = metadata?.rate_limit_reset ?? null;
-      const hasRateLimitMessage =
-        isObject(data) &&
-        typeof data.message === "string" &&
-        /rate\s*limit|secondary\s*rate|abuse/i.test(data.message);
-      const hasRateLimitHeader =
-        metadata?.rate_limit_remaining === 0 ||
-        (retryAfterSeconds !== null && retryAfterSeconds > 0);
+      const signal = classifyGitHubRetrySignal(status, metadata, data, Date.now());
+      const { retryAfterSeconds, rateLimitResetEpoch, isRateLimit } = signal;
       if (status === 204) {
         return { status, kind: "http_204", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
       }
       if (status === 401) {
         return { status, kind: "http_401", retryAfterSeconds, rateLimitResetEpoch, isRateLimit: false };
       }
-      if (status === 429 || (status === 403 && (hasRateLimitHeader || hasRateLimitMessage))) {
+      if (isRateLimit) {
         return {
           status,
           kind: "http_429_or_ratelimit_403",

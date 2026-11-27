@@ -3,6 +3,7 @@ import contract from "../../../src/review_sensei/schemas/v6-coordinator-contract
 import type { WorkerEnv } from "../src/env";
 import {
   GitHubApi,
+  type IssueCommentsScanOptions,
   type LiveCheckRun,
   type LiveIssueComment,
   type LiveIssueCommentPage,
@@ -144,6 +145,7 @@ class FakeV6Provider implements V6ProviderAdapter {
   checkRuns = new Map<number, LiveCheckRun | null>();
   commentsSinceOverride: LiveIssueCommentPage | null = null;
   issueCommentsSinceArgs: string[] = [];
+  issueCommentsSinceOptions: Array<IssueCommentsScanOptions | undefined> = [];
   commentCreatedAtMs = new Map<number, number>();
   botLogin = "reviewsensei[bot]";
   mintQueue: Array<() => Promise<{ token: string; permissions: Record<string, string>; expiresAt: string; expiresAtMs: number }>> = [];
@@ -242,9 +244,11 @@ class FakeV6Provider implements V6ProviderAdapter {
     _pullRequest: number,
     sinceIso: string,
     _token: string,
+    options?: IssueCommentsScanOptions,
   ): Promise<LiveIssueCommentPage> {
     this.calls.commentListReads += 1;
     this.issueCommentsSinceArgs.push(sinceIso);
+    this.issueCommentsSinceOptions.push(options);
     if (this.commentsSinceOverride !== null) {
       return this.commentsSinceOverride;
     }
@@ -3333,9 +3337,13 @@ async function createSignedTestCredentials(claimsOverrides: Partial<OidcClaims> 
   return { jwt, pubJwk, appPrivateKey, signClaims };
 }
 
-function createInMemorySqlStorage(): SqlStorage {
+function createInMemorySqlStorage(): SqlStorage & {
+  cursorRows: Map<string, Record<string, unknown>>;
+} {
   const rows = new Map<string, Record<string, unknown>>();
+  const cursorRows = new Map<string, Record<string, unknown>>();
   return {
+    cursorRows,
     exec: vi.fn((query: string, ...bindings: unknown[]) => {
       const normalized = query.trim().replace(/\s+/g, " ");
       if (normalized.startsWith("PRAGMA table_info(v6_pr_slot)")) {
@@ -3346,6 +3354,23 @@ function createInMemorySqlStorage(): SqlStorage {
             { name: "token_cleared" },
           ],
         };
+      }
+      if (normalized.startsWith("SELECT cursor_json FROM v6_pr_reconcile_cursor")) {
+        const slotKey = String(bindings[0]);
+        const row = cursorRows.get(slotKey);
+        return { toArray: () => (row ? [{ ...row }] : []) };
+      }
+      if (normalized.startsWith("INSERT INTO v6_pr_reconcile_cursor")) {
+        cursorRows.set(String(bindings[0]), {
+          slot_key: bindings[0],
+          cursor_json: bindings[1],
+          updated_at_ms: bindings[2],
+        });
+        return { toArray: () => [] };
+      }
+      if (normalized.startsWith("DELETE FROM v6_pr_reconcile_cursor")) {
+        cursorRows.delete(String(bindings[0]));
+        return { toArray: () => [] };
       }
       if (normalized.startsWith("SELECT")) {
         const slotKey = String(bindings[0]);
@@ -3379,7 +3404,7 @@ function createInMemorySqlStorage(): SqlStorage {
       }
       return { toArray: () => [] };
     }),
-  } as unknown as SqlStorage;
+  } as unknown as SqlStorage & { cursorRows: Map<string, Record<string, unknown>> };
 }
 
 describe("v6 acquire response redaction", () => {
@@ -3803,8 +3828,8 @@ describe("v6 acquire response redaction", () => {
       .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
       .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: [mkRawComment(9000, "tail")] });
 
-    provider.issueCommentsSince = (repo, pr, sinceIso, token) =>
-      ghApi.issueCommentsSince(repo, pr, sinceIso, token);
+    provider.issueCommentsSince = (repo, pr, sinceIso, token, options) =>
+      ghApi.issueCommentsSince(repo, pr, sinceIso, token, options);
 
     const adoptedRes = await engine.handleCompleteReconcile(env, {
       oidc_token: "oidc-run-1",
@@ -3847,7 +3872,7 @@ describe("v6 acquire response redaction", () => {
     let seq = 0;
     reqSpy.mockImplementation(async (_method, path) => {
       seq += 1;
-      if (path.includes("page=1")) {
+      if (/[?&]page=1(?:&|$)/.test(path)) {
         return {
           status: 200,
           hasNextPage: true,
@@ -3872,5 +3897,702 @@ describe("v6 acquire response redaction", () => {
       code: "v6_lease_reconciliation_evidence_invalid",
     });
     expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
+  });
+});
+
+describe("v6 resumable Gate 2 reconciliation", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetOidcJwksCacheForTesting();
+  });
+
+  async function buildSignedIntentAndReceipt(
+    crypto: V6EscrowCrypto,
+    generation: number,
+    operationId: string,
+    payloadSha: string,
+    effectId: number,
+  ) {
+    const intentPayload = {
+      schema: "reviewsensei:v6:intent:v1",
+      record_id: `intent:${operationId}:1`,
+      operation_id: operationId,
+      writer_epoch: generation,
+      pr_head_sha: HEAD_SHA_1,
+      effect_kind: "issue_comment",
+      payload_sha256: payloadSha,
+      target_digest: "d".repeat(64),
+      generation,
+      target_location: `/repos/${PILOT_REPO}/issues/42/comments`,
+    };
+    const canonicalIntent = canonicalJsonString(intentPayload);
+    const intentBody = `<!-- reviewsensei:v6:record sha256=${await sha256Hex(canonicalIntent)} payload=${canonicalIntent} -->`;
+    const receiptPayload = {
+      schema: "reviewsensei:v6:receipt:v1",
+      record_id: `receipt:${operationId}:1`,
+      operation_id: operationId,
+      writer_epoch: generation,
+      github_effect_id: effectId,
+      payload_sha256: payloadSha,
+      completed_at: "2026-11-27T00:00:05Z",
+    };
+    const canonicalReceipt = canonicalJsonString(receiptPayload);
+    const receiptBody = `<!-- reviewsensei:v6:record sha256=${await sha256Hex(canonicalReceipt)} payload=${canonicalReceipt} -->`;
+    return { intentBody, receiptBody };
+  }
+
+  function makeRawNoiseComment(id: number, body = `noise-${id}`) {
+    return {
+      id,
+      body,
+      author_association: "NONE",
+      issue_url: `https://api.github.com/repos/${PILOT_REPO}/issues/42`,
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    };
+  }
+
+  it("completes 999 and exact 1000 comments in a single turn to IDLE with cursor cleared", async () => {
+    for (const totalComments of [999, 1000]) {
+      const { env, engine, provider, store, slotKey42 } = createHarness();
+      const acq = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      expect(acq.status).toBe(200);
+      await engine.handleRelease(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: acq.body.reservation_id,
+      });
+
+      const ghApi = new GitHubApi(env);
+      const reqSpy = vi.spyOn(ghApi, "request").mockImplementation(async (_method, path) => {
+        const page = Number(/[?&]page=([0-9]+)/.exec(path)?.[1] ?? "1");
+        const start = (page - 1) * 100;
+        const end = Math.min(totalComments, start + 100);
+        return {
+          status: 200,
+          hasNextPage: end < totalComments,
+          data: Array.from({ length: end - start }, (_, idx) =>
+            makeRawNoiseComment(start + idx + 1),
+          ),
+        };
+      });
+      provider.issueCommentsSince = (repo, pr, sinceIso, token, options) =>
+        ghApi.issueCommentsSince(repo, pr, sinceIso, token, options);
+
+      const res = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: {
+          old_generation: 1,
+          intent_resolutions: [],
+        },
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.state).toBe("IDLE");
+      const slot = await store.getSlot(slotKey42);
+      expect(slot?.state).toBe("IDLE");
+      expect(slot?.reconcile_scan_cursor).toBeNull();
+      expect(reqSpy).toHaveBeenCalledTimes(20);
+      reqSpy.mockRestore();
+    }
+  });
+
+  it("pauses on 1001 comments in RECONCILING, refuses /acquire, and resumes turn 2 to IDLE", async () => {
+    const { env, engine, makeEngine, provider, store, slotKey42 } = createHarness();
+    const escrowCrypto = new V6EscrowCrypto(SIGNING_KEY);
+    const { intentBody: intentBody1, receiptBody: receiptBody1 } =
+      await buildSignedIntentAndReceipt(escrowCrypto, 1, "op-page1", "a".repeat(64), 7001);
+    const { intentBody: intentBody2, receiptBody: receiptBody2 } =
+      await buildSignedIntentAndReceipt(escrowCrypto, 1, "op-page11", "b".repeat(64), 7002);
+
+    provider.comments.set(5, {
+      id: 5,
+      body: intentBody1,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(6, {
+      id: 6,
+      body: receiptBody1,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(1001, {
+      id: 1001,
+      body: intentBody2,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(1002, {
+      id: 1002,
+      body: receiptBody2,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acq.status).toBe(200);
+    await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acq.body.reservation_id,
+    });
+
+    const ghApi = new GitHubApi(env);
+    const fetchedPages: number[] = [];
+    vi.spyOn(ghApi, "request").mockImplementation(async (_method, path) => {
+      const page = Number(/[?&]page=([0-9]+)/.exec(path)?.[1] ?? "1");
+      fetchedPages.push(page);
+      if (page <= 10) {
+        const start = (page - 1) * 100;
+        return {
+          status: 200,
+          hasNextPage: true,
+          data: Array.from({ length: 100 }, (_, idx) => {
+            const id = start + idx + 1;
+            return makeRawNoiseComment(id, id === 5 ? intentBody1 : `noise-${id}`);
+          }),
+        };
+      }
+      return {
+        status: 200,
+        hasNextPage: false,
+        data: [makeRawNoiseComment(1001, intentBody2)],
+      };
+    });
+    provider.issueCommentsSince = (repo, pr, sinceIso, token, options) =>
+      ghApi.issueCommentsSince(repo, pr, sinceIso, token, options);
+
+    const evidence = {
+      old_generation: 1,
+      intent_resolutions: [
+        {
+          operation_id: "op-page1",
+          intent_comment_id: 5,
+          resolution: "receipt_present",
+          receipt_comment_id: 6,
+        },
+        {
+          operation_id: "op-page11",
+          intent_comment_id: 1001,
+          resolution: "receipt_present",
+          receipt_comment_id: 1002,
+        },
+      ],
+    };
+
+    const turn1 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(turn1.status).toBe(409);
+    expect(turn1.body.slot_state).toBe("RECONCILING");
+    expect(turn1.body.diagnostic).toMatchObject({ code: "v6_lease_reconciling" });
+
+    const midSlot = await store.getSlot(slotKey42);
+    expect(midSlot?.state).toBe("RECONCILING");
+    expect(midSlot?.reconcile_scan_cursor).toMatchObject({
+      next_page: 11,
+      page_size: 100,
+    });
+    expect(midSlot?.reconcile_scan_cursor?.matched_intents.map((i) => i.intent_comment_id)).toEqual([
+      5,
+    ]);
+
+    // /acquire MUST refuse while RECONCILING
+    const blockedAcq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(blockedAcq.status).toBe(409);
+    expect(blockedAcq.body.slot_state).toBe("RECONCILING");
+    expect(blockedAcq.body.diagnostic).toMatchObject({ code: "v6_lease_reconciling" });
+
+    // Cold-restarted engine resumes from page 11 without re-fetching pages 1..10
+    fetchedPages.length = 0;
+    const coldEngine = makeEngine();
+    const turn2 = await coldEngine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(turn2.status).toBe(200);
+    expect(turn2.body.state).toBe("IDLE");
+    expect(fetchedPages).toEqual([11]);
+    const finalSlot = await store.getSlot(slotKey42);
+    expect(finalSlot?.state).toBe("IDLE");
+    expect(finalSlot?.reconcile_scan_cursor).toBeNull();
+  });
+
+  it("handles github_response_too_large fallback across turns without losing comments or false-holding", async () => {
+    const { env, engine, provider, store, slotKey42 } = createHarness();
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acq.body.reservation_id,
+    });
+
+    const ghApi = new GitHubApi(env);
+    let callCount = 0;
+    const calledPaths: string[] = [];
+    vi.spyOn(ghApi, "request").mockImplementation(async (_method, path) => {
+      calledPaths.push(path);
+      callCount += 1;
+      const perPage = Number(/[?&]per_page=([0-9]+)/.exec(path)?.[1] ?? "100");
+      const page = Number(/[?&]page=([0-9]+)/.exec(path)?.[1] ?? "1");
+      if (perPage === 100) {
+        throw new Error("github_response_too_large");
+      }
+      if (perPage === 12 && callCount === 2) {
+        // Turn 1 hits 429 on page 1 at per_page=12 -> saves page_size=12, next_page=1 (or after page 1 -> next_page=2)
+        return {
+          status: 200,
+          hasNextPage: true,
+          data: Array.from({ length: 12 }, (_, idx) => makeRawNoiseComment(idx + 1)),
+        };
+      }
+      if (perPage === 12 && page === 2 && callCount === 3) {
+        return {
+          status: 429,
+          data: { message: "rate limit" },
+          lookupMetadata: { retry_after: 4 },
+        };
+      }
+      if (perPage === 12 && page === 2) {
+        throw new Error("github_response_too_large");
+      }
+      // Stepped down to per_page=5 from offset (2-1)*12 = 12 -> page = floor(12/5)+1 = 3
+      const start = (page - 1) * 5;
+      const total = 18;
+      const end = Math.min(total, start + 5);
+      return {
+        status: 200,
+        hasNextPage: end < total,
+        data: Array.from({ length: end - start }, (_, idx) => makeRawNoiseComment(start + idx + 1)),
+      };
+    });
+    provider.issueCommentsSince = (repo, pr, sinceIso, token, options) =>
+      ghApi.issueCommentsSince(repo, pr, sinceIso, token, options);
+
+    const turn1 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+    });
+    expect(turn1.status).toBe(409);
+    expect(turn1.body.diagnostic).toMatchObject({ code: "v6_lease_reconciling" });
+    expect(turn1.body.retry_after_ms).toBe(4000);
+    expect((await store.getSlot(slotKey42))?.reconcile_scan_cursor).toMatchObject({
+      page_size: 12,
+      next_page: 2,
+    });
+
+    const turn2 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+    });
+    expect(turn2.status).toBe(200);
+    expect(turn2.body.state).toBe("IDLE");
+    expect(calledPaths.some((p) => p.includes("per_page=5") && p.includes("page=3"))).toBe(true);
+    expect((await store.getSlot(slotKey42))?.reconcile_scan_cursor).toBeNull();
+  });
+
+  it("survives throttled cold restart (429 Retry-After & 403 X-RateLimit-Reset) in V6PrCoordinator SQLite DO and resets on evidence change or holds on contradiction", async () => {
+    const ownerCreds = await createSignedTestCredentials({ run_id: "10001", run_attempt: "1" });
+    const contenderJwt = await ownerCreds.signClaims({ run_id: "10002", run_attempt: "1" });
+    const escrowCrypto = new V6EscrowCrypto(SIGNING_KEY);
+    const { intentBody, receiptBody } = await buildSignedIntentAndReceipt(
+      escrowCrypto,
+      1,
+      "op-cold-throttle",
+      "e".repeat(64),
+      8101,
+    );
+    const slotKey = buildCanonicalSlotKey({
+      host: "github.com",
+      appId: 12345,
+      installationId: 67890,
+      baseRepoId: 987654321,
+      pullRequest: 42,
+    });
+
+    const sql = createInMemorySqlStorage();
+    const stateMock = {
+      storage: { sql },
+      blockConcurrencyWhile: vi.fn(async (fn: () => Promise<unknown>) => fn()),
+    } as unknown as DurableObjectState;
+    const env = baseEnv({ GITHUB_APP_PRIVATE_KEY: ownerCreds.appPrivateKey });
+
+    let phase: "throttle_429" | "throttle_403" | "complete" = "throttle_429";
+    let gen2HasUnlistedIntent = false;
+    const commentListPagesFetched: number[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/.well-known/jwks")) {
+        return new Response(
+          JSON.stringify({ keys: [{ ...ownerCreds.pubJwk, kid: "k1", alg: "RS256" }] }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/app")) {
+        return new Response(JSON.stringify({ slug: "reviewsensei" }), { status: 200 });
+      }
+      if (url.endsWith("/repos/malsabbagh/review-sensei/git/ref/tags/v6-pilot")) {
+        return new Response(
+          JSON.stringify({ object: { type: "commit", sha: WORKFLOW_SHA } }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/installation`)) {
+        return new Response(JSON.stringify({ id: 67890 }), { status: 200 });
+      }
+      if (url.endsWith("/app/installations/67890/access_tokens")) {
+        const parsedInit = JSON.parse(String(init?.body ?? "{}")) as {
+          permissions?: Record<string, string>;
+        };
+        const isWriteMint = parsedInit.permissions?.pull_requests === "write";
+        return new Response(
+          JSON.stringify({
+            token: isWriteMint ? "ghs_doResumableToken" : "ghs_doInternalReadOnly",
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            permissions: { metadata: "read", ...(parsedInit.permissions ?? {}) },
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/installation/token")) {
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}`)) {
+        return new Response(JSON.stringify({ id: 987654321, fork: false }), { status: 200 });
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/pulls/42`)) {
+        return new Response(
+          JSON.stringify({
+            state: "open",
+            head: { sha: HEAD_SHA_1, repo: { id: 987654321, fork: false } },
+            base: { repo: { id: 987654321, fork: false } },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/actions/runs/")) {
+        return new Response(
+          JSON.stringify({
+            id: 10001,
+            run_attempt: 1,
+            status: "in_progress",
+            conclusion: null,
+            head_sha: HEAD_SHA_1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes(`/repos/${PILOT_REPO}/issues/42/comments?`)) {
+        const page = Number(new URL(url).searchParams.get("page") ?? "1");
+        commentListPagesFetched.push(page);
+        if (page === 1) {
+          const gen2Extra = gen2HasUnlistedIntent
+            ? [
+                {
+                  id: 9201,
+                  body: (
+                    await buildSignedIntentAndReceipt(
+                      escrowCrypto,
+                      2,
+                      "op-gen2-unlisted",
+                      "f".repeat(64),
+                      8201,
+                    )
+                  ).intentBody,
+                  author_association: "NONE",
+                  issue_url: `https://api.github.com/repos/${PILOT_REPO}/issues/42`,
+                  user: { login: "reviewsensei[bot]", type: "Bot" },
+                },
+              ]
+            : [];
+          return new Response(
+            JSON.stringify([
+              {
+                id: 9101,
+                body: intentBody,
+                author_association: "NONE",
+                issue_url: `https://api.github.com/repos/${PILOT_REPO}/issues/42`,
+                user: { login: "reviewsensei[bot]", type: "Bot" },
+              },
+              ...gen2Extra,
+            ]),
+            {
+              status: 200,
+              headers: {
+                link: `<https://api.github.com/repos/${PILOT_REPO}/issues/42/comments?page=2>; rel="next"`,
+              },
+            },
+          );
+        }
+        if (page === 2 && phase === "throttle_429") {
+          return new Response(JSON.stringify({ message: "secondary rate limit" }), {
+            status: 429,
+            headers: { "retry-after": "12" },
+          });
+        }
+        if (page === 2 && phase === "throttle_403") {
+          const resetEpoch = Math.floor(Date.now() / 1000) + 25;
+          return new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+            status: 403,
+            headers: {
+              "x-ratelimit-remaining": "0",
+              "x-ratelimit-reset": String(resetEpoch),
+            },
+          });
+        }
+        return new Response(
+          JSON.stringify([
+            {
+              id: 9102,
+              body: receiptBody,
+              author_association: "NONE",
+              issue_url: `https://api.github.com/repos/${PILOT_REPO}/issues/42`,
+              user: { login: "reviewsensei[bot]", type: "Bot" },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/issues/comments/9101`)) {
+        return new Response(
+          JSON.stringify({
+            id: 9101,
+            body: intentBody,
+            author_association: "NONE",
+            issue_url: `https://api.github.com/repos/${PILOT_REPO}/issues/42`,
+            user: { login: "reviewsensei[bot]", type: "Bot" },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/issues/comments/9102`)) {
+        return new Response(
+          JSON.stringify({
+            id: 9102,
+            body: receiptBody,
+            author_association: "NONE",
+            issue_url: `https://api.github.com/repos/${PILOT_REPO}/issues/42`,
+            user: { login: "reviewsensei[bot]", type: "Bot" },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const postDo = (instance: V6PrCoordinator, path: string, payload: Record<string, unknown>) =>
+      instance.fetch(
+        new Request(`https://do.internal${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+
+    // Instance 1: Acquire -> Release -> complete-reconcile hits 429 Retry-After: 12 on page 2
+    const do1 = new V6PrCoordinator(stateMock, env);
+    const acqRes = await postDo(do1, "/github/v6/lease/acquire", {
+      oidc_token: ownerCreds.jwt,
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    const acqJson = (await acqRes.json()) as Record<string, unknown>;
+    expect(acqRes.status).toBe(200);
+
+    const relRes = await postDo(do1, "/github/v6/lease/release", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acqJson.reservation_id,
+    });
+    expect(relRes.status).toBe(200);
+
+    const evidence = {
+      old_generation: 1,
+      intent_resolutions: [
+        {
+          operation_id: "op-cold-throttle",
+          intent_comment_id: 9101,
+          resolution: "receipt_present",
+          receipt_comment_id: 9102,
+        },
+      ],
+    };
+
+    const rec1 = await postDo(do1, "/github/v6/lease/complete-reconcile", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(rec1.status).toBe(409);
+    const rec1Json = (await rec1.json()) as Record<string, unknown>;
+    expect(rec1Json).toMatchObject({
+      error: "v6_lease_reconciling",
+      slot_state: "RECONCILING",
+      retry_after_ms: 12000,
+    });
+    expect(sql.cursorRows.has(slotKey)).toBe(true);
+
+    // Contender /acquire MUST fail closed while RECONCILING
+    const blockedAcq = await postDo(do1, "/github/v6/lease/acquire", {
+      oidc_token: contenderJwt,
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(blockedAcq.status).toBe(409);
+    expect(await blockedAcq.json()).toMatchObject({
+      error: "v6_lease_reconciling",
+      slot_state: "RECONCILING",
+    });
+
+    // Cold-restart Instance 2: page 2 hits 403 X-RateLimit-Reset -> stays RECONCILING with retry_after_ms
+    phase = "throttle_403";
+    commentListPagesFetched.length = 0;
+    const do2 = new V6PrCoordinator(stateMock, env);
+    const rec2 = await postDo(do2, "/github/v6/lease/complete-reconcile", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(rec2.status).toBe(409);
+    const rec2Json = (await rec2.json()) as Record<string, unknown>;
+    expect(rec2Json).toMatchObject({
+      error: "v6_lease_reconciling",
+      slot_state: "RECONCILING",
+    });
+    expect(typeof rec2Json.retry_after_ms).toBe("number");
+    expect(rec2Json.retry_after_ms as number).toBeGreaterThan(15_000);
+    expect(commentListPagesFetched).toEqual([2]);
+
+    // Cold-restart Instance 3: resumes from page 2 (does NOT re-fetch page 1), completes to IDLE, clears cursor
+    phase = "complete";
+    commentListPagesFetched.length = 0;
+    const do3 = new V6PrCoordinator(stateMock, env);
+    const rec3 = await postDo(do3, "/github/v6/lease/complete-reconcile", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(rec3.status).toBe(200);
+    expect(await rec3.json()).toMatchObject({
+      slot_key: slotKey,
+      state: "IDLE",
+      generation: 1,
+      lease_epoch: 1,
+    });
+    expect(commentListPagesFetched).toEqual([2]);
+    expect(sql.cursorRows.has(slotKey)).toBe(false);
+
+    // Also verify evidence change resets cursor to page 1 and contradictory evidence moves to HOLD with cursor cleared
+    const acq2Res = await postDo(do3, "/github/v6/lease/acquire", {
+      oidc_token: ownerCreds.jwt,
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    const acq2Json = (await acq2Res.json()) as Record<string, unknown>;
+    await postDo(do3, "/github/v6/lease/release", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 2,
+      lease_epoch: 2,
+      reservation_id: acq2Json.reservation_id,
+    });
+    // Contradictory evidence (empty intent_resolutions while page 1 holds gen-1/or corrupt marker) -> HOLD + cleared cursor
+    // First pause on page 2 with 429, then submit contradictory evidence on next turn:
+    phase = "throttle_429";
+    const gen2Turn1 = await postDo(do3, "/github/v6/lease/complete-reconcile", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 2,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: { old_generation: 2, intent_resolutions: [] },
+    });
+    expect(gen2Turn1.status).toBe(409);
+    expect(sql.cursorRows.has(slotKey)).toBe(true);
+
+    // Changing evidence resets cursor to page 1 (does not reuse page 2), and contradictory unlisted intent -> HOLD
+    commentListPagesFetched.length = 0;
+    phase = "complete";
+    gen2HasUnlistedIntent = true;
+    const gen2Turn2 = await postDo(do3, "/github/v6/lease/complete-reconcile", {
+      oidc_token: ownerCreds.jwt,
+      slot_key: slotKey,
+      generation: 2,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 2,
+        intent_resolutions: [
+          {
+            operation_id: "op-different",
+            intent_comment_id: 9299,
+            resolution: "receipt_present",
+            receipt_comment_id: 9300,
+          },
+        ],
+      },
+    });
+    expect(commentListPagesFetched[0]).toBe(1);
+    expect(gen2Turn2.status).toBe(409);
+    expect(await gen2Turn2.json()).toMatchObject({
+      error: "v6_lease_reconciliation_evidence_invalid",
+      slot_state: "HOLD",
+    });
+    expect(sql.cursorRows.has(slotKey)).toBe(false);
   });
 });
