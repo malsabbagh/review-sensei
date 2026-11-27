@@ -110,12 +110,19 @@ def _reconstruct_diff_from_files(
                 continue
             patch = entry.get("patch")
             filename = entry.get("filename")
-            if not isinstance(patch, str) or not patch.strip():
-                continue
             if not isinstance(filename, str) or not filename.strip():
-                continue
-            if patch.startswith("diff --git "):
-                chunks.append(patch.rstrip("\n") + "\n")
+                raise ReviewInputError(
+                    "PR file entry missing filename",
+                    diagnostic="v6_pr_diff_incomplete",
+                )
+            if not isinstance(patch, str) or not patch.strip():
+                raise ReviewInputError(
+                    f"PR diff incomplete for {filename}",
+                    diagnostic="v6_pr_diff_incomplete",
+                )
+            patch_body = patch if patch.endswith("\n") else f"{patch}\n"
+            if patch_body.startswith("diff --git "):
+                chunks.append(patch_body)
                 continue
             status = str(entry.get("status") or "modified")
             prev = entry.get("previous_filename")
@@ -126,7 +133,7 @@ def _reconstruct_diff_from_files(
                 f"diff --git a/{old_name} b/{filename}\n"
                 f"--- {old_header}\n"
                 f"+++ {new_header}\n"
-                f"{patch.rstrip()}\n"
+                f"{patch_body}"
             )
         if len(resp.body) < 100:
             break
@@ -175,6 +182,7 @@ def _review_result_to_unresolved_payload(
             )
     findings = [comment.to_dict() for comment in result.comments]
     envelope: dict[str, Any] = {
+        "_v6_review_envelope": "reviewsensei:v6:review_envelope:v1",
         "review_body": review_body,
         "event": "COMMENT",
         "comments": inline_comments,

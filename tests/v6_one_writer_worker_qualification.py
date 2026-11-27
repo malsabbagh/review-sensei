@@ -348,31 +348,73 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
 
     git_origin = temp_root / "workflow-origin"
     git_origin.mkdir(parents=True, exist_ok=True)
-    for filename in ("pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md"):
-        src_file = ROOT / filename
-        if src_file.is_file():
-            shutil.copy2(src_file, git_origin / filename)
-    shutil.copytree(
-        ROOT / "src",
-        git_origin / "src",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    ls_proc = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-co", "--exclude-standard", "-z"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    pkg_dst = git_origin / "packages" / "python" / "review-sensei-github"
-    pkg_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        ROOT / "packages" / "python" / "review-sensei-github",
-        pkg_dst,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
+    allowed_prefixes = (
+        "pyproject.toml",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        "src/",
+        "packages/python/review-sensei-github/",
     )
+    ignored_parts = {
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        "build",
+        "dist",
+    }
+    for raw_rel in ls_proc.stdout.split(b"\x00"):
+        if not raw_rel:
+            continue
+        rel_posix = raw_rel.decode("utf-8")
+        if not (
+            rel_posix in allowed_prefixes[:4]
+            or rel_posix.startswith(allowed_prefixes[4])
+            or rel_posix.startswith(allowed_prefixes[5])
+        ):
+            continue
+        rel_path = Path(rel_posix)
+        if (
+            any(
+                part in ignored_parts or part.endswith(".egg-info")
+                for part in rel_path.parts
+            )
+            or rel_path.suffix == ".pyc"
+        ):
+            continue
+        src_file = ROOT / rel_path
+        if not src_file.is_file():
+            continue
+        dst_file = git_origin / rel_path
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst_file)
+
     git_env = {
-        **os.environ,
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(temp_root),
+        "XDG_CONFIG_HOME": str(temp_root / "xdg"),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
         "GIT_AUTHOR_NAME": "ReviewSensei Test",
         "GIT_AUTHOR_EMAIL": "test@reviewsensei.invalid",
         "GIT_COMMITTER_NAME": "ReviewSensei Test",
         "GIT_COMMITTER_EMAIL": "test@reviewsensei.invalid",
     }
+    git_flags = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.autocrlf=false",
+    ]
     subprocess.run(
-        ["git", "init"],
+        ["git", *git_flags, "init"],
         cwd=str(git_origin),
         env=git_env,
         check=True,
@@ -380,7 +422,7 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
     )
     subprocess.run(
-        ["git", "add", "-A"],
+        ["git", *git_flags, "add", "-A"],
         cwd=str(git_origin),
         env=git_env,
         check=True,
@@ -388,7 +430,15 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
     )
     subprocess.run(
-        ["git", "commit", "-m", "v6 workflow archive snapshot"],
+        [
+            "git",
+            *git_flags,
+            "commit",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            "v6 workflow archive snapshot",
+        ],
         cwd=str(git_origin),
         env=git_env,
         check=True,
@@ -396,7 +446,7 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
     )
     commit_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        ["git", *git_flags, "rev-parse", "HEAD"],
         cwd=str(git_origin),
         env=git_env,
         check=True,
@@ -409,7 +459,8 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
     src_checkout = temp_root / "review-sensei-v6-src"
     src_checkout.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "init", "--bare", str(source_dir)],
+        ["git", *git_flags, "init", "--bare", str(source_dir)],
+        env=git_env,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -417,18 +468,31 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
     subprocess.run(
         [
             "git",
+            *git_flags,
             f"--git-dir={source_dir}",
             "fetch",
             "--depth=1",
             str(git_origin),
             commit_sha,
         ],
+        env=git_env,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    fetched_sha = subprocess.run(
+        ["git", *git_flags, f"--git-dir={source_dir}", "rev-parse", "FETCH_HEAD"],
+        env=git_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    if fetched_sha != commit_sha:
+        raise RuntimeError(f"FETCH_HEAD mismatch: {fetched_sha} != {commit_sha}")
     archive_proc = subprocess.run(
-        ["git", f"--git-dir={source_dir}", "archive", commit_sha],
+        ["git", *git_flags, f"--git-dir={source_dir}", "archive", commit_sha],
+        env=git_env,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -503,7 +567,7 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         text=True,
     )
     cli_bin = venv_dir / "bin" / "review-sensei-github"
-    subprocess.run(
+    help_proc = subprocess.run(
         [str(cli_bin), "v6-pilot-run", "--help"],
         check=True,
         cwd=str(temp_root),
@@ -512,6 +576,11 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         stderr=subprocess.PIPE,
         text=True,
     )
+    for required_flag in ("--analyze-fresh-pr", "--policy-root", "--operation-id"):
+        if required_flag not in help_proc.stdout:
+            raise RuntimeError(
+                f"v6-pilot-run --help missing expected flag {required_flag}"
+            )
     return venv_dir, cli_bin
 
 
@@ -1170,7 +1239,20 @@ def _make_openai_provider_handler(
                 self._send_json(401, {"error": "unauthorized"})
                 return
             length = int(self.headers.get("Content-Length", "0"))
-            _ = self.rfile.read(length) if length > 0 else b""
+            raw_body = self.rfile.read(length) if length > 0 else b""
+            try:
+                req_json = json.loads(raw_body.decode("utf-8")) if raw_body else None
+            except Exception:
+                req_json = None
+            if (
+                not isinstance(req_json, dict)
+                or not isinstance(req_json.get("model"), str)
+                or not req_json["model"].strip()
+                or not isinstance(req_json.get("messages"), list)
+                or not req_json["messages"]
+            ):
+                self._send_json(400, {"error": "invalid_request"})
+                return
             with provider_state.lock:
                 provider_state.calls += 1
                 call_num = provider_state.calls

@@ -197,7 +197,7 @@ jobs:
             --effect-kind "$EFFECT_KIND"
             --workflow-sha "$REVIEW_SENSEI_WORKFLOW_SHA"
             --analyze-fresh-pr
-            --policy-root trusted-policy
+            --policy-root "$GITHUB_WORKSPACE/trusted-policy"
             --outcome "$RUNNER_TEMP/v6-pilot-outcome.json"
           )
           if [[ -n "$OPERATION_ID" ]]; then

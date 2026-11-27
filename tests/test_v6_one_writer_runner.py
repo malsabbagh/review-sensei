@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping
@@ -29,9 +30,15 @@ from review_sensei_github.v6_credential_matrix import (
     GitHubEventKind,
     RepositoryVisibility,
 )
+from review_sensei_github.v6_fresh_analysis import _reconstruct_diff_from_files
 from review_sensei_github.v6_pilot_runner import (
+    _MAX_GITHUB_BODY_BYTES,
+    UrllibGitHubTransport,
     V6PilotRunConfig,
     V6PilotRunner,
+    _build_initial_result_loader,
+    default_v6_operation_id,
+    run_v6_pilot_cli,
 )
 from review_sensei_github.v6_recovery_engine import (
     RecoveryCompleted,
@@ -3179,6 +3186,345 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         )
         self.assertEqual(comp.state, "IDLE")
         self.assertEqual(coord.state, "IDLE")
+
+    def test_default_operation_id_and_cli_override_invariants(self) -> None:
+        from unittest import mock
+
+        from review_sensei_github.v6_pilot_runner import V6PilotRunOutcome
+
+        from review_sensei.errors import ReviewInputError
+
+        op1 = default_v6_operation_id(
+            repository_id=REPO_ID, pull_request=PR_NUMBER, head_sha=HEAD_A
+        )
+        op2 = default_v6_operation_id(
+            repository_id=REPO_ID, pull_request=PR_NUMBER, head_sha=HEAD_A
+        )
+        op_b = default_v6_operation_id(
+            repository_id=REPO_ID, pull_request=PR_NUMBER, head_sha=HEAD_B
+        )
+        self.assertEqual(
+            op1, f"v6:{REPO_ID}:{PR_NUMBER}:{HEAD_A[:12]}:pr_review_publish"
+        )
+        self.assertEqual(op1, op2)
+        self.assertNotEqual(op1, op_b)
+
+        cfg_no_transport = V6PilotRunConfig(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            head_sha=HEAD_A,
+            operation_id=op1,
+            analyze_fresh_pr=True,
+        )
+        with self.assertRaises(ReviewInputError) as missing_tok:
+            _build_initial_result_loader(
+                cfg_no_transport, workflow_token_transport=None
+            )
+        self.assertEqual(missing_tok.exception.diagnostic, "v6_missing_github_token")
+
+        wf_transport = _ScriptedTransport(lambda _call: (404, {}, {}))
+        loader = _build_initial_result_loader(
+            cfg_no_transport, workflow_token_transport=wf_transport
+        )
+        self.assertIsNotNone(loader)
+        self.assertEqual(wf_transport.calls, [])
+        with mock.patch(
+            "review_sensei_github.v6_pilot_runner.run_v6_fresh_pr_analysis",
+            return_value=(({"path": "a.py", "line": 1, "body": "x"},), ()),
+        ) as fake_analyze:
+            assert loader is not None
+            loader()
+            fake_analyze.assert_called_once()
+
+        captured_configs: list[V6PilotRunConfig] = []
+
+        def _fake_run_v6_pilot(
+            config: V6PilotRunConfig, **_kwargs: Any
+        ) -> V6PilotRunOutcome:
+            captured_configs.append(config)
+            return V6PilotRunOutcome(status="completed", coordinator_state="IDLE")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            policy_dir = Path(tmpdir) / "policy"
+            policy_dir.mkdir()
+            with (
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test_token"}),
+                mock.patch(
+                    "review_sensei_github.v6_pilot_runner.run_v6_pilot",
+                    side_effect=_fake_run_v6_pilot,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                rc_default = run_v6_pilot_cli(
+                    [
+                        "--repository",
+                        f"{OWNER}/{REPO}",
+                        "--repository-id",
+                        str(REPO_ID),
+                        "--pull-request",
+                        str(PR_NUMBER),
+                        "--head-sha",
+                        HEAD_A,
+                        "--run-id",
+                        "111",
+                        "--run-attempt",
+                        "1",
+                        "--analyze-fresh-pr",
+                        "--policy-root",
+                        str(policy_dir),
+                        "--provider",
+                        "openai-compatible",
+                        "--model",
+                        "gpt-4o-mini",
+                        "--provider-base-url",
+                        "https://127.0.0.1:8443/v1",
+                        "--allow-custom-endpoint",
+                    ]
+                )
+                rc_override = run_v6_pilot_cli(
+                    [
+                        "--repository",
+                        f"{OWNER}/{REPO}",
+                        "--repository-id",
+                        str(REPO_ID),
+                        "--pull-request",
+                        str(PR_NUMBER),
+                        "--head-sha",
+                        HEAD_A,
+                        "--operation-id",
+                        "custom-op-id",
+                    ]
+                )
+        self.assertEqual(rc_default, 0)
+        self.assertEqual(rc_override, 0)
+        self.assertEqual(captured_configs[0].operation_id, op1)
+        self.assertTrue(captured_configs[0].analyze_fresh_pr)
+        self.assertEqual(captured_configs[0].policy_root, policy_dir)
+        self.assertEqual(captured_configs[0].provider, "openai-compatible")
+        self.assertEqual(captured_configs[0].model, "gpt-4o-mini")
+        self.assertEqual(
+            captured_configs[0].provider_base_url, "https://127.0.0.1:8443/v1"
+        )
+        self.assertTrue(captured_configs[0].allow_custom_endpoint)
+        self.assertEqual(captured_configs[1].operation_id, "custom-op-id")
+
+    def test_reconstruct_diff_preserves_no_newline_and_fails_on_missing_patch(
+        self,
+    ) -> None:
+        from review_sensei.errors import ReviewInputError
+
+        patch_with_no_nl = (
+            "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n"
+            "\\ No newline at end of file"
+        )
+        wf_ok = _ScriptedTransport(
+            lambda _call: (
+                200,
+                {},
+                [
+                    {
+                        "filename": "a.py",
+                        "status": "modified",
+                        "patch": patch_with_no_nl,
+                    }
+                ],
+            )
+        )
+        ro_client = DualCredentialGitHubClient(
+            workflow_token_transport=wf_ok,
+            broker_app_transport=_ScriptedTransport(lambda _call: (403, {}, {})),
+        )
+        reconstructed = _reconstruct_diff_from_files(
+            read_client=ro_client,
+            owner=OWNER,
+            repo=REPO,
+            pull_request=PR_NUMBER,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            now_fn=lambda: 1_700_000_000.0,
+        )
+        self.assertIn("\\ No newline at end of file\n", reconstructed)
+
+        wf_missing = _ScriptedTransport(
+            lambda _call: (
+                200,
+                {},
+                [{"filename": "binary.bin", "status": "modified"}],
+            )
+        )
+        ro_missing = DualCredentialGitHubClient(
+            workflow_token_transport=wf_missing,
+            broker_app_transport=_ScriptedTransport(lambda _call: (403, {}, {})),
+        )
+        with self.assertRaises(ReviewInputError) as missing_exc:
+            _reconstruct_diff_from_files(
+                read_client=ro_missing,
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                now_fn=lambda: 1_700_000_000.0,
+            )
+        self.assertEqual(missing_exc.exception.diagnostic, "v6_pr_diff_incomplete")
+
+    def test_urllib_transport_rejects_oversized_diff_body(self) -> None:
+        from review_sensei.errors import ReviewInputError
+
+        class _OversizedResponse:
+            status = 200
+            headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+            def read(self, n: int = -1) -> bytes:
+                size = _MAX_GITHUB_BODY_BYTES + 1 if n < 0 else n
+                return b"x" * size
+
+            def __enter__(self) -> _OversizedResponse:
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                return None
+
+        transport = UrllibGitHubTransport(
+            token="ghp_test_token",
+            opener=lambda _req, timeout=None: _OversizedResponse(),
+        )
+        with self.assertRaises(ReviewInputError) as exc:
+            transport.request(
+                "GET",
+                f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}",
+                headers={"Accept": "application/vnd.github.v3.diff"},
+            )
+        self.assertEqual(exc.exception.diagnostic, "v6_pr_diff_too_large")
+
+    def test_review_envelope_rendering_and_malformed_validation(self) -> None:
+        from review_sensei.errors import ReviewInputError
+
+        now = 1_700_070_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        client = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run1",
+            opener=coord.opener,
+            clock=lambda: now,
+        )
+
+        # 1. Valid anchored envelope renders review_body and inline comments.
+        valid_envelope = (
+            {
+                "_v6_review_envelope": "reviewsensei:v6:review_envelope:v1",
+                "review_body": "Real formatted summary",
+                "event": "COMMENT",
+                "comments": [
+                    {"path": "src/a.py", "line": 3, "side": "RIGHT", "body": "Fix"}
+                ],
+                "findings": [],
+                "provider": "openai-compatible",
+                "model": "gpt-4o-mini",
+                "review_status": "complete",
+                "content_digest": "e" * 64,
+            },
+        )
+        runner = V6PilotRunner(
+            coordinator=client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(pr.handle_app),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord.lease_epoch,
+                "active_run_id": 5002,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-envelope-valid",
+                run_id=5002,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (valid_envelope, ()),
+            )
+        )
+        self.assertEqual(outcome.status, "completed")
+        self.assertIn("Real formatted summary", pr.reviews[-1]["body"])
+
+        # 2. Anchored envelope with non-Mapping comments fails closed.
+        bad_envelope = (
+            {
+                "_v6_review_envelope": "reviewsensei:v6:review_envelope:v1",
+                "review_body": "Body",
+                "event": "COMMENT",
+                "comments": ["not-a-mapping"],
+            },
+        )
+        bad_outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-envelope-bad",
+                run_id=5002,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (bad_envelope, ()),
+            )
+        )
+        self.assertEqual(bad_outcome.status, "hold")
+        self.assertEqual(bad_outcome.diagnostic, "v6_invalid_review_envelope")
+        del ReviewInputError  # imported for diagnostic assertion
+
+    def test_simulated_coordinator_rejects_empty_resolutions_and_ambiguous_hold(
+        self,
+    ) -> None:
+        now = 1_700_080_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        coord.state = "RECONCILING"
+        coord.generation = 1
+        coord.lease_epoch = 1
+        coord.token_cleared = True
+
+        self.assertEqual(
+            coord._verify_pr_reconciliation_evidence(
+                pr=pr,
+                outcome="adopted_missing_receipt",
+                evidence={"old_generation": 1, "intent_resolutions": []},
+            ),
+            "v6_lease_reconciliation_evidence_invalid",
+        )
+        self.assertEqual(
+            coord._verify_pr_reconciliation_evidence(
+                pr=pr,
+                outcome="proved_not_submitted",
+                evidence={"old_generation": 1, "intent_resolutions": []},
+            ),
+            "v6_lease_reconciliation_evidence_invalid",
+        )
 
 
 if __name__ == "__main__":

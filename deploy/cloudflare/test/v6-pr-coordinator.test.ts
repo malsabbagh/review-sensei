@@ -2742,9 +2742,10 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     );
   });
 
-  it("completes reconcile on HEAD_A slot with HEAD_A anchor when req.head_sha is HEAD_B or HEAD_A, then acquires HEAD_B", async () => {
-    for (const reconcileReqHead of [HEAD_SHA_2, HEAD_SHA_1]) {
-      const { env, engine, provider, store, slotKey42 } = createHarness();
+  it("completes reconcile on HEAD_A slot with HEAD_A anchor when req.head_sha is HEAD_B (anchored takeover), and when req.head_sha is HEAD_A", async () => {
+    const setupCrashedHeadA = async () => {
+      const harness = createHarness();
+      const { env, engine, provider, slotKey42 } = harness;
       const crypto = new V6EscrowCrypto(SIGNING_KEY);
 
       const gen1 = await engine.handleAcquire(env, {
@@ -2810,7 +2811,6 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
         performedViaAppId: 12345,
       });
 
-      // Crash Run 1 and advance PR head to HEAD_B
       provider.runAttempts.set("10001:1", {
         run_id: "10001",
         run_attempt: 1,
@@ -2834,7 +2834,12 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       });
       expect(drained.status).toBe(200);
       expect(drained.body.state).toBe("RECONCILING");
+      return harness;
+    };
 
+    // Case A: req.head_sha is HEAD_B while slot.owner_head_sha and anchor are HEAD_A -> anchored takeover succeeds.
+    {
+      const { env, engine, store, slotKey42 } = await setupCrashedHeadA();
       const recDone = await engine.handleCompleteReconcile(env, {
         oidc_token: "oidc-run-2",
         slot_key: slotKey42,
@@ -2854,7 +2859,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
           ],
         },
         anchor_comment_id: 9601,
-        head_sha: reconcileReqHead,
+        head_sha: HEAD_SHA_2,
       });
       expect(recDone.status).toBe(200);
       expect(recDone.body.state).toBe("IDLE");
@@ -2870,6 +2875,164 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       expect(gen2.body.state).toBe("ACTIVE");
       expect(gen2.body.generation).toBe(2);
       expect((await store.getSlot(slotKey42))?.owner_head_sha).toBe(HEAD_SHA_2);
+    }
+
+    // Case B: req.head_sha is reconciled HEAD_A matching slot.owner_head_sha -> succeeds then acquires HEAD_B.
+    {
+      const { env, engine, store, slotKey42 } = await setupCrashedHeadA();
+      const recDone = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-2",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "adopted_missing_receipt",
+        reconciliation_evidence: {
+          old_generation: 1,
+          old_owner_comment_id: 9601,
+          intent_resolutions: [
+            {
+              operation_id: "op-heada",
+              intent_comment_id: 9602,
+              resolution: "adopted_effect",
+              native_effect_kind: "pull_request_review",
+              native_effect_id: 5601,
+            },
+          ],
+        },
+        anchor_comment_id: 9601,
+        head_sha: HEAD_SHA_1,
+      });
+      expect(recDone.status).toBe(200);
+      expect(recDone.body.state).toBe("IDLE");
+
+      const gen2 = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-2",
+        pull_request: 42,
+        head_sha: HEAD_SHA_2,
+        capabilities: ["review_publish"],
+        predecessor_anchor_comment_id: 9601,
+      });
+      expect(gen2.status).toBe(200);
+      expect(gen2.body.state).toBe("ACTIVE");
+      expect(gen2.body.generation).toBe(2);
+      expect((await store.getSlot(slotKey42))?.owner_head_sha).toBe(HEAD_SHA_2);
+    }
+  });
+
+  it("enforces handleCompleteReconcile pre-lock 409 guards, lease_epoch lock race, and unanchored head_sha mismatch HOLD", async () => {
+    // 1. Missing slot -> 409 v6_lease_rollback_blocked (slot_state: IDLE)
+    {
+      const { env, engine, slotKey42 } = createHarness();
+      const missing = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+      });
+      expect(missing.status).toBe(409);
+      expect(missing.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
+      expect(missing.body.slot_state).toBe("IDLE");
+    }
+
+    // 2. Non-RECONCILING slot -> 409 state conflict (ACTIVE -> v6_lease_active_other_owner)
+    {
+      const { env, engine, slotKey42 } = createHarness();
+      await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      const wrongState = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-2",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+      });
+      expect(wrongState.status).toBe(409);
+      expect(wrongState.body.diagnostic).toMatchObject({ code: "v6_lease_active_other_owner" });
+      expect(wrongState.body.slot_state).toBe("ACTIVE");
+    }
+
+    // 3. Generation mismatch -> 409 v6_lease_rollback_blocked (slot_state: RECONCILING)
+    {
+      const { env, engine, store, slotKey42 } = createHarness();
+      const acq = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      await engine.handleRelease(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: acq.body.reservation_id,
+      });
+      const badGen = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 2,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: { old_generation: 2, intent_resolutions: [] },
+      });
+      expect(badGen.status).toBe(409);
+      expect(badGen.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
+      expect(badGen.body.slot_state).toBe("RECONCILING");
+
+      // 4. lease_epoch changed between pre-lock read and reconcilePrep lock -> 409 v6_lease_rollback_blocked
+      const origGetSlot = store.getSlot.bind(store);
+      let reads = 0;
+      vi.spyOn(store, "getSlot").mockImplementation(async (key) => {
+        reads += 1;
+        const row = await origGetSlot(key);
+        if (reads === 2 && row !== null) {
+          return { ...row, lease_epoch: row.lease_epoch + 1 };
+        }
+        return row;
+      });
+      const epochRace = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+      });
+      expect(epochRace.status).toBe(409);
+      expect(epochRace.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
+    }
+
+    // 5. Unanchored caller with mismatched req.head_sha -> HOLD v6_lease_slot_continuity_unproved
+    {
+      const { env, engine, store, slotKey42 } = createHarness();
+      const acq = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      await engine.handleRelease(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: acq.body.reservation_id,
+      });
+      const unanchoredMismatch = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+        head_sha: HEAD_SHA_2,
+      });
+      expect(unanchoredMismatch.status).toBe(409);
+      expect(unanchoredMismatch.body.diagnostic).toMatchObject({
+        code: "v6_lease_slot_continuity_unproved",
+      });
+      expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
     }
   });
 

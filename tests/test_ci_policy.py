@@ -3044,7 +3044,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
         self.assertIn('git --git-dir="$source_dir" archive "$workflow_commit"', text)
         self.assertIn("v6-pilot-run --help", text)
         self.assertIn("--analyze-fresh-pr", text)
-        self.assertIn("--policy-root trusted-policy", text)
+        self.assertIn('--policy-root "$GITHUB_WORKSPACE/trusted-policy"', text)
         self.assertNotIn('pip install "review-sensei-github==', text)
         self.assertNotIn('pip install "review-sensei==', text)
         self.assertNotIn("review-sensei-github==", text)

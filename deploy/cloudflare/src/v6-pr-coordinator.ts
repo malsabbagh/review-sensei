@@ -3926,7 +3926,7 @@ export class V6PrCoordinatorEngine {
             }),
           };
         }
-        if (slot.generation !== reqGeneration) {
+        if (slot.generation !== reqGeneration || slot.lease_epoch !== initialSlot.lease_epoch) {
           return {
             kind: "done" as const,
             result: diagnosticResponse(409, "v6_lease_rollback_blocked", {
@@ -4129,6 +4129,15 @@ export class V6PrCoordinatorEngine {
         reqHeadSha,
       );
       oldOwnerSha256 = verifiedEvidence.oldOwnerSha256;
+      if (
+        reqHeadSha !== undefined &&
+        slotToVerify.owner_head_sha !== null &&
+        reqHeadSha !== slotToVerify.owner_head_sha &&
+        verifiedAnchor === null &&
+        oldOwnerSha256 === null
+      ) {
+        throw new Error("v6_lease_slot_continuity_unproved");
+      }
     } catch (error) {
       verificationError =
         error instanceof Error && VALID_V6_DIAGNOSTIC_CODES.has(error.message as V6DiagnosticCode)

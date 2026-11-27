@@ -2863,6 +2863,8 @@ class V6RecoveryEngine:
             effect_tag = _effect_tag(request.operation_id, payload_sha256)
             if (
                 len(pr_result.findings_payload) == 1
+                and pr_result.findings_payload[0].get("_v6_review_envelope")
+                == "reviewsensei:v6:review_envelope:v1"
                 and isinstance(pr_result.findings_payload[0].get("review_body"), str)
                 and isinstance(pr_result.findings_payload[0].get("comments"), Sequence)
                 and not isinstance(
@@ -2871,10 +2873,16 @@ class V6RecoveryEngine:
                 )
             ):
                 envelope = pr_result.findings_payload[0]
+                raw_comments = envelope["comments"]
+                if not all(isinstance(c, Mapping) for c in raw_comments):
+                    raise ReviewInputError(
+                        "review envelope comments must be JSON objects",
+                        diagnostic="v6_invalid_review_envelope",
+                    )
                 raw_review_body = str(envelope["review_body"]).rstrip()
                 rendered_body = (
                     f"{raw_review_body}\n\n{effect_tag}"
-                    if effect_tag not in raw_review_body
+                    if effect_tag not in raw_review_body.splitlines()
                     else raw_review_body
                 )
                 raw_event = envelope.get("event")
@@ -2884,7 +2892,7 @@ class V6RecoveryEngine:
                     and raw_event in {"COMMENT", "REQUEST_CHANGES", "APPROVE"}
                     else "COMMENT"
                 )
-                review_comments_payload = [dict(c) for c in envelope["comments"]]
+                review_comments_payload = [dict(c) for c in raw_comments]
             else:
                 rendered_body = (
                     f"ReviewSensei recovery publication ({len(pr_result.findings_payload)} finding(s)).\n"
@@ -2970,6 +2978,8 @@ class V6RecoveryEngine:
                     expected_operation_id=request.operation_id,
                     expected_payload_sha256=payload_sha256,
                 )
+            # Catch transient/dropped-reply errors before GitHubHTTPError because
+            # GitHubHTTPTransientError subclasses GitHubHTTPError.
             except (
                 _AmbiguousWriteOutcomeError,
                 TimeoutError,

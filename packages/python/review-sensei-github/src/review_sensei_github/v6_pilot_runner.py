@@ -258,6 +258,11 @@ class UrllibGitHubTransport:
                     else {}
                 )
                 raw = response.read(_MAX_GITHUB_BODY_BYTES + 1)
+                if len(raw) > _MAX_GITHUB_BODY_BYTES:
+                    raise ReviewInputError(
+                        "GitHub response body exceeds maximum size",
+                        diagnostic="v6_pr_diff_too_large",
+                    )
                 text = bytes(raw).decode("utf-8", errors="strict") if raw else ""
                 accept_header = req_headers.get("Accept", "").lower()
                 content_type = str(
@@ -843,7 +848,8 @@ class V6PilotRunner:
                 broker_fence_verifier=fence_verifier,
                 mutation_bound=MutationSanityBound(
                     max_writes=max(
-                        DEFAULT_MUTATION_SANITY_MAX_WRITES, 16 + adopted_count
+                        DEFAULT_MUTATION_SANITY_MAX_WRITES,
+                        16 + min(adopted_count, 16),
                     )
                 ),
             )
