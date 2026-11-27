@@ -116,7 +116,11 @@ describe("worker storage and v6 coordinator boundary", () => {
     expect(coordText).not.toMatch(/pulls\/\$\{[^}]+\}\/reviews/);
     expect(coordText).not.toMatch(/issues\/\$\{[^}]+\}\/comments/);
     expect(githubApiText).not.toContain("resolveReviewThread");
-    expect(githubApiText).not.toContain("/check-runs");
+    expect(githubApiText).not.toContain("/graphql");
+    expect(githubApiText).not.toContain("/git/refs");
+    expect(githubApiText).not.toMatch(
+      /"(?:POST|PATCH|PUT|DELETE)"[\s\S]{0,120}(?:\/pulls\/|\/issues\/|\/check-runs|\/comments)/,
+    );
     expect(githubApiText).not.toMatch(/"POST"[^;]*\/pulls\//);
     expect(githubApiText).not.toMatch(/"PATCH"[^;]*\/issues\/comments/);
   });

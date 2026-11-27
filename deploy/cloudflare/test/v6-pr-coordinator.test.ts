@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import contract from "../../../src/review_sensei/schemas/v6-coordinator-contract.json";
 import type { WorkerEnv } from "../src/env";
 import type {
+  LiveCheckRun,
   LiveIssueComment,
+  LiveIssueCommentPage,
+  LivePullRequestReview,
+  LivePullRequestReviewComment,
   PullRequestBinding,
   PublicWorkflowRuntimeShas,
   RevocationResult,
@@ -118,6 +122,7 @@ class FakeV6Provider implements V6ProviderAdapter {
     revocations: [],
     prReads: 0,
     commentReads: 0,
+    commentListReads: 0,
     runAttemptReads: 0,
     writes: 0,
   };
@@ -132,6 +137,10 @@ class FakeV6Provider implements V6ProviderAdapter {
   prBindings = new Map<number, PullRequestBinding | null>();
   runAttempts = new Map<string, WorkflowRunAttemptInfo | null>();
   comments = new Map<number, LiveIssueComment | null>();
+  reviews = new Map<number, LivePullRequestReview | null>();
+  reviewComments = new Map<number, LivePullRequestReviewComment | null>();
+  checkRuns = new Map<number, LiveCheckRun | null>();
+  commentsSinceOverride: LiveIssueCommentPage | null = null;
   botLogin = "reviewsensei[bot]";
   mintQueue: Array<() => Promise<{ token: string; permissions: Record<string, string>; expiresAt: string; expiresAtMs: number }>> = [];
   revokeQueue: Array<(token: string) => Promise<RevocationResult>> = [];
@@ -222,6 +231,40 @@ class FakeV6Provider implements V6ProviderAdapter {
   ): Promise<LiveIssueComment | null> {
     this.calls.commentReads += 1;
     return this.comments.get(commentId) ?? null;
+  }
+
+  async issueCommentsSince(): Promise<LiveIssueCommentPage> {
+    this.calls.commentListReads += 1;
+    if (this.commentsSinceOverride !== null) {
+      return this.commentsSinceOverride;
+    }
+    const list: LiveIssueComment[] = [];
+    for (const [id, comment] of this.comments.entries()) {
+      if (comment !== null) {
+        list.push({ ...comment, id });
+      }
+    }
+    return { comments: list, truncated: false };
+  }
+
+  async pullRequestReview(
+    _repo: string,
+    _pullRequest: number,
+    reviewId: number,
+  ): Promise<LivePullRequestReview | null> {
+    return this.reviews.get(reviewId) ?? null;
+  }
+
+  async pullRequestReviewComment(
+    _repo: string,
+    _pullRequest: number,
+    commentId: number,
+  ): Promise<LivePullRequestReviewComment | null> {
+    return this.reviewComments.get(commentId) ?? null;
+  }
+
+  async checkRun(_repo: string, checkRunId: number): Promise<LiveCheckRun | null> {
+    return this.checkRuns.get(checkRunId) ?? null;
   }
 
   async mintInstallationToken(
@@ -565,7 +608,21 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       reservation_id: first.body.reservation_id,
     });
     expect(rel42.status).toBe(200);
-    expect(rel42.body.state).toBe("IDLE");
+    expect(rel42.body.state).toBe("RECONCILING");
+    expect(rel42.body.token_cleared).toBe(true);
+
+    const rec42 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 1,
+        intent_resolutions: [],
+      },
+    });
+    expect(rec42.status).toBe(200);
+    expect(rec42.body.state).toBe("IDLE");
 
     const status43 = await engine.handleStatus(env, {
       oidc_token: "oidc-run-2",
@@ -661,7 +718,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       owner_job: "ReviewSensei v6",
       owner_comment_id: null,
       owner_record_sha256: null,
+      acquired_at_ms: null,
       token_expires_at_ms: null,
+      token_cleared: false,
       clock_margin_ms: 300_000,
       encrypted_escrow: null,
       last_reason_code: null,
@@ -727,6 +786,16 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       lease_epoch: 2,
       reservation_id: resumed.body.reservation_id,
     });
+    await fresh2.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 2,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 2,
+        intent_resolutions: [],
+      },
+    });
     provider.mintQueue.push(async () => {
       throw new Error("broker_upstream_timeout");
     });
@@ -746,7 +815,11 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       oidc_token: "oidc-run-2",
       slot_key: slotKey42,
       generation: 3,
-      reconciliation_outcome: "proved_not_submitted",
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 3,
+        intent_resolutions: [],
+      },
     });
     expect(after3h.status).toBe(409);
     expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
@@ -852,14 +925,20 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     });
     expect(drained.status).toBe(200);
     expect(drained.body.state).toBe("RECONCILING");
+    expect(drained.body.token_cleared).toBe(true);
     expect(provider.calls.revocations).toHaveLength(1);
 
-    // Reconcile completes to IDLE cleanly
+    // Reconcile completes to IDLE cleanly with verified owner + bounded empty intent inventory
     const reconciled = await engine.handleCompleteReconcile(env, {
       oidc_token: "oidc-run-2",
       slot_key: slotKey42,
       generation: 1,
-      reconciliation_outcome: "adopted",
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 1,
+        old_owner_comment_id: 9001,
+        intent_resolutions: [],
+      },
       anchor_comment_id: 9001,
     });
     expect(reconciled.status).toBe(200);
@@ -900,11 +979,24 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
         reservation_id: acq.body.reservation_id,
       });
       expect(rel.status).toBe(200);
-      expect(rel.body.state).toBe("IDLE");
+      expect(rel.body.state).toBe("RECONCILING");
+      expect(rel.body.token_cleared).toBe(true);
       expect(provider.calls.revocations.map((r) => r.token)).toEqual([
         acq.body.token,
         acq.body.token,
       ]);
+      const rec = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: {
+          old_generation: 1,
+          intent_resolutions: [],
+        },
+      });
+      expect(rec.status).toBe(200);
+      expect(rec.body.state).toBe("IDLE");
     }
 
     // B. 401 before vs after expires_at + clock_margin_ms
@@ -937,13 +1029,57 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       });
       expect((await store.getSlot(slotKey42))?.state).toBe("RECONCILING");
 
-      // Advance past token_expires_at_ms + 300_000
+      // Advance past token_expires_at_ms + 300_000 and supply verified non-submission evidence
+      const cryptoB = new V6EscrowCrypto(SIGNING_KEY);
+      const payloadSha = "b".repeat(64);
+      provider.comments.set(
+        9201,
+        await buildLedgerComment(cryptoB, {
+          schema: "reviewsensei:v6:intent:v1",
+          record_id: "rec-intent-b",
+          operation_id: "op-b",
+          writer_epoch: 1,
+          pr_head_sha: HEAD_SHA_1,
+          effect_kind: "pull_request_review",
+          payload_sha256: payloadSha,
+          target_digest: "d".repeat(64),
+          generation: 1,
+          target_location: "pr:42",
+        }),
+      );
+      provider.comments.set(
+        9202,
+        await buildLedgerComment(cryptoB, {
+          schema: "reviewsensei:v6:non-submission:v1",
+          record_id: "rec-nonsub-b",
+          slot_key: slotKey42,
+          generation: 1,
+          operation_id: "op-b",
+          pr_head_sha: HEAD_SHA_1,
+          proof_kind: "definitive_github_rejection",
+          payload_sha256: payloadSha,
+          recorded_at: "2026-11-27T00:05:00Z",
+          http_status: 422,
+          diagnostic: "rejected",
+        }),
+      );
       clock.now = expiresAtMs + 300_000;
       const done = await engine.handleCompleteReconcile(env, {
         oidc_token: "oidc-run-1",
         slot_key: slotKey42,
         generation: 1,
         reconciliation_outcome: "proved_not_submitted",
+        reconciliation_evidence: {
+          old_generation: 1,
+          intent_resolutions: [
+            {
+              operation_id: "op-b",
+              intent_comment_id: 9201,
+              resolution: "proved_not_submitted",
+              proof_comment_id: 9202,
+            },
+          ],
+        },
       });
       expect(done.status).toBe(200);
       expect(done.body.state).toBe("IDLE");
@@ -971,7 +1107,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
         owner_job: "ReviewSensei v6",
         owner_comment_id: null,
         owner_record_sha256: null,
+        acquired_at_ms: null,
         token_expires_at_ms: null,
+        token_cleared: false,
         clock_margin_ms: 300_000,
         encrypted_escrow: escrow,
         last_reason_code: null,
@@ -1087,7 +1225,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
 
     // F. Untrusted clock & escrow loss with surviving inventory
     {
-      const { env, clock, engine, store, slotKey42 } = createHarness();
+      const { env, clock, engine, provider, store, slotKey42 } = createHarness();
       clock.trusted = false;
       const untrusted = await engine.handleAcquire(env, {
         oidc_token: "oidc-run-1",
@@ -1113,7 +1251,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
         owner_job: "ReviewSensei v6",
         owner_comment_id: null,
         owner_record_sha256: null,
+        acquired_at_ms: null,
         token_expires_at_ms: expiresAtMs,
+        token_cleared: false,
         clock_margin_ms: 300_000,
         encrypted_escrow: null,
         last_reason_code: null,
@@ -1130,12 +1270,51 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       expect(waitLost.body.diagnostic).toMatchObject({ code: "v6_lease_escrow_lost" });
       expect((await store.getSlot(slotKey42))?.state).toBe("RECONCILING");
 
+      const cryptoAfter = new V6EscrowCrypto(SIGNING_KEY);
+      const adoptedSha = "e".repeat(64);
+      provider.comments.set(
+        9301,
+        await buildLedgerComment(cryptoAfter, {
+          schema: "reviewsensei:v6:intent:v1",
+          record_id: "rec-intent-after",
+          operation_id: "op-after",
+          writer_epoch: 1,
+          pr_head_sha: HEAD_SHA_1,
+          effect_kind: "pull_request_review",
+          payload_sha256: adoptedSha,
+          target_digest: "f".repeat(64),
+          generation: 1,
+          target_location: "pr:42",
+        }),
+      );
+      provider.reviews.set(5009, {
+        id: 5009,
+        login: "reviewsensei[bot]",
+        userType: "Bot",
+        commit_id: HEAD_SHA_1,
+        body: `Review body <!-- reviewsensei:v6:effect op=op-after sha256=${adoptedSha} -->`,
+        state: "COMMENTED",
+        performedViaAppId: 12345,
+      });
+
       clock.now = expiresAtMs + 300_000;
       const resolvedAfterMargin = await engine.handleCompleteReconcile(env, {
         oidc_token: "oidc-run-1",
         slot_key: slotKey42,
         generation: 1,
-        reconciliation_outcome: "adopted",
+        reconciliation_outcome: "adopted_missing_receipt",
+        reconciliation_evidence: {
+          old_generation: 1,
+          intent_resolutions: [
+            {
+              operation_id: "op-after",
+              intent_comment_id: 9301,
+              resolution: "adopted_effect",
+              native_effect_kind: "pull_request_review",
+              native_effect_id: 5009,
+            },
+          ],
+        },
       });
       expect(resolvedAfterMargin.status).toBe(200);
       expect(resolvedAfterMargin.body.state).toBe("IDLE");
@@ -1164,7 +1343,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       owner_job: null,
       owner_comment_id: null,
       owner_record_sha256: null,
+      acquired_at_ms: null,
       token_expires_at_ms: null,
+      token_cleared: false,
       last_reason_code: null,
       updated_at_ms: null,
     });
@@ -1325,7 +1506,21 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       reservation_id: acqBeforeRollback.body.reservation_id,
     });
     expect(rollbackRelease.status).toBe(200);
-    expect(rollbackRelease.body.state).toBe("IDLE");
+    expect(rollbackRelease.body.state).toBe("RECONCILING");
+    expect(rollbackRelease.body.token_cleared).toBe(true);
+
+    const rollbackReconcile = await engine.handleCompleteReconcile(rollbackEnv, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 4,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 4,
+        intent_resolutions: [],
+      },
+    });
+    expect(rollbackReconcile.status).toBe(200);
+    expect(rollbackReconcile.body.state).toBe("IDLE");
 
     expect(provider.calls.writes).toBe(0);
   });
@@ -1661,7 +1856,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       owner_job: "ReviewSensei v6",
       owner_comment_id: null,
       owner_record_sha256: null,
+      acquired_at_ms: null,
       token_expires_at_ms: clock.now - 400_000,
+      token_cleared: false,
       clock_margin_ms: 300_000,
       encrypted_escrow: null,
       last_reason_code: "v6_lease_hold",
@@ -1786,7 +1983,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       owner_job: "ReviewSensei v6",
       owner_comment_id: null,
       owner_record_sha256: null,
+      acquired_at_ms: null,
       token_expires_at_ms: null,
+      token_cleared: false,
       clock_margin_ms: 300_000,
       encrypted_escrow: null,
       last_reason_code: null,
@@ -1830,7 +2029,9 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       owner_job: "ReviewSensei v6",
       owner_comment_id: null,
       owner_record_sha256: null,
+      acquired_at_ms: null,
       token_expires_at_ms: null,
+      token_cleared: false,
       clock_margin_ms: 300_000,
       encrypted_escrow: null,
       last_reason_code: null,
@@ -1880,5 +2081,328 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     });
     expect(racedDrain.status).toBe(409);
     expect(racedDrain.body.diagnostic).toMatchObject({ code: "v6_lease_draining" });
+  });
+
+  it("rejects non-4-multiple base64 strings cleanly in escrow unsealing (RS-061BF3)", async () => {
+    const crypto = new V6EscrowCrypto(SIGNING_KEY);
+    const aad = { slot_key: "v6-pr:github.com:12345:67890:987654321:42", generation: 1, reservation_id: "res-1" };
+    await expect(
+      crypto.unsealToken({ v: 1, alg: "A256GCM", iv_b64: "abc", ct_b64: "AAAAAAAAAAAAAAAAAAAAAA==" }, aad),
+    ).rejects.toThrow("v6_lease_escrow_lost");
+    await expect(
+      crypto.unsealToken({ v: 1, alg: "A256GCM", iv_b64: "AAAAAAAAAAAAAAAA", ct_b64: "ab" }, aad),
+    ).rejects.toThrow("v6_lease_escrow_lost");
+  });
+
+  it("enforces Two-Gate separation, live effect adoption via resolve-hold, and clean_receipts Gen-2 cycle", async () => {
+    const { env, engine, provider, store, slotKey42 } = createHarness();
+    const crypto = new V6EscrowCrypto(SIGNING_KEY);
+
+    // Generation 1 acquires, posts owner + intent + live review 5001, then crashes before receipt.
+    const gen1 = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(gen1.status).toBe(200);
+    expect(gen1.body.generation).toBe(1);
+    const gen1Slot = await store.getSlot(slotKey42);
+    expect(gen1Slot?.token_cleared).toBe(false);
+    expect(gen1Slot?.acquired_at_ms).toBeTypeOf("number");
+
+    const ownerMac1 = await crypto.signOwnerAttestation({
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: gen1.body.reservation_id as string,
+      run_id: "10001",
+      run_attempt: 1,
+      pr_head_sha: HEAD_SHA_1,
+      workflow_sha: WORKFLOW_SHA,
+    });
+    provider.comments.set(
+      9401,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:owner:v1",
+        record_id: "rec-owner-gen1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: gen1.body.reservation_id,
+        operation_id: "op-gen1",
+        run_id: "10001",
+        run_attempt: 1,
+        pr_head_sha: HEAD_SHA_1,
+        workflow_sha: WORKFLOW_SHA,
+        acquired_at: "2026-11-27T00:00:00Z",
+        expires_at: "2026-11-27T01:00:00Z",
+        coordinator_attestation_mac: ownerMac1,
+      }),
+    );
+    const payloadSha1 = "1".repeat(64);
+    provider.comments.set(
+      9402,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:intent:v1",
+        record_id: "rec-intent-gen1",
+        operation_id: "op-gen1",
+        writer_epoch: 1,
+        pr_head_sha: HEAD_SHA_1,
+        effect_kind: "pull_request_review",
+        payload_sha256: payloadSha1,
+        target_digest: "2".repeat(64),
+        generation: 1,
+        target_location: "pr:42",
+      }),
+    );
+    provider.reviews.set(5001, {
+      id: 5001,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      commit_id: HEAD_SHA_1,
+      body: `LGTM <!-- reviewsensei:v6:effect op=op-gen1 sha256=${payloadSha1} -->`,
+      state: "COMMENTED",
+      performedViaAppId: 12345,
+    });
+
+    // Gate 1: Run 2 drains crashed Gen 1 -> RECONCILING (token_cleared=true), /acquire still blocked.
+    provider.runAttempts.set("10001:1", {
+      run_id: "10001",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "failure",
+      head_sha: HEAD_SHA_1,
+    });
+    const drained = await engine.handleDrain(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      expected_generation: 1,
+      predecessor_anchor_comment_id: 9401,
+    });
+    expect(drained.status).toBe(200);
+    expect(drained.body).toMatchObject({
+      state: "RECONCILING",
+      generation: 1,
+      token_cleared: true,
+    });
+
+    const blockedAcq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(blockedAcq.status).toBe(409);
+    expect(blockedAcq.body.diagnostic).toMatchObject({ code: "v6_lease_reconciling" });
+
+    // Bare runner claim without intent coverage fails closed to HOLD!
+    const bareClaim = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "adopted_missing_receipt",
+      reconciliation_evidence: {
+        old_generation: 1,
+        old_owner_comment_id: 9401,
+        intent_resolutions: [],
+      },
+    });
+    expect(bareClaim.status).toBe(409);
+    expect(bareClaim.body.diagnostic).toMatchObject({
+      code: "v6_lease_reconciliation_evidence_invalid",
+    });
+    expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
+
+    // Resolve hold back into RECONCILING with verified hold:v1 comment.
+    provider.comments.set(
+      9403,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:hold:v1",
+        record_id: "rec-hold-gen1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        operation_id: "op-gen1",
+        pr_head_sha: HEAD_SHA_1,
+        reason_code: "v6_lease_reconciliation_evidence_invalid",
+        missing_evidence: ["intent:op-gen1"],
+        held_at: "2026-11-27T00:05:00Z",
+        resolved_by_record_id: null,
+      }),
+    );
+    const enteredReconcile = await engine.handleResolveHold(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      hold_record_comment_id: 9403,
+      resolution_kind: "enter_reconcile",
+      anchor_comment_id: 9401,
+    });
+    expect(enteredReconcile.status).toBe(200);
+    expect(enteredReconcile.body.state).toBe("RECONCILING");
+
+    // Gate 2: Complete reconcile with verified live review 5001 -> IDLE!
+    const adoptedDone = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "adopted_missing_receipt",
+      reconciliation_evidence: {
+        old_generation: 1,
+        old_owner_comment_id: 9401,
+        intent_resolutions: [
+          {
+            operation_id: "op-gen1",
+            intent_comment_id: 9402,
+            resolution: "adopted_effect",
+            native_effect_kind: "pull_request_review",
+            native_effect_id: 5001,
+          },
+        ],
+      },
+    });
+    expect(adoptedDone.status).toBe(200);
+    expect(adoptedDone.body.state).toBe("IDLE");
+
+    // Generation 2 acquires, posts intent + receipt, runs Gate 1 /release -> RECONCILING -> Gate 2 clean_receipts -> IDLE.
+    const gen2 = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+      predecessor_anchor_comment_id: 9401,
+    });
+    expect(gen2.status).toBe(200);
+    expect(gen2.body.generation).toBe(2);
+
+    const payloadSha2 = "3".repeat(64);
+    provider.comments.set(
+      9404,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:intent:v1",
+        record_id: "rec-intent-gen2",
+        operation_id: "op-gen2",
+        writer_epoch: 2,
+        pr_head_sha: HEAD_SHA_1,
+        effect_kind: "pull_request_review",
+        payload_sha256: payloadSha2,
+        target_digest: "4".repeat(64),
+        generation: 2,
+        target_location: "pr:42",
+      }),
+    );
+    provider.comments.set(
+      9405,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:receipt:v1",
+        record_id: "rec-receipt-gen2",
+        operation_id: "op-gen2",
+        writer_epoch: 2,
+        github_effect_id: 5002,
+        payload_sha256: payloadSha2,
+        completed_at: "2026-11-27T00:08:00Z",
+      }),
+    );
+
+    const relGen2 = await engine.handleRelease(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 2,
+      lease_epoch: 2,
+      reservation_id: gen2.body.reservation_id,
+    });
+    expect(relGen2.status).toBe(200);
+    expect(relGen2.body).toMatchObject({ state: "RECONCILING", token_cleared: true });
+
+    const recGen2 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 2,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 2,
+        intent_resolutions: [
+          {
+            operation_id: "op-gen2",
+            intent_comment_id: 9404,
+            resolution: "receipt_present",
+            receipt_comment_id: 9405,
+          },
+        ],
+      },
+    });
+    expect(recGen2.status).toBe(200);
+    expect(recGen2.body.state).toBe("IDLE");
+  });
+
+  it("rejects empty proved_not_submitted and truncated issueCommentsSince to HOLD without pagination", async () => {
+    // 1. Empty intent_resolutions with proved_not_submitted is never accepted -> HOLD
+    {
+      const { env, engine, store, slotKey42 } = createHarness();
+      const acq = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      await engine.handleRelease(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: acq.body.reservation_id,
+      });
+      const emptyNonSub = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "proved_not_submitted",
+        reconciliation_evidence: {
+          old_generation: 1,
+          intent_resolutions: [],
+        },
+      });
+      expect(emptyNonSub.status).toBe(409);
+      expect(emptyNonSub.body.diagnostic).toMatchObject({
+        code: "v6_lease_reconciliation_evidence_invalid",
+      });
+      expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
+    }
+
+    // 2. Truncated issueCommentsSince fails closed to HOLD in a single bounded call
+    {
+      const { env, engine, provider, store, slotKey42 } = createHarness();
+      const acq = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      await engine.handleRelease(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: acq.body.reservation_id,
+      });
+      provider.commentsSinceOverride = { comments: [], truncated: true };
+      const trunc = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: {
+          old_generation: 1,
+          intent_resolutions: [],
+        },
+      });
+      expect(trunc.status).toBe(409);
+      expect(trunc.body.diagnostic).toMatchObject({
+        code: "v6_lease_reconciliation_evidence_invalid",
+      });
+      expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
+      expect(provider.calls.commentListReads).toBe(1);
+    }
   });
 });

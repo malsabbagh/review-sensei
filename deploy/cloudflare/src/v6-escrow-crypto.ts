@@ -48,7 +48,7 @@ function toBase64(bytes: Uint8Array): string {
 }
 
 function fromBase64(value: string): Uint8Array | null {
-  if (typeof value !== "string" || value.length === 0 || value.length % 4 === 1) {
+  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0) {
     return null;
   }
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {

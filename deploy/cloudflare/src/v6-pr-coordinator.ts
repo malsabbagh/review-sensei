@@ -4,7 +4,11 @@ import type { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
 import {
   GitHubApi,
+  type LiveCheckRun,
   type LiveIssueComment,
+  type LiveIssueCommentPage,
+  type LivePullRequestReview,
+  type LivePullRequestReviewComment,
   type PullRequestBinding,
   type PublicWorkflowRuntimeShas,
   type RevocationResult,
@@ -61,7 +65,8 @@ export type V6DiagnosticCode =
   | "v6_lease_slot_continuity_unproved"
   | "v6_lease_unauthorized_tuple"
   | "v6_lease_rollback_blocked"
-  | "v6_lease_mint_uncertain";
+  | "v6_lease_mint_uncertain"
+  | "v6_lease_reconciliation_evidence_invalid";
 
 const VALID_COORDINATOR_STATES = new Set<CoordinatorState>([
   "IDLE",
@@ -91,6 +96,7 @@ const VALID_V6_DIAGNOSTIC_CODES = new Set<V6DiagnosticCode>([
   "v6_lease_unauthorized_tuple",
   "v6_lease_rollback_blocked",
   "v6_lease_mint_uncertain",
+  "v6_lease_reconciliation_evidence_invalid",
 ]);
 
 export interface SlotRecord {
@@ -106,7 +112,9 @@ export interface SlotRecord {
   owner_job: string | null;
   owner_comment_id: number | null;
   owner_record_sha256: string | null;
+  acquired_at_ms: number | null;
   token_expires_at_ms: number | null;
+  token_cleared: boolean;
   clock_margin_ms: number;
   encrypted_escrow: EncryptedEscrow | null;
   last_reason_code: V6DiagnosticCode | null;
@@ -162,6 +170,29 @@ export interface V6ProviderAdapter {
     commentId: number,
     token: string,
   ): Promise<LiveIssueComment | null>;
+  issueCommentsSince(
+    repository: string,
+    pullRequest: number,
+    sinceIso: string,
+    token: string,
+  ): Promise<LiveIssueCommentPage>;
+  pullRequestReview(
+    repository: string,
+    pullRequest: number,
+    reviewId: number,
+    token: string,
+  ): Promise<LivePullRequestReview | null>;
+  pullRequestReviewComment(
+    repository: string,
+    pullRequest: number,
+    commentId: number,
+    token: string,
+  ): Promise<LivePullRequestReviewComment | null>;
+  checkRun(
+    repository: string,
+    checkRunId: number,
+    token: string,
+  ): Promise<LiveCheckRun | null>;
   mintInstallationToken(
     installationId: number,
     repository: string,
@@ -218,13 +249,30 @@ const ALLOWED_EVENTS = new Set([
 ]);
 
 const ALLOWED_RECONCILE_OUTCOMES = new Set([
-  "adopted",
+  "clean_receipts",
+  "adopted_missing_receipt",
   "proved_not_submitted",
   "ambiguous_hold",
   "incomplete",
 ]);
 
-const TERMINAL_RECONCILE_OUTCOMES = new Set(["adopted", "proved_not_submitted"]);
+const TERMINAL_RECONCILE_OUTCOMES = new Set([
+  "clean_receipts",
+  "adopted_missing_receipt",
+  "proved_not_submitted",
+]);
+const ALLOWED_INTENT_RESOLUTIONS = new Set([
+  "receipt_present",
+  "adopted_effect",
+  "proved_not_submitted",
+  "ambiguous_hold",
+]);
+const ALLOWED_NATIVE_EFFECT_KINDS = new Set([
+  "pull_request_review",
+  "pull_request_review_comment",
+  "issue_comment",
+  "check_run",
+]);
 const ALLOWED_HOLD_RESOLUTIONS = new Set(["reconciled_clean", "enter_reconcile"]);
 
 const SYSTEM_CLOCK: V6Clock = {
@@ -465,7 +513,9 @@ function absentSlotView(slotKey: string): Record<string, unknown> {
     owner_job: null,
     owner_comment_id: null,
     owner_record_sha256: null,
+    acquired_at_ms: null,
     token_expires_at_ms: null,
+    token_cleared: false,
     last_reason_code: null,
     updated_at_ms: null,
   };
@@ -485,7 +535,9 @@ function slotStatusView(slot: SlotRecord): Record<string, unknown> {
     owner_job: slot.owner_job,
     owner_comment_id: slot.owner_comment_id,
     owner_record_sha256: slot.owner_record_sha256,
+    acquired_at_ms: slot.acquired_at_ms,
     token_expires_at_ms: slot.token_expires_at_ms,
+    token_cleared: slot.token_cleared,
     last_reason_code: slot.last_reason_code,
     updated_at_ms: slot.updated_at_ms,
   };
@@ -709,6 +761,106 @@ function isValidHoldRecordShape(record: Record<string, unknown>): boolean {
   );
 }
 
+function isValidIntentRecordShape(record: Record<string, unknown>): boolean {
+  const required = [
+    "schema",
+    "record_id",
+    "operation_id",
+    "writer_epoch",
+    "pr_head_sha",
+    "effect_kind",
+    "payload_sha256",
+    "target_digest",
+    "generation",
+    "target_location",
+  ];
+  if (required.some((field) => !Object.hasOwn(record, field))) {
+    return false;
+  }
+  return (
+    record.schema === "reviewsensei:v6:intent:v1" &&
+    typeof record.record_id === "string" &&
+    record.record_id.length > 0 &&
+    typeof record.operation_id === "string" &&
+    record.operation_id.length > 0 &&
+    isNonNegativeSafeInt(record.writer_epoch) &&
+    typeof record.pr_head_sha === "string" &&
+    SHA1_HEX40_PATTERN.test(record.pr_head_sha) &&
+    typeof record.effect_kind === "string" &&
+    record.effect_kind.length > 0 &&
+    typeof record.payload_sha256 === "string" &&
+    SHA256_HEX64_PATTERN.test(record.payload_sha256) &&
+    typeof record.target_digest === "string" &&
+    isPositiveSafeInt(record.generation) &&
+    typeof record.target_location === "string" &&
+    record.target_location.length > 0
+  );
+}
+
+function isValidReceiptRecordShape(record: Record<string, unknown>): boolean {
+  const required = [
+    "schema",
+    "record_id",
+    "operation_id",
+    "writer_epoch",
+    "github_effect_id",
+    "payload_sha256",
+    "completed_at",
+  ];
+  if (required.some((field) => !Object.hasOwn(record, field))) {
+    return false;
+  }
+  return (
+    record.schema === "reviewsensei:v6:receipt:v1" &&
+    typeof record.record_id === "string" &&
+    record.record_id.length > 0 &&
+    typeof record.operation_id === "string" &&
+    record.operation_id.length > 0 &&
+    isNonNegativeSafeInt(record.writer_epoch) &&
+    ((typeof record.github_effect_id === "string" && record.github_effect_id.length > 0) ||
+      isPositiveSafeInt(record.github_effect_id)) &&
+    typeof record.payload_sha256 === "string" &&
+    SHA256_HEX64_PATTERN.test(record.payload_sha256) &&
+    typeof record.completed_at === "string" &&
+    Number.isFinite(Date.parse(record.completed_at))
+  );
+}
+
+function isValidNonSubmissionRecordShape(record: Record<string, unknown>): boolean {
+  const required = [
+    "schema",
+    "record_id",
+    "slot_key",
+    "generation",
+    "operation_id",
+    "pr_head_sha",
+    "proof_kind",
+    "payload_sha256",
+    "recorded_at",
+  ];
+  if (required.some((field) => !Object.hasOwn(record, field))) {
+    return false;
+  }
+  return (
+    record.schema === "reviewsensei:v6:non-submission:v1" &&
+    typeof record.record_id === "string" &&
+    record.record_id.length > 0 &&
+    typeof record.slot_key === "string" &&
+    V6_SLOT_KEY_PATTERN.test(record.slot_key) &&
+    isPositiveSafeInt(record.generation) &&
+    typeof record.operation_id === "string" &&
+    record.operation_id.length > 0 &&
+    typeof record.pr_head_sha === "string" &&
+    SHA1_HEX40_PATTERN.test(record.pr_head_sha) &&
+    (record.proof_kind === "definitive_github_rejection" ||
+      record.proof_kind === "pre_dispatch_terminal_abort") &&
+    typeof record.payload_sha256 === "string" &&
+    SHA256_HEX64_PATTERN.test(record.payload_sha256) &&
+    typeof record.recorded_at === "string" &&
+    Number.isFinite(Date.parse(record.recorded_at))
+  );
+}
+
 /**
  * In-memory durable store used by deterministic Phase 4 unit tests.
  * Deep-clones records on every read and write so crash/restart tests see real serialization boundaries.
@@ -746,6 +898,8 @@ export function validateSlotRecord(record: SlotRecord, expectedSlotKey: string):
     !VALID_COORDINATOR_STATES.has(record.state) ||
     !isNonNegativeSafeInt(record.generation) ||
     !isNonNegativeSafeInt(record.lease_epoch) ||
+    (record.acquired_at_ms !== null && !isPositiveSafeInt(record.acquired_at_ms)) ||
+    typeof record.token_cleared !== "boolean" ||
     !isNonNegativeSafeInt(record.clock_margin_ms) ||
     !isNonNegativeSafeInt(record.updated_at_ms) ||
     (record.last_reason_code !== null &&
@@ -785,13 +939,27 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
         owner_job TEXT,
         owner_comment_id INTEGER,
         owner_record_sha256 TEXT,
+        acquired_at_ms INTEGER,
         token_expires_at_ms INTEGER,
+        token_cleared INTEGER NOT NULL DEFAULT 0,
         clock_margin_ms INTEGER NOT NULL,
         encrypted_escrow TEXT,
         last_reason_code TEXT,
         updated_at_ms INTEGER NOT NULL
       )
     `);
+    const columns = this.sql
+      .exec<{ name: SqlStorageValue }>("PRAGMA table_info(v6_pr_slot)")
+      .toArray()
+      .map((col) => String(col.name));
+    if (columns.length > 0) {
+      if (!columns.includes("acquired_at_ms")) {
+        this.sql.exec("ALTER TABLE v6_pr_slot ADD COLUMN acquired_at_ms INTEGER");
+      }
+      if (!columns.includes("token_cleared")) {
+        this.sql.exec("ALTER TABLE v6_pr_slot ADD COLUMN token_cleared INTEGER NOT NULL DEFAULT 0");
+      }
+    }
     this.initialized = true;
   }
 
@@ -802,7 +970,8 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
         `SELECT slot_key, state, generation, lease_epoch, reservation_id,
                 owner_run_id, owner_run_attempt, owner_head_sha, owner_workflow_sha,
                 owner_job, owner_comment_id, owner_record_sha256,
-                token_expires_at_ms, clock_margin_ms, encrypted_escrow,
+                acquired_at_ms, token_expires_at_ms, token_cleared,
+                clock_margin_ms, encrypted_escrow,
                 last_reason_code, updated_at_ms
            FROM v6_pr_slot
           WHERE slot_key = ?`,
@@ -823,6 +992,13 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
       row.last_reason_code !== null &&
       (typeof row.last_reason_code !== "string" ||
         !VALID_V6_DIAGNOSTIC_CODES.has(row.last_reason_code as V6DiagnosticCode))
+    ) {
+      throw new Error("v6_lease_escrow_lost");
+    }
+    if (
+      row.token_cleared !== 0 &&
+      row.token_cleared !== 1 &&
+      typeof row.token_cleared !== "boolean"
     ) {
       throw new Error("v6_lease_escrow_lost");
     }
@@ -858,8 +1034,11 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
           row.owner_comment_id === null ? null : Number(row.owner_comment_id),
         owner_record_sha256:
           row.owner_record_sha256 === null ? null : String(row.owner_record_sha256),
+        acquired_at_ms:
+          row.acquired_at_ms === null ? null : Number(row.acquired_at_ms),
         token_expires_at_ms:
           row.token_expires_at_ms === null ? null : Number(row.token_expires_at_ms),
+        token_cleared: Boolean(row.token_cleared),
         clock_margin_ms: Number(row.clock_margin_ms),
         encrypted_escrow: parsedEscrow,
         last_reason_code:
@@ -881,9 +1060,10 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
          slot_key, state, generation, lease_epoch, reservation_id,
          owner_run_id, owner_run_attempt, owner_head_sha, owner_workflow_sha,
          owner_job, owner_comment_id, owner_record_sha256,
-         token_expires_at_ms, clock_margin_ms, encrypted_escrow,
+         acquired_at_ms, token_expires_at_ms, token_cleared,
+         clock_margin_ms, encrypted_escrow,
          last_reason_code, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(slot_key) DO UPDATE SET
          state = excluded.state,
          generation = excluded.generation,
@@ -896,7 +1076,9 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
          owner_job = excluded.owner_job,
          owner_comment_id = excluded.owner_comment_id,
          owner_record_sha256 = excluded.owner_record_sha256,
+         acquired_at_ms = excluded.acquired_at_ms,
          token_expires_at_ms = excluded.token_expires_at_ms,
+         token_cleared = excluded.token_cleared,
          clock_margin_ms = excluded.clock_margin_ms,
          encrypted_escrow = excluded.encrypted_escrow,
          last_reason_code = excluded.last_reason_code,
@@ -913,7 +1095,9 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
       record.owner_job,
       record.owner_comment_id,
       record.owner_record_sha256,
+      record.acquired_at_ms,
       record.token_expires_at_ms,
+      record.token_cleared ? 1 : 0,
       record.clock_margin_ms,
       escrowJson,
       record.last_reason_code,
@@ -994,6 +1178,47 @@ export class GitHubV6ProviderAdapter implements V6ProviderAdapter {
       token,
       V6_PR_LEDGER_MAX_BYTES,
     );
+  }
+
+  async issueCommentsSince(
+    repository: string,
+    pullRequest: number,
+    sinceIso: string,
+    token: string,
+  ): Promise<LiveIssueCommentPage> {
+    return this.github.issueCommentsSince(
+      repository,
+      pullRequest,
+      sinceIso,
+      token,
+      V6_PR_LEDGER_MAX_BYTES,
+    );
+  }
+
+  async pullRequestReview(
+    repository: string,
+    pullRequest: number,
+    reviewId: number,
+    token: string,
+  ): Promise<LivePullRequestReview | null> {
+    return this.github.pullRequestReview(repository, pullRequest, reviewId, token);
+  }
+
+  async pullRequestReviewComment(
+    repository: string,
+    pullRequest: number,
+    commentId: number,
+    token: string,
+  ): Promise<LivePullRequestReviewComment | null> {
+    return this.github.pullRequestReviewComment(repository, pullRequest, commentId, token);
+  }
+
+  async checkRun(
+    repository: string,
+    checkRunId: number,
+    token: string,
+  ): Promise<LiveCheckRun | null> {
+    return this.github.checkRun(repository, checkRunId, token);
   }
 
   async mintInstallationToken(
@@ -1288,11 +1513,23 @@ export class V6PrCoordinatorEngine {
       if (!validMac) {
         throw new Error("v6_lease_slot_continuity_unproved");
       }
-    } else if (
-      schema !== "reviewsensei:v6:intent:v1" &&
-      schema !== "reviewsensei:v6:receipt:v1" &&
-      schema !== "reviewsensei:v6:hold:v1"
-    ) {
+    } else if (schema === "reviewsensei:v6:intent:v1") {
+      if (!isValidIntentRecordShape(parsed.payload)) {
+        throw new Error("v6_lease_slot_continuity_unproved");
+      }
+    } else if (schema === "reviewsensei:v6:receipt:v1") {
+      if (!isValidReceiptRecordShape(parsed.payload)) {
+        throw new Error("v6_lease_slot_continuity_unproved");
+      }
+    } else if (schema === "reviewsensei:v6:non-submission:v1") {
+      if (!isValidNonSubmissionRecordShape(parsed.payload)) {
+        throw new Error("v6_lease_slot_continuity_unproved");
+      }
+    } else if (schema === "reviewsensei:v6:hold:v1") {
+      if (!isValidHoldRecordShape(parsed.payload)) {
+        throw new Error("v6_lease_slot_continuity_unproved");
+      }
+    } else {
       throw new Error("v6_lease_slot_continuity_unproved");
     }
     return { comment, parsed };
@@ -1357,6 +1594,12 @@ export class V6PrCoordinatorEngine {
     if (!this.clock.isTrusted()) {
       return { cleared: false, reason: "v6_lease_clock_untrusted", nextState: "HOLD" };
     }
+    if (slot.token_cleared) {
+      if (slot.encrypted_escrow !== null) {
+        return { cleared: false, reason: "v6_lease_escrow_lost", nextState: "HOLD" };
+      }
+      return { cleared: true, clearReasonCode: true };
+    }
     if (slot.encrypted_escrow !== null) {
       if (
         isPositiveSafeInt(slot.token_expires_at_ms) &&
@@ -1387,16 +1630,13 @@ export class V6PrCoordinatorEngine {
         retryAfterMs: slot.token_expires_at_ms + slot.clock_margin_ms - this.clock.nowMs(),
       };
     }
-    // `token_expires_at_ms === null` and `encrypted_escrow === null`:
-    // Only cleared when `last_reason_code === null` (already confirmed 204 revocation).
-    if (slot.last_reason_code === null) {
-      return { cleared: true, clearReasonCode: true };
+    // `token_cleared === false`, `encrypted_escrow === null`, and `token_expires_at_ms === null`:
+    // fail closed (e.g., unobserved mint timeout or 401 without known expiry).
+    if (slot.last_reason_code === "v6_lease_clock_untrusted") {
+      return { cleared: false, reason: "v6_lease_clock_untrusted", nextState: "HOLD" };
     }
     if (slot.last_reason_code === "v6_lease_escrow_lost") {
       return { cleared: false, reason: "v6_lease_escrow_lost", nextState: "HOLD" };
-    }
-    if (slot.last_reason_code === "v6_lease_clock_untrusted") {
-      return { cleared: false, reason: "v6_lease_clock_untrusted", nextState: "HOLD" };
     }
     return { cleared: false, reason: "v6_lease_revocation_uncertain", nextState: "HOLD" };
   }
@@ -1412,10 +1652,21 @@ export class V6PrCoordinatorEngine {
     diagnostic?: V6DiagnosticCode;
     retryAfterMs?: number;
   }> {
+    const clearFields = {
+      state: nextStateOnClear,
+      reservation_id: null,
+      acquired_at_ms: nextStateOnClear === "IDLE" ? null : slot.acquired_at_ms,
+      encrypted_escrow: null,
+      token_expires_at_ms: null,
+      token_cleared: nextStateOnClear === "RECONCILING",
+      last_reason_code: null,
+    } as const;
+
     if (!this.clock.isTrusted()) {
       const held: SlotRecord = {
         ...slot,
         state: "HOLD",
+        token_cleared: false,
         last_reason_code: "v6_lease_clock_untrusted",
         updated_at_ms: this.clock.nowMs(),
       };
@@ -1431,6 +1682,7 @@ export class V6PrCoordinatorEngine {
         const held: SlotRecord = {
           ...slot,
           state: "HOLD",
+          token_cleared: false,
           last_reason_code: "v6_lease_escrow_lost",
           updated_at_ms: this.clock.nowMs(),
         };
@@ -1444,11 +1696,7 @@ export class V6PrCoordinatorEngine {
       if (this.clock.nowMs() >= expiryThreshold) {
         const cleared: SlotRecord = {
           ...slot,
-          state: nextStateOnClear,
-          reservation_id: null,
-          encrypted_escrow: null,
-          token_expires_at_ms: null,
-          last_reason_code: null,
+          ...clearFields,
           updated_at_ms: this.clock.nowMs(),
         };
         return { updatedSlot: cleared, revocationStatus: "expired_past_margin" };
@@ -1456,6 +1704,7 @@ export class V6PrCoordinatorEngine {
       const waiting: SlotRecord = {
         ...slot,
         state: "RECONCILING",
+        token_cleared: false,
         last_reason_code: "v6_lease_escrow_lost",
         updated_at_ms: this.clock.nowMs(),
       };
@@ -1487,11 +1736,7 @@ export class V6PrCoordinatorEngine {
       ) {
         const cleared: SlotRecord = {
           ...slot,
-          state: nextStateOnClear,
-          reservation_id: null,
-          encrypted_escrow: null,
-          token_expires_at_ms: null,
-          last_reason_code: null,
+          ...clearFields,
           updated_at_ms: this.clock.nowMs(),
         };
         return { updatedSlot: cleared, revocationStatus: "expired_past_margin" };
@@ -1499,6 +1744,7 @@ export class V6PrCoordinatorEngine {
       const held: SlotRecord = {
         ...slot,
         state: "HOLD",
+        token_cleared: false,
         last_reason_code: "v6_lease_escrow_lost",
         updated_at_ms: this.clock.nowMs(),
       };
@@ -1516,11 +1762,7 @@ export class V6PrCoordinatorEngine {
       if (lastResult.kind === "http_204") {
         const cleared: SlotRecord = {
           ...slot,
-          state: nextStateOnClear,
-          reservation_id: null,
-          encrypted_escrow: null,
-          token_expires_at_ms: null,
-          last_reason_code: null,
+          ...clearFields,
           updated_at_ms: this.clock.nowMs(),
         };
         return { updatedSlot: cleared, revocationStatus: "confirmed_revoked" };
@@ -1532,6 +1774,7 @@ export class V6PrCoordinatorEngine {
           const held: SlotRecord = {
             ...slot,
             state: "HOLD",
+            token_cleared: false,
             last_reason_code: "v6_lease_escrow_lost",
             updated_at_ms: this.clock.nowMs(),
           };
@@ -1545,6 +1788,7 @@ export class V6PrCoordinatorEngine {
           const held: SlotRecord = {
             ...slot,
             state: "HOLD",
+            token_cleared: false,
             last_reason_code: "v6_lease_clock_untrusted",
             updated_at_ms: this.clock.nowMs(),
           };
@@ -1558,11 +1802,7 @@ export class V6PrCoordinatorEngine {
         if (this.clock.nowMs() >= expiryThreshold) {
           const cleared: SlotRecord = {
             ...slot,
-            state: nextStateOnClear,
-            reservation_id: null,
-            encrypted_escrow: null,
-            token_expires_at_ms: null,
-            last_reason_code: null,
+            ...clearFields,
             updated_at_ms: this.clock.nowMs(),
           };
           return { updatedSlot: cleared, revocationStatus: "expired_past_margin" };
@@ -1571,6 +1811,7 @@ export class V6PrCoordinatorEngine {
           ...slot,
           state: "RECONCILING",
           encrypted_escrow: null,
+          token_cleared: false,
           last_reason_code: "v6_lease_revocation_uncertain",
           updated_at_ms: this.clock.nowMs(),
         };
@@ -1587,6 +1828,7 @@ export class V6PrCoordinatorEngine {
         const held: SlotRecord = {
           ...slot,
           state: "HOLD",
+          token_cleared: false,
           last_reason_code: "v6_lease_revocation_uncertain",
           updated_at_ms: this.clock.nowMs(),
         };
@@ -1612,6 +1854,7 @@ export class V6PrCoordinatorEngine {
     const reconciling: SlotRecord = {
       ...slot,
       state: "RECONCILING",
+      token_cleared: false,
       last_reason_code: "v6_lease_revocation_uncertain",
       updated_at_ms: this.clock.nowMs(),
     };
@@ -1767,7 +2010,9 @@ export class V6PrCoordinatorEngine {
             owner_job: edge.claims.workflow,
             owner_comment_id: existing?.owner_comment_id ?? null,
             owner_record_sha256: existing?.owner_record_sha256 ?? null,
+            acquired_at_ms: null,
             token_expires_at_ms: null,
+            token_cleared: false,
             clock_margin_ms: edge.clockMarginMs,
             encrypted_escrow: null,
             last_reason_code: null,
@@ -1945,7 +2190,9 @@ export class V6PrCoordinatorEngine {
           owner_job: edge.claims.workflow,
           owner_comment_id: predecessorAnchorId!,
           owner_record_sha256: verifiedAnchor?.sha256 ?? null,
+          acquired_at_ms: null,
           token_expires_at_ms: null,
+          token_cleared: true,
           clock_margin_ms: edge.clockMarginMs,
           encrypted_escrow: null,
           last_reason_code: "v6_lease_slot_continuity_unproved",
@@ -2455,7 +2702,9 @@ export class V6PrCoordinatorEngine {
           const active: SlotRecord = {
             ...current,
             state: "ACTIVE",
+            acquired_at_ms: this.clock.nowMs(),
             token_expires_at_ms: minted.expiresAtMs,
+            token_cleared: false,
             encrypted_escrow: encryptedEscrow,
             last_reason_code: null,
             updated_at_ms: this.clock.nowMs(),
@@ -2705,7 +2954,15 @@ export class V6PrCoordinatorEngine {
             }),
           };
         }
-        if (slot.state === "RECONCILING" && slot.encrypted_escrow === null) {
+        if (
+          slot.state === "RECONCILING" &&
+          (slot.token_cleared ||
+            (slot.encrypted_escrow === null &&
+              !(
+                isPositiveSafeInt(slot.token_expires_at_ms) &&
+                this.clock.nowMs() >= slot.token_expires_at_ms + slot.clock_margin_ms
+              )))
+        ) {
           return {
             kind: "error" as const,
             result: diagnosticResponse(409, "v6_lease_reconciling", {
@@ -2745,6 +3002,7 @@ export class V6PrCoordinatorEngine {
           state: "IDLE",
           generation: drainPrep.generation,
           lease_epoch: drainPrep.leaseEpoch,
+          token_cleared: true,
           revocation_status: "already_idle",
         },
       };
@@ -2811,11 +3069,8 @@ export class V6PrCoordinatorEngine {
       return diagnosticResponse(409, "v6_lease_draining", { rayId });
     }
 
-    const hasPendingObligations =
-      drainingSlot.owner_comment_id !== null || anchorCommentId !== undefined;
-    const nextStateOnClear = hasPendingObligations ? "RECONCILING" : "IDLE";
-
-    const revOutcome = await this.executeRevocation(drainingSlot, edge, nextStateOnClear);
+    // Gate 1 (Token Clearance): ALWAYS transitions DRAINING -> RECONCILING | HOLD (never IDLE).
+    const revOutcome = await this.executeRevocation(drainingSlot, edge, "RECONCILING");
     const applied = await this.withSlotLock(slotKey, async () => {
       const latest = await this.readSlot(slotKey);
       if (
@@ -2862,6 +3117,7 @@ export class V6PrCoordinatorEngine {
         state: revOutcome.updatedSlot.state,
         generation: revOutcome.updatedSlot.generation,
         lease_epoch: revOutcome.updatedSlot.lease_epoch,
+        token_cleared: revOutcome.updatedSlot.token_cleared,
         revocation_status: revOutcome.revocationStatus ?? "confirmed_revoked",
       },
     };
@@ -2976,7 +3232,8 @@ export class V6PrCoordinatorEngine {
       return prep.result;
     }
 
-    const revOutcome = await this.executeRevocation(prep.slot, edge, "IDLE");
+    // Gate 1 (Token Clearance): ALWAYS transitions DRAINING -> RECONCILING | HOLD (never IDLE).
+    const revOutcome = await this.executeRevocation(prep.slot, edge, "RECONCILING");
     const releaseApplied = await this.withSlotLock(slotKey, async () => {
       const latest = await this.readSlot(slotKey);
       if (
@@ -3023,9 +3280,487 @@ export class V6PrCoordinatorEngine {
         state: revOutcome.updatedSlot.state,
         generation: revOutcome.updatedSlot.generation,
         lease_epoch: revOutcome.updatedSlot.lease_epoch,
+        token_cleared: revOutcome.updatedSlot.token_cleared,
         revocation_status: revOutcome.revocationStatus ?? "confirmed_revoked",
       },
     };
+  }
+
+  private parseReconciliationEvidence(raw: Record<string, unknown>): {
+    old_generation: number;
+    old_owner_comment_id: number | null;
+    intent_resolutions: Array<{
+      operation_id: string;
+      intent_comment_id: number;
+      resolution: "receipt_present" | "adopted_effect" | "proved_not_submitted" | "ambiguous_hold";
+      receipt_comment_id?: number;
+      native_effect_kind?: "pull_request_review" | "pull_request_review_comment" | "issue_comment" | "check_run";
+      native_effect_id?: number;
+      proof_comment_id?: number;
+    }>;
+  } | null {
+    const allowedEvidenceKeys = new Set([
+      "old_generation",
+      "old_owner_comment_id",
+      "intent_resolutions",
+    ]);
+    if (
+      Object.keys(raw).some((key) => !allowedEvidenceKeys.has(key)) ||
+      !isPositiveSafeInt(raw.old_generation) ||
+      (raw.old_owner_comment_id !== undefined &&
+        raw.old_owner_comment_id !== null &&
+        !isPositiveSafeInt(raw.old_owner_comment_id)) ||
+      !Array.isArray(raw.intent_resolutions)
+    ) {
+      return null;
+    }
+
+    const allowedItemKeys = new Set([
+      "operation_id",
+      "intent_comment_id",
+      "resolution",
+      "receipt_comment_id",
+      "native_effect_kind",
+      "native_effect_id",
+      "proof_comment_id",
+    ]);
+    const seenOps = new Set<string>();
+    const seenIntentComments = new Set<number>();
+    const parsedItems: Array<{
+      operation_id: string;
+      intent_comment_id: number;
+      resolution: "receipt_present" | "adopted_effect" | "proved_not_submitted" | "ambiguous_hold";
+      receipt_comment_id?: number;
+      native_effect_kind?: "pull_request_review" | "pull_request_review_comment" | "issue_comment" | "check_run";
+      native_effect_id?: number;
+      proof_comment_id?: number;
+    }> = [];
+
+    for (const item of raw.intent_resolutions) {
+      if (
+        !isObject(item) ||
+        Object.keys(item).some((key) => !allowedItemKeys.has(key)) ||
+        typeof item.operation_id !== "string" ||
+        !item.operation_id.trim() ||
+        !isPositiveSafeInt(item.intent_comment_id) ||
+        typeof item.resolution !== "string" ||
+        !ALLOWED_INTENT_RESOLUTIONS.has(item.resolution)
+      ) {
+        return null;
+      }
+      if (seenOps.has(item.operation_id) || seenIntentComments.has(item.intent_comment_id)) {
+        return null;
+      }
+      seenOps.add(item.operation_id);
+      seenIntentComments.add(item.intent_comment_id);
+
+      const resolution = item.resolution as
+        | "receipt_present"
+        | "adopted_effect"
+        | "proved_not_submitted"
+        | "ambiguous_hold";
+      if (resolution === "receipt_present" && !isPositiveSafeInt(item.receipt_comment_id)) {
+        return null;
+      }
+      if (
+        resolution === "adopted_effect" &&
+        (typeof item.native_effect_kind !== "string" ||
+          !ALLOWED_NATIVE_EFFECT_KINDS.has(item.native_effect_kind) ||
+          !isPositiveSafeInt(item.native_effect_id))
+      ) {
+        return null;
+      }
+      if (resolution === "proved_not_submitted" && !isPositiveSafeInt(item.proof_comment_id)) {
+        return null;
+      }
+
+      parsedItems.push({
+        operation_id: item.operation_id,
+        intent_comment_id: item.intent_comment_id,
+        resolution,
+        ...(isPositiveSafeInt(item.receipt_comment_id)
+          ? { receipt_comment_id: item.receipt_comment_id }
+          : {}),
+        ...(typeof item.native_effect_kind === "string" &&
+        ALLOWED_NATIVE_EFFECT_KINDS.has(item.native_effect_kind)
+          ? {
+              native_effect_kind: item.native_effect_kind as
+                | "pull_request_review"
+                | "pull_request_review_comment"
+                | "issue_comment"
+                | "check_run",
+            }
+          : {}),
+        ...(isPositiveSafeInt(item.native_effect_id)
+          ? { native_effect_id: item.native_effect_id }
+          : {}),
+        ...(isPositiveSafeInt(item.proof_comment_id)
+          ? { proof_comment_id: item.proof_comment_id }
+          : {}),
+      });
+    }
+
+    return {
+      old_generation: raw.old_generation,
+      old_owner_comment_id: isPositiveSafeInt(raw.old_owner_comment_id)
+        ? raw.old_owner_comment_id
+        : null,
+      intent_resolutions: parsedItems,
+    };
+  }
+
+  private evidenceMatchesTerminalOutcome(
+    outcome: string,
+    items: Array<{ resolution: string }>,
+  ): boolean {
+    if (items.some((item) => item.resolution === "ambiguous_hold")) {
+      return false;
+    }
+    if (outcome === "clean_receipts") {
+      return items.every((item) => item.resolution === "receipt_present");
+    }
+    if (outcome === "adopted_missing_receipt") {
+      return (
+        items.length >= 1 &&
+        items.every(
+          (item) => item.resolution === "receipt_present" || item.resolution === "adopted_effect",
+        ) &&
+        items.some((item) => item.resolution === "adopted_effect")
+      );
+    }
+    if (outcome === "proved_not_submitted") {
+      return (
+        items.length >= 1 &&
+        items.every(
+          (item) =>
+            item.resolution === "receipt_present" || item.resolution === "proved_not_submitted",
+        ) &&
+        items.some((item) => item.resolution === "proved_not_submitted")
+      );
+    }
+    return false;
+  }
+
+  private hasEffectEvidence(body: string, operationId: string, payloadSha256: string): boolean {
+    const markerMatch = /<!--\s*reviewsensei:v6:effect\s+op=([^\s]+)\s+sha256=([0-9a-f]{64})\s*-->/.exec(
+      body,
+    );
+    if (markerMatch !== null) {
+      return markerMatch[1] === operationId && markerMatch[2] === payloadSha256;
+    }
+    return body.includes(operationId) && body.includes(payloadSha256);
+  }
+
+  private isAppBotAuthor(
+    login: string,
+    userType: string,
+    botLogin: string,
+    performedViaAppId: number | null,
+    expectedAppId: number,
+  ): boolean {
+    return (
+      userType === "Bot" &&
+      login.toLowerCase() === botLogin.toLowerCase() &&
+      (performedViaAppId === null || performedViaAppId === expectedAppId)
+    );
+  }
+
+  private async verifyAdoptedNativeEffect(
+    edge: VerifiedEdgeContext,
+    pullRequest: number,
+    botLogin: string,
+    kind: "pull_request_review" | "pull_request_review_comment" | "issue_comment" | "check_run",
+    effectId: number,
+    operationId: string,
+    payloadSha256: string,
+    intentHeadSha: string,
+  ): Promise<void> {
+    if (kind === "pull_request_review") {
+      const review = await this.provider.pullRequestReview(
+        edge.claims.repository,
+        pullRequest,
+        effectId,
+        edge.readToken,
+      );
+      if (
+        review === null ||
+        !this.isAppBotAuthor(
+          review.login,
+          review.userType,
+          botLogin,
+          review.performedViaAppId,
+          edge.appId,
+        ) ||
+        review.state === "PENDING" ||
+        (review.commit_id !== null && review.commit_id !== intentHeadSha) ||
+        !this.hasEffectEvidence(review.body, operationId, payloadSha256)
+      ) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+      return;
+    }
+    if (kind === "pull_request_review_comment") {
+      const reviewComment = await this.provider.pullRequestReviewComment(
+        edge.claims.repository,
+        pullRequest,
+        effectId,
+        edge.readToken,
+      );
+      if (
+        reviewComment === null ||
+        !this.isAppBotAuthor(
+          reviewComment.login,
+          reviewComment.userType,
+          botLogin,
+          reviewComment.performedViaAppId,
+          edge.appId,
+        ) ||
+        (reviewComment.commit_id !== null &&
+          reviewComment.commit_id !== intentHeadSha &&
+          reviewComment.original_commit_id !== intentHeadSha) ||
+        !this.hasEffectEvidence(reviewComment.body, operationId, payloadSha256)
+      ) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+      return;
+    }
+    if (kind === "issue_comment") {
+      const issueComment = await this.provider.issueComment(
+        edge.claims.repository,
+        pullRequest,
+        effectId,
+        edge.readToken,
+      );
+      if (
+        issueComment === null ||
+        issueComment.userType !== "Bot" ||
+        issueComment.login.toLowerCase() !== botLogin.toLowerCase() ||
+        !this.hasEffectEvidence(issueComment.body, operationId, payloadSha256)
+      ) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+      return;
+    }
+    const run = await this.provider.checkRun(edge.claims.repository, effectId, edge.readToken);
+    if (
+      run === null ||
+      (run.appId !== null && run.appId !== edge.appId) ||
+      run.head_sha !== intentHeadSha
+    ) {
+      throw new Error("v6_lease_reconciliation_evidence_invalid");
+    }
+    const combinedOutput = [
+      run.external_id ?? "",
+      run.outputTitle ?? "",
+      run.outputSummary ?? "",
+      run.outputText ?? "",
+    ].join("\n");
+    if (!this.hasEffectEvidence(combinedOutput, operationId, payloadSha256)) {
+      throw new Error("v6_lease_reconciliation_evidence_invalid");
+    }
+  }
+
+  private async verifyReconciliationEvidence(
+    edge: VerifiedEdgeContext,
+    slotKey: string,
+    pullRequest: number,
+    slot: SlotRecord,
+    evidence: NonNullable<ReturnType<V6PrCoordinatorEngine["parseReconciliationEvidence"]>>,
+    anchorCommentId: number | undefined,
+    reqHeadSha: string | undefined,
+  ): Promise<{ oldOwnerSha256: string | null }> {
+    if (
+      anchorCommentId !== undefined &&
+      evidence.old_owner_comment_id !== null &&
+      anchorCommentId !== evidence.old_owner_comment_id
+    ) {
+      throw new Error("v6_lease_reconciliation_evidence_invalid");
+    }
+
+    let oldOwnerSha256: string | null = null;
+    if (evidence.old_owner_comment_id !== null) {
+      if (
+        slot.owner_comment_id !== null &&
+        evidence.old_owner_comment_id !== slot.owner_comment_id
+      ) {
+        // Verify old_owner_comment_id directly against current generation (may have updated slot anchor).
+      }
+      try {
+        const verifiedOldOwner = await this.verifyLedgerComment(
+          edge,
+          pullRequest,
+          evidence.old_owner_comment_id,
+          "owner",
+        );
+        assertRecordMatchesSlot(verifiedOldOwner.parsed.payload, {
+          slot_key: slotKey,
+          generation: slot.generation,
+          lease_epoch: slot.lease_epoch,
+          owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
+        });
+        oldOwnerSha256 = verifiedOldOwner.parsed.sha256;
+      } catch {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+    } else if (slot.owner_comment_id !== null) {
+      // `slot.owner_comment_id` may be a predecessor anchor inherited at acquire time (generation <= slot.generation).
+      try {
+        const verifiedPriorOwner = await this.verifyLedgerComment(
+          edge,
+          pullRequest,
+          slot.owner_comment_id,
+          "owner",
+        );
+        const priorGen = verifiedPriorOwner.parsed.payload.generation;
+        if (
+          verifiedPriorOwner.parsed.payload.slot_key !== slotKey ||
+          !isPositiveSafeInt(priorGen) ||
+          priorGen > slot.generation
+        ) {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+        if (priorGen === slot.generation) {
+          assertRecordMatchesSlot(verifiedPriorOwner.parsed.payload, {
+            slot_key: slotKey,
+            generation: slot.generation,
+            lease_epoch: slot.lease_epoch,
+            owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
+          });
+        }
+        oldOwnerSha256 = verifiedPriorOwner.parsed.sha256;
+      } catch {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+    }
+
+    const sinceMs = slot.acquired_at_ms ?? slot.updated_at_ms;
+    const sinceIso = new Date(sinceMs).toISOString();
+    const [botLogin, page] = await Promise.all([
+      this.provider.appBotLogin(),
+      this.provider.issueCommentsSince(edge.claims.repository, pullRequest, sinceIso, edge.readToken),
+    ]);
+    if (page.truncated) {
+      throw new Error("v6_lease_reconciliation_evidence_invalid");
+    }
+
+    const discoveredIntents = new Map<number, string>();
+    for (const comment of page.comments) {
+      if (comment.userType !== "Bot" || comment.login.toLowerCase() !== botLogin.toLowerCase()) {
+        continue;
+      }
+      if (!comment.body.includes("<!-- reviewsensei:v6:record ")) {
+        continue;
+      }
+      const parsed = await parseAndVerifyPrLedgerMarker(comment.body);
+      if (parsed === null) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+      if (
+        parsed.payload.schema === "reviewsensei:v6:intent:v1" &&
+        parsed.payload.generation === evidence.old_generation
+      ) {
+        if (!isValidIntentRecordShape(parsed.payload)) {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+        discoveredIntents.set(comment.id, parsed.payload.operation_id as string);
+      }
+    }
+
+    const resolutionByIntentId = new Map(
+      evidence.intent_resolutions.map((item) => [item.intent_comment_id, item] as const),
+    );
+    for (const [intentCommentId, expectedOpId] of discoveredIntents.entries()) {
+      const match = resolutionByIntentId.get(intentCommentId);
+      if (match === undefined || match.operation_id !== expectedOpId) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+    }
+
+    for (const item of evidence.intent_resolutions) {
+      let intentRecord: ParsedPrLedgerRecord;
+      try {
+        const verifiedIntent = await this.verifyLedgerComment(
+          edge,
+          pullRequest,
+          item.intent_comment_id,
+          "any",
+        );
+        intentRecord = verifiedIntent.parsed;
+      } catch {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+      if (
+        intentRecord.payload.schema !== "reviewsensei:v6:intent:v1" ||
+        intentRecord.payload.operation_id !== item.operation_id ||
+        intentRecord.payload.generation !== evidence.old_generation
+      ) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+      const intentPayloadSha = intentRecord.payload.payload_sha256 as string;
+      const intentHeadSha = intentRecord.payload.pr_head_sha as string;
+      const intentWriterEpoch = intentRecord.payload.writer_epoch as number;
+
+      if (item.resolution === "receipt_present") {
+        let receiptRecord: ParsedPrLedgerRecord;
+        try {
+          const verifiedReceipt = await this.verifyLedgerComment(
+            edge,
+            pullRequest,
+            item.receipt_comment_id!,
+            "any",
+          );
+          receiptRecord = verifiedReceipt.parsed;
+        } catch {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+        if (
+          receiptRecord.payload.schema !== "reviewsensei:v6:receipt:v1" ||
+          receiptRecord.payload.operation_id !== item.operation_id ||
+          receiptRecord.payload.payload_sha256 !== intentPayloadSha ||
+          receiptRecord.payload.writer_epoch !== intentWriterEpoch
+        ) {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+      } else if (item.resolution === "adopted_effect") {
+        await this.verifyAdoptedNativeEffect(
+          edge,
+          pullRequest,
+          botLogin,
+          item.native_effect_kind!,
+          item.native_effect_id!,
+          item.operation_id,
+          intentPayloadSha,
+          intentHeadSha,
+        );
+      } else if (item.resolution === "proved_not_submitted") {
+        let proofRecord: ParsedPrLedgerRecord;
+        try {
+          const verifiedProof = await this.verifyLedgerComment(
+            edge,
+            pullRequest,
+            item.proof_comment_id!,
+            "any",
+          );
+          proofRecord = verifiedProof.parsed;
+        } catch {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+        if (
+          proofRecord.payload.schema !== "reviewsensei:v6:non-submission:v1" ||
+          proofRecord.payload.slot_key !== slotKey ||
+          proofRecord.payload.generation !== evidence.old_generation ||
+          proofRecord.payload.operation_id !== item.operation_id ||
+          proofRecord.payload.payload_sha256 !== intentPayloadSha ||
+          proofRecord.payload.pr_head_sha !== intentHeadSha
+        ) {
+          throw new Error("v6_lease_reconciliation_evidence_invalid");
+        }
+      } else {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+    }
+
+    return { oldOwnerSha256 };
   }
 
   async handleCompleteReconcile(
@@ -3042,6 +3777,7 @@ export class V6PrCoordinatorEngine {
       "slot_key",
       "generation",
       "reconciliation_outcome",
+      "reconciliation_evidence",
       "anchor_comment_id",
       "head_sha",
       "control_budget",
@@ -3052,6 +3788,7 @@ export class V6PrCoordinatorEngine {
       !isPositiveSafeInt(body.generation) ||
       typeof body.reconciliation_outcome !== "string" ||
       !ALLOWED_RECONCILE_OUTCOMES.has(body.reconciliation_outcome) ||
+      !isObject(body.reconciliation_evidence) ||
       (body.anchor_comment_id !== undefined && !isPositiveSafeInt(body.anchor_comment_id)) ||
       (body.head_sha !== undefined &&
         (typeof body.head_sha !== "string" || !SHA1_HEX40_PATTERN.test(body.head_sha)))
@@ -3071,6 +3808,7 @@ export class V6PrCoordinatorEngine {
 
     const reqGeneration = body.generation;
     const outcome = body.reconciliation_outcome;
+    const parsedEvidence = this.parseReconciliationEvidence(body.reconciliation_evidence);
     const anchorCommentId = body.anchor_comment_id as number | undefined;
     const reqHeadSha = body.head_sha as string | undefined;
 
@@ -3112,7 +3850,8 @@ export class V6PrCoordinatorEngine {
 
     let reconcilePrep:
       | { kind: "done"; result: V6RouteResult }
-      | { kind: "drain"; slot: SlotRecord };
+      | { kind: "drain"; slot: SlotRecord }
+      | { kind: "verify"; slot: SlotRecord };
 
     try {
       reconcilePrep = await this.withSlotLock(slotKey, async () => {
@@ -3189,6 +3928,22 @@ export class V6PrCoordinatorEngine {
           };
         }
 
+        if (parsedEvidence === null || parsedEvidence.old_generation !== slot.generation) {
+          await this.store.putSlot({
+            ...slot,
+            state: "HOLD",
+            last_reason_code: "v6_lease_reconciliation_evidence_invalid",
+            updated_at_ms: this.clock.nowMs(),
+          });
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_reconciliation_evidence_invalid", {
+              slotState: "HOLD",
+              rayId,
+            }),
+          };
+        }
+
         if (!TERMINAL_RECONCILE_OUTCOMES.has(outcome)) {
           const held: SlotRecord = {
             ...slot,
@@ -3213,8 +3968,23 @@ export class V6PrCoordinatorEngine {
           };
         }
 
-        // Terminal reconciliation outcome (`adopted` or `proved_not_submitted`).
-        // Must have confirmed credential clearance before moving to IDLE.
+        if (!this.evidenceMatchesTerminalOutcome(outcome, parsedEvidence.intent_resolutions)) {
+          await this.store.putSlot({
+            ...slot,
+            state: "HOLD",
+            last_reason_code: "v6_lease_reconciliation_evidence_invalid",
+            updated_at_ms: this.clock.nowMs(),
+          });
+          return {
+            kind: "done" as const,
+            result: diagnosticResponse(409, "v6_lease_reconciliation_evidence_invalid", {
+              slotState: "HOLD",
+              rayId,
+            }),
+          };
+        }
+
+        // Terminal reconciliation outcome requires Gate 1 credential clearance FIRST.
         const clearance = await this.isCredentialClearedForReconcileOrHold(slot, edge);
         if (!clearance.cleared) {
           if (clearance.nextState === "DRAINING") {
@@ -3245,35 +4015,20 @@ export class V6PrCoordinatorEngine {
           };
         }
 
-        const idle: SlotRecord = {
-          ...slot,
-          state: "IDLE",
-          reservation_id: null,
-          owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
-          owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
-          token_expires_at_ms: null,
-          encrypted_escrow: null,
-          last_reason_code: null,
-          updated_at_ms: this.clock.nowMs(),
-        };
-        await this.store.putSlot(idle);
-        this.emitAudit("/github/v6/lease/complete-reconcile", slotKey, "success", {
-          state: "IDLE",
-          generation: idle.generation,
-          lease_epoch: idle.lease_epoch,
-        });
-        return {
-          kind: "done" as const,
-          result: {
-            status: 200,
-            body: {
-              slot_key: slotKey,
-              state: "IDLE",
-              generation: idle.generation,
-              lease_epoch: idle.lease_epoch,
-            },
-          },
-        };
+        if (!slot.token_cleared || slot.encrypted_escrow !== null || slot.token_expires_at_ms !== null) {
+          const clearedSlot: SlotRecord = {
+            ...slot,
+            reservation_id: null,
+            token_cleared: true,
+            encrypted_escrow: null,
+            token_expires_at_ms: null,
+            last_reason_code: null,
+            updated_at_ms: this.clock.nowMs(),
+          };
+          await this.store.putSlot(clearedSlot);
+          return { kind: "verify" as const, slot: clearedSlot };
+        }
+        return { kind: "verify" as const, slot };
       });
     } catch (error) {
       if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
@@ -3286,44 +4041,163 @@ export class V6PrCoordinatorEngine {
       return reconcilePrep.result;
     }
 
-    const drainingSlot = reconcilePrep.slot;
-    const rev = await this.executeRevocation(drainingSlot, edge, "IDLE");
-    const applied = await this.withSlotLock(slotKey, async () => {
+    let slotToVerify: SlotRecord;
+    if (reconcilePrep.kind === "drain") {
+      const drainingSlot = reconcilePrep.slot;
+      const rev = await this.executeRevocation(drainingSlot, edge, "RECONCILING");
+      const applied = await this.withSlotLock(slotKey, async () => {
+        const latest = await this.readSlot(slotKey);
+        if (
+          latest === null ||
+          latest.state !== "DRAINING" ||
+          latest.generation !== drainingSlot.generation ||
+          latest.lease_epoch !== drainingSlot.lease_epoch ||
+          latest.reservation_id !== drainingSlot.reservation_id
+        ) {
+          return { conflict: true, state: latest?.state ?? ("IDLE" as CoordinatorState) };
+        }
+        await this.store.putSlot(rev.updatedSlot);
+        return { conflict: false, state: rev.updatedSlot.state };
+      });
+      if (applied.conflict) {
+        return diagnosticResponse(409, "v6_lease_draining", {
+          slotState: applied.state,
+          rayId,
+        });
+      }
+      if (rev.errorStatus !== undefined && rev.diagnostic !== undefined) {
+        return diagnosticResponse(rev.errorStatus, rev.diagnostic, {
+          slotState: rev.updatedSlot.state,
+          retryAfterMs: rev.retryAfterMs,
+          rayId,
+        });
+      }
+      if (!rev.updatedSlot.token_cleared || rev.updatedSlot.state !== "RECONCILING") {
+        return diagnosticResponse(409, "v6_lease_revocation_uncertain", {
+          slotState: rev.updatedSlot.state,
+          rayId,
+        });
+      }
+      slotToVerify = rev.updatedSlot;
+    } else {
+      slotToVerify = reconcilePrep.slot;
+    }
+
+    // Gate 2 (Write Reconciliation): independently verify old_owner + 100% of old_generation intents.
+    let oldOwnerSha256: string | null = null;
+    let verificationError: string | null = null;
+    try {
+      const verifiedEvidence = await this.verifyReconciliationEvidence(
+        edge,
+        slotKey,
+        pullRequest,
+        slotToVerify,
+        parsedEvidence!,
+        anchorCommentId,
+        reqHeadSha,
+      );
+      oldOwnerSha256 = verifiedEvidence.oldOwnerSha256;
+    } catch (error) {
+      verificationError =
+        error instanceof Error && VALID_V6_DIAGNOSTIC_CODES.has(error.message as V6DiagnosticCode)
+          ? error.message
+          : "v6_lease_reconciliation_evidence_invalid";
+    }
+
+    const commitOutcome = await this.withSlotLock(slotKey, async () => {
       const latest = await this.readSlot(slotKey);
       if (
         latest === null ||
-        latest.state !== "DRAINING" ||
-        latest.generation !== drainingSlot.generation ||
-        latest.lease_epoch !== drainingSlot.lease_epoch ||
-        latest.reservation_id !== drainingSlot.reservation_id
+        latest.state !== "RECONCILING" ||
+        latest.generation !== slotToVerify.generation ||
+        latest.lease_epoch !== slotToVerify.lease_epoch
       ) {
-        return { conflict: true, state: latest?.state ?? ("IDLE" as CoordinatorState) };
+        return {
+          kind: "done" as const,
+          result: diagnosticResponse(
+            409,
+            latest === null ? "v6_lease_rollback_blocked" : stateConflictDiagnostic(latest.state, latest),
+            { slotState: latest?.state ?? "IDLE", rayId },
+          ),
+        };
       }
-      await this.store.putSlot(rev.updatedSlot);
-      return { conflict: false, state: rev.updatedSlot.state };
+
+      if (verificationError !== null) {
+        const held: SlotRecord = {
+          ...latest,
+          state: "HOLD",
+          last_reason_code: verificationError as V6DiagnosticCode,
+          updated_at_ms: this.clock.nowMs(),
+        };
+        await this.store.putSlot(held);
+        this.emitAudit("/github/v6/lease/complete-reconcile", slotKey, "refused", {
+          state: "HOLD",
+          generation: held.generation,
+          lease_epoch: held.lease_epoch,
+          diagnostic: verificationError,
+        });
+        return {
+          kind: "done" as const,
+          result: diagnosticResponse(409, verificationError, {
+            slotState: "HOLD",
+            rayId,
+          }),
+        };
+      }
+
+      if (!latest.token_cleared || latest.encrypted_escrow !== null) {
+        const held: SlotRecord = {
+          ...latest,
+          state: "HOLD",
+          last_reason_code: "v6_lease_revocation_uncertain",
+          updated_at_ms: this.clock.nowMs(),
+        };
+        await this.store.putSlot(held);
+        return {
+          kind: "done" as const,
+          result: diagnosticResponse(409, "v6_lease_revocation_uncertain", {
+            slotState: "HOLD",
+            rayId,
+          }),
+        };
+      }
+
+      const idle: SlotRecord = {
+        ...latest,
+        state: "IDLE",
+        reservation_id: null,
+        owner_comment_id:
+          anchorCommentId ?? parsedEvidence!.old_owner_comment_id ?? latest.owner_comment_id,
+        owner_record_sha256:
+          verifiedAnchor?.sha256 ?? oldOwnerSha256 ?? latest.owner_record_sha256,
+        acquired_at_ms: null,
+        token_expires_at_ms: null,
+        token_cleared: false,
+        encrypted_escrow: null,
+        last_reason_code: null,
+        updated_at_ms: this.clock.nowMs(),
+      };
+      await this.store.putSlot(idle);
+      this.emitAudit("/github/v6/lease/complete-reconcile", slotKey, "success", {
+        state: "IDLE",
+        generation: idle.generation,
+        lease_epoch: idle.lease_epoch,
+      });
+      return {
+        kind: "done" as const,
+        result: {
+          status: 200,
+          body: {
+            slot_key: slotKey,
+            state: "IDLE",
+            generation: idle.generation,
+            lease_epoch: idle.lease_epoch,
+          },
+        },
+      };
     });
-    if (applied.conflict) {
-      return diagnosticResponse(409, "v6_lease_draining", {
-        slotState: applied.state,
-        rayId,
-      });
-    }
-    if (rev.errorStatus !== undefined && rev.diagnostic !== undefined) {
-      return diagnosticResponse(rev.errorStatus, rev.diagnostic, {
-        slotState: rev.updatedSlot.state,
-        retryAfterMs: rev.retryAfterMs,
-        rayId,
-      });
-    }
-    return {
-      status: 200,
-      body: {
-        slot_key: slotKey,
-        state: rev.updatedSlot.state,
-        generation: rev.updatedSlot.generation,
-        lease_epoch: rev.updatedSlot.lease_epoch,
-      },
-    };
+
+    return commitOutcome.result;
   }
 
   async handleStatus(
@@ -3573,7 +4447,9 @@ export class V6PrCoordinatorEngine {
           reservation_id: null,
           owner_comment_id: anchorCommentId ?? slot.owner_comment_id,
           owner_record_sha256: verifiedAnchor?.sha256 ?? slot.owner_record_sha256,
+          acquired_at_ms: nextState === "IDLE" ? null : slot.acquired_at_ms,
           token_expires_at_ms: null,
+          token_cleared: nextState === "RECONCILING",
           encrypted_escrow: null,
           last_reason_code: null,
           updated_at_ms: this.clock.nowMs(),

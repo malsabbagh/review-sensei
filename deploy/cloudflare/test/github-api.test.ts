@@ -1281,4 +1281,139 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       });
     await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
   });
+
+  it("reads single bounded issueCommentsSince page without pagination and flags truncation", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: [
+        {
+          id: 501,
+          body: "hello",
+          author_association: "NONE",
+          issue_url: "https://api.example.test/repos/acme/widgets/issues/42",
+          user: { login: "reviewsensei[bot]", type: "Bot" },
+        },
+      ],
+    });
+    const page1 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(page1.truncated).toBe(false);
+    expect(page1.comments).toHaveLength(1);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      "GET",
+      "/repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-27T00%3A00%3A00Z",
+      "read-tok",
+    );
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      hasNextPage: true,
+      data: [],
+    });
+    const pageNext = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(pageNext.truncated).toBe(true);
+    expect(request).toHaveBeenCalledTimes(2);
+
+    const hundred = Array.from({ length: 100 }, (_, idx) => ({
+      id: idx + 1,
+      body: "entry",
+      author_association: "NONE",
+      issue_url: "https://api.example.test/repos/acme/widgets/issues/42",
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    }));
+    request.mockResolvedValueOnce({ status: 200, data: hundred });
+    const page100 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(page100.truncated).toBe(true);
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads pullRequestReview, pullRequestReviewComment, and checkRun O(1) resources", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        id: 5001,
+        user: { login: "reviewsensei[bot]", type: "Bot" },
+        commit_id: SHA,
+        body: "<!-- reviewsensei:v6:effect op=op-1 sha256=deadbeef -->",
+        state: "COMMENTED",
+        pull_request_url: "https://api.example.test/repos/acme/widgets/pulls/42",
+        performed_via_github_app: { id: 12345 },
+      },
+    });
+    await expect(client.pullRequestReview("acme/widgets", 42, 5001, "read-tok")).resolves.toEqual({
+      id: 5001,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      commit_id: SHA,
+      body: "<!-- reviewsensei:v6:effect op=op-1 sha256=deadbeef -->",
+      state: "COMMENTED",
+      performedViaAppId: 12345,
+    });
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(client.pullRequestReviewComment("acme/widgets", 42, 7001, "read-tok")).resolves.toBeNull();
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        id: 7002,
+        user: { login: "reviewsensei[bot]", type: "Bot" },
+        commit_id: SHA,
+        original_commit_id: SHA,
+        body: "inline",
+        pull_request_url: "https://api.example.test/repos/acme/widgets/pulls/42",
+        performed_via_github_app: { id: 12345 },
+      },
+    });
+    await expect(
+      client.pullRequestReviewComment("acme/widgets", 42, 7002, "read-tok"),
+    ).resolves.toMatchObject({ id: 7002, performedViaAppId: 12345 });
+
+    request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        id: 8001,
+        app: { id: 12345 },
+        head_sha: SHA,
+        external_id: "op-check",
+        name: "ReviewSensei",
+        status: "completed",
+        conclusion: "success",
+        output: { title: "t", summary: "s", text: "x" },
+      },
+    });
+    await expect(client.checkRun("acme/widgets", 8001, "read-tok")).resolves.toEqual({
+      id: 8001,
+      appId: 12345,
+      head_sha: SHA,
+      external_id: "op-check",
+      name: "ReviewSensei",
+      status: "completed",
+      conclusion: "success",
+      outputTitle: "t",
+      outputSummary: "s",
+      outputText: "x",
+    });
+  });
 });
