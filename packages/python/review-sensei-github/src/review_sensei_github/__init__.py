@@ -96,6 +96,8 @@ from .setup import (
     SetupPullRequestService,
 )
 from .v6_coordinator_client import (
+    ALLOWED_V6_CAPABILITIES,
+    ALLOWED_V6_PERMISSION_NAMES,
     DEFAULT_COORDINATOR_BASE_URL,
     V6CoordinatorClient,
     V6CoordinatorError,
@@ -269,6 +271,8 @@ __all__ = [
     "GitHubWebhookError",
     "GitHubWebhookSignatureError",
     "GitHubMergeGroupUnsupportedError",
+    "ALLOWED_V6_CAPABILITIES",
+    "ALLOWED_V6_PERMISSION_NAMES",
     "AdvisoryProgressHint",
     "CompletionReceiptRecord",
     "CredentialKind",

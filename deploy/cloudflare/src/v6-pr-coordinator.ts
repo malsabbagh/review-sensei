@@ -306,6 +306,13 @@ function isNonNegativeSafeInt(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function parsePositiveTimestampMs(value: unknown): number | null {
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) && Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : null;
+}
+
 export function configuredAppId(env: WorkerEnv): number {
   const raw = env.GITHUB_APP_ID;
   if (typeof raw !== "string" || !/^[1-9][0-9]{0,15}$/.test(raw)) {
@@ -1426,6 +1433,7 @@ export class V6PrCoordinatorEngine {
       const validatedTag = validatePublicWorkflowTag(pinnedTag);
       const acceptedRefs = new Set([
         `${PUBLIC_REPOSITORY}/.github/workflows/review-sensei-v6.yml@refs/tags/${validatedTag}`,
+        `${PUBLIC_REPOSITORY}/.github/workflows/review-sensei-v6-pilot.yml@refs/tags/${validatedTag}`,
         `${PUBLIC_REPOSITORY}/.github/workflows/review-sensei-run.yml@refs/tags/${validatedTag}`,
       ]);
       if (!acceptedRefs.has(claims.job_workflow_ref)) {
@@ -2190,7 +2198,10 @@ export class V6PrCoordinatorEngine {
           owner_job: edge.claims.workflow,
           owner_comment_id: predecessorAnchorId!,
           owner_record_sha256: verifiedAnchor?.sha256 ?? null,
-          acquired_at_ms: null,
+          acquired_at_ms:
+            verifiedAnchor !== null
+              ? parsePositiveTimestampMs(verifiedAnchor.payload.acquired_at)
+              : null,
           token_expires_at_ms: null,
           token_cleared: true,
           clock_margin_ms: edge.clockMarginMs,
@@ -3578,6 +3589,7 @@ export class V6PrCoordinatorEngine {
     }
 
     let oldOwnerSha256: string | null = null;
+    let verifiedOwnerAcquiredAtMs: number | null = null;
     if (evidence.old_owner_comment_id !== null) {
       if (
         slot.owner_comment_id !== null &&
@@ -3599,6 +3611,9 @@ export class V6PrCoordinatorEngine {
           owner_head_sha: reqHeadSha ?? slot.owner_head_sha,
         });
         oldOwnerSha256 = verifiedOldOwner.parsed.sha256;
+        verifiedOwnerAcquiredAtMs = parsePositiveTimestampMs(
+          verifiedOldOwner.parsed.payload.acquired_at,
+        );
       } catch {
         throw new Error("v6_lease_reconciliation_evidence_invalid");
       }
@@ -3628,13 +3643,18 @@ export class V6PrCoordinatorEngine {
           });
         }
         oldOwnerSha256 = verifiedPriorOwner.parsed.sha256;
+        verifiedOwnerAcquiredAtMs = parsePositiveTimestampMs(
+          verifiedPriorOwner.parsed.payload.acquired_at,
+        );
       } catch {
         throw new Error("v6_lease_reconciliation_evidence_invalid");
       }
     }
 
-    const sinceMs = slot.acquired_at_ms ?? slot.updated_at_ms;
-    const sinceIso = new Date(sinceMs).toISOString();
+    const rawSinceMs =
+      slot.acquired_at_ms ?? verifiedOwnerAcquiredAtMs ?? slot.updated_at_ms;
+    const flooredSinceMs = Math.floor(Math.max(0, rawSinceMs - 2000) / 1000) * 1000;
+    const sinceIso = new Date(flooredSinceMs).toISOString();
     const [botLogin, page] = await Promise.all([
       this.provider.appBotLogin(),
       this.provider.issueCommentsSince(edge.claims.repository, pullRequest, sinceIso, edge.readToken),
