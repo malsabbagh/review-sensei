@@ -434,6 +434,7 @@ class V6PilotRunner:
         current_state = slot_status.state
         current_generation = slot_status.generation
         current_epoch = slot_status.lease_epoch
+        token_cleared = slot_status.token_cleared
         anchor_comment_id = slot_status.owner_comment_id
         takeover_recon: TakeoverReconciliationResult | None = None
 
@@ -467,7 +468,9 @@ class V6PilotRunner:
                 ),
             )
 
-        if current_state in {"ACTIVE", "DRAINING"}:
+        if current_state in {"ACTIVE", "DRAINING"} or (
+            current_state == "RECONCILING" and not token_cleared
+        ):
             try:
                 drain_res = self.coordinator.drain(
                     slot_key=slot_key,
@@ -497,9 +500,20 @@ class V6PilotRunner:
             current_state = drain_res.state
             current_generation = drain_res.generation
             current_epoch = drain_res.lease_epoch
-            if current_state == "HOLD":
+            token_cleared = drain_res.token_cleared
+            if current_state == "HOLD" or not token_cleared:
+                diag = (
+                    "v6_lease_hold"
+                    if current_state == "HOLD"
+                    else "v6_lease_revocation_uncertain"
+                )
                 self._emit_hold_summary(
-                    config, slot_key=slot_key, blocker="v6_lease_hold"
+                    config,
+                    slot_key=slot_key,
+                    blocker=diag,
+                    missing_evidence=(
+                        f"revocation_status:{drain_res.revocation_status}",
+                    ),
                 )
                 return self._write_outcome(
                     config,
@@ -509,7 +523,7 @@ class V6PilotRunner:
                         coordinator_state=current_state,
                         generation=current_generation,
                         lease_epoch=current_epoch,
-                        diagnostic="v6_lease_hold",
+                        diagnostic=diag,
                     ),
                 )
 
@@ -523,6 +537,8 @@ class V6PilotRunner:
                 event=config.event,
                 visibility=config.visibility,
                 granted_scopes=config.granted_scopes,
+                old_generation=current_generation,
+                old_lease_epoch=current_epoch,
                 expected_app_id=config.expected_app_id,
                 expected_bot_login=config.expected_bot_login,
                 expected_bot_user_id=config.expected_bot_user_id,
@@ -534,13 +550,30 @@ class V6PilotRunner:
                 step_summary_sink=config.step_summary_sink,
                 operation_id=config.operation_id,
             )
-            if takeover_recon.anchor_comment_id is not None:
+            if takeover_recon.old_owner_comment_id is not None:
+                anchor_comment_id = takeover_recon.old_owner_comment_id
+            elif takeover_recon.anchor_comment_id is not None:
                 anchor_comment_id = takeover_recon.anchor_comment_id
+
+            recon_evidence: Mapping[str, Any] = (
+                takeover_recon.reconciliation_evidence
+                if takeover_recon.reconciliation_evidence is not None
+                else {
+                    "old_generation": max(1, current_generation),
+                    "intent_resolutions": [],
+                    **(
+                        {"old_owner_comment_id": anchor_comment_id}
+                        if anchor_comment_id is not None
+                        else {}
+                    ),
+                }
+            )
             try:
                 comp = self.coordinator.complete_reconcile(
                     slot_key=slot_key,
                     generation=current_generation,
                     reconciliation_outcome=takeover_recon.reconciliation_outcome,
+                    reconciliation_evidence=recon_evidence,
                     anchor_comment_id=anchor_comment_id,
                     head_sha=config.head_sha,
                 )
@@ -629,6 +662,12 @@ class V6PilotRunner:
 
         lease_released = False
         final_state = grant.state
+        outcome_status = "hold"
+        diag_code: str | None = None
+        recovery_outcome: RecoveryOutcome | None = None
+        current_gen_owner_cid: int | None = None
+        current_gen_resolutions: list[dict[str, Any]] = []
+        receipt_verified_before_release = False
         try:
             app_transport = self.app_transport_factory(grant)
             dual_client = DualCredentialGitHubClient(
@@ -702,10 +741,9 @@ class V6PilotRunner:
                 step_summary_sink=config.step_summary_sink,
             )
 
-            recovery_outcome: RecoveryOutcome | None = None
             if takeover_recon is not None and takeover_recon.adopted_effects:
                 guard = NoProgressGuard(operation_id=config.operation_id)
-                engine._persist_owner_marker_if_needed(
+                current_gen_owner_cid = engine._persist_owner_marker_if_needed(
                     request=request,
                     guard=guard,
                     prior_hint=None,
@@ -713,6 +751,7 @@ class V6PilotRunner:
                 )
                 adopted_receipt: CompletionReceiptRecord | None = None
                 adopted_effect_id: str | int | None = None
+                adopted_receipt_cid: int | None = None
                 for adopted_intent, effect_id in takeover_recon.adopted_effects:
                     op_proof = grant.to_ownership_proof(
                         operation_id=adopted_intent.operation_id,
@@ -725,7 +764,7 @@ class V6PilotRunner:
                         ownership_proof=op_proof,
                         effect_kind=adopted_intent.effect_kind,
                     )
-                    rec, _ = engine._persist_completion_receipt(
+                    rec, _, rcpt_cid = engine._persist_completion_receipt(
                         request=op_request,
                         guard=guard,
                         prior_hint=None,
@@ -735,6 +774,7 @@ class V6PilotRunner:
                     if adopted_intent.operation_id == config.operation_id:
                         adopted_receipt = rec
                         adopted_effect_id = effect_id
+                        adopted_receipt_cid = rcpt_cid
                 if adopted_receipt is not None and adopted_effect_id is not None:
                     recovery_outcome = RecoveryCompleted(
                         operation_id=config.operation_id,
@@ -745,10 +785,40 @@ class V6PilotRunner:
                         used_pr_resident_result=False,
                         readback_gets_emitted=0,
                         model_calls_started=0,
+                        owner_comment_id=current_gen_owner_cid,
+                        receipt_comment_id=adopted_receipt_cid,
                     )
+                    receipt_verified_before_release = adopted_receipt_cid is not None
 
             if recovery_outcome is None:
                 recovery_outcome = engine.recover_and_publish(request)
+                if isinstance(recovery_outcome, RecoveryCompleted):
+                    if recovery_outcome.owner_comment_id is not None:
+                        current_gen_owner_cid = recovery_outcome.owner_comment_id
+                    if (
+                        recovery_outcome.intent_record is not None
+                        and recovery_outcome.intent_record.generation
+                        == grant.generation
+                    ):
+                        if (
+                            recovery_outcome.intent_comment_id is not None
+                            and recovery_outcome.receipt_comment_id is not None
+                        ):
+                            current_gen_resolutions.append(
+                                {
+                                    "operation_id": recovery_outcome.operation_id,
+                                    "intent_comment_id": recovery_outcome.intent_comment_id,
+                                    "resolution": "receipt_present",
+                                    "receipt_comment_id": recovery_outcome.receipt_comment_id,
+                                }
+                            )
+                            receipt_verified_before_release = True
+                        else:
+                            receipt_verified_before_release = False
+                    else:
+                        receipt_verified_before_release = (
+                            recovery_outcome.receipt_comment_id is not None
+                        )
 
             if isinstance(recovery_outcome, RecoveryCompleted):
                 outcome_status = "completed"
@@ -774,6 +844,7 @@ class V6PilotRunner:
                 zero_model_calls_started=True,
             )
             outcome_status = "hold"
+            receipt_verified_before_release = False
         finally:
             try:
                 rel = self.coordinator.release(
@@ -783,9 +854,37 @@ class V6PilotRunner:
                     reservation_id=grant.reservation_id,
                 )
                 final_state = rel.state
-                lease_released = rel.state == "IDLE"
-            except V6CoordinatorError:
+                if (
+                    outcome_status == "completed"
+                    and receipt_verified_before_release
+                    and rel.state == "RECONCILING"
+                    and rel.token_cleared
+                ):
+                    clean_evidence: dict[str, Any] = {
+                        "old_generation": grant.generation,
+                        "intent_resolutions": current_gen_resolutions,
+                    }
+                    if current_gen_owner_cid is not None:
+                        clean_evidence["old_owner_comment_id"] = current_gen_owner_cid
+                    comp2 = self.coordinator.complete_reconcile(
+                        slot_key=grant.slot_key,
+                        generation=grant.generation,
+                        reconciliation_outcome="clean_receipts",
+                        reconciliation_evidence=clean_evidence,
+                        anchor_comment_id=current_gen_owner_cid,
+                        head_sha=grant.head_sha,
+                    )
+                    final_state = comp2.state
+                    lease_released = comp2.state == "IDLE"
+                else:
+                    lease_released = False
+                    if outcome_status == "completed":
+                        outcome_status = "hold"
+                        diag_code = diag_code or "v6_lease_revocation_uncertain"
+            except (V6CoordinatorError, ReviewSenseiError, OSError, ValueError) as exc:
                 lease_released = False
+                if diag_code is None:
+                    diag_code = getattr(exc, "diagnostic", None)
 
         return self._write_outcome(
             config,
