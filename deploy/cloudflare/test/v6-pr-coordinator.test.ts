@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import contract from "../../../src/review_sensei/schemas/v6-coordinator-contract.json";
 import type { WorkerEnv } from "../src/env";
-import type {
-  LiveCheckRun,
-  LiveIssueComment,
-  LiveIssueCommentPage,
-  LivePullRequestReview,
-  LivePullRequestReviewComment,
-  PullRequestBinding,
-  PublicWorkflowRuntimeShas,
-  RevocationResult,
-  WorkflowRunAttemptInfo,
+import {
+  GitHubApi,
+  type LiveCheckRun,
+  type LiveIssueComment,
+  type LiveIssueCommentPage,
+  type LivePullRequestReview,
+  type LivePullRequestReviewComment,
+  type PullRequestBinding,
+  type PublicWorkflowRuntimeShas,
+  type RevocationResult,
+  type WorkflowRunAttemptInfo,
 } from "../src/github-api";
 import { resetOidcJwksCacheForTesting, type OidcClaims } from "../src/oidc";
 import { TokenBroker } from "../src/token-broker";
@@ -3722,5 +3723,154 @@ describe("v6 acquire response redaction", () => {
     expect(conflictRes.headers.get("cache-control")).toBe("no-store");
     const conflictBody = (await conflictRes.json()) as Record<string, unknown>;
     expect(conflictBody.token).toBe("[REDACTED_TOKEN]");
+  });
+
+  it("verifies issue_comment adopted native effects and catches deletion boundary shift in Gate 2 reconciliation", async () => {
+    const payloadSha = "b".repeat(64);
+    const { env, engine, provider, store, slotKey42 } = createHarness();
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+      operation_id: "op-detail-adopt",
+    });
+    expect(acq.status).toBe(200);
+    await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acq.body.reservation_id,
+    });
+
+    const intentPayload = {
+      schema: "reviewsensei:v6:intent:v1",
+      record_id: "intent:op-detail-adopt:detail:0:1",
+      operation_id: "op-detail-adopt:detail:0",
+      writer_epoch: 1,
+      pr_head_sha: HEAD_SHA_1,
+      effect_kind: "issue_comment",
+      payload_sha256: payloadSha,
+      target_digest: "c".repeat(64),
+      generation: 1,
+      target_location: `/repos/${PILOT_REPO}/issues/42/comments`,
+    };
+    const canonicalIntent = canonicalJsonString(intentPayload);
+    const intentBody = `<!-- reviewsensei:v6:record sha256=${await sha256Hex(canonicalIntent)} payload=${canonicalIntent} -->`;
+    provider.comments.set(5001, {
+      id: 5001,
+      body: intentBody,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(5002, {
+      id: 5002,
+      body: `### Detail comment\n<!-- reviewsensei:v6:effect op=op-detail-adopt:detail:0 sha256=${payloadSha} -->`,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+      performedViaAppId: 12345,
+    });
+
+    const ghApi = new GitHubApi(env);
+    const reqSpy = vi.spyOn(ghApi, "request");
+    const issueUrl = `https://api.github.com/repos/${PILOT_REPO}/issues/42`;
+    const mkRawComment = (id: number, body: string) => ({
+      id,
+      body,
+      author_association: "NONE",
+      issue_url: issueUrl,
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    });
+    const shiftedPage1 = [
+      ...Array.from({ length: 99 }, (_, i) => mkRawComment(i + 2, "noise")),
+      mkRawComment(5001, intentBody),
+    ];
+    // Simulate comment #1 deleted mid-scan on attempt 1 so page 1 shifts; retry stabilizes and recovers 5001,
+    // while persistent instability fails closed to HOLD (not certified).
+    reqSpy
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: true,
+        data: Array.from({ length: 100 }, (_, i) => mkRawComment(i + 1, "noise")),
+      })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: [mkRawComment(9000, "tail")] })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: [mkRawComment(9000, "tail")] })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: [mkRawComment(9000, "tail")] });
+
+    provider.issueCommentsSince = (repo, pr, sinceIso, token) =>
+      ghApi.issueCommentsSince(repo, pr, sinceIso, token);
+
+    const adoptedRes = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "adopted_missing_receipt",
+      reconciliation_evidence: {
+        old_generation: 1,
+        intent_resolutions: [
+          {
+            operation_id: "op-detail-adopt:detail:0",
+            intent_comment_id: 5001,
+            resolution: "adopted_effect",
+            native_effect_kind: "issue_comment",
+            native_effect_id: 5002,
+          },
+        ],
+      },
+    });
+    expect(adoptedRes.status).toBe(200);
+    expect(adoptedRes.body.state).toBe("IDLE");
+
+    // Now test persistent instability on a second drain -> MUST fail closed to HOLD (never certify!)
+    const acq2 = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+      operation_id: "op-detail-unstable",
+    });
+    expect(acq2.status).toBe(200);
+    await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 2,
+      lease_epoch: 2,
+      reservation_id: acq2.body.reservation_id,
+    });
+    reqSpy.mockReset();
+    let seq = 0;
+    reqSpy.mockImplementation(async (_method, path) => {
+      seq += 1;
+      if (path.includes("page=1")) {
+        return {
+          status: 200,
+          hasNextPage: true,
+          data: Array.from({ length: 100 }, (_, i) => mkRawComment(seq * 1000 + i, "noise")),
+        };
+      }
+      return { status: 200, hasNextPage: false, data: [mkRawComment(999999, "tail")] };
+    });
+
+    const unstableRes = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 2,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 2,
+        intent_resolutions: [],
+      },
+    });
+    expect(unstableRes.status).toBe(409);
+    expect(unstableRes.body.diagnostic).toMatchObject({
+      code: "v6_lease_reconciliation_evidence_invalid",
+    });
+    expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
   });
 });

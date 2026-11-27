@@ -473,16 +473,31 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
     for dep_name in _collect_transitive_deps(seed_dists):
         _materialize_installed_dist_wheel(dep_name, wheelhouse)
 
-    # Extract the actual Install step script from .github/workflows/review-sensei-v6-pilot.yml.
+    # Extract & qualify actual Steps 1, 2, and 3 from .github/workflows/review-sensei-v6-pilot.yml.
     wf_doc = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "review-sensei-v6-pilot.yml").read_text(
             encoding="utf-8"
         )
     )
+    wf_steps = [step for job in wf_doc["jobs"].values() for step in job["steps"]]
+    validate_step = next(
+        step
+        for step in wf_steps
+        if step.get("name")
+        == "Validate trusted v6 inputs and reject fork head execution"
+    )
+    checkout_step = next(
+        step
+        for step in wf_steps
+        if step.get("name") == "Check out trusted default-branch policy only"
+    )
+    if checkout_step["with"].get("path") != "trusted-policy":
+        raise RuntimeError(
+            "workflow checkout step must isolate policy under trusted-policy/"
+        )
     install_step = next(
         step
-        for job in wf_doc["jobs"].values()
-        for step in job["steps"]
+        for step in wf_steps
         if step.get("name") == "Install ReviewSensei v6 pilot runner"
     )
     install_script = str(install_step["run"])
@@ -500,6 +515,66 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         for k, v in os.environ.items()
         if k not in {"PYTHONPATH", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL"}
     }
+    validate_env = {
+        **bash_env,
+        "REPOSITORY": REPO_FULL,
+        "REPOSITORY_ID": str(REPO_ID),
+        "PULL_REQUEST": "51",
+        "HEAD_SHA": HEAD_SHA,
+        "HEAD_REPOSITORY": REPO_FULL,
+        "OPERATION_ID": "op-validate-1",
+        "EVENT_KIND": "pull_request",
+        "EFFECT_KIND": "pr_review_publish",
+    }
+    val_ok = subprocess.run(
+        ["bash", "-c", str(validate_step["run"])],
+        cwd=str(temp_root),
+        env=validate_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if val_ok.returncode != 0:
+        raise RuntimeError(f"workflow input validation step failed: {val_ok.stderr}")
+    val_fork = subprocess.run(
+        ["bash", "-c", str(validate_step["run"])],
+        cwd=str(temp_root),
+        env={**validate_env, "HEAD_REPOSITORY": "external-actor/fork-repo"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if val_fork.returncode == 0 or "fork" not in val_fork.stderr:
+        raise RuntimeError(
+            "workflow input validation failed to reject fork head repository"
+        )
+
+    # Step 2 equivalent: check out ONLY default branch policy snapshot into trusted-policy/.
+    trusted_policy_checkout = temp_root / str(checkout_step["with"]["path"])
+    subprocess.run(
+        [
+            "git",
+            *git_flags,
+            "clone",
+            "--depth=1",
+            str(git_origin),
+            str(trusted_policy_checkout),
+        ],
+        check=True,
+        env=git_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    trusted_policy_rev = subprocess.run(
+        ["git", *git_flags, "rev-parse", "HEAD"],
+        cwd=str(trusted_policy_checkout),
+        env=git_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
     bash_env.update(
         {
             "PATH": f"{shim_bin}:{os.environ.get('PATH', '')}",
@@ -562,6 +637,7 @@ def _build_offline_venv_and_install(temp_root: Path) -> tuple[Path, Path]:
         worker_hasher.update(ts_file.read_bytes())
     provenance = {
         "workflow_commit_sha": commit_sha,
+        "trusted_policy_revision": trusted_policy_rev,
         "wheel_sha256s": wheel_hashes,
         "worker_source_sha256": worker_hasher.hexdigest(),
     }
@@ -625,6 +701,7 @@ class _SimulatedGitHubState:
     trees: dict[tuple[str, bool], Any] = field(default_factory=dict)
     blobs: dict[str, bytes] = field(default_factory=dict)
     commits: dict[str, list[str]] = field(default_factory=dict)
+    commit_dates: dict[str, str] = field(default_factory=dict)
     head_advance_after_comment_hook: tuple[int, str, str] | None = None
     reject_review_status: dict[int, tuple[int, dict[str, Any]]] = field(
         default_factory=dict
@@ -646,6 +723,7 @@ class _SimulatedGitHubState:
                     "number": pr_number,
                     "head_sha": head_sha,
                     "base_sha": base_sha,
+                    "merge_base_sha": base_sha,
                     "title": title,
                     "diff": diff,
                     "state": "open",
@@ -653,6 +731,53 @@ class _SimulatedGitHubState:
                     "reviews": [],
                 }
                 self.prs[pr_number] = pr
+                if (base_sha, True) not in self.trees and (
+                    base_sha,
+                    False,
+                ) not in self.trees:
+                    base_blob_sha = hashlib.sha256(
+                        f"base:{base_sha}".encode("utf-8")
+                    ).hexdigest()[:40]
+                    self.blobs.setdefault(
+                        base_blob_sha, b"def pick(items, idx):\n    return items[idx]\n"
+                    )
+                    self.trees[(base_sha, True)] = {
+                        "sha": base_sha,
+                        "truncated": False,
+                        "tree": [
+                            {
+                                "path": "src/app.py",
+                                "type": "blob",
+                                "sha": base_blob_sha,
+                                "mode": "100644",
+                            }
+                        ],
+                    }
+                if (head_sha, True) not in self.trees and (
+                    head_sha,
+                    False,
+                ) not in self.trees:
+                    head_blob_sha = hashlib.sha256(
+                        f"head:{head_sha}".encode("utf-8")
+                    ).hexdigest()[:40]
+                    self.blobs.setdefault(
+                        head_blob_sha,
+                        b"def pick(items, idx):\n    # validate index\n    return items[idx]\n",
+                    )
+                    self.trees[(head_sha, True)] = {
+                        "sha": head_sha,
+                        "truncated": False,
+                        "tree": [
+                            {
+                                "path": "src/app.py",
+                                "type": "blob",
+                                "sha": head_blob_sha,
+                                "mode": "100644",
+                            }
+                        ],
+                    }
+                self.commits.setdefault(base_sha, [])
+                self.commits.setdefault(head_sha, [base_sha])
             return pr
 
     def set_run_attempt(
@@ -693,6 +818,7 @@ class _SimulatedGitHubState:
                 "body": body,
                 "author_association": "NONE",
                 "issue_url": f"https://api.github.com/repos/{OWNER}/{REPO}/issues/{pr_number}",
+                "html_url": f"https://github.com/{REPO_FULL}/pull/{pr_number}#issuecomment-{cid}",
                 "user": {"id": BOT_USER_ID, "login": BOT_LOGIN, "type": "Bot"},
                 "performed_via_github_app": {"id": APP_ID, "slug": APP_SLUG},
                 "created_at": now_iso,
@@ -1128,6 +1254,9 @@ def _make_github_handler(
                 commit_sha = commit_match.group(1)
                 with state.lock:
                     parent_shas = state.commits.get(commit_sha)
+                    commit_date = state.commit_dates.get(
+                        commit_sha, "2026-11-27T00:00:00Z"
+                    )
                 if parent_shas is None:
                     self._send_json(404, {"message": "Not Found"})
                     return
@@ -1135,6 +1264,8 @@ def _make_github_handler(
                     200,
                     {
                         "sha": commit_sha,
+                        "tree": {"sha": commit_sha},
+                        "committer": {"date": commit_date},
                         "parents": [{"sha": p} for p in parent_shas],
                     },
                 )
@@ -1841,6 +1972,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             (self.tmp_path / "v6-provenance.json").read_text(encoding="utf-8")
         )
         self.assertRegex(provenance["workflow_commit_sha"], r"^[0-9a-f]{40}$")
+        self.assertRegex(provenance["trusted_policy_revision"], r"^[0-9a-f]{40}$")
         self.assertRegex(provenance["worker_source_sha256"], r"^[0-9a-f]{64}$")
         self.assertGreaterEqual(len(provenance["wheel_sha256s"]), 2)
         for whl_sha in provenance["wheel_sha256s"].values():
@@ -2525,6 +2657,25 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         )
         with self.gh_state.lock:
             self.gh_state.prs[52]["head_sha"] = HEAD_SHA_B
+            head_b_blob = hashlib.sha256(
+                f"head:{HEAD_SHA_B}".encode("utf-8")
+            ).hexdigest()[:40]
+            self.gh_state.blobs[head_b_blob] = (
+                b"def pick(items, idx):\n    # validate index\n    return items[idx]\n"
+            )
+            self.gh_state.trees[(HEAD_SHA_B, True)] = {
+                "sha": HEAD_SHA_B,
+                "truncated": False,
+                "tree": [
+                    {
+                        "path": "src/app.py",
+                        "type": "blob",
+                        "sha": head_b_blob,
+                        "mode": "100644",
+                    }
+                ],
+            }
+            self.gh_state.commits[HEAD_SHA_B] = [BASE_SHA]
         self.gh_state.set_run_attempt(
             "9202", 1, status="in_progress", conclusion=None, head_sha=HEAD_SHA_B
         )
@@ -2860,9 +3011,15 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         pr55["merge_base_sha"] = merge_base_sha
         for c in self.gh_state.prs[54]["comments"]:
             recs = extract_v6_record_markers(c["body"], strict=True)
-            if any(isinstance(r, ResultPartRecord) for r in recs):
+            final_parts = [
+                r
+                for r in recs
+                if isinstance(r, ResultPartRecord)
+                and r.record_id.startswith("result-part:")
+            ]
+            if final_parts:
                 # Re-point operation_id for PR 55's operation_id so orphan part matches PR 55
-                part = next(r for r in recs if isinstance(r, ResultPartRecord))
+                part = final_parts[0]
                 orphan_part = ResultPartRecord(
                     record_id=part.record_id.replace(":54:", ":55:"),
                     operation_id=f"v6:{REPO_ID}:55:{head_t4[:12]}:pr_review_publish",

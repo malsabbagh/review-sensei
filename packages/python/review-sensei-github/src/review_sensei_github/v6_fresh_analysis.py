@@ -5,34 +5,59 @@ from __future__ import annotations
 import base64
 import difflib
 import hashlib
+import heapq
 import os
 import time
 from collections import deque
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from review_sensei.budgets import EffectiveWorkBudget
 from review_sensei.configuration import (
     DEFAULT_CONFIG_FILENAME,
+    ProductConfiguration,
     default_configuration,
     load_configuration,
 )
-from review_sensei.diff import analyze_diff
+from review_sensei.convergence import resolve_review_convergence_policy
+from review_sensei.diff import DiffFileRecord, DiffHunk, analyze_diff
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import EvidenceSnapshot
-from review_sensei.hosted import plan_hosted_execution
+from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.hunk_subdivision import subdivide_hunk
-from review_sensei.models import ReviewComment, ReviewRequest, ReviewResult
+from review_sensei.models import (
+    ReviewComment,
+    ReviewRequest,
+    ReviewResult,
+    ReviewTransaction,
+    build_transaction_configuration_context,
+    transaction_stage_identity,
+)
+from review_sensei.outcomes import ResourceBudget
 from review_sensei.presentation import render_review_markdown
+from review_sensei.providers.base import (
+    ProviderRequest,
+    ProviderResponse,
+    ReviewProvider,
+)
 from review_sensei.providers.openai_compatible import (
     validate_openai_compatible_endpoint,
 )
 from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.registry import ProviderSettings, default_registry
 from review_sensei.providers.routing import bind_stage_providers
-from review_sensei.service import DEFAULT_STAGES, ReviewService
-from review_sensei.validation import DEFAULT_REVIEW_LIMITS
+from review_sensei.service import (
+    DEFAULT_STAGES,
+    ReviewService,
+    review_work_policy_digest,
+)
+from review_sensei.validation import (
+    DEFAULT_REVIEW_LIMITS,
+    DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
+)
 
 from .errors import GitHubHTTPError, GitHubResponseTooLargeError
 from .v6_credential_matrix import (
@@ -40,7 +65,10 @@ from .v6_credential_matrix import (
     GitHubEventKind,
     RepositoryVisibility,
 )
+from .v6_recovery_ledger import canonical_json_bytes, canonical_sha256
 from .v6_transport import DualCredentialGitHubClient, DualCredentialTransport
+
+_REAL_REVIEW_SERVICE = ReviewService
 
 _BACKEND_ADAPTERS: Mapping[str, str] = {
     "local-ollama": "ollama",
@@ -61,6 +89,19 @@ DEFAULT_BATCH_MAX_FILES = 50
 DEFAULT_BATCH_MAX_HUNKS = 200
 _SPECIAL_GIT_MODES = frozenset({"120000", "160000"})
 _HEX_CHARS = frozenset("0123456789abcdef")
+_MAX_LCA_COMMIT_FETCHES = 256
+
+_LCA_PARENT1 = 1
+_LCA_PARENT2 = 2
+_LCA_STALE = 4
+_LCA_RESULT = 8
+
+
+class V6FreshAnalysisError(ReviewInputError):
+    """Fail-closed error raised during v6 fresh PR ancestry, diff, or batch planning."""
+
+    def __init__(self, diagnostic: str, message: str = "") -> None:
+        super().__init__(message or diagnostic, diagnostic=diagnostic)
 
 
 def _is_40_hex(value: Any) -> bool:
@@ -89,12 +130,194 @@ class _ReadOnlyAppTransport:
         )
 
 
+class _NoCallSizingProvider(ReviewProvider):
+    """Zero-network provider placeholder used only to run ``ReviewService._format_prompt``."""
+
+    name = "sizing"
+    model: str | None = None
+
+    def complete(self, request: ProviderRequest) -> ProviderResponse:
+        raise RuntimeError("_NoCallSizingProvider must never execute model calls")
+
+
 @dataclass(frozen=True)
 class _TreeEntry:
     path: str
     sha: str
     mode: str
     entry_type: str
+
+
+@dataclass(frozen=True)
+class V6DiffUnit:
+    """Single hunk or subdivided sub-hunk unit ready for prompt-budgeted batching."""
+
+    file_path: str
+    hunk_id: str
+    parent_hunk_id: str
+    sub_hunk_index: int
+    sub_hunk_count: int
+    header: str
+    hunk_body: str
+    patch_text: str
+    is_fragment: bool
+    group_key: tuple[str, str, int, str, int, int]
+
+
+@dataclass(frozen=True)
+class V6PlannedBatch:
+    """One deterministic, prompt-budgeted batch covering exact primary hunk IDs."""
+
+    batch_id: str
+    diff_text: str
+    diff_sha256: str
+    prompt_bytes: int
+    paths: tuple[str, ...]
+    primary_hunk_ids: tuple[str, ...]
+    parent_hunk_ids: tuple[str, ...]
+
+    def to_plan_dict(self) -> dict[str, Any]:
+        """Compact JSON-compatible representation stored inside ``BatchPlanRecord``."""
+
+        return {
+            "batch_id": self.batch_id,
+            "primary_hunk_ids": list(self.primary_hunk_ids),
+            "parent_hunk_ids": list(self.parent_hunk_ids),
+            "paths": list(self.paths),
+            "diff_sha256": self.diff_sha256,
+            "prompt_bytes": self.prompt_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class V6FreshAnalysisContext:
+    """Complete immutable PR diff context and restartable batch execution plan."""
+
+    owner: str
+    repo: str
+    pull_request: int
+    pr_title: str | None
+    base_sha: str
+    merge_base_sha: str
+    head_sha: str
+    inventory_sha256: str
+    inventory: tuple[dict[str, Any], ...]
+    non_text_changes: tuple[dict[str, Any], ...]
+    policy_digest: str
+    configuration_digest: str
+    max_provider_calls: int
+    planned_batches: tuple[V6PlannedBatch, ...]
+    all_expected_hunk_ids: tuple[str, ...]
+    sub_hunks_by_parent: Mapping[str, tuple[str, ...]]
+    combined_diff_sha256: str
+    provider_name: str
+    model_name: str | None
+    service: Any
+    instructions: str | None = None
+    has_unsupported: bool = False
+
+
+def compute_trusted_policy_and_config_digests(
+    configuration: ProductConfiguration,
+    *,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+    base_url: str | None = None,
+    allow_custom_endpoint: bool = False,
+    upstream_provider: str | None = None,
+    timeout_seconds: float | None = 120.0,
+) -> tuple[str, str]:
+    """Compute real 64-hex ``(policy_digest, configuration_digest)`` from trusted config."""
+
+    resolved_plan: HostedPlan | None = None
+    effective_model: str | None
+    effective_base_url: str | None
+    effective_timeout: float | None
+    if provider_name is None:
+        resolved_plan = plan_hosted_execution(configuration, environ={})
+        effective_provider = _BACKEND_ADAPTERS.get(
+            resolved_plan.backend, resolved_plan.backend
+        )
+        effective_model = model_name or resolved_plan.model
+        effective_base_url = base_url or resolved_plan.base_url
+        effective_allow_custom = (
+            bool(allow_custom_endpoint) or resolved_plan.allow_custom_endpoint
+        )
+        effective_upstream = upstream_provider or resolved_plan.upstream_provider
+        effective_timeout = resolved_plan.timeout_seconds
+    else:
+        effective_provider = provider_name
+        effective_model = model_name
+        effective_base_url = base_url
+        effective_allow_custom = bool(allow_custom_endpoint)
+        effective_upstream = upstream_provider
+        effective_timeout = timeout_seconds
+
+    mode_arg = "advisory" if configuration.github.reviews == "advisory" else None
+    convergence_policy = resolve_review_convergence_policy(
+        mode=mode_arg,
+        quality=configuration.review.quality,
+    )
+    policy_payload: dict[str, Any] = {
+        "convergence": convergence_policy.identity_fields(),
+        "github": {
+            "automatic_reviews": configuration.github.automatic_reviews,
+            "writes": configuration.github.writes,
+            "reviews": configuration.github.reviews,
+            "mentions": configuration.github.mentions,
+            "learning": configuration.github.learning,
+            "artifacts": configuration.github.artifacts,
+            "operation_entry": configuration.github.operation_entry,
+            "publication_inventory": configuration.github.publication_inventory,
+        },
+        "review_quality": configuration.review.quality,
+    }
+    policy_digest = canonical_sha256(policy_payload)
+
+    max_calls = (
+        configuration.advanced.resources.max_provider_calls
+        or DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS
+    )
+    resource_budget = ResourceBudget.create(
+        limits=DEFAULT_REVIEW_LIMITS,
+        max_provider_calls=max_calls,
+    )
+    work_policy_digest = review_work_policy_digest(
+        configuration.advanced.review_work,
+        resource_budget,
+        None,
+        decision=configuration.decision,
+        generated_mirrors=configuration.advanced.generated_mirrors,
+    )
+    stage_identity, category_policy = transaction_stage_identity(DEFAULT_STAGES)
+    provider_identity: dict[str, object] = {
+        "name": effective_provider,
+        "profile": None,
+        "base_url": effective_base_url,
+        "timeout_seconds": (
+            float(effective_timeout) if effective_timeout is not None else 120.0
+        ),
+        "max_output_tokens": None,
+        "allow_custom_endpoint": effective_allow_custom,
+        "openrouter_policy": (
+            {"schema_version": 1, "upstream_provider": effective_upstream}
+            if effective_provider == "openrouter" and effective_upstream is not None
+            else None
+        ),
+    }
+    config_context = build_transaction_configuration_context(
+        provider=provider_identity,
+        model=effective_model,
+        stages=stage_identity,
+        category_policy=category_policy,
+        publication_mode=convergence_policy.mode,
+        orchestration_enabled=True,
+        work_policy_digest=work_policy_digest,
+    )
+    configuration_digest = ReviewTransaction.compute_configuration_digest(
+        config_context
+    )
+    return policy_digest, configuration_digest
 
 
 def verify_live_pr_head(
@@ -169,7 +392,27 @@ def _format_compare_file_diff(entry: Mapping[str, Any]) -> str:
     )
 
 
-_MAX_LCA_COMMIT_FETCHES = 256
+def _parse_commit_timestamp(body: Mapping[str, Any]) -> float:
+    """Extract Git commit timestamp (committer date, then author date) as epoch seconds."""
+
+    for section_key in ("committer", "author"):
+        section = body.get(section_key)
+        if not isinstance(section, Mapping):
+            continue
+        raw_date = section.get("date")
+        if not isinstance(raw_date, str) or not raw_date.strip():
+            continue
+        normalized = raw_date.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return 0.0
 
 
 def _resolve_merge_base_via_git_commits(
@@ -184,20 +427,31 @@ def _resolve_merge_base_via_git_commits(
     granted_scopes: Collection[str],
     clock: Callable[[], float],
 ) -> str:
-    """Resolve a maximal common ancestor (LCA) of ``base_sha`` and ``head_sha`` via ``git_commit``."""
+    """Resolve exact Git merge base via ``paint_down_to_common`` + ``remove_redundant``.
+
+    Orders active traversal by commit timestamp descending, propagates
+    ``PARENT1``/``PARENT2``/``STALE``/``RESULT`` flags, stops only once all
+    active queue items are ``STALE``, and fails closed with
+    ``V6FreshAnalysisError("v6_merge_base_ancestry_incomplete", ...)`` if any
+    parent fetch fails or the fetch cap is exhausted.
+    """
 
     if base_sha == head_sha:
         return base_sha
 
     parents_cache: dict[str, tuple[str, ...]] = {}
+    commit_ts: dict[str, float] = {}
     fetches = 0
 
-    def _get_parents(commit_sha: str) -> tuple[str, ...]:
+    def _get_commit(commit_sha: str) -> tuple[tuple[str, ...], float]:
         nonlocal fetches
         if commit_sha in parents_cache:
-            return parents_cache[commit_sha]
+            return parents_cache[commit_sha], commit_ts[commit_sha]
         if fetches >= _MAX_LCA_COMMIT_FETCHES:
-            return ()
+            raise V6FreshAnalysisError(
+                "v6_merge_base_ancestry_incomplete",
+                f"commit ancestry fetch cap ({_MAX_LCA_COMMIT_FETCHES}) exceeded at {commit_sha}",
+            )
         fetches += 1
         try:
             resp = read_client.execute(
@@ -210,89 +464,123 @@ def _resolve_merge_base_via_git_commits(
                 credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
                 now_epoch=clock(),
             )
-        except (GitHubResponseTooLargeError, GitHubHTTPError):
-            parents_cache[commit_sha] = ()
-            return ()
+        except (GitHubResponseTooLargeError, GitHubHTTPError) as exc:
+            raise V6FreshAnalysisError(
+                "v6_merge_base_ancestry_incomplete",
+                f"failed to fetch commit {commit_sha} during merge-base resolution: {exc}",
+            ) from exc
         if resp.status != 200 or not isinstance(resp.body, Mapping):
-            parents_cache[commit_sha] = ()
-            return ()
+            raise V6FreshAnalysisError(
+                "v6_merge_base_ancestry_incomplete",
+                f"invalid git commit response for {commit_sha} (status={resp.status})",
+            )
         raw_parents = resp.body.get("parents")
-        parsed: list[str] = []
-        if isinstance(raw_parents, Sequence) and not isinstance(
+        if not isinstance(raw_parents, Sequence) or isinstance(
             raw_parents, (str, bytes, bytearray)
         ):
-            for entry in raw_parents:
-                psha = entry.get("sha") if isinstance(entry, Mapping) else entry
-                if _is_40_hex(psha):
-                    parsed.append(str(psha))
+            raise V6FreshAnalysisError(
+                "v6_merge_base_ancestry_incomplete",
+                f"git commit {commit_sha} missing valid 'parents' sequence",
+            )
+        parsed: list[str] = []
+        for entry in raw_parents:
+            psha = entry.get("sha") if isinstance(entry, Mapping) else entry
+            if not _is_40_hex(psha):
+                raise V6FreshAnalysisError(
+                    "v6_merge_base_ancestry_incomplete",
+                    f"git commit {commit_sha} contains invalid parent SHA {psha!r}",
+                )
+            parsed.append(str(psha))
+        ts = _parse_commit_timestamp(resp.body)
         result = tuple(parsed)
         parents_cache[commit_sha] = result
-        return result
+        commit_ts[commit_sha] = ts
+        return result, ts
 
-    base_depth: dict[str, int] = {base_sha: 0}
-    head_depth: dict[str, int] = {head_sha: 0}
-    base_queue: deque[tuple[str, int]] = deque([(base_sha, 0)])
-    head_queue: deque[tuple[str, int]] = deque([(head_sha, 0)])
-    best_sum: int | None = None
+    flags: dict[str, int] = {}
+    heap: list[tuple[float, int, str]] = []
+    in_queue: set[str] = set()
+    push_seq = 0
 
-    while (base_queue or head_queue) and fetches < _MAX_LCA_COMMIT_FETCHES:
-        common = set(base_depth.keys()) & set(head_depth.keys())
-        if common:
-            best_sum = min(base_depth[c] + head_depth[c] for c in common)
-            min_base_q = base_queue[0][1] if base_queue else best_sum + 1
-            min_head_q = head_queue[0][1] if head_queue else best_sum + 1
-            if min_base_q >= best_sum and min_head_q >= best_sum:
-                break
+    def _push(sha: str, ts: float) -> None:
+        nonlocal push_seq
+        if sha in in_queue:
+            return
+        push_seq += 1
+        in_queue.add(sha)
+        heapq.heappush(heap, (-ts, push_seq, sha))
 
-        expand_base: bool
-        if base_queue and head_queue:
-            expand_base = base_queue[0][1] <= head_queue[0][1]
-        elif base_queue:
-            expand_base = True
-        else:
-            expand_base = False
-
-        if expand_base:
-            cur_sha, cur_d = base_queue.popleft()
-            if best_sum is not None and cur_d >= best_sum:
-                continue
-            for psha in _get_parents(cur_sha):
-                if psha not in base_depth:
-                    base_depth[psha] = cur_d + 1
-                    base_queue.append((psha, cur_d + 1))
-        else:
-            cur_sha, cur_d = head_queue.popleft()
-            if best_sum is not None and cur_d >= best_sum:
-                continue
-            for psha in _get_parents(cur_sha):
-                if psha not in head_depth:
-                    head_depth[psha] = cur_d + 1
-                    head_queue.append((psha, cur_d + 1))
-
-    common = set(base_depth.keys()) & set(head_depth.keys())
-    if not common:
-        raise ReviewInputError(
-            f"unable to resolve merge base commit for {base_sha}...{head_sha}",
-            diagnostic="v6_merge_base_unavailable",
+    def _queue_has_non_stale() -> bool:
+        return any(
+            (flags.get(sha, 0) & _LCA_STALE) == 0
+            for _, _, sha in heap
+            if sha in in_queue
         )
 
-    # Filter out any common ancestor that is a strict ancestor of another common ancestor.
-    ancestors_of_common: set[str] = set()
-    for c in common:
-        walk: deque[str] = deque(parents_cache.get(c, ()))
+    _, base_ts = _get_commit(base_sha)
+    _, head_ts = _get_commit(head_sha)
+    flags[base_sha] = _LCA_PARENT1
+    flags[head_sha] = _LCA_PARENT2
+    _push(base_sha, base_ts)
+    _push(head_sha, head_ts)
+
+    result_candidates: list[str] = []
+    while _queue_has_non_stale():
+        _, _, cur_sha = heapq.heappop(heap)
+        if cur_sha not in in_queue:
+            continue
+        in_queue.remove(cur_sha)
+
+        cur_flags = flags.get(cur_sha, 0)
+        if (cur_flags & (_LCA_PARENT1 | _LCA_PARENT2)) == (_LCA_PARENT1 | _LCA_PARENT2):
+            if not (cur_flags & _LCA_RESULT):
+                flags[cur_sha] = cur_flags | _LCA_RESULT
+                result_candidates.append(cur_sha)
+            prop_flags = _LCA_PARENT1 | _LCA_PARENT2 | _LCA_STALE
+        else:
+            prop_flags = cur_flags & (_LCA_PARENT1 | _LCA_PARENT2 | _LCA_STALE)
+
+        parents, _ = _get_commit(cur_sha)
+        for psha in parents:
+            pflags = flags.get(psha, 0)
+            if (pflags & prop_flags) == prop_flags:
+                continue
+            flags[psha] = pflags | prop_flags
+            _, pts = _get_commit(psha)
+            _push(psha, pts)
+
+    if not result_candidates:
+        raise V6FreshAnalysisError(
+            "v6_merge_base_unavailable",
+            f"unable to resolve merge base commit for {base_sha}...{head_sha}",
+        )
+
+    # remove_redundant: filter out any common ancestor that is a strict ancestor of another.
+    if len(result_candidates) == 1:
+        return result_candidates[0]
+
+    min_cand_ts = min(commit_ts.get(c, 0.0) for c in result_candidates)
+    strict_ancestors: set[str] = set()
+    for cand in result_candidates:
+        cand_parents, _ = _get_commit(cand)
+        walk: deque[str] = deque(cand_parents)
         seen_walk: set[str] = set()
         while walk:
-            p = walk.popleft()
-            if p in seen_walk:
+            anc = walk.popleft()
+            if anc in seen_walk:
                 continue
-            seen_walk.add(p)
-            ancestors_of_common.add(p)
-            for gp in parents_cache.get(p, ()):
-                if gp not in seen_walk:
-                    walk.append(gp)
+            seen_walk.add(anc)
+            strict_ancestors.add(anc)
+            anc_parents, anc_ts = _get_commit(anc)
+            if anc_ts >= min_cand_ts or anc_ts == 0.0:
+                for gp in anc_parents:
+                    if gp not in seen_walk:
+                        walk.append(gp)
 
-    maximal = [c for c in common if c not in ancestors_of_common] or list(common)
-    return min(maximal, key=lambda c: (base_depth[c] + head_depth[c], head_depth[c], c))
+    maximal = [
+        c for c in result_candidates if c not in strict_ancestors
+    ] or result_candidates
+    return max(maximal, key=lambda c: (commit_ts.get(c, 0.0), c))
 
 
 def _fetch_compare_and_merge_base(
@@ -358,7 +646,7 @@ def _fetch_compare_and_merge_base(
     except (GitHubResponseTooLargeError, GitHubHTTPError):
         pass
 
-    # Second fallback: bidirectional commit-graph LCA over immutable git_commit objects.
+    # Second fallback: Git paint_down_to_common over immutable git_commit objects.
     merge_base_sha = _resolve_merge_base_via_git_commits(
         read_client=read_client,
         owner=owner,
@@ -400,18 +688,18 @@ def _fetch_complete_tree(
             now_epoch=clock(),
         )
         if resp.status != 200 or not isinstance(resp.body, Mapping):
-            raise ReviewInputError(
+            raise V6FreshAnalysisError(
+                "v6_diff_inventory_incomplete",
                 f"failed to fetch git tree {root_sha} (status={resp.status})",
-                diagnostic="v6_git_tree_unavailable",
             )
         if bool(resp.body.get("truncated", False)):
             need_dir_walk = True
         else:
             raw_tree = resp.body.get("tree")
             if not isinstance(raw_tree, list):
-                raise ReviewInputError(
+                raise V6FreshAnalysisError(
+                    "v6_diff_inventory_incomplete",
                     f"git tree {root_sha} missing 'tree' list",
-                    diagnostic="v6_git_tree_unavailable",
                 )
             for item in raw_tree:
                 if not isinstance(item, Mapping):
@@ -432,6 +720,11 @@ def _fetch_complete_tree(
             return blobs
     except GitHubResponseTooLargeError:
         need_dir_walk = True
+    except GitHubHTTPError as exc:
+        raise V6FreshAnalysisError(
+            "v6_diff_inventory_incomplete",
+            f"failed to fetch git tree {root_sha}: {exc}",
+        ) from exc
 
     if not need_dir_walk:
         return blobs
@@ -444,26 +737,32 @@ def _fetch_complete_tree(
         if (prefix, tree_sha) in visited_trees:
             continue
         visited_trees.add((prefix, tree_sha))
-        resp = read_client.execute(
-            "git_tree",
-            method="GET",
-            path=f"/repos/{owner}/{repo}/git/trees/{tree_sha}",
-            event=event,
-            visibility=visibility,
-            granted_scopes=granted_scopes,
-            credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
-            now_epoch=clock(),
-        )
+        try:
+            resp = read_client.execute(
+                "git_tree",
+                method="GET",
+                path=f"/repos/{owner}/{repo}/git/trees/{tree_sha}",
+                event=event,
+                visibility=visibility,
+                granted_scopes=granted_scopes,
+                credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                now_epoch=clock(),
+            )
+        except (GitHubResponseTooLargeError, GitHubHTTPError) as exc:
+            raise V6FreshAnalysisError(
+                "v6_diff_inventory_incomplete",
+                f"failed to fetch git directory tree {tree_sha}: {exc}",
+            ) from exc
         if resp.status != 200 or not isinstance(resp.body, Mapping):
-            raise ReviewInputError(
+            raise V6FreshAnalysisError(
+                "v6_diff_inventory_incomplete",
                 f"failed to fetch git tree {tree_sha} (status={resp.status})",
-                diagnostic="v6_git_tree_unavailable",
             )
         raw_tree = resp.body.get("tree")
         if not isinstance(raw_tree, list):
-            raise ReviewInputError(
+            raise V6FreshAnalysisError(
+                "v6_diff_inventory_incomplete",
                 f"git tree {tree_sha} missing 'tree' list",
-                diagnostic="v6_git_tree_unavailable",
             )
         for item in raw_tree:
             if not isinstance(item, Mapping):
@@ -489,27 +788,27 @@ def _fetch_complete_tree(
 
 def _decode_blob_bytes(body: Any) -> bytes:
     if not isinstance(body, Mapping):
-        raise ReviewInputError(
-            "git blob payload must be a mapping", diagnostic="v6_git_blob_invalid"
+        raise V6FreshAnalysisError(
+            "v6_diff_inventory_incomplete", "git blob payload must be a mapping"
         )
     content = body.get("content")
     encoding = str(body.get("encoding") or "base64").lower()
     if not isinstance(content, str):
-        raise ReviewInputError(
-            "git blob payload missing content", diagnostic="v6_git_blob_invalid"
+        raise V6FreshAnalysisError(
+            "v6_diff_inventory_incomplete", "git blob payload missing content"
         )
     if encoding == "base64":
         try:
             return base64.b64decode(content, validate=False)
         except Exception as exc:
-            raise ReviewInputError(
-                "git blob contains invalid base64", diagnostic="v6_git_blob_invalid"
+            raise V6FreshAnalysisError(
+                "v6_diff_inventory_incomplete", "git blob contains invalid base64"
             ) from exc
     if encoding == "utf-8":
         return content.encode("utf-8")
-    raise ReviewInputError(
+    raise V6FreshAnalysisError(
+        "v6_diff_inventory_incomplete",
         f"unsupported git blob encoding {encoding!r}",
-        diagnostic="v6_git_blob_invalid",
     )
 
 
@@ -539,10 +838,15 @@ def _fetch_blob_text_or_binary(
         )
     except GitHubResponseTooLargeError:
         return None, "blob_response_too_large"
+    except GitHubHTTPError as exc:
+        raise V6FreshAnalysisError(
+            "v6_diff_inventory_incomplete",
+            f"failed to fetch git blob {sha}: {exc}",
+        ) from exc
     if resp.status != 200:
-        raise ReviewInputError(
+        raise V6FreshAnalysisError(
+            "v6_diff_inventory_incomplete",
             f"failed to fetch git blob {sha} (status={resp.status})",
-            diagnostic="v6_git_blob_unavailable",
         )
     raw_bytes = _decode_blob_bytes(resp.body)
     if b"\x00" in raw_bytes:
@@ -553,7 +857,87 @@ def _fetch_blob_text_or_binary(
         return None, "binary_blob"
 
 
-def _build_complete_split_diff_and_inventory(
+def _compute_hunk_id(path: str, hunk: DiffHunk) -> str:
+    """Return deterministic stable identifier for one unified diff hunk."""
+
+    digest = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "path": path,
+                "index": hunk.index,
+                "old_start": hunk.old_start,
+                "old_count": hunk.old_count,
+                "new_start": hunk.new_start,
+                "new_count": hunk.new_count,
+                "text": hunk.text,
+            }
+        )
+    ).hexdigest()[:16]
+    return (
+        f"{path}#h{hunk.index}:"
+        f"{hunk.old_start},{hunk.old_count}+{hunk.new_start},{hunk.new_count}:{digest}"
+    )
+
+
+def _diff_reconstructs_head(
+    base_text: str | None,
+    head_text: str | None,
+    file_rec: DiffFileRecord,
+) -> bool:
+    """Verify ``file_rec`` hunks reconstruct ``head_text`` line-for-line from ``base_text``."""
+
+    if file_rec.binary:
+        return False
+    base_lines = base_text.splitlines() if base_text is not None else []
+    head_lines = head_text.splitlines() if head_text is not None else []
+    if base_text is None:
+        base_lines = []
+    if head_text is None:
+        head_lines = []
+
+    if not file_rec.hunks:
+        return base_lines == head_lines
+
+    reconstructed: list[str] = []
+    old_cursor = 0  # 0-based index into base_lines
+    for hunk in file_rec.hunks:
+        target_start = (
+            0 if hunk.old_count == 0 and hunk.old_start == 0 else hunk.old_start - 1
+        )
+        if hunk.old_count == 0 and hunk.old_start > 0:
+            target_start = hunk.old_start
+        if target_start < old_cursor or target_start > len(base_lines):
+            return False
+        reconstructed.extend(base_lines[old_cursor:target_start])
+        old_cursor = target_start
+
+        lines = hunk.text.split("\n")[1:]
+        for line in lines:
+            if not line:
+                continue
+            if line.startswith("\\"):
+                continue
+            prefix = line[0]
+            content = line[1:]
+            if prefix == " ":
+                if old_cursor >= len(base_lines) or base_lines[old_cursor] != content:
+                    return False
+                reconstructed.append(content)
+                old_cursor += 1
+            elif prefix == "-":
+                if old_cursor >= len(base_lines) or base_lines[old_cursor] != content:
+                    return False
+                old_cursor += 1
+            elif prefix == "+":
+                reconstructed.append(content)
+            else:
+                return False
+
+    reconstructed.extend(base_lines[old_cursor:])
+    return reconstructed == head_lines
+
+
+def _build_authoritative_inventory_and_diffs(
     *,
     read_client: DualCredentialGitHubClient,
     owner: str,
@@ -561,12 +945,13 @@ def _build_complete_split_diff_and_inventory(
     merge_base_sha: str,
     head_sha: str,
     compare_files_by_path: Mapping[str, Mapping[str, Any]],
+    compare_diff_records_by_path: Mapping[str, DiffFileRecord],
     event: GitHubEventKind,
     visibility: RepositoryVisibility,
     granted_scopes: Collection[str],
     clock: Callable[[], float],
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Diff complete immutable trees and build per-file diffs + sorted inventory."""
+    """Build authoritative tree/blob inventory and reconcile Compare fast-path against it."""
 
     base_blobs = _fetch_complete_tree(
         read_client=read_client,
@@ -600,7 +985,7 @@ def _build_complete_split_diff_and_inventory(
         elif h is not None and b is None and h.entry_type == "blob":
             added_by_sha.setdefault(h.sha, []).append(path)
 
-    rename_pairs: dict[str, str] = {}
+    pure_rename_pairs: dict[str, str] = {}
     suppressed_deleted: set[str] = set()
     for sha, deleted_list in deleted_by_sha.items():
         added_list = added_by_sha.get(sha, [])
@@ -608,8 +993,27 @@ def _build_complete_split_diff_and_inventory(
             old_p = deleted_list[0]
             new_p = added_list[0]
             if base_blobs[old_p].mode == head_blobs[new_p].mode:
-                rename_pairs[new_p] = old_p
+                pure_rename_pairs[new_p] = old_p
                 suppressed_deleted.add(old_p)
+
+    # Pair renames with edits only when trees prove old_p was removed and new_p was added.
+    modified_rename_pairs: dict[str, str] = {}
+    for new_p, compare_meta in compare_files_by_path.items():
+        if str(compare_meta.get("status") or "") != "renamed":
+            continue
+        prev = compare_meta.get("previous_filename")
+        if (
+            isinstance(prev, str)
+            and prev
+            and prev in base_blobs
+            and prev not in head_blobs
+            and prev not in suppressed_deleted
+            and new_p in head_blobs
+            and new_p not in base_blobs
+            and new_p not in pure_rename_pairs
+        ):
+            modified_rename_pairs[new_p] = prev
+            suppressed_deleted.add(prev)
 
     text_diffs: list[str] = []
     inventory: list[dict[str, Any]] = []
@@ -617,37 +1021,36 @@ def _build_complete_split_diff_and_inventory(
     for path in all_paths:
         if path in suppressed_deleted:
             continue
-        if path in rename_pairs:
+        if path in pure_rename_pairs:
             inventory.append(
                 {
                     "path": path,
-                    "previous_path": rename_pairs[path],
+                    "previous_path": pure_rename_pairs[path],
+                    "status": "rename_only",
                     "disposition": "rename_only",
                     "reason": "pure_rename",
+                    "hunk_ids": [],
                 }
             )
             continue
 
-        base_entry = base_blobs.get(path)
-        head_entry = head_blobs.get(path)
-        if base_entry == head_entry:
-            continue
-
-        cmp_entry = compare_files_by_path.get(path)
-        if cmp_entry is not None:
-            patch = cmp_entry.get("patch")
-            if isinstance(patch, str) and patch.strip():
-                text_diffs.append(_format_compare_file_diff(cmp_entry))
-                inv_item: dict[str, Any] = {
-                    "path": path,
-                    "disposition": "text",
-                    "reason": "compare_patch",
-                }
-                prev = cmp_entry.get("previous_filename")
-                if isinstance(prev, str) and prev.strip():
-                    inv_item["previous_path"] = prev
-                inventory.append(inv_item)
+        if path in modified_rename_pairs:
+            prev_path = modified_rename_pairs[path]
+            base_entry: _TreeEntry | None = base_blobs.get(prev_path)
+            head_entry: _TreeEntry | None = head_blobs.get(path)
+            expected_status = "renamed"
+        else:
+            prev_path = None
+            base_entry = base_blobs.get(path)
+            head_entry = head_blobs.get(path)
+            if base_entry == head_entry:
                 continue
+            if base_entry is None:
+                expected_status = "added"
+            elif head_entry is None:
+                expected_status = "removed"
+            else:
+                expected_status = "modified"
 
         if (
             base_entry is not None
@@ -663,15 +1066,35 @@ def _build_complete_split_diff_and_inventory(
             inventory.append(
                 {
                     "path": path,
+                    "status": "unsupported",
                     "disposition": "unsupported",
                     "reason": "non_blob_or_special_mode",
+                    "hunk_ids": [],
+                }
+            )
+            continue
+
+        if (
+            base_entry is not None
+            and head_entry is not None
+            and base_entry.sha == head_entry.sha
+            and base_entry.mode != head_entry.mode
+        ):
+            inventory.append(
+                {
+                    "path": path,
+                    "status": "unsupported",
+                    "disposition": "unsupported",
+                    "reason": "mode_change_only",
+                    "hunk_ids": [],
                 }
             )
             continue
 
         base_text: str | None = None
+        base_err: str | None = None
         if base_entry is not None:
-            base_text, err_reason = _fetch_blob_text_or_binary(
+            base_text, base_err = _fetch_blob_text_or_binary(
                 read_client=read_client,
                 owner=owner,
                 repo=repo,
@@ -681,16 +1104,23 @@ def _build_complete_split_diff_and_inventory(
                 granted_scopes=granted_scopes,
                 clock=clock,
             )
-            if err_reason is not None:
-                disposition = "binary" if err_reason == "binary_blob" else "unsupported"
+            if base_err == "binary_blob":
                 inventory.append(
-                    {"path": path, "disposition": disposition, "reason": err_reason}
+                    {
+                        "path": path,
+                        "status": "binary",
+                        "disposition": "binary",
+                        "reason": base_err,
+                        "hunk_ids": [],
+                        **({"previous_path": prev_path} if prev_path else {}),
+                    }
                 )
                 continue
 
         head_text: str | None = None
-        if head_entry is not None:
-            head_text, err_reason = _fetch_blob_text_or_binary(
+        head_err: str | None = None
+        if head_entry is not None and base_err is None:
+            head_text, head_err = _fetch_blob_text_or_binary(
                 read_client=read_client,
                 owner=owner,
                 repo=repo,
@@ -700,16 +1130,79 @@ def _build_complete_split_diff_and_inventory(
                 granted_scopes=granted_scopes,
                 clock=clock,
             )
-            if err_reason is not None:
-                disposition = "binary" if err_reason == "binary_blob" else "unsupported"
+            if head_err == "binary_blob":
                 inventory.append(
-                    {"path": path, "disposition": disposition, "reason": err_reason}
+                    {
+                        "path": path,
+                        "status": "binary",
+                        "disposition": "binary",
+                        "reason": head_err,
+                        "hunk_ids": [],
+                        **({"previous_path": prev_path} if prev_path else {}),
+                    }
                 )
                 continue
 
+        cmp_rec = compare_diff_records_by_path.get(path)
+        cmp_entry: Mapping[str, Any] | None = compare_files_by_path.get(path)
+        if base_err is not None or head_err is not None:
+            # Oversized blob: allow verified Compare patch if available, otherwise account as unsupported.
+            if cmp_rec is not None and not cmp_rec.binary and cmp_rec.hunks:
+                hunk_ids = [_compute_hunk_id(path, h) for h in cmp_rec.hunks]
+                text_diffs.append(cmp_rec.text)
+                inventory.append(
+                    {
+                        "path": path,
+                        "status": expected_status,
+                        "disposition": "text",
+                        "reason": "compare_patch_oversized_blob",
+                        "hunk_ids": hunk_ids,
+                        **({"previous_path": prev_path} if prev_path else {}),
+                    }
+                )
+                continue
+            err_reason = base_err or head_err or "blob_response_too_large"
+            inventory.append(
+                {
+                    "path": path,
+                    "status": "unsupported",
+                    "disposition": "unsupported",
+                    "reason": err_reason,
+                    "hunk_ids": [],
+                    **({"previous_path": prev_path} if prev_path else {}),
+                }
+            )
+            continue
+
+        # Reconcile Compare fast-path against authoritative base_text -> head_text.
+        cmp_status_ok = True
+        if cmp_entry is not None:
+            raw_cmp_status = str(cmp_entry.get("status") or expected_status)
+            if raw_cmp_status != expected_status:
+                cmp_status_ok = False
+        if (
+            cmp_rec is not None
+            and cmp_status_ok
+            and _diff_reconstructs_head(base_text, head_text, cmp_rec)
+        ):
+            hunk_ids = [_compute_hunk_id(path, h) for h in cmp_rec.hunks]
+            text_diffs.append(cmp_rec.text)
+            inv_row: dict[str, Any] = {
+                "path": path,
+                "status": expected_status,
+                "disposition": "text",
+                "reason": "compare_reconciled",
+                "hunk_ids": hunk_ids,
+            }
+            if prev_path:
+                inv_row["previous_path"] = prev_path
+            inventory.append(inv_row)
+            continue
+
         old_lines = base_text.splitlines() if base_text is not None else []
         new_lines = head_text.splitlines() if head_text is not None else []
-        fromfile = "/dev/null" if base_text is None else f"a/{path}"
+        old_name = prev_path or path
+        fromfile = "/dev/null" if base_text is None else f"a/{old_name}"
         tofile = "/dev/null" if head_text is None else f"b/{path}"
         diff_lines = list(
             difflib.unified_diff(
@@ -724,116 +1217,369 @@ def _build_complete_split_diff_and_inventory(
             inventory.append(
                 {
                     "path": path,
+                    "status": "unsupported",
                     "disposition": "unsupported",
                     "reason": "no_line_diff_content",
+                    "hunk_ids": [],
                 }
             )
             continue
-        file_diff = f"diff --git a/{path} b/{path}\n" + "\n".join(diff_lines) + "\n"
-        text_diffs.append(file_diff)
-        inventory.append(
-            {
-                "path": path,
-                "disposition": "text",
-                "reason": "blob_unified_diff",
-            }
-        )
+        file_diff = f"diff --git a/{old_name} b/{path}\n" + "\n".join(diff_lines) + "\n"
+        parsed_blob = analyze_diff(file_diff)
+        if not parsed_blob.file_records or not parsed_blob.file_records[0].hunks:
+            raise V6FreshAnalysisError(
+                "v6_diff_inventory_incomplete",
+                f"unable to parse authoritative unified diff for {path}",
+            )
+        blob_rec = parsed_blob.file_records[0]
+        hunk_ids = [_compute_hunk_id(path, h) for h in blob_rec.hunks]
+        text_diffs.append(blob_rec.text)
+        inv_blob: dict[str, Any] = {
+            "path": path,
+            "status": expected_status,
+            "disposition": "text",
+            "reason": "blob_unified_diff",
+            "hunk_ids": hunk_ids,
+        }
+        if prev_path:
+            inv_blob["previous_path"] = prev_path
+        inventory.append(inv_blob)
 
     return text_diffs, inventory
 
 
-def _split_text_diff_into_review_units(
-    file_diff_text: str,
+def _file_group_identity(path: str) -> tuple[str, str, int]:
+    """Return ``(parent_dir, normalized_stem, is_test)`` for source/test pairing."""
+
+    p = Path(path)
+    parent = p.parent.as_posix()
+    if parent == ".":
+        parent = ""
+    stem = p.stem
+    is_test = 0
+    if stem.startswith("test_") and len(stem) > 5:
+        stem = stem[5:]
+        is_test = 1
+    elif stem.endswith("_test") and len(stem) > 5:
+        stem = stem[:-5]
+        is_test = 1
+    elif stem.endswith(".test") and len(stem) > 5:
+        stem = stem[:-5]
+        is_test = 1
+    elif stem.endswith(".spec") and len(stem) > 5:
+        stem = stem[:-5]
+        is_test = 1
+    return parent, stem, is_test
+
+
+def _build_group_keys(paths: Sequence[str]) -> dict[str, tuple[str, str, int]]:
+    """Pair source + test files and cluster same-directory modules deterministically."""
+
+    source_dirs_by_stem: dict[str, str] = {}
+    identities: dict[str, tuple[str, str, int]] = {}
+    for path in sorted(set(paths)):
+        parent, stem, is_test = _file_group_identity(path)
+        identities[path] = (parent, stem, is_test)
+        if is_test == 0 and stem not in source_dirs_by_stem:
+            source_dirs_by_stem[stem] = parent
+
+    group_keys: dict[str, tuple[str, str, int]] = {}
+    for path, (parent, stem, is_test) in identities.items():
+        cluster_dir = source_dirs_by_stem.get(stem, parent) if is_test else parent
+        group_keys[path] = (cluster_dir, stem, is_test)
+    return group_keys
+
+
+def _measure_prompt_bytes(
+    service: Any,
+    *,
+    owner: str,
+    repo: str,
+    pull_request: int,
+    pr_title: str | None,
+    base_sha: str,
+    head_sha: str,
+    model_name: str | None,
+    instructions: str | None,
+    diff_text: str,
+    max_prompt_bytes: int,
+) -> int:
+    """Measure full rendered model prompt UTF-8 byte size via ``ReviewService._format_prompt``."""
+
+    formatter_service = service
+    if not hasattr(service, "_format_prompt") or not hasattr(service, "stages"):
+        formatter_service = _REAL_REVIEW_SERVICE(
+            _NoCallSizingProvider(),
+            stages=DEFAULT_STAGES,
+        )
+
+    req = ReviewRequest(
+        diff=diff_text,
+        repository=f"{owner}/{repo}",
+        pull_request_number=pull_request,
+        title=pr_title,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        model=model_name,
+        instructions=instructions,
+    )
+    analysis = analyze_diff(diff_text, limits=req.limits) if diff_text else None
+    max_rendered = 0
+    for stage in formatter_service.stages:
+        rendered = formatter_service._format_prompt(
+            stage,
+            req,
+            active_categories=stage.categories,
+            max_prompt_bytes=max_prompt_bytes,
+            analysis=analysis,
+        )
+        max_rendered = max(max_rendered, len(rendered.encode("utf-8")))
+    return max_rendered
+
+
+def _split_and_group_diff_units(
+    text_diffs: Sequence[str],
     *,
     snapshot: EvidenceSnapshot,
     batch_max_bytes: int,
     batch_max_hunks: int,
-) -> tuple[list[tuple[str, str, int, int]], list[str]]:
-    """Split a file diff into bounded units via ``analyze_diff`` and ``subdivide_hunk``."""
+    prompt_ceiling_bytes: int,
+    measure_prompt_fn: Callable[[str], int],
+) -> tuple[list[V6DiffUnit], dict[str, tuple[str, ...]], set[str]]:
+    """Split file diffs into bounded hunk/sub-hunk units and attach grouping keys."""
 
-    analysis = analyze_diff(file_diff_text)
-    units: list[tuple[str, str, int, int]] = []
-    oversized_paths: list[str] = []
+    parsed_records: list[DiffFileRecord] = []
+    for file_diff_text in text_diffs:
+        analysis = analyze_diff(file_diff_text)
+        parsed_records.extend(analysis.file_records)
 
-    for rec in analysis.file_records:
+    all_paths = [rec.canonical_path or rec.old_path or "" for rec in parsed_records]
+    group_map = _build_group_keys(all_paths)
+
+    units: list[V6DiffUnit] = []
+    sub_hunks_by_parent: dict[str, tuple[str, ...]] = {}
+    oversized_paths: set[str] = set()
+
+    for rec in parsed_records:
         file_key = rec.canonical_path or rec.old_path or ""
-        rec_bytes = len(rec.text.encode("utf-8"))
-        if rec_bytes <= batch_max_bytes and len(rec.hunks) <= batch_max_hunks:
-            units.append((file_key, rec.text, rec_bytes, max(1, len(rec.hunks))))
-            continue
+        cluster_dir, stem, is_test = group_map.get(file_key, ("", file_key, 0))
 
         if not rec.hunks:
-            if rec_bytes <= DEFAULT_REVIEW_LIMITS.max_diff_bytes:
-                units.append((file_key, rec.text, rec_bytes, 1))
+            rec_bytes = len(rec.text.encode("utf-8"))
+            if (
+                rec_bytes <= DEFAULT_REVIEW_LIMITS.max_diff_bytes
+                and rec_bytes <= batch_max_bytes
+                and measure_prompt_fn(rec.text) <= prompt_ceiling_bytes
+            ):
+                synthetic_id = f"{file_key}#h0:0,0+0,0:{hashlib.sha256(rec.text.encode('utf-8')).hexdigest()[:16]}"
+                units.append(
+                    V6DiffUnit(
+                        file_path=file_key,
+                        hunk_id=synthetic_id,
+                        parent_hunk_id=synthetic_id,
+                        sub_hunk_index=0,
+                        sub_hunk_count=1,
+                        header=rec.header,
+                        hunk_body="",
+                        patch_text=rec.text,
+                        is_fragment=False,
+                        group_key=(cluster_dir, stem, is_test, file_key, 0, 0),
+                    )
+                )
+                sub_hunks_by_parent[synthetic_id] = (synthetic_id,)
             elif rec.canonical_path is not None:
-                oversized_paths.append(rec.canonical_path)
+                oversized_paths.add(rec.canonical_path)
             continue
 
         for hunk in rec.hunks:
+            parent_hunk_id = _compute_hunk_id(file_key, hunk)
             hunk_body = hunk.text if hunk.text.endswith("\n") else f"{hunk.text}\n"
             single_hunk_diff = f"{rec.header}{hunk_body}"
             single_bytes = len(single_hunk_diff.encode("utf-8"))
-            if single_bytes <= batch_max_bytes:
-                units.append((file_key, single_hunk_diff, single_bytes, 1))
+            if (
+                single_bytes <= batch_max_bytes
+                and measure_prompt_fn(single_hunk_diff) <= prompt_ceiling_bytes
+            ):
+                units.append(
+                    V6DiffUnit(
+                        file_path=file_key,
+                        hunk_id=parent_hunk_id,
+                        parent_hunk_id=parent_hunk_id,
+                        sub_hunk_index=0,
+                        sub_hunk_count=1,
+                        header=rec.header,
+                        hunk_body=hunk_body,
+                        patch_text=single_hunk_diff,
+                        is_fragment=False,
+                        group_key=(cluster_dir, stem, is_test, file_key, hunk.index, 0),
+                    )
+                )
+                sub_hunks_by_parent[parent_hunk_id] = (parent_hunk_id,)
                 continue
 
             parts = subdivide_hunk(
                 rec,
                 hunk,
                 snapshot,
-                admit=lambda part: len(part.patch.encode("utf-8")) <= batch_max_bytes,
+                admit=lambda part: (
+                    len(part.patch.encode("utf-8")) <= batch_max_bytes
+                    and measure_prompt_fn(part.patch) <= prompt_ceiling_bytes
+                ),
             )
-            for part in parts:
+            part_ids: list[str] = []
+            part_failed = False
+            for part_idx, part in enumerate(parts):
                 part_bytes = len(part.patch.encode("utf-8"))
-                if part_bytes <= DEFAULT_REVIEW_LIMITS.max_diff_bytes:
-                    units.append((file_key, part.patch, part_bytes, 1))
-                elif rec.canonical_path is not None:
-                    oversized_paths.append(rec.canonical_path)
-    return units, oversized_paths
+                if (
+                    part_bytes > DEFAULT_REVIEW_LIMITS.max_diff_bytes
+                    or part_bytes > batch_max_bytes
+                    or measure_prompt_fn(part.patch) > prompt_ceiling_bytes
+                ):
+                    part_failed = True
+                    break
+                sub_id = f"{parent_hunk_id}#s{part_idx}"
+                part_ids.append(sub_id)
+                units.append(
+                    V6DiffUnit(
+                        file_path=file_key,
+                        hunk_id=sub_id,
+                        parent_hunk_id=parent_hunk_id,
+                        sub_hunk_index=part_idx,
+                        sub_hunk_count=len(parts),
+                        header=rec.header,
+                        hunk_body=part.patch,
+                        patch_text=part.patch,
+                        is_fragment=True,
+                        group_key=(
+                            cluster_dir,
+                            stem,
+                            is_test,
+                            file_key,
+                            hunk.index,
+                            part_idx,
+                        ),
+                    )
+                )
+            if part_failed:
+                # Remove any partial fragments for this oversized hunk and mark file unsupported.
+                units = [u for u in units if u.parent_hunk_id != parent_hunk_id]
+                if rec.canonical_path is not None:
+                    oversized_paths.add(rec.canonical_path)
+            else:
+                sub_hunks_by_parent[parent_hunk_id] = tuple(part_ids)
+
+    units.sort(key=lambda u: u.group_key)
+    return units, sub_hunks_by_parent, oversized_paths
 
 
-def _pack_diff_units_into_batches(
-    units: Sequence[tuple[str, str, int, int]],
+def _render_batch_diff_text(batch_units: Sequence[V6DiffUnit]) -> str:
+    """Render grouped units cleanly, combining non-fragment hunks of the same file."""
+
+    chunks: list[str] = []
+    idx = 0
+    while idx < len(batch_units):
+        unit = batch_units[idx]
+        if unit.is_fragment or not unit.hunk_body:
+            chunks.append(unit.patch_text)
+            idx += 1
+            continue
+        chunks.append(unit.header)
+        chunks.append(unit.hunk_body)
+        j = idx + 1
+        while (
+            j < len(batch_units)
+            and not batch_units[j].is_fragment
+            and batch_units[j].file_path == unit.file_path
+            and batch_units[j].header == unit.header
+            and batch_units[j].hunk_body
+        ):
+            chunks.append(batch_units[j].hunk_body)
+            j += 1
+        idx = j
+    return "".join(chunks)
+
+
+def _pack_units_into_planned_batches(
+    units: Sequence[V6DiffUnit],
     *,
     batch_max_bytes: int,
     batch_max_files: int,
     batch_max_hunks: int,
-) -> list[str]:
-    """Greedily pack deterministic units into bounded batches without repeating file headers."""
+    prompt_ceiling_bytes: int,
+    measure_prompt_fn: Callable[[str], int],
+) -> tuple[V6PlannedBatch, ...]:
+    """Pack grouped units into prompt-budgeted batches with strict 1x hunk coverage."""
 
-    batches: list[str] = []
-    cur_chunks: list[str] = []
-    cur_keys: set[str] = set()
-    cur_bytes = 0
-    cur_files = 0
-    cur_hunks = 0
+    if not units:
+        return ()
 
-    for file_key, text, size_bytes, hunk_count in units:
-        would_exceed = bool(
-            cur_chunks
-            and (
-                file_key in cur_keys
-                or cur_bytes + size_bytes > batch_max_bytes
-                or cur_files + 1 > batch_max_files
-                or cur_hunks + hunk_count > batch_max_hunks
+    planned: list[V6PlannedBatch] = []
+    cur_units: list[V6DiffUnit] = []
+    cur_files: set[str] = set()
+
+    def _flush(batch_idx: int) -> None:
+        diff_text = _render_batch_diff_text(cur_units)
+        prompt_bytes = measure_prompt_fn(diff_text)
+        diff_sha = hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
+        paths = tuple(dict.fromkeys(u.file_path for u in cur_units))
+        primary_hunk_ids = tuple(u.hunk_id for u in cur_units)
+        parent_hunk_ids = tuple(dict.fromkeys(u.parent_hunk_id for u in cur_units))
+        planned.append(
+            V6PlannedBatch(
+                batch_id=f"batch-{batch_idx:03d}-{diff_sha[:12]}",
+                diff_text=diff_text,
+                diff_sha256=diff_sha,
+                prompt_bytes=prompt_bytes,
+                paths=paths,
+                primary_hunk_ids=primary_hunk_ids,
+                parent_hunk_ids=parent_hunk_ids,
             )
         )
-        if would_exceed:
-            batches.append("".join(cur_chunks))
-            cur_chunks = []
-            cur_keys = set()
-            cur_bytes = 0
-            cur_files = 0
-            cur_hunks = 0
-        cur_chunks.append(text)
-        cur_keys.add(file_key)
-        cur_bytes += size_bytes
-        cur_files += 1
-        cur_hunks += hunk_count
 
-    if cur_chunks:
-        batches.append("".join(cur_chunks))
-    return batches
+    for unit in units:
+        if cur_units:
+            # Keep a fragmented file's tail separate from the next unrelated group so
+            # source+test pairs start together cleanly instead of being split across batches.
+            switching_from_fragment_group = (
+                cur_units[-1].is_fragment
+                and cur_units[-1].group_key[:2] != unit.group_key[:2]
+            )
+            candidate_units = [*cur_units, unit]
+            candidate_files = cur_files | {unit.file_path}
+            if (
+                switching_from_fragment_group
+                or len(candidate_files) > batch_max_files
+                or len(candidate_units) > batch_max_hunks
+            ):
+                _flush(len(planned))
+                cur_units = []
+                cur_files = set()
+            else:
+                candidate_diff = _render_batch_diff_text(candidate_units)
+                if (
+                    len(candidate_diff.encode("utf-8")) > batch_max_bytes
+                    or measure_prompt_fn(candidate_diff) > prompt_ceiling_bytes
+                ):
+                    _flush(len(planned))
+                    cur_units = []
+                    cur_files = set()
+        cur_units.append(unit)
+        cur_files.add(unit.file_path)
+
+    if cur_units:
+        _flush(len(planned))
+
+    # Assert strict partition invariant: every expected unit appears in exactly one batch.
+    seen_ids: list[str] = []
+    for batch in planned:
+        seen_ids.extend(batch.primary_hunk_ids)
+    expected_ids = [u.hunk_id for u in units]
+    if len(seen_ids) != len(expected_ids) or set(seen_ids) != set(expected_ids):
+        raise V6FreshAnalysisError(
+            "v6_batch_partition_invalid",
+            "planned batches failed strict 1x primary hunk partition invariant",
+        )
+    return tuple(planned)
 
 
 def _merge_batch_results(
@@ -887,7 +1633,7 @@ def _merge_batch_results(
     )
 
 
-def _load_trusted_configuration(policy_root: Path | None) -> Any:
+def _load_trusted_configuration(policy_root: Path | None) -> ProductConfiguration:
     """Load repository policy strictly from ``policy_root`` (never untrusted PR head)."""
 
     if policy_root is None:
@@ -913,6 +1659,7 @@ def _review_result_to_unresolved_payload(
     *,
     diff_sha256: str,
     file_inventory: Sequence[Mapping[str, Any]] = (),
+    binding_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
     """Convert ``ReviewResult`` into lossless ``UnresolvedResultRecord`` payload and digests."""
 
@@ -941,10 +1688,22 @@ def _review_result_to_unresolved_payload(
         "review_status": result.review_status,
         "content_digest": result.content_digest(),
     }
-    return (envelope,), (f"diff:sha256:{diff_sha256}",)
+    digests: list[str] = [f"diff:sha256:{diff_sha256}"]
+    if binding_metadata is not None:
+        for key in (
+            "base_sha",
+            "merge_base_sha",
+            "inventory_sha256",
+            "policy_digest",
+            "configuration_digest",
+        ):
+            val = binding_metadata.get(key)
+            if isinstance(val, str) and val:
+                digests.append(f"v6:{key}:{val}")
+    return (envelope,), tuple(digests)
 
 
-def run_v6_fresh_pr_analysis(
+def prepare_v6_fresh_analysis_context(
     *,
     owner: str,
     repo: str,
@@ -964,8 +1723,10 @@ def run_v6_fresh_pr_analysis(
     batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     batch_max_files: int = DEFAULT_BATCH_MAX_FILES,
     batch_max_hunks: int = DEFAULT_BATCH_MAX_HUNKS,
-) -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
-    """Fetch immutable ``merge_base...head`` diff + complete inventory, batch review, and return v6 payload."""
+    batch_prompt_bytes: int | None = None,
+    instructions: str | None = None,
+) -> V6FreshAnalysisContext:
+    """Resolve immutable ancestry/inventory, reconcile Compare, and build prompt-budgeted batches."""
 
     read_client = DualCredentialGitHubClient(
         workflow_token_transport=workflow_token_transport,
@@ -1029,10 +1790,7 @@ def run_v6_fresh_pr_analysis(
                     all_have_patch = False
             compare_files_complete = all_have_patch
 
-    text_diffs: list[str] = []
-    file_inventory: list[dict[str, Any]] = []
-    used_fast_compare_diff = False
-
+    compare_diff_records_by_path: dict[str, DiffFileRecord] = {}
     if compare_files_complete:
         try:
             diff_resp = read_client.execute(
@@ -1053,35 +1811,25 @@ def run_v6_fresh_pr_analysis(
             ):
                 parsed_fast = analyze_diff(diff_resp.body)
                 for rec in parsed_fast.file_records:
-                    text_diffs.append(rec.text)
-                for fname in sorted(compare_files_by_path.keys()):
-                    entry = compare_files_by_path[fname]
-                    inv_row: dict[str, Any] = {
-                        "path": fname,
-                        "disposition": "text",
-                        "reason": "compare_patch",
-                    }
-                    prev = entry.get("previous_filename")
-                    if isinstance(prev, str) and prev.strip():
-                        inv_row["previous_path"] = prev
-                    file_inventory.append(inv_row)
-                used_fast_compare_diff = True
-        except GitHubResponseTooLargeError:
-            used_fast_compare_diff = False
+                    key = rec.canonical_path or rec.old_path or ""
+                    if key:
+                        compare_diff_records_by_path[key] = rec
+        except (GitHubResponseTooLargeError, GitHubHTTPError, ReviewInputError):
+            compare_diff_records_by_path = {}
 
-    if not used_fast_compare_diff:
-        text_diffs, file_inventory = _build_complete_split_diff_and_inventory(
-            read_client=read_client,
-            owner=owner,
-            repo=repo,
-            merge_base_sha=merge_base_sha,
-            head_sha=head_sha,
-            compare_files_by_path=compare_files_by_path,
-            event=event,
-            visibility=visibility,
-            granted_scopes=granted_scopes,
-            clock=clock,
-        )
+    text_diffs, file_inventory = _build_authoritative_inventory_and_diffs(
+        read_client=read_client,
+        owner=owner,
+        repo=repo,
+        merge_base_sha=merge_base_sha,
+        head_sha=head_sha,
+        compare_files_by_path=compare_files_by_path,
+        compare_diff_records_by_path=compare_diff_records_by_path,
+        event=event,
+        visibility=visibility,
+        granted_scopes=granted_scopes,
+        clock=clock,
+    )
 
     if not text_diffs and not file_inventory:
         raise ReviewInputError(
@@ -1154,65 +1902,254 @@ def run_v6_fresh_pr_analysis(
         work_budgets=configuration.advanced.review_work,
     )
 
+    max_provider_calls = (
+        configuration.advanced.resources.max_provider_calls
+        or DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS
+    )
+    resource_budget = ResourceBudget.create(
+        limits=DEFAULT_REVIEW_LIMITS,
+        max_provider_calls=max_provider_calls,
+    )
+    effective_work_budget: EffectiveWorkBudget = (
+        configuration.advanced.review_work.effective(
+            limits=DEFAULT_REVIEW_LIMITS,
+            resource=resource_budget,
+            mode="discovery",
+        )
+    )
+    ceiling_bytes, _ = effective_work_budget.effective_prompt_ceiling_bytes()
+    prompt_ceiling_bytes = min(
+        ceiling_bytes,
+        effective_work_budget.batch_prompt_bytes,
+        batch_prompt_bytes if batch_prompt_bytes is not None else ceiling_bytes,
+    )
+
+    policy_digest, configuration_digest = compute_trusted_policy_and_config_digests(
+        configuration,
+        provider_name=settings.name,
+        model_name=settings.model,
+        base_url=settings.base_url,
+        allow_custom_endpoint=settings.allow_custom_endpoint,
+        upstream_provider=plan.upstream_provider,
+        timeout_seconds=settings.timeout_seconds,
+    )
+
+    def _measure_fn(candidate_diff: str) -> int:
+        return _measure_prompt_bytes(
+            service,
+            owner=owner,
+            repo=repo,
+            pull_request=pull_request,
+            pr_title=pr_title,
+            base_sha=merge_base_sha,
+            head_sha=head_sha,
+            model_name=settings.model,
+            instructions=instructions,
+            diff_text=candidate_diff,
+            max_prompt_bytes=prompt_ceiling_bytes,
+        )
+
     snapshot = EvidenceSnapshot(
         repository=f"{owner}/{repo}",
         pull_request=pull_request,
         base_sha=merge_base_sha,
         head_sha=head_sha,
     )
-    review_units: list[tuple[str, str, int, int]] = []
-    oversized_paths: set[str] = set()
-    for file_diff_text in text_diffs:
-        units, unsplit = _split_text_diff_into_review_units(
-            file_diff_text,
-            snapshot=snapshot,
-            batch_max_bytes=batch_max_bytes,
-            batch_max_hunks=batch_max_hunks,
-        )
-        review_units.extend(units)
-        oversized_paths.update(unsplit)
+    review_units, sub_hunks_by_parent, oversized_paths = _split_and_group_diff_units(
+        text_diffs,
+        snapshot=snapshot,
+        batch_max_bytes=batch_max_bytes,
+        batch_max_hunks=batch_max_hunks,
+        prompt_ceiling_bytes=prompt_ceiling_bytes,
+        measure_prompt_fn=_measure_fn,
+    )
 
     if oversized_paths:
         for entry in file_inventory:
             if entry.get("path") in oversized_paths:
+                entry["status"] = "unsupported"
                 entry["disposition"] = "unsupported"
                 entry["reason"] = "single_line_exceeds_review_limit"
+                entry["hunk_ids"] = []
 
-    batches = _pack_diff_units_into_batches(
+    planned_batches = _pack_units_into_planned_batches(
         review_units,
         batch_max_bytes=batch_max_bytes,
         batch_max_files=batch_max_files,
         batch_max_hunks=batch_max_hunks,
+        prompt_ceiling_bytes=prompt_ceiling_bytes,
+        measure_prompt_fn=_measure_fn,
     )
-    batch_results: list[ReviewResult] = []
-    for batch_diff in batches:
-        batch_results.append(
-            service.review(
-                ReviewRequest(
-                    diff=batch_diff,
-                    repository=f"{owner}/{repo}",
-                    pull_request_number=pull_request,
-                    title=pr_title,
-                    base_sha=merge_base_sha,
-                    head_sha=head_sha,
-                    model=settings.model,
-                )
-            )
-        )
 
-    has_unsupported = any(
-        entry.get("disposition") == "unsupported" for entry in file_inventory
+    inventory_tuple = tuple(dict(entry) for entry in file_inventory)
+    inventory_sha256 = canonical_sha256(inventory_tuple)
+    non_text_changes = tuple(
+        dict(entry) for entry in inventory_tuple if entry.get("disposition") != "text"
     )
-    merged_result = _merge_batch_results(
-        batch_results,
+    all_expected_hunk_ids = tuple(u.hunk_id for u in review_units)
+    combined_diff_sha256 = hashlib.sha256(
+        "".join(text_diffs).encode("utf-8")
+    ).hexdigest()
+    has_unsupported = any(
+        entry.get("disposition") == "unsupported" for entry in inventory_tuple
+    )
+
+    return V6FreshAnalysisContext(
+        owner=owner,
+        repo=repo,
+        pull_request=pull_request,
+        pr_title=pr_title,
+        base_sha=base_sha,
+        merge_base_sha=merge_base_sha,
+        head_sha=head_sha,
+        inventory_sha256=inventory_sha256,
+        inventory=inventory_tuple,
+        non_text_changes=non_text_changes,
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        max_provider_calls=max_provider_calls,
+        planned_batches=planned_batches,
+        all_expected_hunk_ids=all_expected_hunk_ids,
+        sub_hunks_by_parent=sub_hunks_by_parent,
+        combined_diff_sha256=combined_diff_sha256,
         provider_name=settings.name,
         model_name=settings.model,
+        service=service,
+        instructions=instructions,
         has_unsupported=has_unsupported,
     )
-    combined_text_diff = "".join(text_diffs)
-    diff_sha256 = hashlib.sha256(combined_text_diff.encode("utf-8")).hexdigest()
+
+
+def execute_v6_batch(
+    context: V6FreshAnalysisContext,
+    batch: V6PlannedBatch,
+    *,
+    remaining_provider_calls: int,
+) -> tuple[ReviewResult, int]:
+    """Execute one planned batch against the configured ``ReviewService`` within budget."""
+
+    if remaining_provider_calls < 1:
+        raise V6FreshAnalysisError(
+            "review_provider_call_budget_exhausted",
+            "review-wide provider call budget exhausted before batch dispatch",
+        )
+    req = ReviewRequest(
+        diff=batch.diff_text,
+        repository=f"{context.owner}/{context.repo}",
+        pull_request_number=context.pull_request,
+        title=context.pr_title,
+        base_sha=context.merge_base_sha,
+        head_sha=context.head_sha,
+        model=context.model_name,
+        instructions=context.instructions,
+    )
+    if hasattr(context.service, "run") and callable(context.service.run):
+        budget = ResourceBudget.create(
+            limits=DEFAULT_REVIEW_LIMITS,
+            max_provider_calls=remaining_provider_calls,
+        )
+        run = context.service.run(req, budget=budget)
+        calls_made = max(1, int(getattr(run.outcome, "provider_calls", 1) or 1))
+        if run.result is None or run.outcome.status in {
+            "provider_failed",
+            "budget_exhausted",
+            "failed",
+        }:
+            diag = (
+                getattr(run.outcome, "diagnostic", None) or "v6_batch_inference_failed"
+            )
+            raise V6FreshAnalysisError(
+                str(diag),
+                f"batch {batch.batch_id} failed during provider execution ({run.outcome.status})",
+            )
+        return run.result, calls_made
+
+    res = context.service.review(req)
+    return res, 1
+
+
+def finalize_v6_fresh_analysis_result(
+    context: V6FreshAnalysisContext,
+    batch_results: Sequence[ReviewResult],
+) -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
+    """Merge verified per-batch ``ReviewResult``s into an unresolved envelope payload."""
+
+    merged_result = _merge_batch_results(
+        batch_results,
+        provider_name=context.provider_name,
+        model_name=context.model_name,
+        has_unsupported=context.has_unsupported,
+    )
     return _review_result_to_unresolved_payload(
         merged_result,
-        diff_sha256=diff_sha256,
-        file_inventory=file_inventory,
+        diff_sha256=context.combined_diff_sha256,
+        file_inventory=context.inventory,
+        binding_metadata={
+            "base_sha": context.base_sha,
+            "merge_base_sha": context.merge_base_sha,
+            "inventory_sha256": context.inventory_sha256,
+            "policy_digest": context.policy_digest,
+            "configuration_digest": context.configuration_digest,
+        },
     )
+
+
+def run_v6_fresh_pr_analysis(
+    *,
+    owner: str,
+    repo: str,
+    pull_request: int,
+    head_sha: str,
+    workflow_token_transport: DualCredentialTransport,
+    event: GitHubEventKind = GitHubEventKind.PULL_REQUEST,
+    visibility: RepositoryVisibility = RepositoryVisibility.PUBLIC,
+    granted_scopes: Collection[str] = (),
+    policy_root: Path | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    provider_base_url: str | None = None,
+    allow_custom_endpoint: bool = False,
+    is_ghec: bool = False,
+    clock: Callable[[], float] = time.time,
+    batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
+    batch_max_files: int = DEFAULT_BATCH_MAX_FILES,
+    batch_max_hunks: int = DEFAULT_BATCH_MAX_HUNKS,
+    batch_prompt_bytes: int | None = None,
+    instructions: str | None = None,
+) -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
+    """Fetch immutable ``merge_base...head`` diff + complete inventory, batch review, and return v6 payload."""
+
+    context = prepare_v6_fresh_analysis_context(
+        owner=owner,
+        repo=repo,
+        pull_request=pull_request,
+        head_sha=head_sha,
+        workflow_token_transport=workflow_token_transport,
+        event=event,
+        visibility=visibility,
+        granted_scopes=granted_scopes,
+        policy_root=policy_root,
+        provider=provider,
+        model=model,
+        provider_base_url=provider_base_url,
+        allow_custom_endpoint=allow_custom_endpoint,
+        is_ghec=is_ghec,
+        clock=clock,
+        batch_max_bytes=batch_max_bytes,
+        batch_max_files=batch_max_files,
+        batch_max_hunks=batch_max_hunks,
+        batch_prompt_bytes=batch_prompt_bytes,
+        instructions=instructions,
+    )
+
+    batch_results: list[ReviewResult] = []
+    calls_used = 0
+    for batch in context.planned_batches:
+        remaining = context.max_provider_calls - calls_used
+        result, batch_calls = execute_v6_batch(
+            context, batch, remaining_provider_calls=remaining
+        )
+        calls_used += batch_calls
+        batch_results.append(result)
+
+    return finalize_v6_fresh_analysis_result(context, batch_results)
