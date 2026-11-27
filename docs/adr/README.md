@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0145](0145-v6-one-writer-per-pr-coordinator.md) | Proposed | Authorize narrow `V6PrCoordinator` Durable Object for per-PR fencing & token escrow | v6 one-writer-per-PR architecture | Amends ADR 0020/0073/0144; PR stays sole recovery ledger; `v5` pinned & untouched |
 | [0144](0144-github-governed-recovery.md) | Proposed | Adopt GitHub-governed v6 recovery without fixed read caps | v6 recovery architecture | Dual credentials with 5-read App allowlist, exclusive writer ownership, stability-verified pagination, PR-resident results, `v5` pinned until release gate passes |
 | [0143](0143-asynchronous-npm-release.md) | Proposed | Qualify Python and signed v5 independently of asynchronous npm | User-directed release policy correction | Exact Python and installed qualification, protected OIDC npm and independent Pages |
 | [0142](0142-prospective-pre-entry-abort-close-witness.md) | Proposed | Match one original paid pre-entry abort close to exact native storage | G29; follow-up to PR #468 | Unconnected candidate; no dispatch, settlement or admission authority |
