@@ -54,6 +54,17 @@ VALID_NON_SUBMISSION_PROOF_KINDS: frozenset[str] = frozenset(
     }
 )
 
+VALID_BATCH_ATTEMPT_STATUSES: frozenset[str] = frozenset(
+    {
+        "partial",
+        "failed",
+        "budget_exhausted",
+        "incomplete",
+        "provider_failed",
+        "reviewed",
+    }
+)
+
 VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
     {
         OWNER_SCHEMA,
@@ -833,8 +844,18 @@ class BatchAttemptRecord:
         _require_strict_int(self.attempt, name="attempt", minimum=1)
         _require_sha256_64(self.plan_sha256, name="plan_sha256")
         _require_non_empty_str(self.status, name="status")
-        _require_strict_int(self.provider_calls, name="provider_calls", minimum=1)
+        if self.status not in VALID_BATCH_ATTEMPT_STATUSES:
+            raise ReviewInputError(
+                f"invalid BatchAttemptRecord status: {self.status!r}",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        _require_strict_int(self.provider_calls, name="provider_calls", minimum=0)
         _require_non_empty_str(self.diagnostic, name="diagnostic")
+        if len(self.diagnostic) > 256:
+            raise ReviewInputError(
+                "diagnostic exceeds maximum length (256)",
+                diagnostic="v6_invalid_ledger_field",
+            )
 
 
 @dataclass(frozen=True)
@@ -890,7 +911,7 @@ class BatchOutputRecord:
             _require_non_empty_str(self.model, name="model")
         _require_non_empty_str(self.review_status, name="review_status")
         _require_strict_int(self.attempt, name="attempt", minimum=1)
-        _require_strict_int(self.provider_calls, name="provider_calls", minimum=1)
+        _require_strict_int(self.provider_calls, name="provider_calls", minimum=0)
 
 
 @dataclass(frozen=True)

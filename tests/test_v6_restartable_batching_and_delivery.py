@@ -20,6 +20,7 @@ from review_sensei_github.errors import (
     GitHubHTTPError,
     GitHubResponseTooLargeError,
 )
+from review_sensei_github.v6_coordinator_client import V6CoordinatorClient
 from review_sensei_github.v6_credential_matrix import (
     WORKFLOW_READ_ONLY_SCOPES,
     GitHubEventKind,
@@ -2184,6 +2185,8 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         self.assertEqual(res.blocker, "stale_detail_receipt_payload_mismatch")
 
     def test_batch_attempt_record_marker_roundtrip(self) -> None:
+        from review_sensei.errors import ReviewInputError
+
         rec = BatchAttemptRecord(
             record_id="batch-attempt:op-1:aaaaaaaaaaaa:111111111111:batch-000:1",
             operation_id="op-1",
@@ -2197,17 +2200,41 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         marker = format_v6_record_marker(rec)
         parsed = extract_v6_record_markers(marker)
         self.assertEqual(parsed, (rec,))
-        with self.assertRaises(Exception):
-            BatchAttemptRecord(
-                record_id="bad",
-                operation_id="op-1",
-                batch_id="batch-000",
-                attempt=1,
-                plan_sha256="a" * 64,
-                status="partial",
-                provider_calls=0,
-                diagnostic="v6_batch_incomplete_coverage",
-            )
+
+        rec_zero = BatchAttemptRecord(
+            record_id="batch-attempt:op-1:aaaaaaaaaaaa:111111111111:batch-000:1",
+            operation_id="op-1",
+            batch_id="batch-000",
+            attempt=1,
+            plan_sha256="a" * 64,
+            status="budget_exhausted",
+            provider_calls=0,
+            diagnostic="deadline_exceeded",
+        )
+        self.assertEqual(
+            extract_v6_record_markers(format_v6_record_marker(rec_zero)),
+            (rec_zero,),
+        )
+
+        for bad_kwargs in (
+            {"provider_calls": -1},
+            {"provider_calls": True},
+            {"status": "bogus_status"},
+            {"diagnostic": "x" * 257},
+        ):
+            kwargs: dict[str, Any] = {
+                "record_id": "bad",
+                "operation_id": "op-1",
+                "batch_id": "batch-000",
+                "attempt": 1,
+                "plan_sha256": "a" * 64,
+                "status": "partial",
+                "provider_calls": 0,
+                "diagnostic": "v6_batch_incomplete_coverage",
+                **bad_kwargs,
+            }
+            with self.assertRaises(ReviewInputError):
+                BatchAttemptRecord(**kwargs)
 
     def test_incomplete_batch_persists_durable_provider_calls_and_rerun_holds_with_count(
         self,
@@ -2546,7 +2573,9 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         from review_sensei.service import DEFAULT_STAGES, ReviewService
 
         diff_a = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n"
+        diff_b = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-b = 1\n+b = 2\n"
         hunk_a = "src/a.py#h0:1,1+1,1:" + ("a" * 16)
+        hunk_b = "src/b.py#h0:1,1+1,1:" + ("b" * 16)
         policy_digest, config_digest = compute_trusted_policy_and_config_digests(
             default_configuration(),
             provider_name="openai-compatible",
@@ -2570,20 +2599,299 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
             primary_hunk_ids=(hunk_a,),
             parent_hunk_ids=(hunk_a,),
         )
-
-        # Case 1: Real OpenAICompatibleProvider + real ReviewService (default stages):
-        # Attempt 1 fails transiently (HTTP 503 -> retry), Attempt 2 fails non-transiently (HTTP 400).
-        transport_calls_1 = 0
         opened_errors: list[HTTPError] = []
 
-        def _opener_503_then_400(
-            http_request: Any, *, timeout: float, context: Any
-        ) -> Any:
-            nonlocal transport_calls_1
-            transport_calls_1 += 1
-            if transport_calls_1 == 1:
+        def _make_context(
+            service: Any, *, max_provider_calls: int = 4
+        ) -> V6FreshAnalysisContext:
+            return V6FreshAnalysisContext(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                pr_title="Real adapter test",
+                base_sha=BASE_SHA,
+                merge_base_sha=BASE_SHA,
+                head_sha=HEAD_A,
+                inventory_sha256=inv_sha,
+                inventory=inv,
+                non_text_changes=(),
+                policy_digest=policy_digest,
+                configuration_digest=config_digest,
+                max_provider_calls=max_provider_calls,
+                planned_batches=(b0,),
+                all_expected_hunk_ids=(hunk_a,),
+                sub_hunks_by_parent={},
+                combined_diff_sha256=canonical_sha256(diff_a),
+                provider_name="openai-compatible",
+                model_name="gpt-4o-mini",
+                service=service,
+            )
+
+        try:
+            # Case 1: Real OpenAICompatibleProvider + real ReviewService (default stages):
+            # Attempt 1 fails transiently (HTTP 503 -> retry), Attempt 2 fails non-transiently (HTTP 400).
+            transport_calls_1 = 0
+
+            def _opener_503_then_400(
+                http_request: Any, *, timeout: float, context: Any
+            ) -> Any:
+                nonlocal transport_calls_1
+                transport_calls_1 += 1
+                if transport_calls_1 == 1:
+                    hdrs = Message()
+                    hdrs["Retry-After"] = "0"
+                    err = HTTPError(
+                        http_request.full_url,
+                        503,
+                        "Service Unavailable",
+                        hdrs,
+                        io.BytesIO(b"unavailable"),
+                    )
+                    opened_errors.append(err)
+                    raise err
+                err = HTTPError(
+                    http_request.full_url,
+                    400,
+                    "Bad Request",
+                    Message(),
+                    io.BytesIO(b"bad request"),
+                )
+                opened_errors.append(err)
+                raise err
+
+            real_provider_1 = OpenAICompatibleProvider(
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                api_key="sk-test-fake-key",
+                opener=_opener_503_then_400,
+            )
+            real_service_1 = ReviewService(real_provider_1, stages=DEFAULT_STAGES)
+
+            pr1 = _SimulatedPRSurface(head_sha=HEAD_A)
+            owner1 = _make_owner_record(
+                operation_id="op-real-handled",
+                pr_head_sha=HEAD_A,
+                slot_key=SLOT_B,
+            )
+            pr1.add_comment(format_v6_record_marker(owner1), is_app=True)
+            req1 = RecoveryRequest(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-real-handled",
+                ownership_proof=WriterOwnershipProof(
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    operation_id="op-real-handled",
+                    run_id=101,
+                    run_attempt=1,
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    verified_by_broker=True,
+                ),
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                slot_key=SLOT_B,
+                generation=1,
+                owner_marker=owner1,
+                fresh_analysis_context_loader=lambda: _make_context(real_service_1),
+            )
+            eng1 = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr1.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr1.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            )
+            res1 = eng1.recover_and_publish(req1)
+            self.assertIsInstance(res1, RecoveryHold)
+            assert isinstance(res1, RecoveryHold)
+            self.assertEqual(res1.blocker, "provider_failed")
+            self.assertEqual(res1.model_calls_started, 2)
+            self.assertEqual(res1.operation_model_calls_total, 2)
+            self.assertFalse(res1.operation_model_calls_unknown)
+            self.assertFalse(res1.zero_model_calls_started)
+            self.assertEqual(transport_calls_1, 2)
+            self.assertIn("calls:2", res1.missing_evidence[0])
+            attempts1 = [
+                r
+                for c in pr1.comments
+                for r in extract_v6_record_markers(c["body"])
+                if isinstance(r, BatchAttemptRecord)
+            ]
+            self.assertEqual(len(attempts1), 1)
+            self.assertEqual(attempts1[0].provider_calls, 2)
+            self.assertEqual(attempts1[0].status, "failed")
+            self.assertEqual(attempts1[0].diagnostic, "provider_failed")
+            self.assertFalse(any("batch-output:" in c["body"] for c in pr1.comments))
+            self.assertEqual(pr1.reviews, [])
+
+            # Fresh process on same event holds with 0 extra provider calls, 2 total, and 0 reviews.
+            eng1_fresh = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr1.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr1.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            )
+            res1_rerun = eng1_fresh.recover_and_publish(req1)
+            self.assertIsInstance(res1_rerun, RecoveryHold)
+            assert isinstance(res1_rerun, RecoveryHold)
+            self.assertEqual(res1_rerun.blocker, "provider_failed")
+            self.assertEqual(res1_rerun.model_calls_started, 0)
+            self.assertEqual(res1_rerun.operation_model_calls_total, 2)
+            self.assertFalse(res1_rerun.operation_model_calls_unknown)
+            self.assertTrue(res1_rerun.zero_model_calls_started)
+            self.assertIn("calls:2", res1_rerun.missing_evidence[0])
+            self.assertEqual(transport_calls_1, 2)
+            self.assertEqual(pr1.reviews, [])
+
+            # Pilot report verification for Case 1: 2 on original run, 0 additional on restart, 2 total.
+            with tempfile.TemporaryDirectory() as tmpdir_s:
+                tmpdir = Path(tmpdir_s)
+                transport_calls_1p = 0
+
+                def _opener_503_then_400_pilot(
+                    http_request: Any, *, timeout: float, context: Any
+                ) -> Any:
+                    nonlocal transport_calls_1p
+                    transport_calls_1p += 1
+                    if transport_calls_1p == 1:
+                        hdrs = Message()
+                        hdrs["Retry-After"] = "0"
+                        err = HTTPError(
+                            http_request.full_url,
+                            503,
+                            "Service Unavailable",
+                            hdrs,
+                            io.BytesIO(b"unavailable"),
+                        )
+                        opened_errors.append(err)
+                        raise err
+                    err = HTTPError(
+                        http_request.full_url,
+                        400,
+                        "Bad Request",
+                        Message(),
+                        io.BytesIO(b"bad request"),
+                    )
+                    opened_errors.append(err)
+                    raise err
+
+                svc_1p = ReviewService(
+                    OpenAICompatibleProvider(
+                        base_url="https://api.openai.com/v1",
+                        model="gpt-4o-mini",
+                        api_key="sk-test-fake-key",
+                        opener=_opener_503_then_400_pilot,
+                    ),
+                    stages=DEFAULT_STAGES,
+                )
+                pr1_p = _SimulatedPRSurface(head_sha=HEAD_A)
+                coord1_p = _SimulatedCoordinatorStore(
+                    clock=lambda: 1_700_000_000.0, pr=pr1_p
+                )
+                client1_p = V6CoordinatorClient(
+                    base_url="https://coordinator.invalid",
+                    oidc_token_provider=lambda: "oidc-jwt-token",
+                    opener=coord1_p.opener,
+                    clock=lambda: 1_700_000_000.0,
+                )
+                out1_p = V6PilotRunner(
+                    coordinator=client1_p,
+                    workflow_token_transport=_ScriptedTransport(pr1_p.handle_wf),
+                    app_transport_factory=lambda _g: _ScriptedTransport(
+                        pr1_p.handle_app
+                    ),
+                    clock=lambda: 1_700_000_000.0,
+                    sleeper=lambda _s: None,
+                    broker_fence_verifier=_fence_verifier,
+                ).run(
+                    V6PilotRunConfig(
+                        owner=OWNER,
+                        repo=REPO,
+                        repository_id=REPO_ID,
+                        pull_request=PR_NUMBER,
+                        head_sha=HEAD_A,
+                        operation_id="op-pilot-handled",
+                        workflow_sha=WORKFLOW_SHA,
+                        expected_app_id=APP_ID,
+                        expected_bot_login=BOT_LOGIN,
+                        expected_bot_user_id=BOT_USER_ID,
+                        policy_digest=policy_digest,
+                        configuration_digest=config_digest,
+                        outcome_path=tmpdir / "case1_run1.json",
+                        fresh_analysis_context_loader=lambda: _make_context(svc_1p),
+                    )
+                )
+                report1_r1 = json.loads(
+                    (tmpdir / "case1_run1.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(out1_p.status, "hold")
+                self.assertEqual(out1_p.model_calls_started, 2)
+                self.assertEqual(out1_p.operation_model_calls_total, 2)
+                self.assertEqual(report1_r1["model_calls_started"], 2)
+                self.assertEqual(report1_r1["operation_model_calls_total"], 2)
+
+                out1_p2 = V6PilotRunner(
+                    coordinator=client1_p,
+                    workflow_token_transport=_ScriptedTransport(pr1_p.handle_wf),
+                    app_transport_factory=lambda _g: _ScriptedTransport(
+                        pr1_p.handle_app
+                    ),
+                    clock=lambda: 1_700_000_000.0,
+                    sleeper=lambda _s: None,
+                    broker_fence_verifier=_fence_verifier,
+                ).run(
+                    V6PilotRunConfig(
+                        owner=OWNER,
+                        repo=REPO,
+                        repository_id=REPO_ID,
+                        pull_request=PR_NUMBER,
+                        head_sha=HEAD_A,
+                        operation_id="op-pilot-handled",
+                        run_attempt=2,
+                        workflow_sha=WORKFLOW_SHA,
+                        expected_app_id=APP_ID,
+                        expected_bot_login=BOT_LOGIN,
+                        expected_bot_user_id=BOT_USER_ID,
+                        policy_digest=policy_digest,
+                        configuration_digest=config_digest,
+                        outcome_path=tmpdir / "case1_run2.json",
+                        fresh_analysis_context_loader=lambda: _make_context(svc_1p),
+                    )
+                )
+                report1_r2 = json.loads(
+                    (tmpdir / "case1_run2.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(out1_p2.status, "hold")
+                self.assertEqual(out1_p2.model_calls_started, 0)
+                self.assertEqual(out1_p2.operation_model_calls_total, 2)
+                self.assertEqual(report1_r2["model_calls_started"], 0)
+                self.assertEqual(report1_r2["operation_model_calls_total"], 2)
+                self.assertEqual(transport_calls_1p, 2)
+                self.assertEqual(pr1_p.reviews, [])
+
+            # Case 2: Unexpected exception inside real ReviewService.run() with no reliable count:
+            # holds fail-closed without recording 0 or guessing; fresh process holds with 0 extra calls.
+            transport_calls_2 = 0
+
+            def _opener_503(http_request: Any, *, timeout: float, context: Any) -> Any:
+                nonlocal transport_calls_2
+                transport_calls_2 += 1
                 hdrs = Message()
-                hdrs["Retry-After"] = "0"
+                hdrs["Retry-After"] = "1"
                 err = HTTPError(
                     http_request.full_url,
                     503,
@@ -2593,256 +2901,622 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
                 )
                 opened_errors.append(err)
                 raise err
-            err = HTTPError(
-                http_request.full_url,
-                400,
-                "Bad Request",
-                Message(),
-                io.BytesIO(b"bad request"),
+
+            real_provider_2 = OpenAICompatibleProvider(
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                api_key="sk-test-fake-key",
+                opener=_opener_503,
             )
-            opened_errors.append(err)
-            raise err
+            real_service_2 = ReviewService(real_provider_2, stages=DEFAULT_STAGES)
 
-        real_provider_1 = OpenAICompatibleProvider(
-            base_url="https://api.openai.com/v1",
-            model="gpt-4o-mini",
-            api_key="sk-test-fake-key",
-            opener=_opener_503_then_400,
-        )
-        real_service_1 = ReviewService(real_provider_1, stages=DEFAULT_STAGES)
-
-        pr1 = _SimulatedPRSurface(head_sha=HEAD_A)
-        owner1 = _make_owner_record(
-            operation_id="op-real-handled",
-            pr_head_sha=HEAD_A,
-            slot_key=SLOT_B,
-        )
-        pr1.add_comment(format_v6_record_marker(owner1), is_app=True)
-        req1 = RecoveryRequest(
-            owner=OWNER,
-            repo=REPO,
-            repository_id=REPO_ID,
-            pull_request=PR_NUMBER,
-            operation_id="op-real-handled",
-            ownership_proof=WriterOwnershipProof(
-                repository_id=REPO_ID,
-                pull_request=PR_NUMBER,
-                operation_id="op-real-handled",
-                run_id=101,
-                run_attempt=1,
-                writer_epoch=1,
+            pr2 = _SimulatedPRSurface(head_sha=HEAD_A)
+            owner2 = _make_owner_record(
+                operation_id="op-real-unexpected",
                 pr_head_sha=HEAD_A,
-                verified_by_broker=True,
-            ),
-            event=GitHubEventKind.PULL_REQUEST,
-            visibility=RepositoryVisibility.PUBLIC,
-            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
-            expected_app_id=APP_ID,
-            expected_bot_login=BOT_LOGIN,
-            expected_bot_user_id=BOT_USER_ID,
-            slot_key=SLOT_B,
-            generation=1,
-            owner_marker=owner1,
-            fresh_analysis_context_loader=lambda: V6FreshAnalysisContext(
+                slot_key=SLOT_B,
+            )
+            pr2.add_comment(format_v6_record_marker(owner2), is_app=True)
+            req2 = RecoveryRequest(
                 owner=OWNER,
                 repo=REPO,
-                pull_request=PR_NUMBER,
-                pr_title="Real handled failure",
-                base_sha=BASE_SHA,
-                merge_base_sha=BASE_SHA,
-                head_sha=HEAD_A,
-                inventory_sha256=inv_sha,
-                inventory=inv,
-                non_text_changes=(),
-                policy_digest=policy_digest,
-                configuration_digest=config_digest,
-                max_provider_calls=4,
-                planned_batches=(b0,),
-                all_expected_hunk_ids=(hunk_a,),
-                sub_hunks_by_parent={},
-                combined_diff_sha256=canonical_sha256(diff_a),
-                provider_name="openai-compatible",
-                model_name="gpt-4o-mini",
-                service=real_service_1,
-            ),
-        )
-        eng1 = V6RecoveryEngine(
-            DualCredentialGitHubClient(
-                workflow_token_transport=_ScriptedTransport(pr1.handle_wf),
-                broker_app_transport=_ScriptedTransport(pr1.handle_app),
-            ),
-            now_fn=lambda: 1_700_000_000.0,
-            sleeper=lambda _s: None,
-            broker_fence_verifier=_fence_verifier,
-            mutation_bound=MutationSanityBound(max_writes=32),
-        )
-        res1 = eng1.recover_and_publish(req1)
-        self.assertIsInstance(res1, RecoveryHold)
-        assert isinstance(res1, RecoveryHold)
-        self.assertEqual(res1.blocker, "provider_failed")
-        self.assertEqual(transport_calls_1, 2)
-        self.assertIn("calls:2", res1.missing_evidence[0])
-        attempts1 = [
-            r
-            for c in pr1.comments
-            for r in extract_v6_record_markers(c["body"])
-            if isinstance(r, BatchAttemptRecord)
-        ]
-        self.assertEqual(len(attempts1), 1)
-        self.assertEqual(attempts1[0].provider_calls, 2)
-        self.assertEqual(attempts1[0].status, "failed")
-        self.assertEqual(attempts1[0].diagnostic, "provider_failed")
-        self.assertFalse(any("batch-output:" in c["body"] for c in pr1.comments))
-        self.assertEqual(pr1.reviews, [])
-
-        # Fresh process on same event holds with 0 extra provider calls and 0 reviews written.
-        eng1_fresh = V6RecoveryEngine(
-            DualCredentialGitHubClient(
-                workflow_token_transport=_ScriptedTransport(pr1.handle_wf),
-                broker_app_transport=_ScriptedTransport(pr1.handle_app),
-            ),
-            now_fn=lambda: 1_700_000_000.0,
-            sleeper=lambda _s: None,
-            broker_fence_verifier=_fence_verifier,
-            mutation_bound=MutationSanityBound(max_writes=32),
-        )
-        res1_rerun = eng1_fresh.recover_and_publish(req1)
-        self.assertIsInstance(res1_rerun, RecoveryHold)
-        assert isinstance(res1_rerun, RecoveryHold)
-        self.assertEqual(res1_rerun.blocker, "provider_failed")
-        self.assertIn("calls:2", res1_rerun.missing_evidence[0])
-        self.assertEqual(transport_calls_1, 2)
-        self.assertEqual(pr1.reviews, [])
-
-        # Case 2: Unexpected exception inside real ReviewService.run() with no reliable count:
-        # leaves dispatch unresolved without recording 0 or guessing a count; fresh process holds.
-        transport_calls_2 = 0
-
-        def _opener_503(http_request: Any, *, timeout: float, context: Any) -> Any:
-            nonlocal transport_calls_2
-            transport_calls_2 += 1
-            hdrs = Message()
-            hdrs["Retry-After"] = "1"
-            err = HTTPError(
-                http_request.full_url,
-                503,
-                "Service Unavailable",
-                hdrs,
-                io.BytesIO(b"unavailable"),
-            )
-            opened_errors.append(err)
-            raise err
-
-        real_provider_2 = OpenAICompatibleProvider(
-            base_url="https://api.openai.com/v1",
-            model="gpt-4o-mini",
-            api_key="sk-test-fake-key",
-            opener=_opener_503,
-        )
-        real_service_2 = ReviewService(real_provider_2, stages=DEFAULT_STAGES)
-
-        pr2 = _SimulatedPRSurface(head_sha=HEAD_A)
-        owner2 = _make_owner_record(
-            operation_id="op-real-unexpected",
-            pr_head_sha=HEAD_A,
-            slot_key=SLOT_B,
-        )
-        pr2.add_comment(format_v6_record_marker(owner2), is_app=True)
-        req2 = RecoveryRequest(
-            owner=OWNER,
-            repo=REPO,
-            repository_id=REPO_ID,
-            pull_request=PR_NUMBER,
-            operation_id="op-real-unexpected",
-            ownership_proof=WriterOwnershipProof(
                 repository_id=REPO_ID,
                 pull_request=PR_NUMBER,
                 operation_id="op-real-unexpected",
-                run_id=102,
-                run_attempt=1,
-                writer_epoch=1,
+                ownership_proof=WriterOwnershipProof(
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    operation_id="op-real-unexpected",
+                    run_id=102,
+                    run_attempt=1,
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    verified_by_broker=True,
+                ),
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                slot_key=SLOT_B,
+                generation=1,
+                owner_marker=owner2,
+                fresh_analysis_context_loader=lambda: _make_context(real_service_2),
+            )
+            eng2 = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr2.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr2.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            )
+            with mock.patch(
+                "review_sensei.service.time.sleep",
+                side_effect=RuntimeError("unexpected retry interruption"),
+            ):
+                res2 = eng2.recover_and_publish(req2)
+
+            self.assertIsInstance(res2, RecoveryHold)
+            assert isinstance(res2, RecoveryHold)
+            self.assertEqual(res2.blocker, "ambiguous_batch_inference_outcome")
+            self.assertEqual(
+                res2.missing_evidence, ("batch_dispatch:batch-000:attempt:1",)
+            )
+            self.assertIsNone(res2.model_calls_started)
+            self.assertIsNone(res2.operation_model_calls_total)
+            self.assertTrue(res2.operation_model_calls_unknown)
+            self.assertFalse(res2.zero_model_calls_started)
+            self.assertEqual(transport_calls_2, 1)
+            self.assertEqual(pr2.reviews, [])
+            self.assertFalse(any("batch-attempt:" in c["body"] for c in pr2.comments))
+            self.assertFalse(any("batch-output:" in c["body"] for c in pr2.comments))
+            self.assertTrue(any("batch-dispatch:" in c["body"] for c in pr2.comments))
+
+            # Fresh process on same event holds without calling provider or writing a review.
+            eng2_fresh = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr2.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr2.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            )
+            res2_fresh = eng2_fresh.recover_and_publish(req2)
+            self.assertIsInstance(res2_fresh, RecoveryHold)
+            assert isinstance(res2_fresh, RecoveryHold)
+            self.assertEqual(res2_fresh.blocker, "ambiguous_batch_inference_outcome")
+            self.assertEqual(
+                res2_fresh.missing_evidence, ("batch_dispatch:batch-000:attempt:1",)
+            )
+            self.assertEqual(res2_fresh.model_calls_started, 0)
+            self.assertIsNone(res2_fresh.operation_model_calls_total)
+            self.assertTrue(res2_fresh.operation_model_calls_unknown)
+            self.assertTrue(res2_fresh.zero_model_calls_started)
+            self.assertEqual(transport_calls_2, 1)
+            self.assertEqual(pr2.reviews, [])
+
+            # Pilot report verification for Case 2: unknown on Run 1, 0 additional / unknown total on restart.
+            with tempfile.TemporaryDirectory() as tmpdir_s:
+                tmpdir = Path(tmpdir_s)
+                transport_calls_2p = 0
+
+                def _opener_503_pilot(
+                    http_request: Any, *, timeout: float, context: Any
+                ) -> Any:
+                    nonlocal transport_calls_2p
+                    transport_calls_2p += 1
+                    hdrs = Message()
+                    hdrs["Retry-After"] = "1"
+                    err = HTTPError(
+                        http_request.full_url,
+                        503,
+                        "Service Unavailable",
+                        hdrs,
+                        io.BytesIO(b"unavailable"),
+                    )
+                    opened_errors.append(err)
+                    raise err
+
+                svc_2p = ReviewService(
+                    OpenAICompatibleProvider(
+                        base_url="https://api.openai.com/v1",
+                        model="gpt-4o-mini",
+                        api_key="sk-test-fake-key",
+                        opener=_opener_503_pilot,
+                    ),
+                    stages=DEFAULT_STAGES,
+                )
+                pr2_p = _SimulatedPRSurface(head_sha=HEAD_A)
+                coord2_p = _SimulatedCoordinatorStore(
+                    clock=lambda: 1_700_000_000.0, pr=pr2_p
+                )
+                client2_p = V6CoordinatorClient(
+                    base_url="https://coordinator.invalid",
+                    oidc_token_provider=lambda: "oidc-jwt-token",
+                    opener=coord2_p.opener,
+                    clock=lambda: 1_700_000_000.0,
+                )
+                with mock.patch(
+                    "review_sensei.service.time.sleep",
+                    side_effect=RuntimeError("unexpected retry interruption"),
+                ):
+                    out2_p = V6PilotRunner(
+                        coordinator=client2_p,
+                        workflow_token_transport=_ScriptedTransport(pr2_p.handle_wf),
+                        app_transport_factory=lambda _g: _ScriptedTransport(
+                            pr2_p.handle_app
+                        ),
+                        clock=lambda: 1_700_000_000.0,
+                        sleeper=lambda _s: None,
+                        broker_fence_verifier=_fence_verifier,
+                    ).run(
+                        V6PilotRunConfig(
+                            owner=OWNER,
+                            repo=REPO,
+                            repository_id=REPO_ID,
+                            pull_request=PR_NUMBER,
+                            head_sha=HEAD_A,
+                            operation_id="op-pilot-unexpected",
+                            workflow_sha=WORKFLOW_SHA,
+                            expected_app_id=APP_ID,
+                            expected_bot_login=BOT_LOGIN,
+                            expected_bot_user_id=BOT_USER_ID,
+                            policy_digest=policy_digest,
+                            configuration_digest=config_digest,
+                            outcome_path=tmpdir / "case2_run1.json",
+                            fresh_analysis_context_loader=lambda: _make_context(svc_2p),
+                        )
+                    )
+                report2_r1 = json.loads(
+                    (tmpdir / "case2_run1.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(out2_p.status, "hold")
+                self.assertEqual(out2_p.model_calls_started, "unknown")
+                self.assertEqual(out2_p.operation_model_calls_total, "unknown")
+                self.assertEqual(report2_r1["model_calls_started"], "unknown")
+                self.assertEqual(report2_r1["operation_model_calls_total"], "unknown")
+
+                out2_p2 = V6PilotRunner(
+                    coordinator=client2_p,
+                    workflow_token_transport=_ScriptedTransport(pr2_p.handle_wf),
+                    app_transport_factory=lambda _g: _ScriptedTransport(
+                        pr2_p.handle_app
+                    ),
+                    clock=lambda: 1_700_000_000.0,
+                    sleeper=lambda _s: None,
+                    broker_fence_verifier=_fence_verifier,
+                ).run(
+                    V6PilotRunConfig(
+                        owner=OWNER,
+                        repo=REPO,
+                        repository_id=REPO_ID,
+                        pull_request=PR_NUMBER,
+                        head_sha=HEAD_A,
+                        operation_id="op-pilot-unexpected",
+                        run_attempt=2,
+                        workflow_sha=WORKFLOW_SHA,
+                        expected_app_id=APP_ID,
+                        expected_bot_login=BOT_LOGIN,
+                        expected_bot_user_id=BOT_USER_ID,
+                        policy_digest=policy_digest,
+                        configuration_digest=config_digest,
+                        outcome_path=tmpdir / "case2_run2.json",
+                        fresh_analysis_context_loader=lambda: _make_context(svc_2p),
+                    )
+                )
+                report2_r2 = json.loads(
+                    (tmpdir / "case2_run2.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(out2_p2.status, "hold")
+                self.assertEqual(out2_p2.model_calls_started, 0)
+                self.assertEqual(out2_p2.operation_model_calls_total, "unknown")
+                self.assertEqual(report2_r2["model_calls_started"], 0)
+                self.assertEqual(report2_r2["operation_model_calls_total"], "unknown")
+                self.assertEqual(transport_calls_2p, 1)
+                self.assertEqual(pr2_p.reviews, [])
+
+            # Case 3: Real pre-provider stop through OpenAICompatibleProvider + ReviewService:
+            # 0 provider calls stays 0 in PR ledger, fresh-process restart, aggregation, and pilot report.
+            transport_calls_3 = 0
+
+            def _opener_never_called(
+                http_request: Any, *, timeout: float, context: Any
+            ) -> Any:
+                nonlocal transport_calls_3
+                transport_calls_3 += 1
+                raise AssertionError("pre-provider stop must not call transport")
+
+            real_provider_3 = OpenAICompatibleProvider(
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                api_key="sk-test-fake-key",
+                opener=_opener_never_called,
+            )
+            real_service_3 = ReviewService(real_provider_3, stages=DEFAULT_STAGES)
+
+            pr3 = _SimulatedPRSurface(head_sha=HEAD_A)
+            owner3 = _make_owner_record(
+                operation_id="op-real-known-zero",
                 pr_head_sha=HEAD_A,
-                verified_by_broker=True,
-            ),
-            event=GitHubEventKind.PULL_REQUEST,
-            visibility=RepositoryVisibility.PUBLIC,
-            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
-            expected_app_id=APP_ID,
-            expected_bot_login=BOT_LOGIN,
-            expected_bot_user_id=BOT_USER_ID,
-            slot_key=SLOT_B,
-            generation=1,
-            owner_marker=owner2,
-            fresh_analysis_context_loader=lambda: V6FreshAnalysisContext(
+                slot_key=SLOT_B,
+            )
+            pr3.add_comment(format_v6_record_marker(owner3), is_app=True)
+            req3 = RecoveryRequest(
                 owner=OWNER,
                 repo=REPO,
+                repository_id=REPO_ID,
                 pull_request=PR_NUMBER,
-                pr_title="Real unexpected exception",
+                operation_id="op-real-known-zero",
+                ownership_proof=WriterOwnershipProof(
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    operation_id="op-real-known-zero",
+                    run_id=103,
+                    run_attempt=1,
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    verified_by_broker=True,
+                ),
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                slot_key=SLOT_B,
+                generation=1,
+                owner_marker=owner3,
+                fresh_analysis_context_loader=lambda: _make_context(real_service_3),
+            )
+            eng3 = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr3.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr3.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            )
+            mono_ticks = 0
+
+            def _expired_monotonic() -> float:
+                nonlocal mono_ticks
+                mono_ticks += 1
+                return 0.0 if mono_ticks == 1 else 10_000.0
+
+            with mock.patch(
+                "review_sensei.service.time.monotonic", side_effect=_expired_monotonic
+            ):
+                res3 = eng3.recover_and_publish(req3)
+
+            self.assertIsInstance(res3, RecoveryHold)
+            assert isinstance(res3, RecoveryHold)
+            self.assertEqual(res3.blocker, "deadline_exceeded")
+            self.assertEqual(res3.model_calls_started, 0)
+            self.assertEqual(res3.operation_model_calls_total, 0)
+            self.assertFalse(res3.operation_model_calls_unknown)
+            self.assertTrue(res3.zero_model_calls_started)
+            self.assertEqual(
+                res3.missing_evidence,
+                ("batch_attempt:batch-000:attempt:1:calls:0:status:failed",),
+            )
+            self.assertEqual(transport_calls_3, 0)
+            attempts3 = [
+                r
+                for c in pr3.comments
+                for r in extract_v6_record_markers(c["body"])
+                if isinstance(r, BatchAttemptRecord)
+            ]
+            self.assertEqual(len(attempts3), 1)
+            self.assertEqual(attempts3[0].provider_calls, 0)
+            self.assertEqual(attempts3[0].status, "failed")
+            self.assertEqual(attempts3[0].diagnostic, "deadline_exceeded")
+            self.assertEqual(pr3.reviews, [])
+
+            # Fresh process holds at 0 total calls (does not replay, does not floor to 1).
+            eng3_fresh = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr3.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr3.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            )
+            res3_rerun = eng3_fresh.recover_and_publish(req3)
+            self.assertIsInstance(res3_rerun, RecoveryHold)
+            assert isinstance(res3_rerun, RecoveryHold)
+            self.assertEqual(res3_rerun.blocker, "deadline_exceeded")
+            self.assertEqual(res3_rerun.model_calls_started, 0)
+            self.assertEqual(res3_rerun.operation_model_calls_total, 0)
+            self.assertFalse(res3_rerun.operation_model_calls_unknown)
+            self.assertIn("calls:0", res3_rerun.missing_evidence[0])
+            self.assertEqual(transport_calls_3, 0)
+            self.assertEqual(pr3.reviews, [])
+
+            # Restart aggregation proof: attempt=1 (0 calls) + attempt=2 BatchOutputRecord (1 call) = 1 < max_provider_calls=2.
+            # Second batch MUST be admitted (proving 0 was NOT floored to 1).
+            inv2 = (
+                {
+                    "path": "src/a.py",
+                    "status": "modified",
+                    "disposition": "text",
+                    "hunk_ids": [hunk_a],
+                },
+                {
+                    "path": "src/b.py",
+                    "status": "modified",
+                    "disposition": "text",
+                    "hunk_ids": [hunk_b],
+                },
+            )
+            b1 = V6PlannedBatch(
+                batch_id="batch-001",
+                diff_text=diff_b,
+                diff_sha256=canonical_sha256(diff_b),
+                prompt_bytes=200,
+                paths=("src/b.py",),
+                primary_hunk_ids=(hunk_b,),
+                parent_hunk_ids=(hunk_b,),
+            )
+            req3_agg_base = replace(
+                req3,
+                operation_id="op-real-known-zero-agg",
+                ownership_proof=replace(
+                    req3.ownership_proof, operation_id="op-real-known-zero-agg"
+                ),
+                owner_marker=_make_owner_record(
+                    operation_id="op-real-known-zero-agg",
+                    pr_head_sha=HEAD_A,
+                    slot_key=SLOT_B,
+                ),
+            )
+            # First compute exact plan_sha256 for 2-batch plan with max_provider_calls=2:
+            from types import SimpleNamespace
+
+            in_dig2 = canonical_sha256(
+                {
+                    "pr_head_sha": HEAD_A,
+                    "effect_kind": "pr_review_publish",
+                    "findings": [],
+                    "required_evidence_digests": [],
+                    "artifact_cache_sha256": None,
+                }
+            )
+            plan2_rec = BatchPlanRecord(
+                record_id=f"batch-plan:op-real-known-zero-agg:{HEAD_A[:12]}:{in_dig2}",
+                operation_id="op-real-known-zero-agg",
                 base_sha=BASE_SHA,
                 merge_base_sha=BASE_SHA,
-                head_sha=HEAD_A,
-                inventory_sha256=inv_sha,
-                inventory=inv,
-                non_text_changes=(),
+                pr_head_sha=HEAD_A,
+                inventory_sha256=canonical_sha256(inv2),
                 policy_digest=policy_digest,
                 configuration_digest=config_digest,
-                max_provider_calls=4,
-                planned_batches=(b0,),
-                all_expected_hunk_ids=(hunk_a,),
-                sub_hunks_by_parent={},
-                combined_diff_sha256=canonical_sha256(diff_a),
-                provider_name="openai-compatible",
-                model_name="gpt-4o-mini",
-                service=real_service_2,
-            ),
-        )
-        eng2 = V6RecoveryEngine(
-            DualCredentialGitHubClient(
-                workflow_token_transport=_ScriptedTransport(pr2.handle_wf),
-                broker_app_transport=_ScriptedTransport(pr2.handle_app),
-            ),
-            now_fn=lambda: 1_700_000_000.0,
-            sleeper=lambda _s: None,
-            broker_fence_verifier=_fence_verifier,
-            mutation_bound=MutationSanityBound(max_writes=32),
-        )
-        with mock.patch(
-            "review_sensei.service.time.sleep",
-            side_effect=RuntimeError("unexpected retry interruption"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "unexpected retry interruption"):
-                eng2.recover_and_publish(req2)
+                max_provider_calls=2,
+                batches=(b0.to_plan_dict(), b1.to_plan_dict()),
+                non_text_changes=(),
+            )
+            plan2_sha = canonical_sha256(record_to_dict(plan2_rec))
+            pr3_agg = _SimulatedPRSurface(head_sha=HEAD_A)
+            for rec_to_seed in (
+                req3_agg_base.owner_marker,
+                plan2_rec,
+                BatchDispatchRecord(
+                    record_id=f"batch-dispatch:op-real-known-zero-agg:{HEAD_A[:12]}:{in_dig2}:batch-000:1",
+                    operation_id="op-real-known-zero-agg",
+                    batch_id="batch-000",
+                    attempt=1,
+                    plan_sha256=plan2_sha,
+                    prompt_sha256=canonical_sha256(b0.to_plan_dict()),
+                    generation=1,
+                ),
+                BatchAttemptRecord(
+                    record_id=f"batch-attempt:op-real-known-zero-agg:{HEAD_A[:12]}:{in_dig2}:batch-000:1",
+                    operation_id="op-real-known-zero-agg",
+                    batch_id="batch-000",
+                    attempt=1,
+                    plan_sha256=plan2_sha,
+                    status="failed",
+                    provider_calls=0,
+                    diagnostic="deadline_exceeded",
+                ),
+                BatchOutputRecord(
+                    record_id=f"batch-output:op-real-known-zero-agg:{HEAD_A[:12]}:{in_dig2}:batch-000:2",
+                    operation_id="op-real-known-zero-agg",
+                    batch_id="batch-000",
+                    plan_sha256=plan2_sha,
+                    hunk_ids_reviewed=(hunk_a,),
+                    findings=(),
+                    summary="Recovered A",
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                    attempt=2,
+                    provider_calls=1,
+                ),
+            ):
+                assert rec_to_seed is not None
+                pr3_agg.add_comment(format_v6_record_marker(rec_to_seed), is_app=True)
 
-        self.assertEqual(transport_calls_2, 1)
-        self.assertEqual(pr2.reviews, [])
-        for err in opened_errors:
-            err.close()
-        self.assertFalse(any("batch-attempt:" in c["body"] for c in pr2.comments))
-        self.assertFalse(any("batch-output:" in c["body"] for c in pr2.comments))
-        self.assertTrue(any("batch-dispatch:" in c["body"] for c in pr2.comments))
+            b1_remaining_seen: list[int] = []
 
-        # Fresh process on same event holds without calling provider or writing a review.
-        eng2_fresh = V6RecoveryEngine(
-            DualCredentialGitHubClient(
-                workflow_token_transport=_ScriptedTransport(pr2.handle_wf),
-                broker_app_transport=_ScriptedTransport(pr2.handle_app),
-            ),
-            now_fn=lambda: 1_700_000_000.0,
-            sleeper=lambda _s: None,
-            broker_fence_verifier=_fence_verifier,
-            mutation_bound=MutationSanityBound(max_writes=32),
-        )
-        res2_fresh = eng2_fresh.recover_and_publish(req2)
-        self.assertIsInstance(res2_fresh, RecoveryHold)
-        assert isinstance(res2_fresh, RecoveryHold)
-        self.assertEqual(res2_fresh.blocker, "ambiguous_batch_inference_outcome")
-        self.assertEqual(
-            res2_fresh.missing_evidence, ("batch_dispatch:batch-000:attempt:1",)
-        )
-        self.assertEqual(transport_calls_2, 1)
-        self.assertEqual(pr2.reviews, [])
-        for err in opened_errors:
-            err.close()
+            def _svc_b1_run(r: Any, *, budget: Any) -> Any:
+                b1_remaining_seen.append(budget.max_provider_calls)
+                return SimpleNamespace(
+                    result=ReviewResult(
+                        summary="Batch B ok",
+                        comments=(
+                            ReviewComment(
+                                path="src/b.py", line=1, body="Clean finding B"
+                            ),
+                        ),
+                        provider="openai-compatible",
+                        model="gpt-4o-mini",
+                        review_status="complete",
+                    ),
+                    outcome=SimpleNamespace(
+                        status="reviewed",
+                        diagnostic=None,
+                        provider_calls=1,
+                    ),
+                )
+
+            svc_b1 = SimpleNamespace(run=_svc_b1_run)
+            res3_agg = V6RecoveryEngine(
+                DualCredentialGitHubClient(
+                    workflow_token_transport=_ScriptedTransport(pr3_agg.handle_wf),
+                    broker_app_transport=_ScriptedTransport(pr3_agg.handle_app),
+                ),
+                now_fn=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+                mutation_bound=MutationSanityBound(max_writes=32),
+            ).recover_and_publish(
+                replace(
+                    req3_agg_base,
+                    fresh_analysis_context_loader=lambda: V6FreshAnalysisContext(
+                        owner=OWNER,
+                        repo=REPO,
+                        pull_request=PR_NUMBER,
+                        pr_title="Aggregating zero calls",
+                        base_sha=BASE_SHA,
+                        merge_base_sha=BASE_SHA,
+                        head_sha=HEAD_A,
+                        inventory_sha256=canonical_sha256(inv2),
+                        inventory=inv2,
+                        non_text_changes=(),
+                        policy_digest=policy_digest,
+                        configuration_digest=config_digest,
+                        max_provider_calls=2,
+                        planned_batches=(b0, b1),
+                        all_expected_hunk_ids=(hunk_a, hunk_b),
+                        sub_hunks_by_parent={},
+                        combined_diff_sha256=canonical_sha256(diff_a + diff_b),
+                        provider_name="openai-compatible",
+                        model_name="gpt-4o-mini",
+                        service=svc_b1,
+                    ),
+                )
+            )
+            self.assertIsInstance(res3_agg, RecoveryCompleted)
+            assert isinstance(res3_agg, RecoveryCompleted)
+            self.assertEqual(b1_remaining_seen, [1])
+            self.assertEqual(res3_agg.model_calls_started, 1)
+            self.assertEqual(res3_agg.operation_model_calls_total, 2)
+
+            # Pilot report verification for Case 3: 0 on Run 1, 0 additional / 0 total on restart.
+            with tempfile.TemporaryDirectory() as tmpdir_s:
+                tmpdir = Path(tmpdir_s)
+                pr3_p = _SimulatedPRSurface(head_sha=HEAD_A)
+                coord3_p = _SimulatedCoordinatorStore(
+                    clock=lambda: 1_700_000_000.0, pr=pr3_p
+                )
+                client3_p = V6CoordinatorClient(
+                    base_url="https://coordinator.invalid",
+                    oidc_token_provider=lambda: "oidc-jwt-token",
+                    opener=coord3_p.opener,
+                    clock=lambda: 1_700_000_000.0,
+                )
+                mono_ticks_p = 0
+
+                def _expired_monotonic_pilot() -> float:
+                    nonlocal mono_ticks_p
+                    mono_ticks_p += 1
+                    return 0.0 if mono_ticks_p == 1 else 10_000.0
+
+                with mock.patch(
+                    "review_sensei.service.time.monotonic",
+                    side_effect=_expired_monotonic_pilot,
+                ):
+                    out3_p = V6PilotRunner(
+                        coordinator=client3_p,
+                        workflow_token_transport=_ScriptedTransport(pr3_p.handle_wf),
+                        app_transport_factory=lambda _g: _ScriptedTransport(
+                            pr3_p.handle_app
+                        ),
+                        clock=lambda: 1_700_000_000.0,
+                        sleeper=lambda _s: None,
+                        broker_fence_verifier=_fence_verifier,
+                    ).run(
+                        V6PilotRunConfig(
+                            owner=OWNER,
+                            repo=REPO,
+                            repository_id=REPO_ID,
+                            pull_request=PR_NUMBER,
+                            head_sha=HEAD_A,
+                            operation_id="op-pilot-known-zero",
+                            workflow_sha=WORKFLOW_SHA,
+                            expected_app_id=APP_ID,
+                            expected_bot_login=BOT_LOGIN,
+                            expected_bot_user_id=BOT_USER_ID,
+                            policy_digest=policy_digest,
+                            configuration_digest=config_digest,
+                            outcome_path=tmpdir / "case3_run1.json",
+                            fresh_analysis_context_loader=lambda: _make_context(
+                                real_service_3
+                            ),
+                        )
+                    )
+                report3_r1 = json.loads(
+                    (tmpdir / "case3_run1.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(out3_p.status, "hold")
+                self.assertEqual(out3_p.model_calls_started, 0)
+                self.assertEqual(out3_p.operation_model_calls_total, 0)
+                self.assertEqual(report3_r1["model_calls_started"], 0)
+                self.assertEqual(report3_r1["operation_model_calls_total"], 0)
+
+                out3_p2 = V6PilotRunner(
+                    coordinator=client3_p,
+                    workflow_token_transport=_ScriptedTransport(pr3_p.handle_wf),
+                    app_transport_factory=lambda _g: _ScriptedTransport(
+                        pr3_p.handle_app
+                    ),
+                    clock=lambda: 1_700_000_000.0,
+                    sleeper=lambda _s: None,
+                    broker_fence_verifier=_fence_verifier,
+                ).run(
+                    V6PilotRunConfig(
+                        owner=OWNER,
+                        repo=REPO,
+                        repository_id=REPO_ID,
+                        pull_request=PR_NUMBER,
+                        head_sha=HEAD_A,
+                        operation_id="op-pilot-known-zero",
+                        run_attempt=2,
+                        workflow_sha=WORKFLOW_SHA,
+                        expected_app_id=APP_ID,
+                        expected_bot_login=BOT_LOGIN,
+                        expected_bot_user_id=BOT_USER_ID,
+                        policy_digest=policy_digest,
+                        configuration_digest=config_digest,
+                        outcome_path=tmpdir / "case3_run2.json",
+                        fresh_analysis_context_loader=lambda: _make_context(
+                            real_service_3
+                        ),
+                    )
+                )
+                report3_r2 = json.loads(
+                    (tmpdir / "case3_run2.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(out3_p2.status, "hold")
+                self.assertEqual(out3_p2.model_calls_started, 0)
+                self.assertEqual(out3_p2.operation_model_calls_total, 0)
+                self.assertEqual(report3_r2["model_calls_started"], 0)
+                self.assertEqual(report3_r2["operation_model_calls_total"], 0)
+                self.assertEqual(transport_calls_3, 0)
+                self.assertEqual(pr3_p.reviews, [])
+        finally:
+            for err in opened_errors:
+                err.close()
 
 
 if __name__ == "__main__":

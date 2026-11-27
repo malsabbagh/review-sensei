@@ -105,10 +105,14 @@ class V6FreshAnalysisError(ReviewInputError):
         diagnostic: str,
         message: str = "",
         *,
-        provider_calls: int = 0,
+        provider_calls: int | None = None,
     ) -> None:
         super().__init__(message or diagnostic, diagnostic=diagnostic)
-        self.provider_calls = max(0, int(provider_calls))
+        if provider_calls is not None and (
+            type(provider_calls) is not int or provider_calls < 0
+        ):
+            raise ValueError("provider_calls must be None or a non-negative integer")
+        self.provider_calls: int | None = provider_calls
 
 
 def _is_40_hex(value: Any) -> bool:
@@ -2070,6 +2074,7 @@ def execute_v6_batch(
         raise V6FreshAnalysisError(
             "review_provider_call_budget_exhausted",
             "review-wide provider call budget exhausted before batch dispatch",
+            provider_calls=0,
         )
     req = ReviewRequest(
         diff=batch.diff_text,
@@ -2087,7 +2092,10 @@ def execute_v6_batch(
             max_provider_calls=remaining_provider_calls,
         )
         run = context.service.run(req, budget=budget)
-        calls_made = max(1, int(getattr(run.outcome, "provider_calls", 1) or 1))
+        raw_calls = getattr(getattr(run, "outcome", None), "provider_calls", None)
+        calls_made: int | None = (
+            raw_calls if (type(raw_calls) is int and raw_calls >= 0) else None
+        )
         if run.result is None or run.outcome.status in {
             "provider_failed",
             "budget_exhausted",
@@ -2101,7 +2109,7 @@ def execute_v6_batch(
                 f"batch {batch.batch_id} failed during provider execution ({run.outcome.status})",
                 provider_calls=calls_made,
             )
-        return run.result, calls_made
+        return run.result, (calls_made if calls_made is not None else 1)
 
     res = context.service.review(req)
     return res, 1
