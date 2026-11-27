@@ -9,6 +9,7 @@ without ever starting a fresh model call as a recovery fallback.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -19,6 +20,13 @@ from pathlib import Path
 from typing import Any, TypeAlias
 from urllib.parse import urlsplit
 
+from review_sensei.bounded_evidence import (
+    AuthenticatedPart,
+    EvidenceReadBudget,
+    evidence_manifest,
+    partition_evidence,
+    read_partitioned_evidence,
+)
 from review_sensei.errors import ReviewInputError
 
 from .errors import (
@@ -39,17 +47,21 @@ from .v6_pagination import (
     StabilityVerifiedPaginator,
 )
 from .v6_recovery_ledger import (
+    MAX_MARKER_ENCODED_BYTES,
     VALID_NON_SUBMISSION_PROOF_KINDS,
     AdvisoryProgressHint,
     CompletionReceiptRecord,
     DurableHoldRecord,
     NonSubmissionProofRecord,
     OwnerMarkerRecord,
+    ResultManifestRecord,
+    ResultPartRecord,
     UnresolvedResultRecord,
     V6LedgerIntegrityError,
     V6LedgerRecord,
     WriteIntentRecord,
     WriterOwnershipProof,
+    _to_json_compatible,
     canonical_sha256,
     extract_v6_record_markers,
     format_v6_record_marker,
@@ -266,6 +278,7 @@ class RecoveryRequest:
     initial_result_loader: (
         Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None
     ) = None
+    pre_publish_head_verifier: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +294,8 @@ class _CollectedLedger:
     anchor_comment_id: int | None
     comment_ids_by_record_id: Mapping[str, int]
     owner_comment_ids_by_generation: Mapping[int, int]
+    result_parts: tuple[ResultPartRecord, ...] = ()
+    result_manifests: tuple[ResultManifestRecord, ...] = ()
 
 
 class _AmbiguousWriteOutcomeError(RuntimeError):
@@ -851,6 +866,240 @@ def _match_native_effects_for_intent(
     return tuple(matched_ids), contradictory
 
 
+_REVIEW_ENVELOPE_VERSION = "reviewsensei:v6:review_envelope:v1"
+_REVIEW_ENVELOPE_HINT_KEYS = frozenset(
+    {"_v6_review_envelope", "review_body", "comments", "event"}
+)
+
+
+def _evidence_binding_for_request(
+    request: RecoveryRequest, *, pr_head_sha: str
+) -> dict[str, Any]:
+    producer = (
+        f"github-bot:{request.expected_app_id}"
+        if type(request.expected_app_id) is int and request.expected_app_id > 0
+        else "local-ledger"
+    )
+    return {
+        "repository": f"{request.owner}/{request.repo}",
+        "repository_id": request.repository_id,
+        "pull_request": request.pull_request,
+        "base_sha": "0" * 40,
+        "head_sha": pr_head_sha,
+        "policy_digest": "0" * 64,
+        "configuration_digest": "0" * 64,
+        "generation": 0,
+        "producer": producer,
+        "purpose": "evidence",
+        "schema_version": "1.0",
+    }
+
+
+def _partition_storage_id(idx: int, part_record_id: str) -> str:
+    digest = hashlib.sha256(part_record_id.encode("utf-8")).hexdigest()[:48]
+    return f"part_{idx:03d}_{digest}"
+
+
+def _reconstruct_partitioned_result(
+    *,
+    request: RecoveryRequest,
+    manifest_rec: ResultManifestRecord,
+    result_parts: Sequence[ResultPartRecord],
+    comment_ids_by_record_id: Mapping[str, int] | None,
+) -> UnresolvedResultRecord:
+    expected_binding = _evidence_binding_for_request(
+        request, pr_head_sha=manifest_rec.pr_head_sha
+    )
+    parts_by_record_id = {
+        part.record_id: part
+        for part in result_parts
+        if part.operation_id == manifest_rec.operation_id
+        and part.pr_head_sha == manifest_rec.pr_head_sha
+        and part.payload_sha256 == manifest_rec.payload_sha256
+    }
+    manifest_dict = _to_json_compatible(manifest_rec.manifest)
+    manifest_parts = (
+        manifest_dict.get("parts") if isinstance(manifest_dict, Mapping) else None
+    )
+    if not isinstance(manifest_parts, list) or len(manifest_parts) != len(
+        manifest_rec.part_record_ids
+    ):
+        raise ReviewInputError(
+            "partition manifest parts length mismatch",
+            diagnostic="corrupted_pr_unresolved_result_digest",
+        )
+
+    storage_to_part: dict[str, ResultPartRecord] = {}
+    for idx, (part_rec_id, expected_cid, manifest_part_ref) in enumerate(
+        zip(
+            manifest_rec.part_record_ids,
+            manifest_rec.part_comment_ids,
+            manifest_parts,
+        )
+    ):
+        if not isinstance(manifest_part_ref, Mapping):
+            raise ReviewInputError(
+                "partition manifest entry is not a mapping",
+                diagnostic="corrupted_pr_unresolved_result_digest",
+            )
+        storage_id = manifest_part_ref.get("storage_id")
+        part_rec = parts_by_record_id.get(part_rec_id)
+        if not isinstance(storage_id, str) or part_rec is None:
+            raise ReviewInputError(
+                f"missing result part {part_rec_id!r} referenced by manifest",
+                diagnostic="corrupted_pr_unresolved_result_digest",
+            )
+        if part_rec.part_index != idx or part_rec.part_count != len(
+            manifest_rec.part_record_ids
+        ):
+            raise ReviewInputError(
+                f"result part {part_rec_id!r} index/count mismatch",
+                diagnostic="corrupted_pr_unresolved_result_digest",
+            )
+        part_payload_plain = _to_json_compatible(part_rec.part_payload)
+        if canonical_sha256(part_payload_plain) != part_rec.part_sha256:
+            raise ReviewInputError(
+                f"result part {part_rec_id!r} SHA-256 mismatch",
+                diagnostic="corrupted_pr_unresolved_result_digest",
+            )
+        if comment_ids_by_record_id is not None:
+            observed_cid = comment_ids_by_record_id.get(part_rec_id)
+            if observed_cid is not None and observed_cid != expected_cid:
+                raise ReviewInputError(
+                    f"result part {part_rec_id!r} comment ID mismatch",
+                    diagnostic="corrupted_pr_unresolved_result_digest",
+                )
+        storage_to_part[storage_id] = part_rec
+
+    def _read_part(sid: str) -> AuthenticatedPart:
+        part_rec = storage_to_part.get(sid)
+        if part_rec is None:
+            raise ReviewInputError(
+                f"missing storage part {sid!r}",
+                diagnostic="corrupted_pr_unresolved_result_digest",
+            )
+        return AuthenticatedPart(
+            document=_to_json_compatible(part_rec.part_payload),
+            producer=str(expected_binding["producer"]),
+        )
+
+    restored = read_partitioned_evidence(
+        manifest_dict,
+        reader=_read_part,
+        expected_binding=expected_binding,
+        budget=EvidenceReadBudget(),
+    )
+    if not isinstance(restored, Mapping) or not isinstance(
+        restored.get("findings_payload"), list
+    ):
+        raise ReviewInputError(
+            "reconstructed partitioned result missing findings_payload list",
+            diagnostic="corrupted_pr_unresolved_result_digest",
+        )
+    restored_findings = tuple(dict(item) for item in restored["findings_payload"])
+    if canonical_sha256(restored_findings) != manifest_rec.payload_sha256:
+        raise ReviewInputError(
+            "reconstructed partitioned findings digest mismatch",
+            diagnostic="corrupted_pr_unresolved_result_digest",
+        )
+    return UnresolvedResultRecord(
+        record_id=manifest_rec.record_id,
+        operation_id=manifest_rec.operation_id,
+        pr_head_sha=manifest_rec.pr_head_sha,
+        payload_sha256=manifest_rec.payload_sha256,
+        findings_payload=restored_findings,
+        required_evidence_digests=manifest_rec.required_evidence_digests,
+        artifact_cache_sha256=manifest_rec.artifact_cache_sha256,
+    )
+
+
+def _build_review_effect_payload(
+    request: RecoveryRequest,
+    *,
+    pr_result: UnresolvedResultRecord,
+    payload_sha256: str,
+) -> dict[str, Any]:
+    """Validate result payload strictly (comment-only) and build GitHub review body."""
+
+    effect_tag = _effect_tag(request.operation_id, payload_sha256)
+    findings = pr_result.findings_payload
+    has_envelope_hints = any(
+        bool(_REVIEW_ENVELOPE_HINT_KEYS.intersection(entry.keys()))
+        for entry in findings
+    )
+    if has_envelope_hints:
+        if len(findings) != 1:
+            raise ReviewInputError(
+                "review envelope findings_payload must contain exactly one envelope mapping",
+                diagnostic="v6_invalid_review_envelope",
+            )
+        envelope = findings[0]
+        if (
+            envelope.get("_v6_review_envelope") != _REVIEW_ENVELOPE_VERSION
+            or not isinstance(envelope.get("review_body"), str)
+            or not isinstance(envelope.get("comments"), Sequence)
+            or isinstance(envelope.get("comments"), (str, bytes, bytearray))
+        ):
+            raise ReviewInputError(
+                "malformed v6 review envelope",
+                diagnostic="v6_invalid_review_envelope",
+            )
+        raw_comments = envelope["comments"]
+        if not all(isinstance(c, Mapping) for c in raw_comments):
+            raise ReviewInputError(
+                "review envelope comments must be JSON objects",
+                diagnostic="v6_invalid_review_envelope",
+            )
+        raw_event = envelope.get("event")
+        if raw_event is not None and raw_event != "COMMENT":
+            raise ReviewInputError(
+                f"v6 pilot publisher forbids non-COMMENT review event {raw_event!r}",
+                diagnostic="v6_unsupported_review_event",
+            )
+        raw_review_body = str(envelope["review_body"]).rstrip()
+        rendered_body = (
+            f"{raw_review_body}\n\n{effect_tag}"
+            if effect_tag not in raw_review_body.splitlines()
+            else raw_review_body
+        )
+        review_comments_payload = [dict(c) for c in raw_comments]
+    else:
+        rendered_body = (
+            f"ReviewSensei recovery publication ({len(findings)} finding(s)).\n"
+            f"{effect_tag}"
+        )
+        review_comments_payload = [dict(entry) for entry in findings]
+
+    return {
+        "commit_id": request.ownership_proof.pr_head_sha,
+        "event": "COMMENT",
+        "body": rendered_body,
+        "comments": review_comments_payload,
+    }
+
+
+def _definitive_rejection_diagnostic(status: int, body: Any = None) -> str:
+    if status == 413:
+        return "github_native_review_size_refused"
+    if status == 422 and body is not None:
+        text = str(body).lower()
+        if any(
+            token in text
+            for token in (
+                "too large",
+                "exceed",
+                "size",
+                "limit",
+                "length",
+                "characters",
+                "bytes",
+                "maximum",
+            )
+        ):
+            return "github_native_review_size_refused"
+    return f"definitive_github_rejection_{status}"
+
+
 class V6RecoveryEngine:
     """Orchestrates v6 GitHub-governed recovery and reconcile-before-retry writes."""
 
@@ -1276,6 +1525,8 @@ class V6RecoveryEngine:
         non_submissions: list[NonSubmissionProofRecord] = []
         holds: list[DurableHoldRecord] = []
         unresolved_results: list[UnresolvedResultRecord] = []
+        result_parts: list[ResultPartRecord] = []
+        result_manifests: list[ResultManifestRecord] = []
         hints: list[AdvisoryProgressHint] = []
         app_marker_comments: list[PaginatedRecord] = []
         anchor_comment_id: int | None = None
@@ -1327,6 +1578,10 @@ class V6RecoveryEngine:
                     holds.append(rec)
                 elif isinstance(rec, UnresolvedResultRecord):
                     unresolved_results.append(rec)
+                elif isinstance(rec, ResultPartRecord):
+                    result_parts.append(rec)
+                elif isinstance(rec, ResultManifestRecord):
+                    result_manifests.append(rec)
                 elif isinstance(rec, AdvisoryProgressHint):
                     hints.append(rec)
         return _CollectedLedger(
@@ -1341,6 +1596,8 @@ class V6RecoveryEngine:
             anchor_comment_id=anchor_comment_id,
             comment_ids_by_record_id=comment_ids_by_record_id,
             owner_comment_ids_by_generation=owner_comment_ids_by_generation,
+            result_parts=tuple(result_parts),
+            result_manifests=tuple(result_manifests),
         )
 
     def _collect_ledger_records(
@@ -1831,31 +2088,74 @@ class V6RecoveryEngine:
         *,
         request: RecoveryRequest,
         unresolved_results: Sequence[UnresolvedResultRecord],
+        result_parts: Sequence[ResultPartRecord] = (),
+        result_manifests: Sequence[ResultManifestRecord] = (),
+        comment_ids_by_record_id: Mapping[str, int] | None = None,
     ) -> UnresolvedResultRecord | RecoveryHold:
+        head_sha = request.ownership_proof.pr_head_sha
         matching = [
             rec
             for rec in unresolved_results
-            if rec.operation_id == request.operation_id
-            and rec.pr_head_sha == request.ownership_proof.pr_head_sha
+            if rec.operation_id == request.operation_id and rec.pr_head_sha == head_sha
         ]
-        if not matching:
-            return RecoveryHold(
-                operation_id=request.operation_id,
-                blocker="missing_pr_unresolved_result",
-                missing_evidence=(
-                    f"unresolved_result:{request.operation_id}:{request.ownership_proof.pr_head_sha}",
-                ),
-                zero_model_calls_started=True,
-            )
-        result = matching[-1]
-        expected_digest = canonical_sha256(result.findings_payload)
-        if result.payload_sha256 != expected_digest:
-            return RecoveryHold(
-                operation_id=request.operation_id,
-                blocker="corrupted_pr_unresolved_result_digest",
-                missing_evidence=(f"payload_sha256:{result.payload_sha256}",),
-                zero_model_calls_started=True,
-            )
+        if matching:
+            result = matching[-1]
+            expected_digest = canonical_sha256(result.findings_payload)
+            if result.payload_sha256 != expected_digest:
+                return RecoveryHold(
+                    operation_id=request.operation_id,
+                    blocker="corrupted_pr_unresolved_result_digest",
+                    missing_evidence=(f"payload_sha256:{result.payload_sha256}",),
+                    zero_model_calls_started=True,
+                )
+        else:
+            matching_manifests = [
+                rec
+                for rec in result_manifests
+                if rec.operation_id == request.operation_id
+                and rec.pr_head_sha == head_sha
+            ]
+            if matching_manifests:
+                manifest_rec = matching_manifests[-1]
+                try:
+                    result = _reconstruct_partitioned_result(
+                        request=request,
+                        manifest_rec=manifest_rec,
+                        result_parts=result_parts,
+                        comment_ids_by_record_id=comment_ids_by_record_id,
+                    )
+                except ReviewInputError:
+                    return RecoveryHold(
+                        operation_id=request.operation_id,
+                        blocker="corrupted_pr_unresolved_result_digest",
+                        missing_evidence=(
+                            f"result_manifest:{manifest_rec.record_id}:{manifest_rec.payload_sha256}",
+                        ),
+                        zero_model_calls_started=True,
+                    )
+            else:
+                orphan_parts = [
+                    part
+                    for part in result_parts
+                    if part.operation_id == request.operation_id
+                    and part.pr_head_sha == head_sha
+                ]
+                if orphan_parts:
+                    return RecoveryHold(
+                        operation_id=request.operation_id,
+                        blocker="incomplete_partitioned_result_missing_manifest",
+                        missing_evidence=tuple(p.record_id for p in orphan_parts),
+                        zero_model_calls_started=True,
+                    )
+                return RecoveryHold(
+                    operation_id=request.operation_id,
+                    blocker="missing_pr_unresolved_result",
+                    missing_evidence=(
+                        f"unresolved_result:{request.operation_id}:{head_sha}",
+                    ),
+                    zero_model_calls_started=True,
+                )
+
         if request.observed_evidence_digests is not None:
             observed = set(request.observed_evidence_digests)
             missing = tuple(
@@ -1871,6 +2171,282 @@ class V6RecoveryEngine:
                     zero_model_calls_started=True,
                 )
         return result
+
+    def _post_ledger_marker_with_rescan(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        record: V6LedgerRecord,
+        effect_kind_label: str,
+        find_existing_cid: Callable[[_CollectedLedger], int | None],
+    ) -> int:
+        marker_body = format_v6_record_marker(record)
+        for attempt in range(2):
+            self._verify_write_boundary(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_hint,
+            )
+            self.mutation_bound.consume("write_intent_comment", effect_kind_label)
+            try:
+                resp = self._execute_with_throttle(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                    call_fn=lambda ts: self.client.execute(
+                        "write_intent_comment",
+                        method="POST",
+                        path=(
+                            f"/repos/{request.owner}/{request.repo}/issues/"
+                            f"{request.pull_request}/comments"
+                        ),
+                        event=request.event,
+                        visibility=request.visibility,
+                        granted_scopes=request.granted_scopes,
+                        credential_kind=CredentialKind.APP_BROKER,
+                        body={"body": marker_body},
+                        now_epoch=ts,
+                    ),
+                )
+                eff_id = verify_write_response_readback(resp, expected_marker=record)
+                if type(eff_id) is int and eff_id > 0:
+                    return eff_id
+                raise _AmbiguousWriteOutcomeError(
+                    "ledger comment response missing positive integer id"
+                )
+            except (
+                _AmbiguousWriteOutcomeError,
+                TimeoutError,
+                ConnectionError,
+                GitHubHTTPTransientError,
+            ):
+                exec_fn = self._throttled_page_executor(
+                    request=request, guard=guard, prior_hint=prior_hint
+                )
+                rescan = self.paginator.scan_rest(
+                    endpoint_id="pr_issue_comments",
+                    path=(
+                        f"/repos/{request.owner}/{request.repo}/issues/"
+                        f"{request.pull_request}/comments?per_page=100"
+                    ),
+                    event=request.event,
+                    visibility=request.visibility,
+                    granted_scopes=request.granted_scopes,
+                    progress_guard=guard,
+                    phase_name="rescan_result_parts",
+                    now_epoch=self.now_fn(),
+                    execute_fn=exec_fn,
+                )
+                rescanned = self._collect_full_ledger(
+                    rescan.records,
+                    expected_app_id=request.expected_app_id,
+                    expected_bot_login=request.expected_bot_login,
+                    expected_bot_user_id=request.expected_bot_user_id,
+                )
+                found_cid = find_existing_cid(rescanned)
+                if found_cid is not None:
+                    return found_cid
+                if attempt == 1:
+                    raise
+        raise _AmbiguousWriteOutcomeError("ledger marker write unconfirmed")
+
+    def _persist_initial_result(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        findings_tuple: tuple[dict[str, Any], ...],
+        raw_digests: Sequence[str],
+        collected: _CollectedLedger,
+    ) -> tuple[
+        tuple[UnresolvedResultRecord, ...],
+        tuple[ResultPartRecord, ...],
+        tuple[ResultManifestRecord, ...],
+        dict[str, int],
+    ]:
+        head_sha = request.ownership_proof.pr_head_sha
+        payload_sha256 = canonical_sha256(findings_tuple)
+        target_result_record_id = f"result:{request.operation_id}:{head_sha[:12]}"
+        inline_rec = UnresolvedResultRecord(
+            record_id=target_result_record_id,
+            operation_id=request.operation_id,
+            pr_head_sha=head_sha,
+            payload_sha256=payload_sha256,
+            findings_payload=findings_tuple,
+            required_evidence_digests=tuple(raw_digests),
+        )
+        fits_inline = False
+        inline_marker = ""
+        try:
+            inline_marker = format_v6_record_marker(inline_rec)
+            fits_inline = len(inline_marker.encode("utf-8")) <= MAX_MARKER_ENCODED_BYTES
+        except V6LedgerIntegrityError as exc:
+            if exc.diagnostic != "v6_marker_too_large":
+                raise
+            fits_inline = False
+
+        updated_cids = dict(collected.comment_ids_by_record_id)
+        if fits_inline:
+            self._verify_write_boundary(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_hint,
+            )
+            self.mutation_bound.consume("write_intent_comment", "unresolved_result")
+            result_resp = self._execute_with_throttle(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_hint,
+                call_fn=lambda ts: self.client.execute(
+                    "write_intent_comment",
+                    method="POST",
+                    path=(
+                        f"/repos/{request.owner}/{request.repo}/issues/"
+                        f"{request.pull_request}/comments"
+                    ),
+                    event=request.event,
+                    visibility=request.visibility,
+                    granted_scopes=request.granted_scopes,
+                    credential_kind=CredentialKind.APP_BROKER,
+                    body={"body": inline_marker},
+                    now_epoch=ts,
+                ),
+            )
+            cid = verify_write_response_readback(
+                result_resp, expected_marker=inline_rec
+            )
+            if type(cid) is int and cid > 0:
+                updated_cids[inline_rec.record_id] = cid
+            return (
+                (*collected.unresolved_results, inline_rec),
+                collected.result_parts,
+                collected.result_manifests,
+                updated_cids,
+            )
+
+        # Inline exceeded 64 KiB marker bound: partition losslessly into result-part:v1 + manifest-last.
+        binding = _evidence_binding_for_request(request, pr_head_sha=head_sha)
+        envelope_value = {"findings_payload": _to_json_compatible(findings_tuple)}
+        raw_parts = partition_evidence(
+            envelope_value,
+            binding=binding,
+            item_count=len(findings_tuple),
+        )
+        existing_parts_by_idx: dict[int, tuple[ResultPartRecord, int]] = {}
+        for existing_part in collected.result_parts:
+            if (
+                existing_part.operation_id == request.operation_id
+                and existing_part.pr_head_sha == head_sha
+                and existing_part.payload_sha256 == payload_sha256
+                and existing_part.part_count == len(raw_parts)
+            ):
+                ecid = updated_cids.get(existing_part.record_id)
+                if type(ecid) is int and ecid > 0:
+                    existing_parts_by_idx[existing_part.part_index] = (
+                        existing_part,
+                        ecid,
+                    )
+
+        posted_parts: list[ResultPartRecord] = []
+        part_cids: list[int] = []
+        storage_ids: list[str] = []
+        for idx, part_dict in enumerate(raw_parts):
+            part_record_id = (
+                f"result-part:{request.operation_id}:{head_sha[:12]}:{idx:03d}"
+            )
+            storage_ids.append(_partition_storage_id(idx, part_record_id))
+            part_sha = canonical_sha256(part_dict)
+            part_rec = ResultPartRecord(
+                record_id=part_record_id,
+                operation_id=request.operation_id,
+                pr_head_sha=head_sha,
+                payload_sha256=payload_sha256,
+                part_index=idx,
+                part_count=len(raw_parts),
+                part_sha256=part_sha,
+                part_payload=part_dict,
+            )
+            reused = existing_parts_by_idx.get(idx)
+            if reused is not None and reused[0].part_sha256 == part_sha:
+                posted_parts.append(reused[0])
+                part_cids.append(reused[1])
+                continue
+
+            def _find_part_cid(
+                ledger: _CollectedLedger,
+                *,
+                expected_rec: ResultPartRecord = part_rec,
+            ) -> int | None:
+                for cand in ledger.result_parts:
+                    if (
+                        cand.record_id == expected_rec.record_id
+                        and cand.operation_id == expected_rec.operation_id
+                        and cand.pr_head_sha == expected_rec.pr_head_sha
+                        and cand.payload_sha256 == expected_rec.payload_sha256
+                        and cand.part_sha256 == expected_rec.part_sha256
+                    ):
+                        return ledger.comment_ids_by_record_id.get(cand.record_id)
+                return None
+
+            part_cid = self._post_ledger_marker_with_rescan(
+                request=request,
+                guard=guard,
+                prior_hint=prior_hint,
+                record=part_rec,
+                effect_kind_label="result_part",
+                find_existing_cid=_find_part_cid,
+            )
+            updated_cids[part_rec.record_id] = part_cid
+            posted_parts.append(part_rec)
+            part_cids.append(part_cid)
+
+        manifest_dict = evidence_manifest(
+            envelope_value,
+            binding=binding,
+            item_count=len(findings_tuple),
+            parts=raw_parts,
+            storage_ids=tuple(storage_ids),
+        )
+        manifest_rec = ResultManifestRecord(
+            record_id=f"result-manifest:{request.operation_id}:{head_sha[:12]}",
+            operation_id=request.operation_id,
+            pr_head_sha=head_sha,
+            payload_sha256=payload_sha256,
+            part_record_ids=tuple(p.record_id for p in posted_parts),
+            part_comment_ids=tuple(part_cids),
+            manifest=manifest_dict,
+            required_evidence_digests=tuple(raw_digests),
+        )
+
+        def _find_manifest_cid(ledger: _CollectedLedger) -> int | None:
+            for cand in ledger.result_manifests:
+                if (
+                    cand.record_id == manifest_rec.record_id
+                    and cand.operation_id == manifest_rec.operation_id
+                    and cand.pr_head_sha == manifest_rec.pr_head_sha
+                    and cand.payload_sha256 == manifest_rec.payload_sha256
+                ):
+                    return ledger.comment_ids_by_record_id.get(cand.record_id)
+            return None
+
+        manifest_cid = self._post_ledger_marker_with_rescan(
+            request=request,
+            guard=guard,
+            prior_hint=prior_hint,
+            record=manifest_rec,
+            effect_kind_label="result_manifest",
+            find_existing_cid=_find_manifest_cid,
+        )
+        updated_cids[manifest_rec.record_id] = manifest_cid
+        return (
+            collected.unresolved_results,
+            (*collected.result_parts, *posted_parts),
+            (*collected.result_manifests, manifest_rec),
+            updated_cids,
+        )
 
     def reconcile_takeover_read_only(
         self,
@@ -2641,15 +3217,29 @@ class V6RecoveryEngine:
 
             # Effect not yet landed: must recover strictly from PR-resident result.
             model_calls_started = 0
+            result_parts = collected.result_parts
+            result_manifests = collected.result_manifests
+            comment_ids_by_record_id = dict(collected.comment_ids_by_record_id)
             validated = self._validate_pr_resident_result(
                 request=request,
                 unresolved_results=unresolved_results,
+                result_parts=result_parts,
+                result_manifests=result_manifests,
+                comment_ids_by_record_id=comment_ids_by_record_id,
             )
-            target_result_record_id = f"result:{request.operation_id}:{request.ownership_proof.pr_head_sha[:12]}"
+            head_sha_prefix = request.ownership_proof.pr_head_sha[:12]
+            target_result_record_id = f"result:{request.operation_id}:{head_sha_prefix}"
+            target_manifest_record_id = (
+                f"result-manifest:{request.operation_id}:{head_sha_prefix}"
+            )
             result_id_absent = (
-                target_result_record_id not in collected.comment_ids_by_record_id
+                target_result_record_id not in comment_ids_by_record_id
+                and target_manifest_record_id not in comment_ids_by_record_id
                 and not any(
                     r.record_id == target_result_record_id for r in unresolved_results
+                )
+                and not any(
+                    m.record_id == target_manifest_record_id for m in result_manifests
                 )
             )
             if (
@@ -2667,7 +3257,7 @@ class V6RecoveryEngine:
                         guard=guard,
                         prior_hint=prior_hint,
                         existing_owners=owners,
-                        comment_ids_by_record_id=collected.comment_ids_by_record_id,
+                        comment_ids_by_record_id=comment_ids_by_record_id,
                     )
                     if (
                         request.owner_marker is not None
@@ -2677,43 +3267,41 @@ class V6RecoveryEngine:
                 raw_findings, raw_digests = request.initial_result_loader()
                 model_calls_started = 1
                 findings_tuple = tuple(dict(entry) for entry in raw_findings)
-                new_result = UnresolvedResultRecord(
-                    record_id=target_result_record_id,
-                    operation_id=request.operation_id,
-                    pr_head_sha=request.ownership_proof.pr_head_sha,
-                    payload_sha256=canonical_sha256(findings_tuple),
-                    findings_payload=findings_tuple,
-                    required_evidence_digests=tuple(raw_digests),
-                )
-                self._verify_write_boundary(
-                    request=request,
-                    guard=guard,
-                    prior_durable_hint=prior_hint,
-                )
-                self.mutation_bound.consume("write_intent_comment", "unresolved_result")
-                result_resp = self._execute_with_throttle(
-                    request=request,
-                    guard=guard,
-                    prior_durable_hint=prior_hint,
-                    call_fn=lambda ts: self.client.execute(
-                        "write_intent_comment",
-                        method="POST",
-                        path=(
-                            f"/repos/{request.owner}/{request.repo}/issues/"
-                            f"{request.pull_request}/comments"
+                try:
+                    (
+                        unresolved_results,
+                        result_parts,
+                        result_manifests,
+                        comment_ids_by_record_id,
+                    ) = self._persist_initial_result(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        findings_tuple=findings_tuple,
+                        raw_digests=raw_digests,
+                        collected=collected,
+                    )
+                except (
+                    _AmbiguousWriteOutcomeError,
+                    TimeoutError,
+                    ConnectionError,
+                    GitHubHTTPTransientError,
+                ):
+                    return self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        blocker="ambiguous_write_outcome",
+                        missing_evidence=(
+                            f"result_persistence:{request.operation_id}:{request.ownership_proof.pr_head_sha}",
                         ),
-                        event=request.event,
-                        visibility=request.visibility,
-                        granted_scopes=request.granted_scopes,
-                        credential_kind=CredentialKind.APP_BROKER,
-                        body={"body": format_v6_record_marker(new_result)},
-                        now_epoch=ts,
-                    ),
-                )
-                verify_write_response_readback(result_resp, expected_marker=new_result)
+                    )
                 validated = self._validate_pr_resident_result(
                     request=request,
-                    unresolved_results=(*unresolved_results, new_result),
+                    unresolved_results=unresolved_results,
+                    result_parts=result_parts,
+                    result_manifests=result_manifests,
+                    comment_ids_by_record_id=comment_ids_by_record_id,
                 )
             if isinstance(validated, RecoveryHold):
                 return self._finalize_hold(
@@ -2785,14 +3373,34 @@ class V6RecoveryEngine:
                         ),
                     )
 
+            effect_payload = _build_review_effect_payload(
+                request,
+                pr_result=pr_result,
+                payload_sha256=payload_sha256,
+            )
+            effect_payload_sha256 = canonical_sha256(effect_payload)
+
             if current_intent is None:
+                if request.pre_publish_head_verifier is not None:
+                    try:
+                        request.pre_publish_head_verifier()
+                    except ReviewInputError as head_exc:
+                        return self._finalize_hold(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker=head_exc.diagnostic or "v6_pr_head_mismatch",
+                            missing_evidence=(
+                                f"pr_head_match:{request.ownership_proof.pr_head_sha}",
+                            ),
+                        )
                 if owner_cid is None:
                     owner_cid = self._persist_owner_marker_if_needed(
                         request=request,
                         guard=guard,
                         prior_hint=prior_hint,
                         existing_owners=owners,
-                        comment_ids_by_record_id=collected.comment_ids_by_record_id,
+                        comment_ids_by_record_id=comment_ids_by_record_id,
                     )
                 self._verify_write_boundary(
                     request=request,
@@ -2800,13 +3408,7 @@ class V6RecoveryEngine:
                     prior_durable_hint=prior_hint,
                     target_path=effect_path,
                 )
-                target_digest = request.target_digest or canonical_sha256(
-                    {
-                        "repo": request.repository_id,
-                        "pr": request.pull_request,
-                        "head": request.ownership_proof.pr_head_sha,
-                    }
-                )
+                target_digest = request.target_digest or effect_payload_sha256
                 intent_record_id = (
                     f"intent:{request.operation_id}:{request.ownership_proof.writer_epoch}"
                     if existing_intent is None
@@ -2852,62 +3454,46 @@ class V6RecoveryEngine:
                 if type(created_intent_id) is int and created_intent_id > 0:
                     intent_cid = created_intent_id
 
-            # Verify exclusive writer ownership again immediately before external write.
+            # Verify live PR head and exclusive writer ownership again immediately before external write.
+            if request.pre_publish_head_verifier is not None:
+                try:
+                    request.pre_publish_head_verifier()
+                except ReviewInputError as head_exc:
+                    blocker = head_exc.diagnostic or "v6_pr_head_mismatch"
+                    missing = (
+                        f"non_submission_proof:{request.operation_id}:{payload_sha256}",
+                    )
+                    if (
+                        request.has_active_write_lease
+                        and request.slot_key is not None
+                        and request.generation is not None
+                    ):
+                        try:
+                            self._persist_non_submission_proof(
+                                request=request,
+                                guard=guard,
+                                prior_hint=prior_hint,
+                                payload_sha256=payload_sha256,
+                                proof_kind="pre_dispatch_terminal_abort",
+                                http_status=None,
+                                diagnostic=blocker,
+                            )
+                        except StaleWriterOwnershipError:
+                            pass
+                    return self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        blocker=blocker,
+                        missing_evidence=missing,
+                    )
+
             self._verify_write_boundary(
                 request=request,
                 guard=guard,
                 prior_durable_hint=prior_hint,
                 target_path=effect_path,
             )
-
-            effect_tag = _effect_tag(request.operation_id, payload_sha256)
-            if (
-                len(pr_result.findings_payload) == 1
-                and pr_result.findings_payload[0].get("_v6_review_envelope")
-                == "reviewsensei:v6:review_envelope:v1"
-                and isinstance(pr_result.findings_payload[0].get("review_body"), str)
-                and isinstance(pr_result.findings_payload[0].get("comments"), Sequence)
-                and not isinstance(
-                    pr_result.findings_payload[0].get("comments"),
-                    (str, bytes, bytearray),
-                )
-            ):
-                envelope = pr_result.findings_payload[0]
-                raw_comments = envelope["comments"]
-                if not all(isinstance(c, Mapping) for c in raw_comments):
-                    raise ReviewInputError(
-                        "review envelope comments must be JSON objects",
-                        diagnostic="v6_invalid_review_envelope",
-                    )
-                raw_review_body = str(envelope["review_body"]).rstrip()
-                rendered_body = (
-                    f"{raw_review_body}\n\n{effect_tag}"
-                    if effect_tag not in raw_review_body.splitlines()
-                    else raw_review_body
-                )
-                raw_event = envelope.get("event")
-                review_event = (
-                    raw_event
-                    if isinstance(raw_event, str)
-                    and raw_event in {"COMMENT", "REQUEST_CHANGES", "APPROVE"}
-                    else "COMMENT"
-                )
-                review_comments_payload = [dict(c) for c in raw_comments]
-            else:
-                rendered_body = (
-                    f"ReviewSensei recovery publication ({len(pr_result.findings_payload)} finding(s)).\n"
-                    f"{effect_tag}"
-                )
-                review_event = "COMMENT"
-                review_comments_payload = [
-                    dict(entry) for entry in pr_result.findings_payload
-                ]
-            effect_payload = {
-                "commit_id": request.ownership_proof.pr_head_sha,
-                "event": review_event,
-                "body": rendered_body,
-                "comments": review_comments_payload,
-            }
 
             self.mutation_bound.consume(request.effect_endpoint_id, request.effect_kind)
             effect_id: str | int | None = None
@@ -2929,8 +3515,10 @@ class V6RecoveryEngine:
                         now_epoch=ts,
                     ),
                 )
-                if write_resp.status in {400, 404, 409, 410, 422}:
-                    blocker = f"definitive_github_rejection_{write_resp.status}"
+                if write_resp.status in {400, 404, 409, 410, 413, 422}:
+                    blocker = _definitive_rejection_diagnostic(
+                        write_resp.status, write_resp.body
+                    )
                     missing = (
                         f"non_submission_proof:{request.operation_id}:{payload_sha256}",
                     )
@@ -3020,12 +3608,14 @@ class V6RecoveryEngine:
                             GitHubHTTPTransientError,
                         ),
                     )
-                    and http_err.http_status in {400, 404, 409, 410, 422}
+                    and http_err.http_status in {400, 404, 409, 410, 413, 422}
                     and request.has_active_write_lease
                     and request.slot_key is not None
                     and request.generation is not None
                 ):
-                    blocker = f"definitive_github_rejection_{http_err.http_status}"
+                    blocker = _definitive_rejection_diagnostic(
+                        http_err.http_status, str(http_err)
+                    )
                     missing = (
                         f"non_submission_proof:{request.operation_id}:{payload_sha256}",
                     )

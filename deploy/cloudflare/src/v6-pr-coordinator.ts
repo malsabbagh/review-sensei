@@ -3875,16 +3875,24 @@ export class V6PrCoordinatorEngine {
           owner_head_sha: initialSlot.owner_head_sha ?? reqHeadSha,
         });
       } catch {
+        let rollbackBlockedState: SlotRecord["state"] | null = null;
         try {
           await this.withSlotLock(slotKey, async () => {
             const current = await this.readSlot(slotKey);
-            if (current !== null && current.state === "RECONCILING") {
+            if (
+              current !== null &&
+              current.state === "RECONCILING" &&
+              current.generation === reqGeneration &&
+              current.lease_epoch === initialSlot.lease_epoch
+            ) {
               await this.store.putSlot({
                 ...current,
                 state: "HOLD",
                 last_reason_code: "v6_lease_slot_continuity_unproved",
                 updated_at_ms: this.clock.nowMs(),
               });
+            } else {
+              rollbackBlockedState = current?.state ?? "IDLE";
             }
           });
         } catch (err) {
@@ -3892,6 +3900,12 @@ export class V6PrCoordinatorEngine {
             return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
           }
           throw err;
+        }
+        if (rollbackBlockedState !== null) {
+          return diagnosticResponse(409, "v6_lease_rollback_blocked", {
+            slotState: rollbackBlockedState,
+            rayId,
+          });
         }
         return diagnosticResponse(409, "v6_lease_slot_continuity_unproved", {
           slotState: "HOLD",

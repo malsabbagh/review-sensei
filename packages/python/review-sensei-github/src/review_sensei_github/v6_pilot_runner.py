@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 
-from .errors import GitHubHTTPTransientError
+from .errors import GitHubHTTPTransientError, GitHubResponseTooLargeError
 from .v6_coordinator_client import (
     DEFAULT_COORDINATOR_BASE_URL,
     V6CoordinatorClient,
@@ -32,7 +32,11 @@ from .v6_credential_matrix import (
     GitHubEventKind,
     RepositoryVisibility,
 )
-from .v6_fresh_analysis import run_v6_fresh_pr_analysis
+from .v6_fresh_analysis import (
+    _load_trusted_configuration,
+    run_v6_fresh_pr_analysis,
+    verify_live_pr_head,
+)
 from .v6_pagination import NoProgressGuard
 from .v6_recovery_engine import (
     DEFAULT_CLOCK_MARGIN_MS,
@@ -259,9 +263,9 @@ class UrllibGitHubTransport:
                 )
                 raw = response.read(_MAX_GITHUB_BODY_BYTES + 1)
                 if len(raw) > _MAX_GITHUB_BODY_BYTES:
-                    raise ReviewInputError(
+                    raise GitHubResponseTooLargeError(
                         "GitHub response body exceeds maximum size",
-                        diagnostic="v6_pr_diff_too_large",
+                        diagnostic="v6_response_too_large",
                     )
                 text = bytes(raw).decode("utf-8", errors="strict") if raw else ""
                 accept_header = req_headers.get("Accept", "").lower()
@@ -340,6 +344,7 @@ class V6PilotRunConfig:
     model: str | None = None
     provider_base_url: str | None = None
     allow_custom_endpoint: bool = False
+    pre_publish_head_verifier: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -528,6 +533,47 @@ class V6PilotRunner:
 
     def run(self, config: V6PilotRunConfig) -> V6PilotRunOutcome:
         """Execute one full v6 coordinator + PR-governed recovery lifecycle."""
+
+        if config.policy_root is not None:
+            try:
+                trusted_cfg = _load_trusted_configuration(config.policy_root)
+            except ReviewInputError as exc:
+                diag = exc.diagnostic or "v6_untrusted_policy_root"
+                self._emit_hold_summary(
+                    config,
+                    slot_key=config.slot_key,
+                    blocker=diag,
+                    missing_evidence=(str(exc),),
+                )
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="hold",
+                        slot_key=config.slot_key,
+                        diagnostic=diag,
+                    ),
+                )
+            if not trusted_cfg.github.writes:
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="skipped",
+                        slot_key=config.slot_key,
+                        diagnostic="v6_policy_writes_disabled",
+                    ),
+                )
+            if (
+                config.event == GitHubEventKind.PULL_REQUEST
+                and not trusted_cfg.github.automatic_reviews
+            ):
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="skipped",
+                        slot_key=config.slot_key,
+                        diagnostic="v6_policy_automatic_reviews_disabled",
+                    ),
+                )
 
         read_only_client = DualCredentialGitHubClient(
             workflow_token_transport=self.workflow_token_transport,
@@ -849,7 +895,7 @@ class V6PilotRunner:
                 mutation_bound=MutationSanityBound(
                     max_writes=max(
                         DEFAULT_MUTATION_SANITY_MAX_WRITES,
-                        16 + min(adopted_count, 16),
+                        48 + min(adopted_count, 16),
                     )
                 ),
             )
@@ -909,6 +955,28 @@ class V6PilotRunner:
                     workflow_token_transport=self.workflow_token_transport,
                     is_ghec=self.is_ghec,
                     clock=self.clock,
+                ),
+                pre_publish_head_verifier=(
+                    config.pre_publish_head_verifier
+                    if config.pre_publish_head_verifier is not None
+                    else (
+                        (
+                            lambda: verify_live_pr_head(
+                                owner=config.owner,
+                                repo=config.repo,
+                                pull_request=config.pull_request,
+                                expected_head_sha=config.head_sha,
+                                workflow_token_transport=self.workflow_token_transport,
+                                event=config.event,
+                                visibility=config.visibility,
+                                granted_scopes=config.granted_scopes,
+                                is_ghec=self.is_ghec,
+                                clock=self.clock,
+                            )
+                        )
+                        if config.analyze_fresh_pr
+                        else None
+                    )
                 ),
             )
 
@@ -1234,4 +1302,4 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         github_api_url=options.github_api_url,
     )
     sys.stdout.write(json.dumps(outcome.to_dict(), indent=2, sort_keys=True) + "\n")
-    return 0 if outcome.status in {"completed", "paused"} else 1
+    return 0 if outcome.status in {"completed", "paused", "skipped"} else 1

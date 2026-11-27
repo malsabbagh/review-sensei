@@ -1282,67 +1282,118 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
     await expect(client.workflowRunAttempt("acme/widgets", "9002", "2", "read-tok")).resolves.toBeNull();
   });
 
-  it("reads single bounded issueCommentsSince page without pagination and flags truncation", async () => {
+  it("paginates issueCommentsSince boundedly, steps down on github_response_too_large, and flags ceiling truncation", async () => {
     const client = api();
     const request = vi.spyOn(client, "request");
+    const issueUrl = "https://api.example.test/repos/acme/widgets/issues/42";
+    const comment = (id: number) => ({
+      id,
+      body: `comment-${id}`,
+      author_association: "NONE",
+      issue_url: issueUrl,
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    });
 
+    // 1. Single incomplete page -> truncated: false
     request.mockResolvedValueOnce({
       status: 200,
-      data: [
-        {
-          id: 501,
-          body: "hello",
-          author_association: "NONE",
-          issue_url: "https://api.example.test/repos/acme/widgets/issues/42",
-          user: { login: "reviewsensei[bot]", type: "Bot" },
-        },
-      ],
+      data: [comment(501)],
     });
-    const page1 = await client.issueCommentsSince(
+    const single = await client.issueCommentsSince(
       "acme/widgets",
       42,
       "2026-11-27T00:00:00Z",
       "read-tok",
     );
-    expect(page1.truncated).toBe(false);
-    expect(page1.comments).toHaveLength(1);
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(single.truncated).toBe(false);
+    expect(single.comments).toHaveLength(1);
     expect(request).toHaveBeenCalledWith(
       "GET",
-      "/repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-27T00%3A00%3A00Z",
+      "/repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-27T00%3A00%3A00Z&page=1",
       "read-tok",
     );
 
-    request.mockResolvedValueOnce({
+    // 2. Multi-page continuation completes cleanly with truncated: false
+    request.mockReset();
+    request
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: true,
+        data: Array.from({ length: 100 }, (_, idx) => comment(idx + 1)),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: false,
+        data: [comment(101)],
+      });
+    const multi = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(multi.truncated).toBe(false);
+    expect(multi.comments).toHaveLength(101);
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      "GET",
+      "/repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-27T00%3A00%3A00Z&page=2",
+      "read-tok",
+    );
+
+    // 3. Adaptive step-down 100 -> 12 -> 5 restarts at page=1 and deduplicates by id
+    request.mockReset();
+    request
+      .mockRejectedValueOnce(new Error("github_response_too_large")) // 100 page 1
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: true,
+        data: Array.from({ length: 12 }, (_, idx) => comment(200 + idx)),
+      }) // 12 page 1
+      .mockRejectedValueOnce(new Error("github_response_too_large")) // 12 page 2
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: true,
+        data: Array.from({ length: 5 }, (_, idx) => comment(200 + idx)),
+      }) // 5 page 1 (overlap)
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: false,
+        data: [comment(212), comment(213)],
+      }); // 5 page 2
+    const stepped = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(stepped.truncated).toBe(false);
+    expect(stepped.comments.map((c) => c.id)).toEqual([200, 201, 202, 203, 204, 212, 213]);
+    expect(request).toHaveBeenNthCalledWith(
+      4,
+      "GET",
+      "/repos/acme/widgets/issues/42/comments?per_page=5&since=2026-11-27T00%3A00%3A00Z&page=1",
+      "read-tok",
+    );
+
+    // 4. Request ceiling sets truncated: true when more pages remain
+    request.mockReset();
+    request.mockResolvedValue({
       status: 200,
       hasNextPage: true,
-      data: [],
+      data: [comment(900)],
     });
-    const pageNext = await client.issueCommentsSince(
+    const cappedRequests = await client.issueCommentsSince(
       "acme/widgets",
       42,
       "2026-11-27T00:00:00Z",
       "read-tok",
+      65536,
+      2,
+      1000,
     );
-    expect(pageNext.truncated).toBe(true);
+    expect(cappedRequests.truncated).toBe(true);
     expect(request).toHaveBeenCalledTimes(2);
-
-    const hundred = Array.from({ length: 100 }, (_, idx) => ({
-      id: idx + 1,
-      body: "entry",
-      author_association: "NONE",
-      issue_url: "https://api.example.test/repos/acme/widgets/issues/42",
-      user: { login: "reviewsensei[bot]", type: "Bot" },
-    }));
-    request.mockResolvedValueOnce({ status: 200, data: hundred });
-    const page100 = await client.issueCommentsSince(
-      "acme/widgets",
-      42,
-      "2026-11-27T00:00:00Z",
-      "read-tok",
-    );
-    expect(page100.truncated).toBe(true);
-    expect(request).toHaveBeenCalledTimes(3);
   });
 
   it("reads pullRequestReview, pullRequestReviewComment, and checkRun O(1) resources", async () => {

@@ -16,7 +16,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import review_sensei_github
 from review_sensei_github.cli import main as github_main
-from review_sensei_github.errors import GitHubHTTPTransientError
+from review_sensei_github.errors import (
+    GitHubHTTPTransientError,
+    GitHubResponseTooLargeError,
+)
 from review_sensei_github.v6_coordinator_client import (
     ALLOWED_V6_CAPABILITIES,
     ALLOWED_V6_PERMISSION_NAMES,
@@ -30,7 +33,10 @@ from review_sensei_github.v6_credential_matrix import (
     GitHubEventKind,
     RepositoryVisibility,
 )
-from review_sensei_github.v6_fresh_analysis import _reconstruct_diff_from_files
+from review_sensei_github.v6_fresh_analysis import (
+    _format_compare_file_diff,
+    run_v6_fresh_pr_analysis,
+)
 from review_sensei_github.v6_pilot_runner import (
     _MAX_GITHUB_BODY_BYTES,
     UrllibGitHubTransport,
@@ -3310,71 +3316,21 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         self.assertTrue(captured_configs[0].allow_custom_endpoint)
         self.assertEqual(captured_configs[1].operation_id, "custom-op-id")
 
-    def test_reconstruct_diff_preserves_no_newline_and_fails_on_missing_patch(
-        self,
-    ) -> None:
-        from review_sensei.errors import ReviewInputError
-
+    def test_format_compare_file_diff_preserves_no_newline_verbatim(self) -> None:
         patch_with_no_nl = (
             "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n"
             "\\ No newline at end of file"
         )
-        wf_ok = _ScriptedTransport(
-            lambda _call: (
-                200,
-                {},
-                [
-                    {
-                        "filename": "a.py",
-                        "status": "modified",
-                        "patch": patch_with_no_nl,
-                    }
-                ],
-            )
-        )
-        ro_client = DualCredentialGitHubClient(
-            workflow_token_transport=wf_ok,
-            broker_app_transport=_ScriptedTransport(lambda _call: (403, {}, {})),
-        )
-        reconstructed = _reconstruct_diff_from_files(
-            read_client=ro_client,
-            owner=OWNER,
-            repo=REPO,
-            pull_request=PR_NUMBER,
-            event=GitHubEventKind.PULL_REQUEST,
-            visibility=RepositoryVisibility.PUBLIC,
-            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
-            now_fn=lambda: 1_700_000_000.0,
+        reconstructed = _format_compare_file_diff(
+            {
+                "filename": "a.py",
+                "status": "modified",
+                "patch": patch_with_no_nl,
+            }
         )
         self.assertIn("\\ No newline at end of file\n", reconstructed)
 
-        wf_missing = _ScriptedTransport(
-            lambda _call: (
-                200,
-                {},
-                [{"filename": "binary.bin", "status": "modified"}],
-            )
-        )
-        ro_missing = DualCredentialGitHubClient(
-            workflow_token_transport=wf_missing,
-            broker_app_transport=_ScriptedTransport(lambda _call: (403, {}, {})),
-        )
-        with self.assertRaises(ReviewInputError) as missing_exc:
-            _reconstruct_diff_from_files(
-                read_client=ro_missing,
-                owner=OWNER,
-                repo=REPO,
-                pull_request=PR_NUMBER,
-                event=GitHubEventKind.PULL_REQUEST,
-                visibility=RepositoryVisibility.PUBLIC,
-                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
-                now_fn=lambda: 1_700_000_000.0,
-            )
-        self.assertEqual(missing_exc.exception.diagnostic, "v6_pr_diff_incomplete")
-
     def test_urllib_transport_rejects_oversized_diff_body(self) -> None:
-        from review_sensei.errors import ReviewInputError
-
         class _OversizedResponse:
             status = 200
             headers = {"Content-Type": "text/plain; charset=utf-8"}
@@ -3393,13 +3349,13 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             token="ghp_test_token",
             opener=lambda _req, timeout=None: _OversizedResponse(),
         )
-        with self.assertRaises(ReviewInputError) as exc:
+        with self.assertRaises(GitHubResponseTooLargeError) as exc:
             transport.request(
                 "GET",
                 f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}",
                 headers={"Accept": "application/vnd.github.v3.diff"},
             )
-        self.assertEqual(exc.exception.diagnostic, "v6_pr_diff_too_large")
+        self.assertEqual(exc.exception.diagnostic, "v6_response_too_large")
 
     def test_review_envelope_rendering_and_malformed_validation(self) -> None:
         from review_sensei.errors import ReviewInputError
@@ -3525,6 +3481,835 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             ),
             "v6_lease_reconciliation_evidence_invalid",
         )
+
+    def test_run_v6_fresh_pr_analysis_splits_oversized_compare_tree_blobs_and_subdivides_hunks(
+        self,
+    ) -> None:
+        import base64
+        import hashlib
+        from unittest import mock
+
+        from review_sensei.models import ReviewComment, ReviewResult
+
+        base_sha = "1" * 40
+        merge_base_sha = "2" * 40
+        dir_sha_base = "3" * 40
+        dir_sha_head = "4" * 40
+        blob_a_base = "5" * 40
+        blob_a_head = "6" * 40
+        blob_bin_head = "7" * 40
+        blob_ren = "8" * 40
+        big_lines = [f"line_{i} = {i}" for i in range(60)]
+        big_lines_head = [f"line_{i} = {i + 1000}" for i in range(60)]
+
+        blobs = {
+            blob_a_base: "\n".join(big_lines).encode("utf-8"),
+            blob_a_head: "\n".join(big_lines_head).encode("utf-8"),
+            blob_bin_head: b"\x00\x01binary-payload\xff",
+            blob_ren: b"renamed content\n",
+        }
+
+        def _wf_handler(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            path = call["path"]
+            headers = call.get("headers") or {}
+            if path == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}":
+                return (
+                    200,
+                    {},
+                    {
+                        "state": "open",
+                        "title": "Large tree split PR",
+                        "head": {"sha": HEAD_A},
+                        "base": {"sha": base_sha},
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{HEAD_A}":
+                if "v3.diff" in str(headers.get("Accept", "")):
+                    raise GitHubResponseTooLargeError()
+                raise GitHubResponseTooLargeError()
+            if (
+                path
+                == f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{HEAD_A}?per_page=1"
+            ):
+                return 200, {}, {"merge_base_commit": {"sha": merge_base_sha}}
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{merge_base_sha}?recursive=1":
+                raise GitHubResponseTooLargeError()
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{head_sha_val}?recursive=1":
+                raise GitHubResponseTooLargeError()
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{merge_base_sha}":
+                return (
+                    200,
+                    {},
+                    {
+                        "tree": [
+                            {
+                                "path": "src",
+                                "type": "tree",
+                                "sha": dir_sha_base,
+                                "mode": "040000",
+                            },
+                            {
+                                "path": "old_name.txt",
+                                "type": "blob",
+                                "sha": blob_ren,
+                                "mode": "100644",
+                            },
+                        ]
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{dir_sha_base}":
+                return (
+                    200,
+                    {},
+                    {
+                        "tree": [
+                            {
+                                "path": "big.py",
+                                "type": "blob",
+                                "sha": blob_a_base,
+                                "mode": "100644",
+                            },
+                        ]
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{HEAD_A}":
+                return (
+                    200,
+                    {},
+                    {
+                        "tree": [
+                            {
+                                "path": "src",
+                                "type": "tree",
+                                "sha": dir_sha_head,
+                                "mode": "040000",
+                            },
+                            {
+                                "path": "new_name.txt",
+                                "type": "blob",
+                                "sha": blob_ren,
+                                "mode": "100644",
+                            },
+                            {
+                                "path": "assets.bin",
+                                "type": "blob",
+                                "sha": blob_bin_head,
+                                "mode": "100644",
+                            },
+                        ]
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{dir_sha_head}":
+                return (
+                    200,
+                    {},
+                    {
+                        "tree": [
+                            {
+                                "path": "big.py",
+                                "type": "blob",
+                                "sha": blob_a_head,
+                                "mode": "100644",
+                            },
+                        ]
+                    },
+                )
+            if path.startswith(f"/repos/{OWNER}/{REPO}/git/blobs/"):
+                sha = path.rsplit("/", 1)[-1]
+                raw = blobs[sha]
+                return (
+                    200,
+                    {},
+                    {
+                        "sha": sha,
+                        "size": len(raw),
+                        "encoding": "base64",
+                        "content": base64.b64encode(raw).decode("ascii"),
+                    },
+                )
+            raise AssertionError(f"unexpected call: {call}")
+
+        head_sha_val = HEAD_A
+        review_calls: list[str] = []
+
+        class _FakeService:
+            def __init__(self, *_a: Any, **_kw: Any) -> None:
+                pass
+
+            def review(self, req: Any) -> ReviewResult:
+                review_calls.append(req.diff)
+                return ReviewResult(
+                    summary=f"Batch {len(review_calls)}",
+                    comments=(
+                        ReviewComment(
+                            path="src/big.py",
+                            line=2,
+                            side="RIGHT",
+                            body="Shared finding",
+                        ),
+                        ReviewComment(
+                            path="src/big.py",
+                            line=2 + len(review_calls),
+                            side="RIGHT",
+                            body=f"Batch {len(review_calls)} finding",
+                        ),
+                    ),
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                )
+
+        with (
+            mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}),
+            mock.patch(
+                "review_sensei_github.v6_fresh_analysis.ReviewService",
+                _FakeService,
+            ),
+        ):
+            payloads, digests = run_v6_fresh_pr_analysis(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                workflow_token_transport=_ScriptedTransport(_wf_handler),
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                provider="openai-compatible",
+                model="gpt-4o-mini",
+                provider_base_url="https://127.0.0.1:8443/v1",
+                allow_custom_endpoint=True,
+                batch_max_bytes=700,
+            )
+
+        self.assertGreater(len(review_calls), 1)
+        self.assertEqual(len(payloads), 1)
+        envelope = payloads[0]
+        self.assertEqual(
+            envelope["_v6_review_envelope"], "reviewsensei:v6:review_envelope:v1"
+        )
+        inv_by_path = {row["path"]: row for row in envelope["file_inventory"]}
+        self.assertEqual(inv_by_path["src/big.py"]["disposition"], "text")
+        self.assertEqual(inv_by_path["assets.bin"]["disposition"], "binary")
+        self.assertEqual(inv_by_path["new_name.txt"]["disposition"], "rename_only")
+        # Shared finding across batches must be deduplicated cleanly.
+        bodies = [c["body"] for c in envelope["comments"]]
+        self.assertEqual(bodies.count("Shared finding"), 1)
+        self.assertTrue(digests[0].startswith("diff:sha256:"))
+        del hashlib
+
+    def test_partitioned_result_recovery_orphan_hold_and_413_size_refused(self) -> None:
+        from review_sensei_github.v6_recovery_ledger import (
+            NonSubmissionProofRecord,
+            ResultManifestRecord,
+            ResultPartRecord,
+        )
+
+        now = 1_700_090_000.0
+        large_body = "Summary detail " + ("x" * 70_000)
+        oversized_envelope = (
+            {
+                "_v6_review_envelope": "reviewsensei:v6:review_envelope:v1",
+                "review_body": large_body,
+                "event": "COMMENT",
+                "comments": [
+                    {"path": "src/a.py", "line": 3, "side": "RIGHT", "body": "Fix"}
+                ],
+                "findings": [],
+                "provider": "openai-compatible",
+                "model": "gpt-4o-mini",
+                "review_status": "complete",
+                "content_digest": "f" * 64,
+            },
+        )
+
+        # 1. Oversized (>64 KiB) result splits into result-part:v1 + result-manifest:v1
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        client = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run1",
+            opener=coord.opener,
+            clock=lambda: now,
+        )
+        runner = V6PilotRunner(
+            coordinator=client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(pr.handle_app),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord.lease_epoch,
+                "active_run_id": 5010,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-partition-1",
+                run_id=5010,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (oversized_envelope, ()),
+            )
+        )
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(len(pr.reviews), 1)
+        self.assertIn(large_body[:1000], pr.reviews[0]["body"])
+        self.assertEqual(
+            len(pr.reviews[0]["body"]),
+            len(large_body)
+            + len("\n\n<!-- reviewsensei:v6:effect op=op-partition-1 sha256=")
+            + 64
+            + len(" -->"),
+        )
+        all_recs = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+        ]
+        parts = [r for r in all_recs if isinstance(r, ResultPartRecord)]
+        manifests = [r for r in all_recs if isinstance(r, ResultManifestRecord)]
+        self.assertGreaterEqual(len(parts), 1)
+        self.assertEqual(len(manifests), 1)
+
+        # 2. Cold recovery from partitioned result-part:v1 + result-manifest:v1 (0 model calls)
+        pr_cold = _SimulatedPRSurface(head_sha=HEAD_A)
+        for c in pr.comments:
+            rec_list = extract_v6_record_markers(c["body"], strict=True)
+            if any(
+                isinstance(r, (ResultPartRecord, ResultManifestRecord))
+                for r in rec_list
+            ):
+                pr_cold.comments.append(dict(c))
+        coord_cold = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr_cold)
+        client_cold = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run2",
+            opener=coord_cold.opener,
+            clock=lambda: now,
+        )
+        loader_calls = 0
+
+        def _should_not_run_loader() -> tuple[Any, Any]:
+            nonlocal loader_calls
+            loader_calls += 1
+            return oversized_envelope, ()
+
+        runner_cold = V6PilotRunner(
+            coordinator=client_cold,
+            workflow_token_transport=_ScriptedTransport(pr_cold.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(pr_cold.handle_app),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord_cold.lease_epoch,
+                "active_run_id": 5011,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        cold_outcome = runner_cold.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-partition-1",
+                run_id=5011,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=_should_not_run_loader,
+            )
+        )
+        self.assertEqual(cold_outcome.status, "completed")
+        self.assertEqual(loader_calls, 0)
+        self.assertEqual(len(pr_cold.reviews), 1)
+        self.assertEqual(len(pr_cold.reviews[0]["body"]), len(pr.reviews[0]["body"]))
+
+        # 3. Orphan result-part:v1 without manifest -> HOLD incomplete_partitioned_result_missing_manifest (0 model calls)
+        pr_orphan = _SimulatedPRSurface(head_sha=HEAD_A)
+        for c in pr.comments:
+            rec_list = extract_v6_record_markers(c["body"], strict=True)
+            if any(isinstance(r, ResultPartRecord) for r in rec_list):
+                pr_orphan.add_comment(c["body"], is_app=True)
+        coord_orphan = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr_orphan)
+        client_orphan = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run3",
+            opener=coord_orphan.opener,
+            clock=lambda: now,
+        )
+        runner_orphan = V6PilotRunner(
+            coordinator=client_orphan,
+            workflow_token_transport=_ScriptedTransport(pr_orphan.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(
+                pr_orphan.handle_app
+            ),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord_orphan.lease_epoch,
+                "active_run_id": 5012,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        orphan_outcome = runner_orphan.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-partition-1",
+                run_id=5012,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=_should_not_run_loader,
+            )
+        )
+        self.assertEqual(orphan_outcome.status, "hold")
+        self.assertEqual(
+            orphan_outcome.diagnostic, "incomplete_partitioned_result_missing_manifest"
+        )
+        self.assertEqual(loader_calls, 0)
+
+        # 4. HTTP 413 on POST /pulls/{pr}/reviews persists NonSubmissionProofRecord(github_native_review_size_refused)
+        pr_413 = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_413 = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr_413)
+        client_413 = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run4",
+            opener=coord_413.opener,
+            clock=lambda: now,
+        )
+
+        def _app_with_413(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            if call["method"] == "POST" and call["path"].endswith("/reviews"):
+                return 413, {}, {"message": "Review payload too large"}
+            return pr_413.handle_app(call)
+
+        runner_413 = V6PilotRunner(
+            coordinator=client_413,
+            workflow_token_transport=_ScriptedTransport(pr_413.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(_app_with_413),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord_413.lease_epoch,
+                "active_run_id": 5013,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        out_413 = runner_413.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-413-refuse",
+                run_id=5013,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (oversized_envelope, ()),
+            )
+        )
+        self.assertEqual(out_413.status, "hold")
+        self.assertEqual(out_413.diagnostic, "github_native_review_size_refused")
+        proofs_413 = [
+            rec
+            for c in pr_413.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, NonSubmissionProofRecord)
+        ]
+        self.assertEqual(len(proofs_413), 1)
+        self.assertEqual(proofs_413[0].diagnostic, "github_native_review_size_refused")
+
+    def test_strict_comment_only_publisher_and_effect_payload_digest_bound(
+        self,
+    ) -> None:
+        from review_sensei_github.v6_recovery_ledger import canonical_sha256
+
+        now = 1_700_095_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        client = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run1",
+            opener=coord.opener,
+            clock=lambda: now,
+        )
+        runner = V6PilotRunner(
+            coordinator=client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(pr.handle_app),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord.lease_epoch,
+                "active_run_id": 5020,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        approve_envelope = (
+            {
+                "_v6_review_envelope": "reviewsensei:v6:review_envelope:v1",
+                "review_body": "Should reject non-comment",
+                "event": "APPROVE",
+                "comments": [],
+            },
+        )
+        out = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-no-approve",
+                run_id=5020,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (approve_envelope, ()),
+            )
+        )
+        self.assertEqual(out.status, "hold")
+        self.assertEqual(out.diagnostic, "v6_unsupported_review_event")
+        intents_bad = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, WriteIntentRecord)
+        ]
+        self.assertEqual(intents_bad, [])
+
+        # Valid COMMENT envelope binds target_digest to exact canonical_sha256(effect_payload)
+        valid_envelope = (
+            {
+                "_v6_review_envelope": "reviewsensei:v6:review_envelope:v1",
+                "review_body": "Bound effect digest",
+                "event": "COMMENT",
+                "comments": [],
+            },
+        )
+        pr_ok = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_ok = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr_ok)
+        client_ok = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run2",
+            opener=coord_ok.opener,
+            clock=lambda: now,
+        )
+        posted_bodies: list[dict[str, Any]] = []
+
+        def _capture_app(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            if call["method"] == "POST" and call["path"].endswith("/reviews"):
+                posted_bodies.append(dict(call["body"]))
+            return pr_ok.handle_app(call)
+
+        runner_ok = V6PilotRunner(
+            coordinator=client_ok,
+            workflow_token_transport=_ScriptedTransport(pr_ok.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(_capture_app),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord_ok.lease_epoch,
+                "active_run_id": 5021,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        ok_outcome = runner_ok.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-bound-effect",
+                run_id=5021,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (valid_envelope, ()),
+            )
+        )
+        self.assertEqual(ok_outcome.status, "completed")
+        intents_ok = [
+            rec
+            for c in pr_ok.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, WriteIntentRecord)
+        ]
+        self.assertEqual(len(intents_ok), 1)
+        self.assertEqual(
+            intents_ok[0].target_digest, canonical_sha256(posted_bodies[0])
+        )
+
+    def test_pre_publish_head_verifier_blocks_before_post_and_persists_non_submission(
+        self,
+    ) -> None:
+        from review_sensei_github.v6_recovery_ledger import NonSubmissionProofRecord
+
+        from review_sensei.errors import ReviewInputError
+
+        now = 1_700_096_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        client = V6CoordinatorClient(
+            base_url="https://coordinator.example",
+            oidc_token_provider=lambda: "oidc.jwt.run1",
+            opener=coord.opener,
+            clock=lambda: now,
+        )
+        checks = 0
+
+        def _move_after_intent() -> None:
+            nonlocal checks
+            checks += 1
+            if checks >= 2:
+                raise ReviewInputError(
+                    "PR head moved mid-run", diagnostic="v6_pr_head_mismatch"
+                )
+
+        runner = V6PilotRunner(
+            coordinator=client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _grant: _ScriptedTransport(pr.handle_app),
+            clock=lambda: now,
+            sleeper=lambda _sec: None,
+            broker_fence_verifier=lambda _proof: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": HEAD_A,
+                "pr_state": "open",
+                "active_writer_epoch": coord.lease_epoch,
+                "active_run_id": 5025,
+                "active_run_attempt": 1,
+                "run_status": "in_progress",
+                "verified_by_broker": True,
+            },
+        )
+        out = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-head-move",
+                run_id=5025,
+                run_attempt=1,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                initial_result_loader=lambda: (
+                    _make_unresolved(operation_id="op-head-move").findings_payload,
+                    (),
+                ),
+                pre_publish_head_verifier=_move_after_intent,
+            )
+        )
+        self.assertEqual(out.status, "hold")
+        self.assertEqual(out.diagnostic, "v6_pr_head_mismatch")
+        self.assertEqual(pr.reviews, [])
+        proofs = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, NonSubmissionProofRecord)
+        ]
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(proofs[0].proof_kind, "pre_dispatch_terminal_abort")
+
+    def test_trusted_policy_enforcement_skips_before_coordinator(self) -> None:
+        from unittest import mock
+
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_calls: list[str] = []
+
+        class _FailIfCalledCoord:
+            def status(self, **_kw: Any) -> Any:
+                coord_calls.append("status")
+                raise AssertionError("coordinator must not be called when skipped")
+
+        runner = V6PilotRunner(
+            coordinator=_FailIfCalledCoord(),  # type: ignore[arg-type]
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdir = Path(tmpdir)
+            (pdir / ".reviewsensei.yml").write_text(
+                "schema: 1\ngithub:\n  writes: false\n  automatic_reviews: true\n",
+                encoding="utf-8",
+            )
+            out_writes_off = runner.run(
+                V6PilotRunConfig(
+                    owner=OWNER,
+                    repo=REPO,
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    head_sha=HEAD_A,
+                    operation_id="op-skip-w",
+                    policy_root=pdir,
+                )
+            )
+            self.assertEqual(out_writes_off.status, "skipped")
+            self.assertEqual(out_writes_off.diagnostic, "v6_policy_writes_disabled")
+            self.assertEqual(coord_calls, [])
+
+            (pdir / ".reviewsensei.yml").write_text(
+                "schema: 1\ngithub:\n  writes: true\n  automatic_reviews: false\n",
+                encoding="utf-8",
+            )
+            out_auto_off = runner.run(
+                V6PilotRunConfig(
+                    owner=OWNER,
+                    repo=REPO,
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    head_sha=HEAD_A,
+                    operation_id="op-skip-a",
+                    event=GitHubEventKind.PULL_REQUEST,
+                    policy_root=pdir,
+                )
+            )
+            self.assertEqual(out_auto_off.status, "skipped")
+            self.assertEqual(
+                out_auto_off.diagnostic, "v6_policy_automatic_reviews_disabled"
+            )
+            self.assertEqual(coord_calls, [])
+
+            # CLI returns exit code 0 when outcome is skipped.
+            with (
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test_token"}),
+                mock.patch(
+                    "review_sensei_github.v6_pilot_runner.run_v6_pilot",
+                    return_value=out_writes_off,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                rc = run_v6_pilot_cli(
+                    [
+                        "--repository",
+                        f"{OWNER}/{REPO}",
+                        "--repository-id",
+                        str(REPO_ID),
+                        "--pull-request",
+                        str(PR_NUMBER),
+                        "--head-sha",
+                        HEAD_A,
+                        "--policy-root",
+                        str(pdir),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+
+    def test_adaptive_rest_pagination_step_down_deduplicates_across_restarts(
+        self,
+    ) -> None:
+        from review_sensei_github.v6_pagination import (
+            NoProgressGuard,
+            StabilityVerifiedPaginator,
+        )
+
+        items = [{"id": idx + 1, "body": f"c-{idx + 1}"} for idx in range(15)]
+        requested_urls: list[str] = []
+
+        def _wf_paged(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            url = call["path"]
+            requested_urls.append(url)
+            parsed = urlsplit(url)
+            qs = parse_qs(parsed.query)
+            per_page = int(qs.get("per_page", ["100"])[0])
+            page = int(qs.get("page", ["1"])[0])
+            if per_page == 100:
+                raise GitHubResponseTooLargeError()
+            if per_page == 12 and page == 2:
+                raise GitHubResponseTooLargeError()
+            start = (page - 1) * per_page
+            chunk = items[start : start + per_page]
+            headers: dict[str, str] = {}
+            if start + per_page < len(items):
+                headers["Link"] = (
+                    f'<https://api.github.com{parsed.path}?per_page={per_page}&page={page + 1}&sort=created&direction=asc>; rel="next"'
+                )
+            return 200, headers, chunk
+
+        client = DualCredentialGitHubClient(
+            workflow_token_transport=_ScriptedTransport(_wf_paged),
+            broker_app_transport=_ScriptedTransport(lambda _c: (403, {}, {})),
+        )
+        paginator = StabilityVerifiedPaginator(client)
+        res = paginator.scan_rest(
+            endpoint_id="pr_issue_comments",
+            path=f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments?per_page=100",
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            progress_guard=NoProgressGuard(operation_id="op-adapt"),
+        )
+        self.assertEqual([r.record_id for r in res.records], [i + 1 for i in range(15)])
+        self.assertTrue(any("per_page=12" in u for u in requested_urls))
+        self.assertTrue(any("per_page=5" in u for u in requested_urls))
 
 
 if __name__ == "__main__":

@@ -34,6 +34,8 @@ RECEIPT_SCHEMA = "reviewsensei:v6:receipt:v1"
 NON_SUBMISSION_SCHEMA = "reviewsensei:v6:non-submission:v1"
 HOLD_SCHEMA = "reviewsensei:v6:hold:v1"
 UNRESOLVED_RESULT_SCHEMA = "reviewsensei:v6:unresolved:v1"
+RESULT_PART_SCHEMA = "reviewsensei:v6:result-part:v1"
+RESULT_MANIFEST_SCHEMA = "reviewsensei:v6:result-manifest:v1"
 PROGRESS_HINT_SCHEMA = "reviewsensei:v6:progress:v1"
 
 MAX_MARKER_ENCODED_BYTES = 65536
@@ -53,6 +55,8 @@ VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
         NON_SUBMISSION_SCHEMA,
         HOLD_SCHEMA,
         UNRESOLVED_RESULT_SCHEMA,
+        RESULT_PART_SCHEMA,
+        RESULT_MANIFEST_SCHEMA,
         PROGRESS_HINT_SCHEMA,
     }
 )
@@ -543,6 +547,128 @@ class UnresolvedResultRecord:
 
 
 @dataclass(frozen=True)
+class ResultPartRecord:
+    """Lossless partitioned chunk of an oversized PR-resident review result."""
+
+    record_id: str
+    operation_id: str
+    pr_head_sha: str
+    payload_sha256: str
+    part_index: int
+    part_count: int
+    part_sha256: str
+    part_payload: Mapping[str, Any]
+    schema: str = RESULT_PART_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != RESULT_PART_SCHEMA:
+            raise ReviewInputError(
+                f"invalid ResultPartRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_sha256_64(self.payload_sha256, name="payload_sha256")
+        idx = _require_strict_int(self.part_index, name="part_index", minimum=0)
+        count = _require_strict_int(self.part_count, name="part_count", minimum=1)
+        if idx >= count:
+            raise ReviewInputError(
+                f"part_index {idx} must be < part_count {count}",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        _require_sha256_64(self.part_sha256, name="part_sha256")
+        if not isinstance(self.part_payload, Mapping):
+            raise ReviewInputError(
+                "part_payload must be a mapping",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        frozen_part = MappingProxyType(_to_json_compatible(dict(self.part_payload)))
+        object.__setattr__(self, "part_payload", frozen_part)
+
+
+@dataclass(frozen=True)
+class ResultManifestRecord:
+    """Manifest binding partitioned ResultPartRecord comments into an exact payload."""
+
+    record_id: str
+    operation_id: str
+    pr_head_sha: str
+    payload_sha256: str
+    part_record_ids: tuple[str, ...]
+    part_comment_ids: tuple[int, ...]
+    manifest: Mapping[str, Any]
+    required_evidence_digests: tuple[str, ...] = ()
+    artifact_cache_sha256: str | None = None
+    schema: str = RESULT_MANIFEST_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != RESULT_MANIFEST_SCHEMA:
+            raise ReviewInputError(
+                f"invalid ResultManifestRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_sha256_64(self.payload_sha256, name="payload_sha256")
+        if (
+            not isinstance(self.part_record_ids, Sequence)
+            or isinstance(self.part_record_ids, (str, bytes, bytearray))
+            or not self.part_record_ids
+        ):
+            raise ReviewInputError(
+                "part_record_ids must be a non-empty sequence of record IDs",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_part_ids = tuple(
+            _require_non_empty_str(pid, name="part_record_id")
+            for pid in self.part_record_ids
+        )
+        if len(set(validated_part_ids)) != len(validated_part_ids):
+            raise ReviewInputError(
+                "part_record_ids must be unique",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        object.__setattr__(self, "part_record_ids", validated_part_ids)
+        if (
+            not isinstance(self.part_comment_ids, Sequence)
+            or isinstance(self.part_comment_ids, (str, bytes, bytearray))
+            or len(self.part_comment_ids) != len(validated_part_ids)
+        ):
+            raise ReviewInputError(
+                "part_comment_ids must match length of part_record_ids",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_cids = tuple(
+            _require_strict_int(cid, name="part_comment_id", minimum=1)
+            for cid in self.part_comment_ids
+        )
+        object.__setattr__(self, "part_comment_ids", validated_cids)
+        if not isinstance(self.manifest, Mapping):
+            raise ReviewInputError(
+                "manifest must be a mapping",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        frozen_manifest = MappingProxyType(_to_json_compatible(dict(self.manifest)))
+        object.__setattr__(self, "manifest", frozen_manifest)
+        if not isinstance(self.required_evidence_digests, Sequence) or isinstance(
+            self.required_evidence_digests, (str, bytes, bytearray)
+        ):
+            raise ReviewInputError(
+                "required_evidence_digests must be a sequence of digest strings",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_digests = tuple(
+            _require_non_empty_str(digest, name="required_evidence_digest")
+            for digest in self.required_evidence_digests
+        )
+        object.__setattr__(self, "required_evidence_digests", validated_digests)
+        if self.artifact_cache_sha256 is not None:
+            _require_sha256_64(self.artifact_cache_sha256, name="artifact_cache_sha256")
+
+
+@dataclass(frozen=True)
 class AdvisoryProgressHint:
     """Strictly read-phase progress/stall hint; never holds sole write or result truth."""
 
@@ -682,6 +808,8 @@ V6LedgerRecord: TypeAlias = (
     | NonSubmissionProofRecord
     | DurableHoldRecord
     | UnresolvedResultRecord
+    | ResultPartRecord
+    | ResultManifestRecord
     | AdvisoryProgressHint
 )
 
@@ -771,6 +899,31 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "pr_head_sha": record.pr_head_sha,
             "payload_sha256": record.payload_sha256,
             "findings_payload": _to_json_compatible(record.findings_payload),
+            "required_evidence_digests": list(record.required_evidence_digests),
+            "artifact_cache_sha256": record.artifact_cache_sha256,
+        }
+    if isinstance(record, ResultPartRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "pr_head_sha": record.pr_head_sha,
+            "payload_sha256": record.payload_sha256,
+            "part_index": record.part_index,
+            "part_count": record.part_count,
+            "part_sha256": record.part_sha256,
+            "part_payload": _to_json_compatible(record.part_payload),
+        }
+    if isinstance(record, ResultManifestRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "pr_head_sha": record.pr_head_sha,
+            "payload_sha256": record.payload_sha256,
+            "part_record_ids": list(record.part_record_ids),
+            "part_comment_ids": list(record.part_comment_ids),
+            "manifest": _to_json_compatible(record.manifest),
             "required_evidence_digests": list(record.required_evidence_digests),
             "artifact_cache_sha256": record.artifact_cache_sha256,
         }
@@ -1098,6 +1251,104 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
                 payload_sha256=_require_mapping_str(payload, "payload_sha256"),
                 findings_payload=tuple(raw_findings),
+                required_evidence_digests=tuple(raw_digests),
+                artifact_cache_sha256=_require_mapping_opt_str(
+                    payload, "artifact_cache_sha256"
+                ),
+            )
+
+        if schema == RESULT_PART_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "pr_head_sha",
+                "payload_sha256",
+                "part_index",
+                "part_count",
+                "part_sha256",
+                "part_payload",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "ResultPartRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_part = payload["part_payload"]
+            if not isinstance(raw_part, Mapping):
+                raise V6LedgerIntegrityError(
+                    "field 'part_payload' must be a mapping",
+                    diagnostic="v6_malformed_marker",
+                )
+            return ResultPartRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                payload_sha256=_require_mapping_str(payload, "payload_sha256"),
+                part_index=_require_mapping_int(payload, "part_index"),
+                part_count=_require_mapping_int(payload, "part_count"),
+                part_sha256=_require_mapping_str(payload, "part_sha256"),
+                part_payload=raw_part,
+            )
+
+        if schema == RESULT_MANIFEST_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "pr_head_sha",
+                "payload_sha256",
+                "part_record_ids",
+                "part_comment_ids",
+                "manifest",
+                "required_evidence_digests",
+                "artifact_cache_sha256",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "ResultManifestRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_part_ids = payload["part_record_ids"]
+            if not isinstance(raw_part_ids, (list, tuple)) or any(
+                type(item) is not str for item in raw_part_ids
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'part_record_ids' must be a list of strings",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_cids = payload["part_comment_ids"]
+            if not isinstance(raw_cids, (list, tuple)) or any(
+                type(item) is not int for item in raw_cids
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'part_comment_ids' must be a list of integers",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_manifest = payload["manifest"]
+            if not isinstance(raw_manifest, Mapping):
+                raise V6LedgerIntegrityError(
+                    "field 'manifest' must be a mapping",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_digests = payload["required_evidence_digests"]
+            if not isinstance(raw_digests, (list, tuple)) or any(
+                type(item) is not str for item in raw_digests
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'required_evidence_digests' must be a list or tuple of strings",
+                    diagnostic="v6_malformed_marker",
+                )
+            return ResultManifestRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                payload_sha256=_require_mapping_str(payload, "payload_sha256"),
+                part_record_ids=tuple(raw_part_ids),
+                part_comment_ids=tuple(raw_cids),
+                manifest=raw_manifest,
                 required_evidence_digests=tuple(raw_digests),
                 artifact_cache_sha256=_require_mapping_opt_str(
                     payload, "artifact_cache_sha256"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from review_sensei.broker_diagnostics import BrokerDiagnostic
-from review_sensei.errors import ReviewSenseiError
+from review_sensei.errors import ReviewInputError, ReviewSenseiError
 
 VALID_RATE_LIMIT_KINDS: frozenset[str] = frozenset(
     {"primary", "secondary", "graphql_200"}
@@ -172,6 +172,20 @@ class GitHubHTTPPaginationLimitError(GitHubHTTPError):
     """Raised when a bounded GitHub pagination walk reaches its page limit."""
 
     error_category = "github_http_pagination_limit"
+
+
+class GitHubResponseTooLargeError(ReviewInputError):
+    """Raised when a bounded v6 GitHub response exceeds the 512 KiB ceiling."""
+
+    error_category = "v6_response_too_large"
+
+    def __init__(
+        self,
+        message: str = "GitHub response body exceeds maximum size",
+        *,
+        diagnostic: str = "v6_response_too_large",
+    ) -> None:
+        super().__init__(message, diagnostic=diagnostic)
 
 
 class GitHubHTTPTransientError(GitHubHTTPError):

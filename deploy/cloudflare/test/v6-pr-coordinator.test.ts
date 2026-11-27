@@ -3004,6 +3004,46 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       expect(epochRace.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
     }
 
+    // 4b. Early anchor verification catch blocks HOLD and returns 409 v6_lease_rollback_blocked if generation/epoch changed
+    {
+      const { env, engine, store, slotKey42 } = createHarness();
+      const acq = await engine.handleAcquire(env, {
+        oidc_token: "oidc-run-1",
+        pull_request: 42,
+        head_sha: HEAD_SHA_1,
+        capabilities: ["review_publish"],
+      });
+      await engine.handleRelease(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: acq.body.reservation_id,
+      });
+      const origGetSlot = store.getSlot.bind(store);
+      let reads = 0;
+      vi.spyOn(store, "getSlot").mockImplementation(async (key) => {
+        reads += 1;
+        const row = await origGetSlot(key);
+        if (reads === 2 && row !== null) {
+          return { ...row, lease_epoch: row.lease_epoch + 1 };
+        }
+        return row;
+      });
+      const anchorCatchRace = await engine.handleCompleteReconcile(env, {
+        oidc_token: "oidc-run-1",
+        slot_key: slotKey42,
+        generation: 1,
+        anchor_comment_id: 99999,
+        reconciliation_outcome: "clean_receipts",
+        reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+      });
+      expect(anchorCatchRace.status).toBe(409);
+      expect(anchorCatchRace.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
+      const slotAfter = await origGetSlot(slotKey42);
+      expect(slotAfter?.state).toBe("RECONCILING");
+    }
+
     // 5. Unanchored caller with mismatched req.head_sha -> HOLD v6_lease_slot_continuity_unproved
     {
       const { env, engine, store, slotKey42 } = createHarness();
