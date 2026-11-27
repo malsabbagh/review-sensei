@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from review_sensei.errors import ReviewInputError
 
+from .errors import GitHubHTTPResponseTooLargeError, GitHubResponseTooLargeError
 from .v6_credential_matrix import (
     CredentialKind,
     GitHubEventKind,
@@ -30,6 +31,7 @@ from .v6_recovery_ledger import (
 from .v6_transport import DualCredentialGitHubClient, DualCredentialResponse
 
 _SORTABLE_ASC_ENDPOINTS = frozenset({"pr_issue_comments", "pr_review_comments"})
+_ADAPTIVE_PAGE_SIZES: tuple[int, ...] = (100, 12, 5, 1)
 
 
 class RecoveryStalledError(ReviewInputError):
@@ -387,6 +389,51 @@ def _normalize_and_validate_rest_path(raw_path_or_url: str, *, endpoint_id: str)
     return urlunsplit(("", "", path, rebuilt_query, ""))
 
 
+def _extract_per_page(path_or_url: str, *, default: int = 100) -> int:
+    """Return parsed positive integer ``per_page`` query parameter or ``default``."""
+
+    parts = urlsplit(path_or_url)
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() == "per_page":
+            try:
+                parsed = int(value)
+            except ValueError:
+                return default
+            if parsed > 0:
+                return parsed
+            return default
+    return default
+
+
+def _next_smaller_per_page(current: int) -> int | None:
+    """Return the next smaller bounded adaptive page size in ``[100, 12, 5, 1]``."""
+
+    for candidate in _ADAPTIVE_PAGE_SIZES:
+        if candidate < current:
+            return candidate
+    return None
+
+
+def _rewrite_rest_page_1_per_page(
+    base_path: str,
+    *,
+    per_page: int,
+    endpoint_id: str,
+) -> str:
+    """Rebuild ``base_path`` restarting at ``page=1`` with ``per_page``."""
+
+    parts = urlsplit(base_path.strip())
+    kept = [
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in {"page", "per_page"}
+    ]
+    kept.append(("per_page", str(per_page)))
+    kept.append(("page", "1"))
+    rebuilt = urlunsplit(("", "", parts.path, urlencode(kept), ""))
+    return _normalize_and_validate_rest_path(rebuilt, endpoint_id=endpoint_id)
+
+
 def _default_rest_record_extractor(
     body: Any,
 ) -> tuple[PaginatedRecord, ...]:
@@ -566,17 +613,21 @@ class StabilityVerifiedPaginator:
             resumed = stable
 
         seen_keys: set[tuple[str, str]] = set()
+        seen_id_index: dict[str, int] = {}
         ordered_records: list[PaginatedRecord] = []
         if resumed:
             for existing in deduplicate_records(known_records):
                 seen_keys.add(existing.dedup_key)
+                seen_id_index[str(existing.record_id)] = len(ordered_records)
                 ordered_records.append(existing)
 
-        next_path: str | None = _normalize_and_validate_rest_path(
+        base_normalized_path = _normalize_and_validate_rest_path(
             path, endpoint_id=endpoint_id
         )
+        next_path: str | None = base_normalized_path
         visited_paths: set[str] = set()
         pages_fetched = 0
+        overlap_catchup_ids: set[str] = set()
 
         while next_path is not None:
             if next_path in visited_paths:
@@ -598,26 +649,53 @@ class StabilityVerifiedPaginator:
             visited_paths.add(next_path)
 
             caller = self.client.execute if execute_fn is None else execute_fn
-            response = caller(
-                endpoint_id,
-                method="GET",
-                path=next_path,
-                event=event,
-                visibility=visibility,
-                granted_scopes=granted_scopes,
-                credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
-                now_epoch=now_epoch,
-            )
+            try:
+                response = caller(
+                    endpoint_id,
+                    method="GET",
+                    path=next_path,
+                    event=event,
+                    visibility=visibility,
+                    granted_scopes=granted_scopes,
+                    credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                    now_epoch=now_epoch,
+                )
+            except (GitHubResponseTooLargeError, GitHubHTTPResponseTooLargeError):
+                current_per_page = _extract_per_page(next_path, default=100)
+                smaller_per_page = _next_smaller_per_page(current_per_page)
+                if smaller_per_page is None:
+                    raise
+                overlap_catchup_ids = set(seen_id_index.keys())
+                visited_paths.clear()
+                next_path = _rewrite_rest_page_1_per_page(
+                    base_normalized_path,
+                    per_page=smaller_per_page,
+                    endpoint_id=endpoint_id,
+                )
+                continue
+
             pages_fetched += 1
             page_records = extractor(response.body)
             new_count = 0
+            overlap_count = 0
             for record in page_records:
                 if not isinstance(record, PaginatedRecord):
                     raise TypeError(
                         "record_extractor must yield PaginatedRecord instances"
                     )
+                rec_id_str = str(record.record_id)
+                if rec_id_str in overlap_catchup_ids:
+                    overlap_catchup_ids.discard(rec_id_str)
+                    overlap_count += 1
+                existing_idx = seen_id_index.get(rec_id_str)
+                if existing_idx is not None:
+                    if record.dedup_key not in seen_keys:
+                        seen_keys.add(record.dedup_key)
+                        ordered_records[existing_idx] = record
+                    continue
                 if record.dedup_key not in seen_keys:
                     seen_keys.add(record.dedup_key)
+                    seen_id_index[rec_id_str] = len(ordered_records)
                     ordered_records.append(record)
                     new_count += 1
 
@@ -635,14 +713,18 @@ class StabilityVerifiedPaginator:
             )
             progress_guard.cursor_hint = normalized_next
 
-            # Only enforce no-progress stall when pagination continues (or page is empty on loop)
+            # Only enforce no-progress stall when pagination continues (or page is empty on loop);
+            # during adaptive step-down catchup past previously fetched IDs, do not penalize stall_count.
             if normalized_next is not None:
-                progress_guard.record_step(
-                    new_records_count=new_count,
-                    reconciled_effect=False,
-                    new_phase=phase_name,
-                    state_digest=prefix_digest,
-                )
+                if new_count == 0 and overlap_count > 0:
+                    pass
+                else:
+                    progress_guard.record_step(
+                        new_records_count=new_count,
+                        reconciled_effect=False,
+                        new_phase=phase_name,
+                        state_digest=prefix_digest,
+                    )
             elif new_count > 0 or phase_name != progress_guard.recovery_phase:
                 progress_guard.record_step(
                     new_records_count=new_count,

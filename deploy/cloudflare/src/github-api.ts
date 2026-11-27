@@ -1066,8 +1066,9 @@ export class GitHubApi {
   }
 
   /**
-   * Single bounded page of issue comments modified at or after `sinceIso` (per_page=100).
-   * Deliberately never paginates: sets `truncated: true` if Link rel="next" or length === 100.
+   * Bounded adaptive pagination of issue comments modified at or after `sinceIso`.
+   * Steps down page sizes [100, 12, 5, 1] on github_response_too_large, restarting
+   * from page 1 and deduplicating by comment id within bounded ceilings.
    */
   async issueCommentsSince(
     repository: string,
@@ -1075,6 +1076,8 @@ export class GitHubApi {
     sinceIso: string,
     token: string,
     maxBodyBytes = 65536,
+    maxRequests = 40,
+    maxComments = 1000,
   ): Promise<LiveIssueCommentPage> {
     if (
       !Number.isSafeInteger(pullRequest) ||
@@ -1086,23 +1089,78 @@ export class GitHubApi {
       throw new Error("github_issue_comment_invalid");
     }
     const repoBase = repositoryPath(repository);
-    const response = await this.request(
-      "GET",
-      `${repoBase}/issues/${pullRequest}/comments?per_page=100&since=${encodeURIComponent(sinceIso)}`,
-      token,
-    );
-    if (response.status === 403) {
-      throw new Error("github_issue_comment_forbidden");
-    }
-    if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
-      throw new Error("github_issue_comment_lookup_failed");
-    }
     const expectedIssueUrl = `${this.apiUrl}${repoBase}/issues/${pullRequest}`;
-    const comments = response.data.map((item) =>
-      this.parseIssueCommentObject(item, expectedIssueUrl, maxBodyBytes),
-    );
-    const truncated = response.hasNextPage === true || response.data.length >= 100;
-    return { comments, truncated };
+    const encodedSince = encodeURIComponent(sinceIso);
+    const pageSizes = [100, 12, 5, 1] as const;
+    let requests = 0;
+
+    for (const size of pageSizes) {
+      const commentsById = new Map<number, LiveIssueComment>();
+      let hitTooLarge = false;
+
+      for (let page = 1; ; page += 1) {
+        if (requests >= maxRequests) {
+          return {
+            comments: Array.from(commentsById.values()),
+            truncated: true,
+          };
+        }
+        requests += 1;
+        let response: GitHubApiResponse;
+        try {
+          response = await this.request(
+            "GET",
+            `${repoBase}/issues/${pullRequest}/comments?per_page=${size}&since=${encodedSince}&page=${page}`,
+            token,
+          );
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message === "github_response_too_large" &&
+            size > 1
+          ) {
+            hitTooLarge = true;
+            break;
+          }
+          throw error;
+        }
+        if (response.status === 403) {
+          throw new Error("github_issue_comment_forbidden");
+        }
+        if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
+          throw new Error("github_issue_comment_lookup_failed");
+        }
+        const hasMorePage = response.hasNextPage === true || response.data.length >= size;
+        for (let idx = 0; idx < response.data.length; idx += 1) {
+          const parsed = this.parseIssueCommentObject(
+            response.data[idx],
+            expectedIssueUrl,
+            maxBodyBytes,
+          );
+          if (!commentsById.has(parsed.id)) {
+            commentsById.set(parsed.id, parsed);
+          }
+          if (commentsById.size >= maxComments) {
+            const hasMoreItems = idx < response.data.length - 1 || hasMorePage;
+            return {
+              comments: Array.from(commentsById.values()),
+              truncated: hasMoreItems,
+            };
+          }
+        }
+        if (!hasMorePage) {
+          return {
+            comments: Array.from(commentsById.values()),
+            truncated: false,
+          };
+        }
+      }
+
+      if (!hitTooLarge) {
+        break;
+      }
+    }
+    throw new Error("github_response_too_large");
   }
 
   private async getObjectOrNull(

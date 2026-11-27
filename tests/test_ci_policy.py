@@ -3041,6 +3041,14 @@ class ReusablePublishGuardTests(unittest.TestCase):
         self.assertIn("head.repo.fork != true", text)
         self.assertIn("head.repo.full_name == github.repository", text)
         self.assertIn("v6-pilot-run", text)
+        self.assertIn('git --git-dir="$source_dir" archive "$workflow_commit"', text)
+        self.assertIn("v6-pilot-run --help", text)
+        self.assertIn("--analyze-fresh-pr", text)
+        self.assertIn('--policy-root "$GITHUB_WORKSPACE/trusted-policy"', text)
+        self.assertNotIn('pip install "review-sensei-github==', text)
+        self.assertNotIn('pip install "review-sensei==', text)
+        self.assertNotIn("review-sensei-github==", text)
+        self.assertNotIn("review-sensei==", text)
         for block in _run_blocks(text):
             self.assertNotIn("${{ inputs.", block)
         for v5_file in (

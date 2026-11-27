@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -18,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 
-from .errors import GitHubHTTPTransientError
+from .errors import GitHubHTTPTransientError, GitHubResponseTooLargeError
 from .v6_coordinator_client import (
     DEFAULT_COORDINATOR_BASE_URL,
     V6CoordinatorClient,
@@ -31,9 +32,16 @@ from .v6_credential_matrix import (
     GitHubEventKind,
     RepositoryVisibility,
 )
+from .v6_fresh_analysis import (
+    _load_trusted_configuration,
+    run_v6_fresh_pr_analysis,
+    verify_live_pr_head,
+)
 from .v6_pagination import NoProgressGuard
 from .v6_recovery_engine import (
     DEFAULT_CLOCK_MARGIN_MS,
+    DEFAULT_MUTATION_SANITY_MAX_WRITES,
+    MutationSanityBound,
     RecoveryCompleted,
     RecoveryHold,
     RecoveryOutcome,
@@ -74,51 +82,98 @@ def _app_id_from_slot_key(slot_key: str) -> int | None:
     return None
 
 
+def default_v6_operation_id(
+    *,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    effect_kind: str = "pr_review_publish",
+) -> str:
+    """Return a stable, rerun-invariant v6 operation identifier for one PR head."""
+
+    return f"v6:{repository_id}:{pull_request}:{head_sha[:12]}:{effect_kind}"
+
+
 def _build_initial_result_loader(
     config: V6PilotRunConfig,
+    *,
+    workflow_token_transport: DualCredentialTransport | None = None,
+    is_ghec: bool = False,
+    clock: Callable[[], float] = time.time,
 ) -> Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None:
-    """Return a lazy initial findings loader without touching disk unless invoked."""
+    """Return a lazy initial findings loader without touching disk or models unless invoked."""
 
     if config.initial_result_loader is not None:
         return config.initial_result_loader
-    if config.initial_findings_path is None:
-        return None
-    findings_path = config.initial_findings_path
+    if config.initial_findings_path is not None:
+        findings_path = config.initial_findings_path
 
-    def _load() -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
-        raw = json.loads(findings_path.read_text(encoding="utf-8"))
-        if isinstance(raw, list):
-            findings_raw: Any = raw
-            digests_raw: Any = ()
-        elif isinstance(raw, Mapping):
-            findings_raw = raw.get("findings", ())
-            digests_raw = raw.get("required_evidence_digests", ())
-        else:
-            raise ReviewInputError(
-                "initial findings JSON must be an object or list",
-                diagnostic="v6_invalid_initial_findings",
-            )
-        if (
-            not isinstance(findings_raw, Sequence)
-            or isinstance(findings_raw, (str, bytes, bytearray))
-            or not all(isinstance(entry, Mapping) for entry in findings_raw)
-        ):
-            raise ReviewInputError(
-                "initial findings entries must be JSON objects",
-                diagnostic="v6_invalid_initial_findings",
-            )
-        if (
-            not isinstance(digests_raw, Sequence)
-            or isinstance(digests_raw, (str, bytes, bytearray))
-            or not all(isinstance(item, str) and item.strip() for item in digests_raw)
-        ):
-            raise ReviewInputError(
-                "required_evidence_digests must be non-empty strings",
-                diagnostic="v6_invalid_initial_findings",
-            )
-        return tuple(dict(entry) for entry in findings_raw), tuple(digests_raw)
+        def _load() -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
+            raw = json.loads(findings_path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                findings_raw: Any = raw
+                digests_raw: Any = ()
+            elif isinstance(raw, Mapping):
+                findings_raw = raw.get("findings", ())
+                digests_raw = raw.get("required_evidence_digests", ())
+            else:
+                raise ReviewInputError(
+                    "initial findings JSON must be an object or list",
+                    diagnostic="v6_invalid_initial_findings",
+                )
+            if (
+                not isinstance(findings_raw, Sequence)
+                or isinstance(findings_raw, (str, bytes, bytearray))
+                or not all(isinstance(entry, Mapping) for entry in findings_raw)
+            ):
+                raise ReviewInputError(
+                    "initial findings entries must be JSON objects",
+                    diagnostic="v6_invalid_initial_findings",
+                )
+            if (
+                not isinstance(digests_raw, Sequence)
+                or isinstance(digests_raw, (str, bytes, bytearray))
+                or not all(
+                    isinstance(item, str) and item.strip() for item in digests_raw
+                )
+            ):
+                raise ReviewInputError(
+                    "required_evidence_digests must be non-empty strings",
+                    diagnostic="v6_invalid_initial_findings",
+                )
+            return tuple(dict(entry) for entry in findings_raw), tuple(digests_raw)
 
-    return _load
+        return _load
+
+    if config.analyze_fresh_pr:
+        if workflow_token_transport is None:
+            raise ReviewInputError(
+                "workflow_token_transport is required for fresh PR analysis",
+                diagnostic="v6_missing_github_token",
+            )
+
+        def _analyze() -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
+            return run_v6_fresh_pr_analysis(
+                owner=config.owner,
+                repo=config.repo,
+                pull_request=config.pull_request,
+                head_sha=config.head_sha,
+                workflow_token_transport=workflow_token_transport,
+                event=config.event,
+                visibility=config.visibility,
+                granted_scopes=config.granted_scopes,
+                policy_root=config.policy_root,
+                provider=config.provider,
+                model=config.model,
+                provider_base_url=config.provider_base_url,
+                allow_custom_endpoint=config.allow_custom_endpoint,
+                is_ghec=is_ghec,
+                clock=clock,
+            )
+
+        return _analyze
+
+    return None
 
 
 class _FailClosedReadOnlyAppTransport:
@@ -207,11 +262,22 @@ class UrllibGitHubTransport:
                     else {}
                 )
                 raw = response.read(_MAX_GITHUB_BODY_BYTES + 1)
-                parsed = (
-                    json.loads(bytes(raw).decode("utf-8", errors="strict"))
-                    if raw
-                    else None
-                )
+                if len(raw) > _MAX_GITHUB_BODY_BYTES:
+                    raise GitHubResponseTooLargeError(
+                        "GitHub response body exceeds maximum size",
+                        diagnostic="v6_response_too_large",
+                    )
+                text = bytes(raw).decode("utf-8", errors="strict") if raw else ""
+                accept_header = req_headers.get("Accept", "").lower()
+                content_type = str(
+                    resp_headers.get("Content-Type")
+                    or resp_headers.get("content-type")
+                    or ""
+                ).lower()
+                if "v3.diff" in accept_header and "json" not in content_type:
+                    parsed: Any = text
+                else:
+                    parsed = json.loads(text) if text else None
                 return status, resp_headers, parsed
         except HTTPError as exc:
             err_headers = dict(exc.headers.items()) if exc.headers is not None else {}
@@ -230,7 +296,7 @@ class UrllibGitHubTransport:
                 except Exception:
                     pass
             return exc.code, err_headers, parsed_err
-        except (URLError, TimeoutError, OSError) as exc:
+        except (URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise GitHubHTTPTransientError(
                 redact_secrets(f"GitHub HTTP request failed ({type(exc).__name__})")
             ) from exc
@@ -272,6 +338,13 @@ class V6PilotRunConfig:
     initial_result_loader: (
         Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None
     ) = None
+    analyze_fresh_pr: bool = False
+    policy_root: Path | None = None
+    provider: str | None = None
+    model: str | None = None
+    provider_base_url: str | None = None
+    allow_custom_endpoint: bool = False
+    pre_publish_head_verifier: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -312,6 +385,9 @@ class V6PilotRunOutcome:
             payload["github_effect_id"] = self.recovery_outcome.github_effect_id
             payload["reconciled_from_existing_effect"] = (
                 self.recovery_outcome.reconciled_from_existing_effect
+            )
+            payload["reconciled_after_lost_write"] = (
+                self.recovery_outcome.reconciled_after_lost_write
             )
             payload["receipt_record_id"] = self.recovery_outcome.receipt.record_id
         elif isinstance(self.recovery_outcome, RecoveryHold):
@@ -457,6 +533,47 @@ class V6PilotRunner:
 
     def run(self, config: V6PilotRunConfig) -> V6PilotRunOutcome:
         """Execute one full v6 coordinator + PR-governed recovery lifecycle."""
+
+        if config.policy_root is not None:
+            try:
+                trusted_cfg = _load_trusted_configuration(config.policy_root)
+            except ReviewInputError as exc:
+                diag = exc.diagnostic or "v6_untrusted_policy_root"
+                self._emit_hold_summary(
+                    config,
+                    slot_key=config.slot_key,
+                    blocker=diag,
+                    missing_evidence=(str(exc),),
+                )
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="hold",
+                        slot_key=config.slot_key,
+                        diagnostic=diag,
+                    ),
+                )
+            if not trusted_cfg.github.writes:
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="skipped",
+                        slot_key=config.slot_key,
+                        diagnostic="v6_policy_writes_disabled",
+                    ),
+                )
+            if (
+                config.event == GitHubEventKind.PULL_REQUEST
+                and not trusted_cfg.github.automatic_reviews
+            ):
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="skipped",
+                        slot_key=config.slot_key,
+                        diagnostic="v6_policy_automatic_reviews_disabled",
+                    ),
+                )
 
         read_only_client = DualCredentialGitHubClient(
             workflow_token_transport=self.workflow_token_transport,
@@ -634,6 +751,25 @@ class V6PilotRunner:
                     ),
                 }
             )
+            reconciled_head_sha = config.head_sha
+            gen_owners = [
+                owner_rec
+                for owner_rec in takeover_recon.owner_lineage
+                if owner_rec.generation == current_generation
+            ]
+            if gen_owners:
+                reconciled_head_sha = gen_owners[-1].pr_head_sha
+            elif (
+                slot_status.owner_head_sha is not None
+                and _SHA1_40_RE.fullmatch(slot_status.owner_head_sha) is not None
+            ):
+                reconciled_head_sha = slot_status.owner_head_sha
+            elif takeover_recon.adopted_effects and (
+                _SHA1_40_RE.fullmatch(takeover_recon.adopted_effects[0][0].pr_head_sha)
+                is not None
+            ):
+                reconciled_head_sha = takeover_recon.adopted_effects[0][0].pr_head_sha
+
             try:
                 comp = self.coordinator.complete_reconcile(
                     slot_key=slot_key,
@@ -641,7 +777,7 @@ class V6PilotRunner:
                     reconciliation_outcome=takeover_recon.reconciliation_outcome,
                     reconciliation_evidence=recon_evidence,
                     anchor_comment_id=anchor_comment_id,
-                    head_sha=config.head_sha,
+                    head_sha=reconciled_head_sha,
                 )
             except V6CoordinatorError as exc:
                 diag = exc.diagnostic or "v6_lease_reconciling"
@@ -748,11 +884,20 @@ class V6PilotRunner:
                     config=config, grant=grant, client=dual_client
                 )
             )
+            adopted_count = (
+                len(takeover_recon.adopted_effects) if takeover_recon is not None else 0
+            )
             engine = V6RecoveryEngine(
                 dual_client,
                 sleeper=self.sleeper,
                 now_fn=self.clock,
                 broker_fence_verifier=fence_verifier,
+                mutation_bound=MutationSanityBound(
+                    max_writes=max(
+                        DEFAULT_MUTATION_SANITY_MAX_WRITES,
+                        48 + min(adopted_count, 16),
+                    )
+                ),
             )
             now_ms = int(self.clock() * 1000)
             owner_marker = OwnerMarkerRecord(
@@ -805,7 +950,34 @@ class V6PilotRunner:
                 has_active_write_lease=True,
                 emit_durable_hold_on_pr=True,
                 step_summary_sink=config.step_summary_sink,
-                initial_result_loader=_build_initial_result_loader(config),
+                initial_result_loader=_build_initial_result_loader(
+                    config,
+                    workflow_token_transport=self.workflow_token_transport,
+                    is_ghec=self.is_ghec,
+                    clock=self.clock,
+                ),
+                pre_publish_head_verifier=(
+                    config.pre_publish_head_verifier
+                    if config.pre_publish_head_verifier is not None
+                    else (
+                        (
+                            lambda: verify_live_pr_head(
+                                owner=config.owner,
+                                repo=config.repo,
+                                pull_request=config.pull_request,
+                                expected_head_sha=config.head_sha,
+                                workflow_token_transport=self.workflow_token_transport,
+                                event=config.event,
+                                visibility=config.visibility,
+                                granted_scopes=config.granted_scopes,
+                                is_ghec=self.is_ghec,
+                                clock=self.clock,
+                            )
+                        )
+                        if config.analyze_fresh_pr
+                        else None
+                    )
+                ),
             )
 
             if takeover_recon is not None and takeover_recon.adopted_effects:
@@ -1037,6 +1209,12 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
     )
     parser.add_argument("--step-summary-path", type=Path, default=None)
     parser.add_argument("--initial-findings-json", type=Path, default=None)
+    parser.add_argument("--analyze-fresh-pr", action="store_true", default=False)
+    parser.add_argument("--policy-root", type=Path, default=None)
+    parser.add_argument("--provider", default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--provider-base-url", default=None)
+    parser.add_argument("--allow-custom-endpoint", action="store_true", default=False)
     parser.add_argument("--expected-bot-login", default=None)
     parser.add_argument("--expected-app-id", type=int, default=None)
     parser.add_argument(
@@ -1079,9 +1257,11 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
             "GITHUB_TOKEN is required for read-only PR bulk scans",
             diagnostic="v6_missing_github_token",
         )
-    operation_id = (
-        options.operation_id
-        or f"v6:{options.repository_id}:{options.pull_request}:{options.head_sha[:12]}:{run_id}:{run_attempt}"
+    operation_id = options.operation_id or default_v6_operation_id(
+        repository_id=options.repository_id,
+        pull_request=options.pull_request,
+        head_sha=options.head_sha,
+        effect_kind=options.effect_kind,
     )
 
     coordinator = V6CoordinatorClient(base_url=options.coordinator_url)
@@ -1108,6 +1288,12 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         step_summary_sink=options.step_summary_path,
         outcome_path=options.outcome,
         initial_findings_path=options.initial_findings_json,
+        analyze_fresh_pr=options.analyze_fresh_pr,
+        policy_root=options.policy_root,
+        provider=options.provider,
+        model=options.model,
+        provider_base_url=options.provider_base_url,
+        allow_custom_endpoint=options.allow_custom_endpoint,
     )
     outcome = run_v6_pilot(
         config,
@@ -1116,4 +1302,4 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         github_api_url=options.github_api_url,
     )
     sys.stdout.write(json.dumps(outcome.to_dict(), indent=2, sort_keys=True) + "\n")
-    return 0 if outcome.status in {"completed", "paused"} else 1
+    return 0 if outcome.status in {"completed", "paused", "skipped"} else 1

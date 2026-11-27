@@ -312,6 +312,42 @@ _MATRIX_ENTRIES: tuple[tuple[str, EndpointCredentialRule], ...] = (
         ),
     ),
     _bulk_read(
+        "pr_compare",
+        "/repos/{owner}/{repo}/compare/{base}...{head}",
+        required_permissions=("pull-requests: read", "contents: read"),
+        rationale=(
+            "Fetch immutable base...head compare summary or diff via workflow "
+            "GITHUB_TOKEN without burning App installation quota."
+        ),
+    ),
+    _bulk_read(
+        "git_tree",
+        "/repos/{owner}/{repo}/git/trees/{tree_sha}",
+        required_permissions=("contents: read",),
+        rationale=(
+            "Fetch immutable commit tree snapshots via workflow GITHUB_TOKEN "
+            "for complete oversized PR inventory and diff splitting."
+        ),
+    ),
+    _bulk_read(
+        "git_blob",
+        "/repos/{owner}/{repo}/git/blobs/{file_sha}",
+        required_permissions=("contents: read",),
+        rationale=(
+            "Fetch immutable Git blob objects via workflow GITHUB_TOKEN "
+            "when splitting oversized PR diffs deterministically."
+        ),
+    ),
+    _bulk_read(
+        "git_commit",
+        "/repos/{owner}/{repo}/git/commits/{commit_sha}",
+        required_permissions=("contents: read",),
+        rationale=(
+            "Fetch immutable Git commit objects via workflow GITHUB_TOKEN "
+            "to compute commit-graph merge base when compare responses fail or overflow."
+        ),
+    ),
+    _bulk_read(
         "pr_files",
         "/repos/{owner}/{repo}/pulls/{pull_number}/files",
         required_permissions=("pull-requests: read", "contents: read"),
