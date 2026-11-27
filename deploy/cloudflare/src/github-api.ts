@@ -91,6 +91,7 @@ export interface LiveIssueComment {
   login: string;
   userType: string;
   association: string;
+  performedViaAppId?: number | null;
 }
 
 export interface LiveIssueCommentPage {
@@ -1020,12 +1021,16 @@ export class GitHubApi {
     ) {
       throw new Error("github_issue_comment_response_invalid");
     }
+    const performedViaAppId = isObject(raw.performed_via_github_app)
+      ? this.optionalPositiveId(raw.performed_via_github_app.id)
+      : null;
     return {
       id,
       body,
       login: user.login,
       userType: user.type,
       association,
+      ...(performedViaAppId !== null ? { performedViaAppId } : {}),
     };
   }
 
@@ -1069,6 +1074,9 @@ export class GitHubApi {
    * Bounded adaptive pagination of issue comments modified at or after `sinceIso`.
    * Steps down page sizes [100, 12, 5, 1] on github_response_too_large, restarting
    * from page 1 and deduplicating by comment id within bounded ceilings.
+   * When pagination spans multiple pages (N >= 2), verifies page 1..N-1 ordered ID
+   * tuple equality and page N tail monotonicity (with bounded retries) so deletions
+   * cannot silently shift comments across page boundaries.
    */
   async issueCommentsSince(
     repository: string,
@@ -1092,71 +1100,187 @@ export class GitHubApi {
     const expectedIssueUrl = `${this.apiUrl}${repoBase}/issues/${pullRequest}`;
     const encodedSince = encodeURIComponent(sinceIso);
     const pageSizes = [100, 12, 5, 1] as const;
+    const maxStabilityRetries = 2;
     let requests = 0;
 
-    for (const size of pageSizes) {
-      const commentsById = new Map<number, LiveIssueComment>();
-      let hitTooLarge = false;
-
-      for (let page = 1; ; page += 1) {
-        if (requests >= maxRequests) {
-          return {
-            comments: Array.from(commentsById.values()),
-            truncated: true,
-          };
+    const fetchPage = async (
+      size: number,
+      page: number,
+    ): Promise<{ items: LiveIssueComment[]; hasMorePage: boolean } | "too_large"> => {
+      requests += 1;
+      let response: GitHubApiResponse;
+      try {
+        response = await this.request(
+          "GET",
+          `${repoBase}/issues/${pullRequest}/comments?per_page=${size}&since=${encodedSince}&page=${page}`,
+          token,
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "github_response_too_large" &&
+          size > 1
+        ) {
+          return "too_large";
         }
-        requests += 1;
-        let response: GitHubApiResponse;
-        try {
-          response = await this.request(
-            "GET",
-            `${repoBase}/issues/${pullRequest}/comments?per_page=${size}&since=${encodedSince}&page=${page}`,
-            token,
-          );
-        } catch (error) {
-          if (
-            error instanceof Error &&
-            error.message === "github_response_too_large" &&
-            size > 1
-          ) {
+        throw error;
+      }
+      if (response.status === 403) {
+        throw new Error("github_issue_comment_forbidden");
+      }
+      if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
+        throw new Error("github_issue_comment_lookup_failed");
+      }
+      const hasMorePage = response.hasNextPage === true || response.data.length >= size;
+      const items = response.data.map((entry) =>
+        this.parseIssueCommentObject(entry, expectedIssueUrl, maxBodyBytes),
+      );
+      return { items, hasMorePage };
+    };
+
+    let lastComments: LiveIssueComment[] = [];
+
+    for (let attempt = 0; attempt <= maxStabilityRetries; attempt += 1) {
+      let retryForInstability = false;
+      let exhausted = false;
+
+      for (const size of pageSizes) {
+        const commentsById = new Map<number, LiveIssueComment>();
+        const pageIds: number[][] = [];
+        let hitTooLarge = false;
+        let scanDone = false;
+
+        for (let page = 1; ; page += 1) {
+          if (requests >= maxRequests) {
+            return {
+              comments: Array.from(commentsById.values()),
+              truncated: true,
+            };
+          }
+          const fetched = await fetchPage(size, page);
+          if (fetched === "too_large") {
             hitTooLarge = true;
             break;
           }
-          throw error;
-        }
-        if (response.status === 403) {
-          throw new Error("github_issue_comment_forbidden");
-        }
-        if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
-          throw new Error("github_issue_comment_lookup_failed");
-        }
-        const hasMorePage = response.hasNextPage === true || response.data.length >= size;
-        for (let idx = 0; idx < response.data.length; idx += 1) {
-          const parsed = this.parseIssueCommentObject(
-            response.data[idx],
-            expectedIssueUrl,
-            maxBodyBytes,
-          );
-          if (!commentsById.has(parsed.id)) {
-            commentsById.set(parsed.id, parsed);
+          const currentPageIds: number[] = [];
+          for (let idx = 0; idx < fetched.items.length; idx += 1) {
+            const parsed = fetched.items[idx];
+            currentPageIds.push(parsed.id);
+            if (!commentsById.has(parsed.id)) {
+              commentsById.set(parsed.id, parsed);
+            }
+            if (commentsById.size >= maxComments) {
+              const hasMoreItems = idx < fetched.items.length - 1 || fetched.hasMorePage;
+              return {
+                comments: Array.from(commentsById.values()),
+                truncated: hasMoreItems,
+              };
+            }
           }
-          if (commentsById.size >= maxComments) {
-            const hasMoreItems = idx < response.data.length - 1 || hasMorePage;
-            return {
-              comments: Array.from(commentsById.values()),
-              truncated: hasMoreItems,
-            };
+          pageIds.push(currentPageIds);
+          if (!fetched.hasMorePage) {
+            scanDone = true;
+            break;
           }
         }
-        if (!hasMorePage) {
+
+        if (hitTooLarge) {
+          lastComments = Array.from(commentsById.values());
+          continue;
+        }
+        if (!scanDone) {
+          break;
+        }
+        lastComments = Array.from(commentsById.values());
+        if (pageIds.length <= 1) {
           return {
-            comments: Array.from(commentsById.values()),
+            comments: lastComments,
             truncated: false,
           };
         }
+
+        let unstable = false;
+        for (let verifyPage = 1; verifyPage < pageIds.length; verifyPage += 1) {
+          if (requests >= maxRequests) {
+            return {
+              comments: lastComments,
+              truncated: true,
+            };
+          }
+          const refetched = await fetchPage(size, verifyPage);
+          if (refetched === "too_large") {
+            hitTooLarge = true;
+            break;
+          }
+          const expectedIds = pageIds[verifyPage - 1];
+          if (
+            refetched.items.length !== expectedIds.length ||
+            refetched.items.some((item, idx) => item.id !== expectedIds[idx])
+          ) {
+            unstable = true;
+            break;
+          }
+        }
+        if (hitTooLarge) {
+          lastComments = Array.from(commentsById.values());
+          continue;
+        }
+        if (!unstable) {
+          if (requests >= maxRequests) {
+            return {
+              comments: lastComments,
+              truncated: true,
+            };
+          }
+          const lastPageNumber = pageIds.length;
+          const tailRefetched = await fetchPage(size, lastPageNumber);
+          if (tailRefetched === "too_large") {
+            continue;
+          }
+          const prevTailIds = pageIds[lastPageNumber - 1];
+          const prefixMatches =
+            tailRefetched.items.length >= prevTailIds.length &&
+            prevTailIds.every((id, idx) => tailRefetched.items[idx].id === id);
+          if (!prefixMatches || tailRefetched.hasMorePage) {
+            unstable = true;
+          } else {
+            for (let idx = prevTailIds.length; idx < tailRefetched.items.length; idx += 1) {
+              const appended = tailRefetched.items[idx];
+              if (!commentsById.has(appended.id)) {
+                commentsById.set(appended.id, appended);
+              }
+              if (commentsById.size >= maxComments) {
+                const hasMoreItems = idx < tailRefetched.items.length - 1;
+                return {
+                  comments: Array.from(commentsById.values()),
+                  truncated: hasMoreItems,
+                };
+              }
+            }
+            return {
+              comments: Array.from(commentsById.values()),
+              truncated: false,
+            };
+          }
+        }
+
+        if (unstable) {
+          if (attempt < maxStabilityRetries) {
+            retryForInstability = true;
+          } else {
+            exhausted = true;
+          }
+          break;
+        }
       }
 
-      if (!hitTooLarge) {
+      if (exhausted) {
+        return {
+          comments: lastComments,
+          truncated: true,
+        };
+      }
+      if (!retryForInstability) {
         break;
       }
     }

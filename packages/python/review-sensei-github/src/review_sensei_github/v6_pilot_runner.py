@@ -17,6 +17,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from review_sensei.configuration import default_configuration
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 
 from .errors import GitHubHTTPTransientError, GitHubResponseTooLargeError
@@ -33,7 +34,10 @@ from .v6_credential_matrix import (
     RepositoryVisibility,
 )
 from .v6_fresh_analysis import (
+    V6FreshAnalysisContext,
     _load_trusted_configuration,
+    compute_trusted_policy_and_config_digests,
+    prepare_v6_fresh_analysis_context,
     run_v6_fresh_pr_analysis,
     verify_live_pr_head,
 )
@@ -174,6 +178,49 @@ def _build_initial_result_loader(
         return _analyze
 
     return None
+
+
+def _build_fresh_analysis_context_loader(
+    config: V6PilotRunConfig,
+    *,
+    workflow_token_transport: DualCredentialTransport | None = None,
+    is_ghec: bool = False,
+    clock: Callable[[], float] = time.time,
+) -> Callable[[], V6FreshAnalysisContext] | None:
+    """Return a lazy restartable batch context builder when fresh PR analysis is active."""
+
+    if (
+        not config.analyze_fresh_pr
+        or config.initial_result_loader is not None
+        or config.initial_findings_path is not None
+    ):
+        return None
+    if workflow_token_transport is None:
+        raise ReviewInputError(
+            "workflow_token_transport is required for fresh PR analysis",
+            diagnostic="v6_missing_github_token",
+        )
+
+    def _prepare() -> V6FreshAnalysisContext:
+        return prepare_v6_fresh_analysis_context(
+            owner=config.owner,
+            repo=config.repo,
+            pull_request=config.pull_request,
+            head_sha=config.head_sha,
+            workflow_token_transport=workflow_token_transport,
+            event=config.event,
+            visibility=config.visibility,
+            granted_scopes=config.granted_scopes,
+            policy_root=config.policy_root,
+            provider=config.provider,
+            model=config.model,
+            provider_base_url=config.provider_base_url,
+            allow_custom_endpoint=config.allow_custom_endpoint,
+            is_ghec=is_ghec,
+            clock=clock,
+        )
+
+    return _prepare
 
 
 class _FailClosedReadOnlyAppTransport:
@@ -345,6 +392,9 @@ class V6PilotRunConfig:
     provider_base_url: str | None = None
     allow_custom_endpoint: bool = False
     pre_publish_head_verifier: Callable[[], Any] | None = None
+    base_sha: str | None = None
+    policy_digest: str | None = None
+    configuration_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -895,10 +945,42 @@ class V6PilotRunner:
                 mutation_bound=MutationSanityBound(
                     max_writes=max(
                         DEFAULT_MUTATION_SANITY_MAX_WRITES,
-                        48 + min(adopted_count, 16),
+                        128 + (adopted_count * 2),
                     )
                 ),
             )
+            fresh_context_loader = _build_fresh_analysis_context_loader(
+                config,
+                workflow_token_transport=self.workflow_token_transport,
+                is_ghec=self.is_ghec,
+                clock=self.clock,
+            )
+            resolved_policy_digest = config.policy_digest
+            resolved_config_digest = config.configuration_digest
+            if (
+                resolved_policy_digest is None or resolved_config_digest is None
+            ) and config.policy_root is not None:
+                trusted_cfg = _load_trusted_configuration(config.policy_root)
+                computed_pol, computed_cfg = compute_trusted_policy_and_config_digests(
+                    trusted_cfg,
+                    provider_name=config.provider,
+                    model_name=config.model,
+                    base_url=config.provider_base_url,
+                    allow_custom_endpoint=config.allow_custom_endpoint,
+                )
+                resolved_policy_digest = resolved_policy_digest or computed_pol
+                resolved_config_digest = resolved_config_digest or computed_cfg
+            elif resolved_policy_digest is None and resolved_config_digest is None:
+                computed_pol, computed_cfg = compute_trusted_policy_and_config_digests(
+                    default_configuration(),
+                    provider_name=config.provider or "ollama",
+                    model_name=config.model or "llama3.2",
+                    base_url=config.provider_base_url,
+                    allow_custom_endpoint=config.allow_custom_endpoint,
+                )
+                resolved_policy_digest = computed_pol
+                resolved_config_digest = computed_cfg
+
             now_ms = int(self.clock() * 1000)
             owner_marker = OwnerMarkerRecord(
                 record_id=(
@@ -950,11 +1032,15 @@ class V6PilotRunner:
                 has_active_write_lease=True,
                 emit_durable_hold_on_pr=True,
                 step_summary_sink=config.step_summary_sink,
-                initial_result_loader=_build_initial_result_loader(
-                    config,
-                    workflow_token_transport=self.workflow_token_transport,
-                    is_ghec=self.is_ghec,
-                    clock=self.clock,
+                initial_result_loader=(
+                    None
+                    if fresh_context_loader is not None
+                    else _build_initial_result_loader(
+                        config,
+                        workflow_token_transport=self.workflow_token_transport,
+                        is_ghec=self.is_ghec,
+                        clock=self.clock,
+                    )
                 ),
                 pre_publish_head_verifier=(
                     config.pre_publish_head_verifier
@@ -978,6 +1064,10 @@ class V6PilotRunner:
                         else None
                     )
                 ),
+                base_sha=config.base_sha,
+                policy_digest=resolved_policy_digest,
+                configuration_digest=resolved_config_digest,
+                fresh_analysis_context_loader=fresh_context_loader,
             )
 
             if takeover_recon is not None and takeover_recon.adopted_effects:
@@ -1034,6 +1124,10 @@ class V6PilotRunner:
                 if isinstance(recovery_outcome, RecoveryCompleted):
                     if recovery_outcome.owner_comment_id is not None:
                         current_gen_owner_cid = recovery_outcome.owner_comment_id
+                    if recovery_outcome.detail_resolutions:
+                        current_gen_resolutions.extend(
+                            dict(item) for item in recovery_outcome.detail_resolutions
+                        )
                     if (
                         recovery_outcome.intent_record is not None
                         and recovery_outcome.intent_record.generation

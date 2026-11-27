@@ -36,9 +36,15 @@ HOLD_SCHEMA = "reviewsensei:v6:hold:v1"
 UNRESOLVED_RESULT_SCHEMA = "reviewsensei:v6:unresolved:v1"
 RESULT_PART_SCHEMA = "reviewsensei:v6:result-part:v1"
 RESULT_MANIFEST_SCHEMA = "reviewsensei:v6:result-manifest:v1"
+BATCH_PLAN_SCHEMA = "reviewsensei:v6:batch-plan:v1"
+BATCH_DISPATCH_SCHEMA = "reviewsensei:v6:batch-dispatch:v1"
+BATCH_OUTPUT_SCHEMA = "reviewsensei:v6:batch-output:v1"
 PROGRESS_HINT_SCHEMA = "reviewsensei:v6:progress:v1"
 
 MAX_MARKER_ENCODED_BYTES = 65536
+_EFFECT_MARKER_RE = re.compile(
+    r"^<!--\s*reviewsensei:v6:effect\s+op=[^\s]+\s+sha256=[0-9a-f]{64}\s*-->$"
+)
 
 VALID_NON_SUBMISSION_PROOF_KINDS: frozenset[str] = frozenset(
     {
@@ -57,6 +63,9 @@ VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
         UNRESOLVED_RESULT_SCHEMA,
         RESULT_PART_SCHEMA,
         RESULT_MANIFEST_SCHEMA,
+        BATCH_PLAN_SCHEMA,
+        BATCH_DISPATCH_SCHEMA,
+        BATCH_OUTPUT_SCHEMA,
         PROGRESS_HINT_SCHEMA,
     }
 )
@@ -669,6 +678,188 @@ class ResultManifestRecord:
 
 
 @dataclass(frozen=True)
+class BatchPlanRecord:
+    """Immutable PR-resident batch plan binding PR inputs and hunk partition."""
+
+    record_id: str
+    operation_id: str
+    base_sha: str
+    merge_base_sha: str
+    pr_head_sha: str
+    inventory_sha256: str
+    policy_digest: str
+    configuration_digest: str
+    max_provider_calls: int
+    batches: tuple[Mapping[str, Any], ...]
+    non_text_changes: tuple[Mapping[str, Any], ...] = ()
+    schema: str = BATCH_PLAN_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != BATCH_PLAN_SCHEMA:
+            raise ReviewInputError(
+                f"invalid BatchPlanRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.base_sha, name="base_sha")
+        _require_sha1_40(self.merge_base_sha, name="merge_base_sha")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_sha256_64(self.inventory_sha256, name="inventory_sha256")
+        _require_sha256_64(self.policy_digest, name="policy_digest")
+        _require_sha256_64(self.configuration_digest, name="configuration_digest")
+        _require_strict_int(
+            self.max_provider_calls, name="max_provider_calls", minimum=1
+        )
+
+        if not isinstance(self.batches, Sequence) or isinstance(
+            self.batches, (str, bytes, bytearray)
+        ):
+            raise ReviewInputError(
+                "batches must be a sequence of batch mappings",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        seen_batch_ids: set[str] = set()
+        frozen_batches: list[Mapping[str, Any]] = []
+        for idx, item in enumerate(self.batches):
+            if not isinstance(item, Mapping):
+                raise ReviewInputError(
+                    f"batches[{idx}] must be a mapping",
+                    diagnostic="v6_invalid_ledger_field",
+                )
+            bid = _require_non_empty_str(
+                item.get("batch_id"), name=f"batches[{idx}].batch_id"
+            )
+            if bid in seen_batch_ids:
+                raise ReviewInputError(
+                    f"duplicate batch_id {bid!r} in BatchPlanRecord",
+                    diagnostic="v6_invalid_ledger_field",
+                )
+            seen_batch_ids.add(bid)
+            raw_hunks = item.get("primary_hunk_ids")
+            if (
+                not isinstance(raw_hunks, Sequence)
+                or isinstance(raw_hunks, (str, bytes, bytearray))
+                or not raw_hunks
+            ):
+                raise ReviewInputError(
+                    f"batches[{idx}].primary_hunk_ids must be a non-empty sequence",
+                    diagnostic="v6_invalid_ledger_field",
+                )
+            for h_idx, h_id in enumerate(raw_hunks):
+                _require_non_empty_str(
+                    h_id, name=f"batches[{idx}].primary_hunk_ids[{h_idx}]"
+                )
+            frozen_batches.append(MappingProxyType(_to_json_compatible(dict(item))))
+        object.__setattr__(self, "batches", tuple(frozen_batches))
+
+        if not isinstance(self.non_text_changes, Sequence) or isinstance(
+            self.non_text_changes, (str, bytes, bytearray)
+        ):
+            raise ReviewInputError(
+                "non_text_changes must be a sequence of mappings",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        frozen_non_text: list[Mapping[str, Any]] = []
+        for idx, entry in enumerate(self.non_text_changes):
+            if not isinstance(entry, Mapping):
+                raise ReviewInputError(
+                    f"non_text_changes[{idx}] must be a mapping",
+                    diagnostic="v6_invalid_ledger_field",
+                )
+            _require_non_empty_str(
+                entry.get("path"), name=f"non_text_changes[{idx}].path"
+            )
+            _require_non_empty_str(
+                entry.get("status"), name=f"non_text_changes[{idx}].status"
+            )
+            frozen_non_text.append(MappingProxyType(_to_json_compatible(dict(entry))))
+        object.__setattr__(self, "non_text_changes", tuple(frozen_non_text))
+
+
+@dataclass(frozen=True)
+class BatchDispatchRecord:
+    """Immutable PR-resident marker recorded BEFORE a provider batch request."""
+
+    record_id: str
+    operation_id: str
+    batch_id: str
+    attempt: int
+    plan_sha256: str
+    prompt_sha256: str
+    generation: int
+    schema: str = BATCH_DISPATCH_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != BATCH_DISPATCH_SCHEMA:
+            raise ReviewInputError(
+                f"invalid BatchDispatchRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_non_empty_str(self.batch_id, name="batch_id")
+        _require_strict_int(self.attempt, name="attempt", minimum=1)
+        _require_sha256_64(self.plan_sha256, name="plan_sha256")
+        _require_sha256_64(self.prompt_sha256, name="prompt_sha256")
+        _require_strict_int(self.generation, name="generation", minimum=1)
+
+
+@dataclass(frozen=True)
+class BatchOutputRecord:
+    """Immutable PR-resident marker recorded AFTER a verified batch provider response."""
+
+    record_id: str
+    operation_id: str
+    batch_id: str
+    plan_sha256: str
+    hunk_ids_reviewed: tuple[str, ...]
+    findings: tuple[Mapping[str, Any], ...]
+    summary: str
+    provider: str
+    model: str | None = None
+    review_status: str = "complete"
+    attempt: int = 1
+    schema: str = BATCH_OUTPUT_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != BATCH_OUTPUT_SCHEMA:
+            raise ReviewInputError(
+                f"invalid BatchOutputRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_non_empty_str(self.batch_id, name="batch_id")
+        _require_sha256_64(self.plan_sha256, name="plan_sha256")
+        if (
+            not isinstance(self.hunk_ids_reviewed, Sequence)
+            or isinstance(self.hunk_ids_reviewed, (str, bytes, bytearray))
+            or not self.hunk_ids_reviewed
+        ):
+            raise ReviewInputError(
+                "hunk_ids_reviewed must be a non-empty sequence of strings",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_hunks = tuple(
+            _require_non_empty_str(hid, name="hunk_id_reviewed")
+            for hid in self.hunk_ids_reviewed
+        )
+        object.__setattr__(self, "hunk_ids_reviewed", validated_hunks)
+        frozen_findings = _freeze_findings_payload(self.findings)
+        object.__setattr__(self, "findings", frozen_findings)
+        if type(self.summary) is not str:
+            raise ReviewInputError(
+                "summary must be a string", diagnostic="v6_invalid_ledger_field"
+            )
+        _require_non_empty_str(self.provider, name="provider")
+        if self.model is not None:
+            _require_non_empty_str(self.model, name="model")
+        _require_non_empty_str(self.review_status, name="review_status")
+        _require_strict_int(self.attempt, name="attempt", minimum=1)
+
+
+@dataclass(frozen=True)
 class AdvisoryProgressHint:
     """Strictly read-phase progress/stall hint; never holds sole write or result truth."""
 
@@ -810,6 +1001,9 @@ V6LedgerRecord: TypeAlias = (
     | UnresolvedResultRecord
     | ResultPartRecord
     | ResultManifestRecord
+    | BatchPlanRecord
+    | BatchDispatchRecord
+    | BatchOutputRecord
     | AdvisoryProgressHint
 )
 
@@ -926,6 +1120,47 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "manifest": _to_json_compatible(record.manifest),
             "required_evidence_digests": list(record.required_evidence_digests),
             "artifact_cache_sha256": record.artifact_cache_sha256,
+        }
+    if isinstance(record, BatchPlanRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "base_sha": record.base_sha,
+            "merge_base_sha": record.merge_base_sha,
+            "pr_head_sha": record.pr_head_sha,
+            "inventory_sha256": record.inventory_sha256,
+            "policy_digest": record.policy_digest,
+            "configuration_digest": record.configuration_digest,
+            "max_provider_calls": record.max_provider_calls,
+            "batches": _to_json_compatible(record.batches),
+            "non_text_changes": _to_json_compatible(record.non_text_changes),
+        }
+    if isinstance(record, BatchDispatchRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "batch_id": record.batch_id,
+            "attempt": record.attempt,
+            "plan_sha256": record.plan_sha256,
+            "prompt_sha256": record.prompt_sha256,
+            "generation": record.generation,
+        }
+    if isinstance(record, BatchOutputRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "batch_id": record.batch_id,
+            "plan_sha256": record.plan_sha256,
+            "hunk_ids_reviewed": list(record.hunk_ids_reviewed),
+            "findings": _to_json_compatible(record.findings),
+            "summary": record.summary,
+            "provider": record.provider,
+            "model": record.model,
+            "review_status": record.review_status,
+            "attempt": record.attempt,
         }
     if isinstance(record, AdvisoryProgressHint):
         return {
@@ -1355,6 +1590,137 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 ),
             )
 
+        if schema == BATCH_PLAN_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "base_sha",
+                "merge_base_sha",
+                "pr_head_sha",
+                "inventory_sha256",
+                "policy_digest",
+                "configuration_digest",
+                "max_provider_calls",
+                "batches",
+                "non_text_changes",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "BatchPlanRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_batches = payload["batches"]
+            raw_non_text = payload["non_text_changes"]
+            if not isinstance(raw_batches, (list, tuple)) or any(
+                not isinstance(item, Mapping) for item in raw_batches
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'batches' must be a list of mappings",
+                    diagnostic="v6_malformed_marker",
+                )
+            if not isinstance(raw_non_text, (list, tuple)) or any(
+                not isinstance(item, Mapping) for item in raw_non_text
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'non_text_changes' must be a list of mappings",
+                    diagnostic="v6_malformed_marker",
+                )
+            return BatchPlanRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                base_sha=_require_mapping_str(payload, "base_sha"),
+                merge_base_sha=_require_mapping_str(payload, "merge_base_sha"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                inventory_sha256=_require_mapping_str(payload, "inventory_sha256"),
+                policy_digest=_require_mapping_str(payload, "policy_digest"),
+                configuration_digest=_require_mapping_str(
+                    payload, "configuration_digest"
+                ),
+                max_provider_calls=_require_mapping_int(payload, "max_provider_calls"),
+                batches=tuple(raw_batches),
+                non_text_changes=tuple(raw_non_text),
+            )
+
+        if schema == BATCH_DISPATCH_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "batch_id",
+                "attempt",
+                "plan_sha256",
+                "prompt_sha256",
+                "generation",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "BatchDispatchRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            return BatchDispatchRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                batch_id=_require_mapping_str(payload, "batch_id"),
+                attempt=_require_mapping_int(payload, "attempt"),
+                plan_sha256=_require_mapping_str(payload, "plan_sha256"),
+                prompt_sha256=_require_mapping_str(payload, "prompt_sha256"),
+                generation=_require_mapping_int(payload, "generation"),
+            )
+
+        if schema == BATCH_OUTPUT_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "batch_id",
+                "plan_sha256",
+                "hunk_ids_reviewed",
+                "findings",
+                "summary",
+                "provider",
+                "model",
+                "review_status",
+                "attempt",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "BatchOutputRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_hunks = payload["hunk_ids_reviewed"]
+            if not isinstance(raw_hunks, (list, tuple)) or any(
+                type(item) is not str for item in raw_hunks
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'hunk_ids_reviewed' must be a list of strings",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_findings = payload["findings"]
+            if not isinstance(raw_findings, (list, tuple)) or any(
+                not isinstance(item, Mapping) for item in raw_findings
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'findings' must be a list of mappings",
+                    diagnostic="v6_malformed_marker",
+                )
+            return BatchOutputRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                batch_id=_require_mapping_str(payload, "batch_id"),
+                plan_sha256=_require_mapping_str(payload, "plan_sha256"),
+                hunk_ids_reviewed=tuple(raw_hunks),
+                findings=tuple(raw_findings),
+                summary=_require_mapping_str(payload, "summary"),
+                provider=_require_mapping_str(payload, "provider"),
+                model=_require_mapping_opt_str(payload, "model"),
+                review_status=_require_mapping_str(payload, "review_status"),
+                attempt=_require_mapping_int(payload, "attempt"),
+            )
+
         # PROGRESS_HINT_SCHEMA
         forbidden = _FORBIDDEN_PROGRESS_HINT_KEYS.intersection(payload.keys())
         if forbidden:
@@ -1509,6 +1875,8 @@ def extract_v6_record_markers(
     for raw_line in body.splitlines():
         stripped = raw_line.strip()
         if "<!-- reviewsensei:v6:" not in stripped:
+            continue
+        if _EFFECT_MARKER_RE.fullmatch(stripped) is not None:
             continue
         if strict:
             records.append(parse_v6_record_marker(stripped))

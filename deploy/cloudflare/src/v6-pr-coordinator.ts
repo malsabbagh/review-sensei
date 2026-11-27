@@ -3547,8 +3547,13 @@ export class V6PrCoordinatorEngine {
       );
       if (
         issueComment === null ||
-        issueComment.userType !== "Bot" ||
-        issueComment.login.toLowerCase() !== botLogin.toLowerCase() ||
+        !this.isAppBotAuthor(
+          issueComment.login,
+          issueComment.userType,
+          botLogin,
+          issueComment.performedViaAppId ?? null,
+          edge.appId,
+        ) ||
         !this.hasEffectEvidence(issueComment.body, operationId, payloadSha256)
       ) {
         throw new Error("v6_lease_reconciliation_evidence_invalid");

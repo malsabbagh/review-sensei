@@ -1313,13 +1313,24 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       "read-tok",
     );
 
-    // 2. Multi-page continuation completes cleanly with truncated: false
+    // 2. Multi-page continuation verifies stability across pages 1..N and completes with truncated: false
     request.mockReset();
+    const page1Comments = Array.from({ length: 100 }, (_, idx) => comment(idx + 1));
     request
       .mockResolvedValueOnce({
         status: 200,
         hasNextPage: true,
-        data: Array.from({ length: 100 }, (_, idx) => comment(idx + 1)),
+        data: page1Comments,
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: false,
+        data: [comment(101)],
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: true,
+        data: page1Comments,
       })
       .mockResolvedValueOnce({
         status: 200,
@@ -1340,9 +1351,12 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       "/repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-27T00%3A00%3A00Z&page=2",
       "read-tok",
     );
+    expect(request).toHaveBeenCalledTimes(4);
 
-    // 3. Adaptive step-down 100 -> 12 -> 5 restarts at page=1 and deduplicates by id
+    // 3. Adaptive step-down 100 -> 12 -> 5 restarts at page=1, deduplicates by id, and verifies stability
     request.mockReset();
+    const steppedPage1 = Array.from({ length: 5 }, (_, idx) => comment(200 + idx));
+    const steppedPage2 = [comment(212), comment(213)];
     request
       .mockRejectedValueOnce(new Error("github_response_too_large")) // 100 page 1
       .mockResolvedValueOnce({
@@ -1354,13 +1368,23 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       .mockResolvedValueOnce({
         status: 200,
         hasNextPage: true,
-        data: Array.from({ length: 5 }, (_, idx) => comment(200 + idx)),
-      }) // 5 page 1 (overlap)
+        data: steppedPage1,
+      }) // 5 page 1
       .mockResolvedValueOnce({
         status: 200,
         hasNextPage: false,
-        data: [comment(212), comment(213)],
-      }); // 5 page 2
+        data: steppedPage2,
+      }) // 5 page 2
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: true,
+        data: steppedPage1,
+      }) // verify 5 page 1
+      .mockResolvedValueOnce({
+        status: 200,
+        hasNextPage: false,
+        data: steppedPage2,
+      }); // verify 5 page 2
     const stepped = await client.issueCommentsSince(
       "acme/widgets",
       42,
@@ -1394,6 +1418,69 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
     );
     expect(cappedRequests.truncated).toBe(true);
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("catches comment deletion boundary shift in issueCommentsSince, retries boundedly, and fails closed if instability persists", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+    const issueUrl = "https://api.example.test/repos/acme/widgets/issues/42";
+    const comment = (id: number, body = `comment-${id}`) => ({
+      id,
+      body,
+      author_association: "NONE",
+      issue_url: issueUrl,
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    });
+
+    const initialPage1 = Array.from({ length: 100 }, (_, idx) => comment(idx + 1));
+    const shiftedIntent = comment(101, "<!-- reviewsensei:v6:record intent:v1 -->");
+    const shiftedPage1 = [
+      ...Array.from({ length: 99 }, (_, idx) => comment(idx + 2)),
+      shiftedIntent,
+    ];
+    const shiftedPage2 = [comment(102)];
+
+    // Attempt 1 sees initialPage1 then page 2=[102] (comment 1 deleted mid-scan, shifting 101 onto page 1!).
+    // Re-fetch of page 1 catches the ID tuple change, triggers bounded retry, and attempt 2 stabilizes on shiftedPage1 + shiftedPage2.
+    request
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: initialPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: shiftedPage2 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: shiftedPage2 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: shiftedPage2 });
+
+    const recovered = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(recovered.truncated).toBe(false);
+    expect(recovered.comments.some((c) => c.id === 101)).toBe(true);
+
+    // Persistent boundary instability across all bounded retries must return truncated: true.
+    request.mockReset();
+    let seq = 0;
+    request.mockImplementation(async (_method, path) => {
+      seq += 1;
+      if (path.includes("page=1")) {
+        return {
+          status: 200,
+          hasNextPage: true,
+          data: Array.from({ length: 100 }, (_, idx) => comment(seq * 1000 + idx)),
+        };
+      }
+      return { status: 200, hasNextPage: false, data: [comment(999999)] };
+    });
+    const unstableResult = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+    );
+    expect(unstableResult.truncated).toBe(true);
   });
 
   it("reads pullRequestReview, pullRequestReviewComment, and checkRun O(1) resources", async () => {

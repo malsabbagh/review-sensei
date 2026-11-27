@@ -705,7 +705,12 @@ class _SimulatedPRSurface:
         cid = self._next_id
         self._next_id += 1
         meta = _app_meta() if is_app else _human_meta()
-        item = {"id": cid, "body": body, **meta}
+        item = {
+            "id": cid,
+            "body": body,
+            "html_url": f"https://github.com/{OWNER}/{REPO}/pull/{PR_NUMBER}#issuecomment-{cid}",
+            **meta,
+        }
         self.comments.append(item)
         return item
 
@@ -815,6 +820,14 @@ class _SimulatedPRSurface:
             for r in self.reviews:
                 if r["id"] == rid:
                     return 200, {"X-RateLimit-Remaining": "4995"}, dict(r)
+            return 404, {"X-RateLimit-Remaining": "4995"}, {"message": "Not Found"}
+        if method == "GET" and parsed.path.startswith(
+            f"/repos/{OWNER}/{REPO}/issues/comments/"
+        ):
+            cid = int(parsed.path.rsplit("/", 1)[-1])
+            for c in self.comments:
+                if c["id"] == cid:
+                    return 200, {"X-RateLimit-Remaining": "4995"}, dict(c)
             return 404, {"X-RateLimit-Remaining": "4995"}, {"message": "Not Found"}
         raise AssertionError(f"unexpected App call: {call}")
 
@@ -3772,13 +3785,21 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "completed")
         self.assertEqual(len(pr.reviews), 1)
+        self.assertLessEqual(len(pr.reviews[0]["body"].encode("utf-8")), 65_536)
         self.assertIn(large_body[:1000], pr.reviews[0]["body"])
-        self.assertEqual(
-            len(pr.reviews[0]["body"]),
-            len(large_body)
-            + len("\n\n<!-- reviewsensei:v6:effect op=op-partition-1 sha256=")
-            + 64
-            + len(" -->"),
+        detail_comments = [
+            c for c in pr.comments if "## ReviewSensei Detail (" in c["body"]
+        ]
+        self.assertGreaterEqual(len(detail_comments), 1)
+        for dc in detail_comments:
+            self.assertLessEqual(len(dc["body"].encode("utf-8")), 65_536)
+            self.assertIn(dc["html_url"], pr.reviews[0]["body"])
+        self.assertIn(
+            large_body[-500:], "\n".join(dc["body"] for dc in detail_comments)
+        )
+        self.assertIn(
+            "<!-- reviewsensei:v6:effect op=op-partition-1 sha256=",
+            pr.reviews[0]["body"],
         )
         all_recs = [
             rec
