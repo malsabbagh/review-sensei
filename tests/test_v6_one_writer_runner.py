@@ -13,8 +13,11 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
+import review_sensei_github
 from review_sensei_github.cli import main as github_main
 from review_sensei_github.v6_coordinator_client import (
+    ALLOWED_V6_CAPABILITIES,
+    ALLOWED_V6_PERMISSION_NAMES,
     V6CoordinatorClient,
     V6CoordinatorError,
     build_v6_slot_key,
@@ -508,6 +511,15 @@ class _SimulatedCoordinatorStore:
             )
 
         if route == "/github/v6/lease/acquire":
+            if not self._is_valid_capabilities(payload.get("capabilities")):
+                return self._err(
+                    400,
+                    "broker_capability_invalid",
+                    {
+                        "code": "broker_capability_invalid",
+                        "message": "Invalid capabilities",
+                    },
+                )
             if self.state != "IDLE":
                 return self._err(409, "v6_lease_hold", f"v6_lease_{self.state.lower()}")
             if payload["head_sha"] != self.live_head_sha:
@@ -579,15 +591,41 @@ class _SimulatedCoordinatorStore:
         raise AssertionError(f"unexpected coordinator route: {route}")
 
     @staticmethod
+    def _is_valid_capabilities(capabilities: Any) -> bool:
+        if isinstance(capabilities, list):
+            return (
+                1 <= len(capabilities) <= 10
+                and len(set(capabilities)) == len(capabilities)
+                and all(
+                    type(item) is str and item in ALLOWED_V6_CAPABILITIES
+                    for item in capabilities
+                )
+            )
+        if isinstance(capabilities, dict):
+            return 1 <= len(capabilities) <= len(ALLOWED_V6_PERMISSION_NAMES) and all(
+                type(name) is str
+                and name in ALLOWED_V6_PERMISSION_NAMES
+                and type(level) is str
+                and level in {"read", "write"}
+                for name, level in capabilities.items()
+            )
+        return False
+
+    @staticmethod
     def _json(status: int, body: dict[str, Any]) -> _FakeUrllibResponse:
         return _FakeUrllibResponse(status, body, {"cf-ray": "0123456789abcdef-YYZ"})
 
-    def _err(self, status: int, error: str, diagnostic: str) -> _FakeUrllibResponse:
+    def _err(
+        self,
+        status: int,
+        error: str,
+        diagnostic: str | Mapping[str, Any],
+    ) -> _FakeUrllibResponse:
         raw = json.dumps(
             {
                 "error": error,
                 "diagnostic": diagnostic,
-                "slot_state": {"slot_key": self.slot_key, "state": self.state},
+                "slot_state": self.state,
             }
         ).encode("utf-8")
         raise HTTPError(
@@ -1779,7 +1817,7 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         grant_1 = coord_client.acquire(
             pull_request=PR_NUMBER,
             head_sha=HEAD_A,
-            capabilities=("pull_requests:write", "issues:write"),
+            capabilities=("review_publish",),
             operation_id="op-1",
         )
         self.assertEqual(grant_1.generation, 1)
@@ -1829,7 +1867,7 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             coord_client.acquire(
                 pull_request=PR_NUMBER,
                 head_sha=HEAD_A,
-                capabilities=("pull_requests:write",),
+                capabilities=("review_publish",),
                 operation_id="op-1",
             )
 
@@ -2401,6 +2439,159 @@ class V6OneWriterRunnerTests(unittest.TestCase):
                     ],
                 },
             )
+
+    def test_capabilities_wire_parity_and_slot_state_error_parsing(self) -> None:
+        """Client and simulated coordinator share v6 capability rules and parse string/dict slot_state."""
+
+        from types import MappingProxyType
+        from urllib.request import Request
+
+        self.assertEqual(
+            review_sensei_github.ALLOWED_V6_CAPABILITIES, ALLOWED_V6_CAPABILITIES
+        )
+        self.assertEqual(
+            review_sensei_github.ALLOWED_V6_PERMISSION_NAMES,
+            ALLOWED_V6_PERMISSION_NAMES,
+        )
+        self.assertEqual(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-default",
+            ).capabilities,
+            ("review_publish",),
+        )
+
+        now = 1_764_200_000.0
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+
+        # Client rejects legacy scope strings and malformed mappings before sending HTTP.
+        for bad_caps in (
+            ("pull_requests:write",),
+            ("pull_requests:write", "issues:write"),
+            ("review_publish", "review_publish"),
+            (),
+            {},
+            {"pull_requests": "admin"},
+            {"unknown_perm": "read"},
+            "review_publish",
+        ):
+            with self.assertRaises(V6CoordinatorError) as bad_ctx:
+                coord_client.acquire(
+                    pull_request=PR_NUMBER,
+                    head_sha=HEAD_A,
+                    capabilities=bad_caps,  # type: ignore[arg-type]
+                )
+            self.assertEqual(bad_ctx.exception.diagnostic, "broker_capability_invalid")
+        self.assertEqual(coord_store.calls, [])
+
+        # Simulated coordinator store independently enforces the same capability wire contract.
+        raw_req = Request(
+            "https://coordinator.invalid/github/v6/lease/acquire",
+            data=json.dumps(
+                {
+                    "pull_request": PR_NUMBER,
+                    "head_sha": HEAD_A,
+                    "capabilities": ["pull_requests:write"],
+                }
+            ).encode("utf-8"),
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as store_bad:
+            coord_store.opener(raw_req)
+        self.assertEqual(store_bad.exception.code, 400)
+        parsed_err = V6CoordinatorClient._parse_http_error(
+            store_bad.exception, correlation_id=None
+        )
+        self.assertEqual(parsed_err.error, "broker_capability_invalid")
+        self.assertEqual(parsed_err.diagnostic, "broker_capability_invalid")
+        self.assertEqual(parsed_err.slot_state, MappingProxyType({"state": "IDLE"}))
+
+        # Client + store accept both v6 capability list and GitHub permission mapping.
+        grant_list = coord_client.acquire(
+            pull_request=PR_NUMBER,
+            head_sha=HEAD_A,
+            capabilities=("review_publish",),
+            operation_id="op-list",
+        )
+        self.assertEqual(grant_list.generation, 1)
+        self.assertEqual(coord_store.calls[-1][1]["capabilities"], ["review_publish"])
+
+        map_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        map_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=map_store.opener,
+            clock=lambda: now,
+        )
+        grant_map = map_client.acquire(
+            pull_request=PR_NUMBER,
+            head_sha=HEAD_A,
+            capabilities={"contents": "read", "pull_requests": "write"},
+            operation_id="op-map",
+        )
+        self.assertEqual(grant_map.generation, 1)
+        self.assertEqual(
+            map_store.calls[-1][1]["capabilities"],
+            {"contents": "read", "pull_requests": "write"},
+        )
+
+        # String slot_state ("HOLD") from real Worker diagnosticResponse normalizes cleanly.
+        hold_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        hold_store.state = "HOLD"
+        hold_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=hold_store.opener,
+            clock=lambda: now,
+        )
+        with self.assertRaises(V6CoordinatorError) as hold_ctx:
+            hold_client.acquire(
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                capabilities=("review_publish",),
+            )
+        self.assertIsNotNone(hold_ctx.exception.slot_state)
+        assert hold_ctx.exception.slot_state is not None
+        self.assertEqual(hold_ctx.exception.slot_state["state"], "HOLD")
+        self.assertEqual(
+            hold_ctx.exception.slot_state, MappingProxyType({"state": "HOLD"})
+        )
+
+        # Dict slot_state backwards compatibility remains intact.
+        dict_err = HTTPError(
+            "https://coordinator.invalid",
+            409,
+            "v6_lease_hold",
+            {},  # type: ignore[arg-type]
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": "v6_lease_hold",
+                        "diagnostic": {"code": "v6_lease_hold"},
+                        "slot_state": {
+                            "slot_key": hold_store.slot_key,
+                            "state": "HOLD",
+                        },
+                    }
+                ).encode("utf-8")
+            ),
+        )
+        parsed_dict_err = V6CoordinatorClient._parse_http_error(
+            dict_err, correlation_id=None
+        )
+        assert parsed_dict_err.slot_state is not None
+        self.assertEqual(parsed_dict_err.slot_state["state"], "HOLD")
+        self.assertEqual(parsed_dict_err.slot_state["slot_key"], hold_store.slot_key)
 
 
 if __name__ == "__main__":

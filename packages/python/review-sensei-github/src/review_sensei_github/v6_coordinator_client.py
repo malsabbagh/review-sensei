@@ -69,6 +69,29 @@ HOLD_RESOLUTION_KINDS: frozenset[str] = frozenset(
         "enter_reconcile",
     }
 )
+ALLOWED_V6_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "review_publish",
+        "thread_resolve",
+        "check_publish",
+        "review_session",
+        "review_status",
+        "review_actions",
+        "inline_reply",
+        "issue_reply",
+        "learning_write",
+    }
+)
+ALLOWED_V6_PERMISSION_NAMES: frozenset[str] = frozenset(
+    {
+        "actions",
+        "checks",
+        "contents",
+        "issues",
+        "pull_requests",
+    }
+)
+_ALLOWED_V6_PERMISSION_LEVELS: frozenset[str] = frozenset({"read", "write"})
 V6_COORDINATOR_DIAGNOSTICS: frozenset[str] = frozenset(
     {
         "broker_v6_pilot_v5_writer_disabled",
@@ -470,6 +493,54 @@ def _require_state(value: Any) -> str:
     return state
 
 
+def _invalid_capability_error() -> V6CoordinatorError:
+    return V6CoordinatorError(
+        "capabilities must match v6 capability names or permission mapping",
+        diagnostic="broker_capability_invalid",
+    )
+
+
+def _normalize_v6_capabilities(
+    capabilities: Sequence[str] | Mapping[str, str],
+) -> list[str] | dict[str, str]:
+    """Validate and serialize v6 capabilities to match Worker ``mergePermissions``."""
+
+    if isinstance(capabilities, Mapping):
+        if not (1 <= len(capabilities) <= len(ALLOWED_V6_PERMISSION_NAMES)):
+            raise _invalid_capability_error()
+        normalized_map: dict[str, str] = {}
+        for name, level in capabilities.items():
+            if (
+                type(name) is not str
+                or name not in ALLOWED_V6_PERMISSION_NAMES
+                or type(level) is not str
+                or level not in _ALLOWED_V6_PERMISSION_LEVELS
+            ):
+                raise _invalid_capability_error()
+            normalized_map[name] = level
+        return normalized_map
+
+    if isinstance(capabilities, Sequence) and not isinstance(
+        capabilities, (str, bytes, bytearray)
+    ):
+        if not (1 <= len(capabilities) <= 10):
+            raise _invalid_capability_error()
+        seen: set[str] = set()
+        normalized_list: list[str] = []
+        for item in capabilities:
+            if (
+                type(item) is not str
+                or item not in ALLOWED_V6_CAPABILITIES
+                or item in seen
+            ):
+                raise _invalid_capability_error()
+            seen.add(item)
+            normalized_list.append(item)
+        return normalized_list
+
+    raise _invalid_capability_error()
+
+
 def _correlation_id(headers: Any) -> str | None:
     if headers is None:
         return None
@@ -634,8 +705,14 @@ class V6CoordinatorClient:
                         raw_diag.get("code"), str
                     ):
                         diagnostic = raw_diag["code"]
-                    if isinstance(parsed.get("slot_state"), Mapping):
-                        slot_state = parsed["slot_state"]
+                    raw_slot_state = parsed.get("slot_state")
+                    if isinstance(raw_slot_state, Mapping):
+                        slot_state = raw_slot_state
+                    elif (
+                        isinstance(raw_slot_state, str)
+                        and raw_slot_state in COORDINATOR_STATES
+                    ):
+                        slot_state = {"state": raw_slot_state}
                     raw_retry = parsed.get("retry_after_ms")
                     if type(raw_retry) is int and raw_retry >= 0:
                         retry_after_ms = raw_retry
@@ -663,7 +740,7 @@ class V6CoordinatorClient:
         *,
         pull_request: int,
         head_sha: str,
-        capabilities: Sequence[str],
+        capabilities: Sequence[str] | Mapping[str, str],
         operation_id: str | None = None,
         predecessor_anchor_comment_id: int | None = None,
         control_budget: Mapping[str, Any] | None = None,
@@ -673,18 +750,12 @@ class V6CoordinatorClient:
         _require_int(pull_request, name="pull_request", minimum=1)
         if type(head_sha) is not str or _SHA1_40_RE.fullmatch(head_sha) is None:
             raise V6CoordinatorError("head_sha must be a 40-hex SHA-1")
-        if (
-            not isinstance(capabilities, Sequence)
-            or isinstance(capabilities, (str, bytes, bytearray))
-            or not capabilities
-            or any(type(c) is not str or not c.strip() for c in capabilities)
-        ):
-            raise V6CoordinatorError("capabilities must be a non-empty list of strings")
+        normalized_capabilities = _normalize_v6_capabilities(capabilities)
 
         payload: dict[str, Any] = {
             "pull_request": pull_request,
             "head_sha": head_sha,
-            "capabilities": list(capabilities),
+            "capabilities": normalized_capabilities,
         }
         if operation_id is not None:
             payload["operation_id"] = _require_str(operation_id, name="operation_id")

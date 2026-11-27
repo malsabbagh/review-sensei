@@ -192,7 +192,7 @@ class V6PilotRunConfig:
     event: GitHubEventKind = GitHubEventKind.PULL_REQUEST
     visibility: RepositoryVisibility = RepositoryVisibility.PUBLIC
     granted_scopes: Collection[str] = WORKFLOW_READ_ONLY_SCOPES
-    capabilities: tuple[str, ...] = ("pull_requests:write", "issues:write")
+    capabilities: Sequence[str] | Mapping[str, str] = ("review_publish",)
     run_id: int = 1
     run_attempt: int = 1
     workflow_sha: str = "0" * 40

@@ -141,6 +141,8 @@ class FakeV6Provider implements V6ProviderAdapter {
   reviewComments = new Map<number, LivePullRequestReviewComment | null>();
   checkRuns = new Map<number, LiveCheckRun | null>();
   commentsSinceOverride: LiveIssueCommentPage | null = null;
+  issueCommentsSinceArgs: string[] = [];
+  commentCreatedAtMs = new Map<number, number>();
   botLogin = "reviewsensei[bot]";
   mintQueue: Array<() => Promise<{ token: string; permissions: Record<string, string>; expiresAt: string; expiresAtMs: number }>> = [];
   revokeQueue: Array<(token: string) => Promise<RevocationResult>> = [];
@@ -233,14 +235,25 @@ class FakeV6Provider implements V6ProviderAdapter {
     return this.comments.get(commentId) ?? null;
   }
 
-  async issueCommentsSince(): Promise<LiveIssueCommentPage> {
+  async issueCommentsSince(
+    _repo: string,
+    _pullRequest: number,
+    sinceIso: string,
+    _token: string,
+  ): Promise<LiveIssueCommentPage> {
     this.calls.commentListReads += 1;
+    this.issueCommentsSinceArgs.push(sinceIso);
     if (this.commentsSinceOverride !== null) {
       return this.commentsSinceOverride;
     }
+    const sinceMs = Date.parse(sinceIso);
     const list: LiveIssueComment[] = [];
     for (const [id, comment] of this.comments.entries()) {
       if (comment !== null) {
+        const createdAtMs = this.commentCreatedAtMs.get(id);
+        if (createdAtMs !== undefined && Number.isFinite(sinceMs) && createdAtMs < sinceMs) {
+          continue;
+        }
         list.push({ ...comment, id });
       }
     }
@@ -2404,5 +2417,299 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       expect((await store.getSlot(slotKey42))?.state).toBe("HOLD");
       expect(provider.calls.commentListReads).toBe(1);
     }
+  });
+
+  it("accepts review-sensei-v6-pilot.yml@refs/tags/<tag> under V6_PILOT_WORKFLOW_TAG when runtime SHA matches", async () => {
+    const tag = "v6-pilot-rc1";
+    const pilotWorkflowRef = `malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@refs/tags/${tag}`;
+    const { env, engine, provider } = createHarness({
+      V6_PILOT_WORKFLOW_REF: undefined,
+      V6_PILOT_WORKFLOW_TAG: tag,
+    });
+    provider.runtimeShas = {
+      commitSha: WORKFLOW_SHA,
+      refSha: WORKFLOW_SHA,
+    };
+    provider.registerOidc(
+      "oidc-pilot-tag",
+      makeClaims({
+        run_id: "20001",
+        run_attempt: "1",
+        job_workflow_ref: pilotWorkflowRef,
+        job_workflow_sha: WORKFLOW_SHA,
+      }),
+    );
+
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-pilot-tag",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acq.status).toBe(200);
+    expect(acq.body.state).toBe("ACTIVE");
+
+    // Mismatched runtime SHA must still be rejected.
+    provider.registerOidc(
+      "oidc-pilot-bad-sha",
+      makeClaims({
+        run_id: "20002",
+        run_attempt: "1",
+        job_workflow_ref: pilotWorkflowRef,
+        job_workflow_sha: "f".repeat(40),
+      }),
+    );
+    const badSha = await engine.handleStatus(env, {
+      oidc_token: "oidc-pilot-bad-sha",
+      pull_request: 42,
+    });
+    expect(badSha.status).toBe(403);
+    expect(badSha.body.diagnostic).toMatchObject({ code: "v6_lease_unauthorized_tuple" });
+  });
+
+  it("floors issueCommentsSince down by 2s to whole seconds for sub-second acquired_at_ms", async () => {
+    const { env, clock, engine, provider, slotKey42 } = createHarness();
+    // Set sub-second timestamp: ...005.678s -> -2000ms = ...003.678s -> floor = ...003.000s
+    clock.now = 1_795_000_005_678;
+
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acq.status).toBe(200);
+
+    clock.now = 1_795_000_020_123;
+    const rel = await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acq.body.reservation_id,
+    });
+    expect(rel.status).toBe(200);
+
+    const rec = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 1,
+        intent_resolutions: [],
+      },
+    });
+    expect(rec.status).toBe(200);
+    expect(rec.body.state).toBe("IDLE");
+    expect(provider.issueCommentsSinceArgs).toEqual([
+      new Date(1_795_000_003_000).toISOString(),
+    ]);
+  });
+
+  it("preserves predecessor acquired_at across cold-start HOLD -> enter_reconcile -> complete-reconcile", async () => {
+    const { env, clock, engine, provider, store, slotKey42 } = createHarness();
+    const crypto = new V6EscrowCrypto(SIGNING_KEY);
+    const predecessorAcquiredAtMs = 1_795_000_010_750;
+    const intentCreatedAtMs = 1_795_000_012_400;
+    const coldStartHoldAtMs = 1_795_000_090_000;
+
+    // Predecessor owner (gen 1) acquired earlier and wrote intent before cold-start.
+    const ownerMac1 = await crypto.signOwnerAttestation({
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: "res-gen1",
+      run_id: "10001",
+      run_attempt: 1,
+      pr_head_sha: HEAD_SHA_1,
+      workflow_sha: WORKFLOW_SHA,
+    });
+    provider.comments.set(
+      9501,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:owner:v1",
+        record_id: "rec-owner-gen1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        reservation_id: "res-gen1",
+        operation_id: "op-gen1",
+        run_id: "10001",
+        run_attempt: 1,
+        pr_head_sha: HEAD_SHA_1,
+        workflow_sha: WORKFLOW_SHA,
+        acquired_at: new Date(predecessorAcquiredAtMs).toISOString(),
+        expires_at: new Date(predecessorAcquiredAtMs + 3_600_000).toISOString(),
+        coordinator_attestation_mac: ownerMac1,
+      }),
+    );
+    provider.commentCreatedAtMs.set(9501, predecessorAcquiredAtMs + 50);
+
+    const payloadSha = "5".repeat(64);
+    provider.comments.set(
+      9502,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:intent:v1",
+        record_id: "rec-intent-gen1",
+        operation_id: "op-gen1",
+        writer_epoch: 1,
+        pr_head_sha: HEAD_SHA_1,
+        effect_kind: "pull_request_review",
+        payload_sha256: payloadSha,
+        target_digest: "6".repeat(64),
+        generation: 1,
+        target_location: "pr:42",
+      }),
+    );
+    provider.commentCreatedAtMs.set(9502, intentCreatedAtMs);
+
+    provider.comments.set(
+      9503,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:receipt:v1",
+        record_id: "rec-receipt-gen1",
+        operation_id: "op-gen1",
+        writer_epoch: 1,
+        github_effect_id: 5050,
+        payload_sha256: payloadSha,
+        completed_at: new Date(intentCreatedAtMs + 500).toISOString(),
+      }),
+    );
+    provider.commentCreatedAtMs.set(9503, intentCreatedAtMs + 500);
+
+    // Predecessor run is terminal so enter_reconcile is cleared.
+    provider.runAttempts.set("10001:1", {
+      run_id: "10001",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "failure",
+      head_sha: HEAD_SHA_1,
+    });
+
+    // Cold-start acquire with predecessor_anchor_comment_id creates HOLD much later.
+    clock.now = coldStartHoldAtMs;
+    const coldAcq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+      predecessor_anchor_comment_id: 9501,
+    });
+    expect(coldAcq.status).toBe(409);
+    expect(coldAcq.body.diagnostic).toMatchObject({
+      code: "v6_lease_slot_continuity_unproved",
+    });
+    const heldSlot = await store.getSlot(slotKey42);
+    expect(heldSlot?.state).toBe("HOLD");
+    expect(heldSlot?.acquired_at_ms).toBe(predecessorAcquiredAtMs);
+
+    // enter_reconcile transitions HOLD -> RECONCILING while preserving acquired_at_ms.
+    provider.comments.set(
+      9504,
+      await buildLedgerComment(crypto, {
+        schema: "reviewsensei:v6:hold:v1",
+        record_id: "rec-hold-cold-gen1",
+        slot_key: slotKey42,
+        generation: 1,
+        lease_epoch: 1,
+        operation_id: "op-gen1",
+        pr_head_sha: HEAD_SHA_1,
+        reason_code: "v6_lease_slot_continuity_unproved",
+        missing_evidence: ["intent:op-gen1"],
+        held_at: new Date(coldStartHoldAtMs).toISOString(),
+        resolved_by_record_id: null,
+      }),
+    );
+    provider.commentCreatedAtMs.set(9504, coldStartHoldAtMs + 100);
+    clock.now = coldStartHoldAtMs + 5_000;
+    const enterRec = await engine.handleResolveHold(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      hold_record_comment_id: 9504,
+      resolution_kind: "enter_reconcile",
+      anchor_comment_id: 9501,
+    });
+    expect(enterRec.status).toBe(200);
+    expect(enterRec.body.state).toBe("RECONCILING");
+
+    // complete-reconcile uses predecessor acquired_at (floored -2s), catching intent 9502 written before cold-start.
+    const recDone = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 1,
+        intent_resolutions: [
+          {
+            operation_id: "op-gen1",
+            intent_comment_id: 9502,
+            resolution: "receipt_present",
+            receipt_comment_id: 9503,
+          },
+        ],
+      },
+    });
+    expect(recDone.status).toBe(200);
+    expect(recDone.body.state).toBe("IDLE");
+    expect(provider.issueCommentsSinceArgs[0]).toBe(
+      new Date(1_795_000_008_000).toISOString(),
+    );
+
+    // Also verify fallback when an existing HOLD row has acquired_at_ms === null.
+    await store.putSlot({
+      slot_key: slotKey42,
+      state: "HOLD",
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: null,
+      owner_run_id: "10002",
+      owner_run_attempt: 1,
+      owner_head_sha: HEAD_SHA_1,
+      owner_workflow_sha: WORKFLOW_SHA,
+      owner_job: "ReviewSensei v6",
+      owner_comment_id: 9501,
+      owner_record_sha256: null,
+      acquired_at_ms: null,
+      token_expires_at_ms: null,
+      token_cleared: true,
+      clock_margin_ms: 300_000,
+      encrypted_escrow: null,
+      last_reason_code: "v6_lease_slot_continuity_unproved",
+      updated_at_ms: coldStartHoldAtMs,
+    });
+    const enterRecFallback = await engine.handleResolveHold(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      hold_record_comment_id: 9504,
+      resolution_kind: "enter_reconcile",
+      anchor_comment_id: 9501,
+    });
+    expect(enterRecFallback.status).toBe(200);
+    const recFallback = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-2",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 1,
+        intent_resolutions: [
+          {
+            operation_id: "op-gen1",
+            intent_comment_id: 9502,
+            resolution: "receipt_present",
+            receipt_comment_id: 9503,
+          },
+        ],
+      },
+    });
+    expect(recFallback.status).toBe(200);
+    expect(recFallback.body.state).toBe("IDLE");
+    expect(provider.issueCommentsSinceArgs[1]).toBe(
+      new Date(1_795_000_008_000).toISOString(),
+    );
   });
 });
