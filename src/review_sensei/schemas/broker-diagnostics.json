@@ -473,5 +473,80 @@
     "stage": "request_validation",
     "action": "check_request",
     "hint": "The downward-only request deadline was invalid. Inspect the original request without extending or retrying it automatically."
+  },
+  "broker_v6_pilot_v5_writer_disabled": {
+    "stage": "pilot_isolation",
+    "action": "check_workflow",
+    "hint": "v5 writer capability issuance is disabled for opt-in v6 pilot repositories. Run the pinned v6 workflow instead."
+  },
+  "v6_lease_reserved": {
+    "stage": "v6_lease",
+    "action": "retry_later",
+    "hint": "The PR coordinator slot is currently reserved for an active mint transition. Wait briefly before retrying."
+  },
+  "v6_lease_active_other_owner": {
+    "stage": "v6_lease",
+    "action": "inspect_owner",
+    "hint": "Another run currently holds the active v6 PR writer lease. Wait for the owning run to finish or drain before acquiring."
+  },
+  "v6_lease_draining": {
+    "stage": "v6_lease",
+    "action": "retry_later",
+    "hint": "The PR coordinator slot is draining a prior installation token. Retry after revocation or expiry completes."
+  },
+  "v6_lease_reconciling": {
+    "stage": "v6_lease",
+    "action": "reconcile_slot",
+    "hint": "The PR coordinator slot requires bounded reconciliation before a new lease can be granted. Complete reconciliation first."
+  },
+  "v6_lease_hold": {
+    "stage": "v6_hold",
+    "action": "resolve_hold",
+    "hint": "The PR coordinator slot is in HOLD due to an unproved or ambiguous state. Inspect the PR ledger and resolve the hold explicitly."
+  },
+  "v6_lease_head_changed": {
+    "stage": "v6_lease",
+    "action": "reanchor_head",
+    "hint": "The live pull request head SHA no longer matches the requested lease head. Re-anchor against the current head SHA."
+  },
+  "v6_lease_predecessor_not_terminal": {
+    "stage": "v6_lease",
+    "action": "wait_predecessor",
+    "hint": "The prior owning workflow attempt has not reached a terminal completed state on GitHub Actions. Wait for terminal completion before acquiring."
+  },
+  "v6_lease_revocation_uncertain": {
+    "stage": "v6_revocation",
+    "action": "reconcile_slot",
+    "hint": "Token revocation via DELETE /installation/token could not be confirmed before lease expiry. Wait for expiry or reconcile the slot."
+  },
+  "v6_lease_escrow_lost": {
+    "stage": "v6_hold",
+    "action": "contact_operator",
+    "hint": "Encrypted token escrow could not be decrypted or was lost for an unrevoked slot. Hold until expiry or operator resolution."
+  },
+  "v6_lease_clock_untrusted": {
+    "stage": "v6_hold",
+    "action": "contact_operator",
+    "hint": "Coordinator clock or token expiry safety margin could not be trusted. Hold until clock integrity and expiry bounds are restored."
+  },
+  "v6_lease_slot_continuity_unproved": {
+    "stage": "v6_hold",
+    "action": "reconcile_slot",
+    "hint": "Targeted O(1) PR ledger anchor verification failed to prove slot continuity. Reconcile the PR ledger before resolving the hold."
+  },
+  "v6_lease_unauthorized_tuple": {
+    "stage": "v6_authorization",
+    "action": "check_workflow",
+    "hint": "The verified OIDC workflow identity, repository, event, or runner tuple is not authorized for v6 coordinator lease acquisition."
+  },
+  "v6_lease_rollback_blocked": {
+    "stage": "v6_authorization",
+    "action": "check_workflow",
+    "hint": "A stale workflow generation or superseded lease epoch attempted to acquire or mutate a slot after rollback protection engaged."
+  },
+  "v6_lease_mint_uncertain": {
+    "stage": "v6_issuance",
+    "action": "reconcile_slot",
+    "hint": "Installation token minting did not produce a confirmed outcome and may have issued an unescrowed token. Reconcile or drain before retrying."
   }
 }

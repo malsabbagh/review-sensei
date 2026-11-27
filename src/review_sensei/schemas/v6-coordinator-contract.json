@@ -1,0 +1,768 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "v6-coordinator-contract-v1",
+  "description": "Frozen Phase 1 wire, state-machine, escrow, revocation, and PR-ledger contract for the ReviewSensei v6 one-writer-per-PR coordinator.",
+  "baseline": {
+    "pinned_main_sha": "ff406a44754d5016fead2435e547b9fd0536e17b",
+    "pinned_v5_tag": "v5",
+    "pinned_v5_commit": "40b4f52face3402fc3a9cd51387bde7cf53c3951",
+    "pinned_engine_version": "0.8.28",
+    "pinned_github_package_version": "0.3.34"
+  },
+  "pilot_isolation": {
+    "env_var": "V6_PILOT_REPOSITORIES",
+    "v5_writer_disabled_diagnostic": "broker_v6_pilot_v5_writer_disabled",
+    "pre_admission_drain_seconds": 3600,
+    "github_token_scope_note": "GitHub installation tokens are scoped to repository+permissions, not PR; per-PR exclusivity is a ReviewSensei coordination rule assuming trusted, pinned writer code, no independent write credential, and no PR-controlled code execution in the write job."
+  },
+  "slot_key": {
+    "template": "v6-pr:{host}:{app_id}:{installation_id}:{base_repo_id}:{pr_number}",
+    "pattern": "^v6-pr:[a-z0-9.-]+:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$",
+    "components": [
+      "host",
+      "app_id",
+      "installation_id",
+      "base_repo_id",
+      "pr_number"
+    ]
+  },
+  "coordinator_states": [
+    "IDLE",
+    "RESERVED",
+    "MINTING",
+    "ACTIVE",
+    "DRAINING",
+    "RECONCILING",
+    "HOLD"
+  ],
+  "state_transitions": {
+    "IDLE": [
+      "RESERVED"
+    ],
+    "RESERVED": [
+      "MINTING",
+      "IDLE"
+    ],
+    "MINTING": [
+      "ACTIVE",
+      "RECONCILING",
+      "HOLD",
+      "IDLE"
+    ],
+    "ACTIVE": [
+      "DRAINING",
+      "RECONCILING",
+      "HOLD"
+    ],
+    "DRAINING": [
+      "IDLE",
+      "RECONCILING",
+      "HOLD"
+    ],
+    "RECONCILING": [
+      "DRAINING",
+      "IDLE",
+      "HOLD"
+    ],
+    "HOLD": [
+      "RECONCILING",
+      "IDLE"
+    ]
+  },
+  "coordinator_storage": {
+    "durable_object_class": "V6PrCoordinator",
+    "clock_margin_ms_default": 300000,
+    "escrow": {
+      "kdf": "HKDF-SHA256",
+      "cipher": "AES-GCM-256",
+      "key_root_env": "REVIEWSENSEI_SIGNING_KEY",
+      "hkdf_salt": "v6-pr-coordinator-escrow-v1",
+      "hkdf_info": "reviewsensei:v6:token-escrow:v1",
+      "iv_bytes": 12,
+      "aad_fields": [
+        "slot_key",
+        "generation",
+        "reservation_id"
+      ]
+    },
+    "slot_state_fields": {
+      "slot_key": "string",
+      "state": "coordinator_state",
+      "generation": "integer>=0",
+      "lease_epoch": "integer>=0",
+      "reservation_id": "string|null",
+      "owner_run_id": "string|null",
+      "owner_run_attempt": "integer|null",
+      "owner_head_sha": "sha1_hex40|null",
+      "owner_workflow_sha": "sha1_hex40|null",
+      "owner_job": "string|null",
+      "owner_comment_id": "integer|null",
+      "owner_record_sha256": "sha256_hex64|null",
+      "token_expires_at_ms": "integer|null",
+      "clock_margin_ms": "integer>=0",
+      "encrypted_escrow": "object|null",
+      "last_reason_code": "diagnostic_code|null",
+      "updated_at_ms": "integer>=0"
+    },
+    "keep_fields": [
+      "slot_key",
+      "state",
+      "generation",
+      "lease_epoch",
+      "reservation_id",
+      "owner_run_id",
+      "owner_run_attempt",
+      "owner_head_sha",
+      "owner_workflow_sha",
+      "owner_job",
+      "owner_comment_id",
+      "owner_record_sha256",
+      "token_expires_at_ms",
+      "clock_margin_ms",
+      "encrypted_escrow",
+      "last_reason_code",
+      "updated_at_ms"
+    ],
+    "never_keep_fields": [
+      "github_app_private_key",
+      "reviewsensei_signing_key",
+      "raw_aes_key",
+      "oidc_token",
+      "plaintext_installation_token",
+      "workflow_github_token",
+      "provider_api_key",
+      "ollama_api_key",
+      "openrouter_api_key",
+      "openai_api_key",
+      "pr_diff",
+      "source_file_contents",
+      "review_comment_body",
+      "model_response",
+      "raw_github_error_body"
+    ]
+  },
+  "pr_ledger": {
+    "marker_prefix": "<!-- reviewsensei:v6:record ",
+    "marker_format": "<!-- reviewsensei:v6:record sha256={sha256_hex} payload={canonical_json} -->",
+    "record_schemas": {
+      "owner": {
+        "schema": "reviewsensei:v6:owner:v1",
+        "required_fields": [
+          "schema",
+          "record_id",
+          "slot_key",
+          "generation",
+          "lease_epoch",
+          "reservation_id",
+          "operation_id",
+          "run_id",
+          "run_attempt",
+          "pr_head_sha",
+          "workflow_sha",
+          "acquired_at",
+          "expires_at",
+          "coordinator_attestation_mac"
+        ],
+        "properties": {
+          "schema": "const:reviewsensei:v6:owner:v1",
+          "record_id": "string",
+          "slot_key": "slot_key",
+          "generation": "integer>=1",
+          "lease_epoch": "integer>=1",
+          "reservation_id": "string",
+          "operation_id": "string",
+          "run_id": "positive_decimal_string",
+          "run_attempt": "integer>=1",
+          "pr_head_sha": "sha1_hex40",
+          "workflow_sha": "sha1_hex40",
+          "acquired_at": "iso8601_utc",
+          "expires_at": "iso8601_utc",
+          "coordinator_attestation_mac": "hmac_sha256_hex64"
+        }
+      },
+      "intent": {
+        "schema": "reviewsensei:v6:intent:v1",
+        "required_fields": [
+          "schema",
+          "record_id",
+          "operation_id",
+          "writer_epoch",
+          "pr_head_sha",
+          "effect_kind",
+          "payload_sha256",
+          "target_digest"
+        ],
+        "properties": {
+          "schema": "const:reviewsensei:v6:intent:v1",
+          "record_id": "string",
+          "operation_id": "string",
+          "writer_epoch": "integer>=0",
+          "pr_head_sha": "sha1_hex40",
+          "effect_kind": "string",
+          "payload_sha256": "sha256_hex64",
+          "target_digest": "string"
+        }
+      },
+      "receipt": {
+        "schema": "reviewsensei:v6:receipt:v1",
+        "required_fields": [
+          "schema",
+          "record_id",
+          "operation_id",
+          "writer_epoch",
+          "github_effect_id",
+          "payload_sha256",
+          "completed_at"
+        ],
+        "properties": {
+          "schema": "const:reviewsensei:v6:receipt:v1",
+          "record_id": "string",
+          "operation_id": "string",
+          "writer_epoch": "integer>=0",
+          "github_effect_id": "string|integer>0",
+          "payload_sha256": "sha256_hex64",
+          "completed_at": "iso8601_utc"
+        }
+      },
+      "hold": {
+        "schema": "reviewsensei:v6:hold:v1",
+        "required_fields": [
+          "schema",
+          "record_id",
+          "slot_key",
+          "generation",
+          "lease_epoch",
+          "operation_id",
+          "pr_head_sha",
+          "reason_code",
+          "missing_evidence",
+          "held_at",
+          "resolved_by_record_id"
+        ],
+        "properties": {
+          "schema": "const:reviewsensei:v6:hold:v1",
+          "record_id": "string",
+          "slot_key": "slot_key",
+          "generation": "integer>=1",
+          "lease_epoch": "integer>=0",
+          "operation_id": "string",
+          "pr_head_sha": "sha1_hex40",
+          "reason_code": "diagnostic_code",
+          "missing_evidence": "array<string>",
+          "held_at": "iso8601_utc",
+          "resolved_by_record_id": "string|null"
+        }
+      },
+      "unresolved": {
+        "schema": "reviewsensei:v6:unresolved:v1",
+        "required_fields": [
+          "schema",
+          "record_id",
+          "operation_id",
+          "pr_head_sha",
+          "payload_sha256",
+          "findings_payload",
+          "required_evidence_digests",
+          "artifact_cache_sha256"
+        ],
+        "properties": {
+          "schema": "const:reviewsensei:v6:unresolved:v1",
+          "record_id": "string",
+          "operation_id": "string",
+          "pr_head_sha": "sha1_hex40",
+          "payload_sha256": "sha256_hex64",
+          "findings_payload": "array<object>",
+          "required_evidence_digests": "array<string>",
+          "artifact_cache_sha256": "sha256_hex64|null"
+        }
+      },
+      "progress": {
+        "schema": "reviewsensei:v6:progress:v1",
+        "required_fields": [
+          "schema",
+          "operation_id",
+          "recovery_phase",
+          "cursor_hint",
+          "verified_prefix_count",
+          "verified_prefix_digest",
+          "last_verified_id",
+          "stall_count",
+          "last_progress_digest",
+          "transient_error_count"
+        ],
+        "properties": {
+          "schema": "const:reviewsensei:v6:progress:v1",
+          "operation_id": "string",
+          "recovery_phase": "string",
+          "cursor_hint": "string|null",
+          "verified_prefix_count": "integer>=0",
+          "verified_prefix_digest": "sha256_hex64_or_empty",
+          "last_verified_id": "string|integer>0|null",
+          "stall_count": "integer>=0",
+          "last_progress_digest": "string",
+          "transient_error_count": "integer>=0"
+        }
+      }
+    },
+    "keep_fields": [
+      "acquired_at",
+      "artifact_cache_sha256",
+      "completed_at",
+      "coordinator_attestation_mac",
+      "cursor_hint",
+      "effect_kind",
+      "expires_at",
+      "findings_payload",
+      "generation",
+      "github_effect_id",
+      "held_at",
+      "last_progress_digest",
+      "last_verified_id",
+      "lease_epoch",
+      "missing_evidence",
+      "operation_id",
+      "payload_sha256",
+      "pr_head_sha",
+      "reason_code",
+      "record_id",
+      "recovery_phase",
+      "required_evidence_digests",
+      "reservation_id",
+      "resolved_by_record_id",
+      "run_attempt",
+      "run_id",
+      "schema",
+      "slot_key",
+      "stall_count",
+      "target_digest",
+      "transient_error_count",
+      "verified_prefix_count",
+      "verified_prefix_digest",
+      "workflow_sha",
+      "writer_epoch"
+    ],
+    "never_keep_fields": [
+      "github_app_private_key",
+      "reviewsensei_signing_key",
+      "raw_aes_key",
+      "oidc_token",
+      "plaintext_installation_token",
+      "encrypted_escrow",
+      "iv_b64",
+      "ciphertext_b64",
+      "workflow_github_token",
+      "provider_api_key",
+      "ollama_api_key",
+      "openrouter_api_key",
+      "openai_api_key",
+      "raw_github_error_body"
+    ]
+  },
+  "revocation_rules": {
+    "endpoint": "DELETE /installation/token",
+    "clock_margin_ms_default": 300000,
+    "outcomes": {
+      "http_204": {
+        "status": 204,
+        "classification": "confirmed_revoked",
+        "next_state": "IDLE",
+        "clear_escrow": true
+      },
+      "http_401": {
+        "status": 401,
+        "classification": "already_invalid_or_expired",
+        "expiry_fallback_condition": "now_ms >= token_expires_at_ms + clock_margin_ms",
+        "next_state_after_expiry": "IDLE",
+        "next_state_before_expiry": "RECONCILING",
+        "diagnostic_before_expiry": "v6_lease_revocation_uncertain"
+      },
+      "http_429_or_ratelimit_403": {
+        "statuses": [
+          429,
+          403
+        ],
+        "requires_rate_limit_indicator": true,
+        "classification": "rate_limited",
+        "action": "bounded_retry_with_reset_backoff",
+        "exhausted_next_state": "RECONCILING",
+        "exhausted_diagnostic": "v6_lease_revocation_uncertain"
+      },
+      "permission_403": {
+        "status": 403,
+        "requires_rate_limit_indicator": false,
+        "classification": "permission_rejected",
+        "action": "fail_closed_no_retry",
+        "next_state": "HOLD",
+        "diagnostic": "v6_lease_revocation_uncertain"
+      },
+      "http_5xx_or_timeout": {
+        "statuses": [
+          500,
+          502,
+          503,
+          504
+        ],
+        "includes_timeout": true,
+        "classification": "transient_uncertain",
+        "action": "bounded_retry",
+        "exhausted_next_state": "RECONCILING",
+        "exhausted_diagnostic": "v6_lease_revocation_uncertain"
+      }
+    }
+  },
+  "http_routes": {
+    "/github/v6/lease/acquire": {
+      "method": "POST",
+      "request_fields": {
+        "required": [
+          "oidc_token",
+          "pull_request",
+          "head_sha",
+          "capabilities"
+        ],
+        "optional": [
+          "operation_id",
+          "predecessor_anchor_comment_id",
+          "control_budget"
+        ]
+      },
+      "response_fields": {
+        "success": [
+          "slot_key",
+          "state",
+          "generation",
+          "lease_epoch",
+          "reservation_id",
+          "token",
+          "token_expires_at_ms",
+          "app_id",
+          "installation_id",
+          "base_repo_id",
+          "pull_request",
+          "head_sha",
+          "coordinator_attestation_mac"
+        ],
+        "error": [
+          "error",
+          "diagnostic",
+          "slot_state",
+          "retry_after_ms"
+        ]
+      },
+      "success_statuses": [
+        200
+      ],
+      "error_statuses": [
+        400,
+        403,
+        409,
+        411,
+        413,
+        429,
+        503
+      ],
+      "reason_codes": [
+        "v6_lease_reserved",
+        "v6_lease_active_other_owner",
+        "v6_lease_draining",
+        "v6_lease_reconciling",
+        "v6_lease_hold",
+        "v6_lease_head_changed",
+        "v6_lease_predecessor_not_terminal",
+        "v6_lease_revocation_uncertain",
+        "v6_lease_escrow_lost",
+        "v6_lease_clock_untrusted",
+        "v6_lease_slot_continuity_unproved",
+        "v6_lease_unauthorized_tuple",
+        "v6_lease_rollback_blocked",
+        "v6_lease_mint_uncertain"
+      ]
+    },
+    "/github/v6/lease/drain": {
+      "method": "POST",
+      "request_fields": {
+        "required": [
+          "oidc_token",
+          "slot_key"
+        ],
+        "optional": [
+          "expected_generation",
+          "expected_lease_epoch",
+          "predecessor_anchor_comment_id",
+          "control_budget"
+        ]
+      },
+      "response_fields": {
+        "success": [
+          "slot_key",
+          "state",
+          "generation",
+          "lease_epoch",
+          "revocation_status"
+        ],
+        "error": [
+          "error",
+          "diagnostic",
+          "slot_state",
+          "retry_after_ms"
+        ]
+      },
+      "success_statuses": [
+        200
+      ],
+      "error_statuses": [
+        400,
+        403,
+        409,
+        411,
+        413,
+        429,
+        503
+      ],
+      "reason_codes": [
+        "v6_lease_active_other_owner",
+        "v6_lease_draining",
+        "v6_lease_reconciling",
+        "v6_lease_hold",
+        "v6_lease_predecessor_not_terminal",
+        "v6_lease_revocation_uncertain",
+        "v6_lease_escrow_lost",
+        "v6_lease_clock_untrusted",
+        "v6_lease_slot_continuity_unproved",
+        "v6_lease_unauthorized_tuple",
+        "v6_lease_rollback_blocked"
+      ]
+    },
+    "/github/v6/lease/complete-reconcile": {
+      "method": "POST",
+      "request_fields": {
+        "required": [
+          "oidc_token",
+          "slot_key",
+          "generation",
+          "reconciliation_outcome"
+        ],
+        "optional": [
+          "anchor_comment_id",
+          "head_sha",
+          "control_budget"
+        ]
+      },
+      "response_fields": {
+        "success": [
+          "slot_key",
+          "state",
+          "generation",
+          "lease_epoch"
+        ],
+        "error": [
+          "error",
+          "diagnostic",
+          "slot_state"
+        ]
+      },
+      "success_statuses": [
+        200
+      ],
+      "error_statuses": [
+        400,
+        403,
+        409,
+        411,
+        413,
+        503
+      ],
+      "reason_codes": [
+        "v6_lease_hold",
+        "v6_lease_revocation_uncertain",
+        "v6_lease_escrow_lost",
+        "v6_lease_clock_untrusted",
+        "v6_lease_slot_continuity_unproved",
+        "v6_lease_unauthorized_tuple",
+        "v6_lease_rollback_blocked"
+      ]
+    },
+    "/github/v6/lease/release": {
+      "method": "POST",
+      "request_fields": {
+        "required": [
+          "oidc_token",
+          "slot_key",
+          "generation",
+          "lease_epoch",
+          "reservation_id"
+        ],
+        "optional": [
+          "control_budget"
+        ]
+      },
+      "response_fields": {
+        "success": [
+          "slot_key",
+          "state",
+          "generation",
+          "lease_epoch",
+          "revocation_status"
+        ],
+        "error": [
+          "error",
+          "diagnostic",
+          "slot_state"
+        ]
+      },
+      "success_statuses": [
+        200
+      ],
+      "error_statuses": [
+        400,
+        403,
+        409,
+        411,
+        413,
+        503
+      ],
+      "reason_codes": [
+        "v6_lease_active_other_owner",
+        "v6_lease_draining",
+        "v6_lease_reconciling",
+        "v6_lease_hold",
+        "v6_lease_revocation_uncertain",
+        "v6_lease_escrow_lost",
+        "v6_lease_clock_untrusted",
+        "v6_lease_unauthorized_tuple",
+        "v6_lease_rollback_blocked"
+      ]
+    },
+    "/github/v6/lease/status": {
+      "method": "POST",
+      "request_fields": {
+        "required": [
+          "oidc_token",
+          "pull_request"
+        ],
+        "optional": [
+          "slot_key",
+          "control_budget"
+        ]
+      },
+      "response_fields": {
+        "success": [
+          "slot_key",
+          "state",
+          "generation",
+          "lease_epoch",
+          "owner_run_id",
+          "owner_run_attempt",
+          "owner_head_sha",
+          "token_expires_at_ms",
+          "last_reason_code",
+          "updated_at_ms"
+        ],
+        "error": [
+          "error",
+          "diagnostic"
+        ]
+      },
+      "success_statuses": [
+        200
+      ],
+      "error_statuses": [
+        400,
+        403,
+        411,
+        413,
+        503
+      ],
+      "reason_codes": [
+        "v6_lease_unauthorized_tuple"
+      ]
+    },
+    "/github/v6/lease/resolve-hold": {
+      "method": "POST",
+      "request_fields": {
+        "required": [
+          "oidc_token",
+          "slot_key",
+          "generation",
+          "hold_record_comment_id",
+          "resolution_kind"
+        ],
+        "optional": [
+          "anchor_comment_id",
+          "control_budget"
+        ]
+      },
+      "response_fields": {
+        "success": [
+          "slot_key",
+          "state",
+          "generation",
+          "lease_epoch"
+        ],
+        "error": [
+          "error",
+          "diagnostic",
+          "slot_state"
+        ]
+      },
+      "success_statuses": [
+        200
+      ],
+      "error_statuses": [
+        400,
+        403,
+        409,
+        411,
+        413,
+        503
+      ],
+      "reason_codes": [
+        "v6_lease_hold",
+        "v6_lease_escrow_lost",
+        "v6_lease_clock_untrusted",
+        "v6_lease_slot_continuity_unproved",
+        "v6_lease_unauthorized_tuple",
+        "v6_lease_rollback_blocked"
+      ]
+    }
+  },
+  "diagnostic_codes": [
+    "broker_v6_pilot_v5_writer_disabled",
+    "v6_lease_reserved",
+    "v6_lease_active_other_owner",
+    "v6_lease_draining",
+    "v6_lease_reconciling",
+    "v6_lease_hold",
+    "v6_lease_head_changed",
+    "v6_lease_predecessor_not_terminal",
+    "v6_lease_revocation_uncertain",
+    "v6_lease_escrow_lost",
+    "v6_lease_clock_untrusted",
+    "v6_lease_slot_continuity_unproved",
+    "v6_lease_unauthorized_tuple",
+    "v6_lease_rollback_blocked",
+    "v6_lease_mint_uncertain"
+  ],
+  "blockers": [
+    {
+      "id": "callable_v6_workflow",
+      "name": "callable v6 workflow",
+      "status": "OPEN"
+    },
+    {
+      "id": "fenced_issuance",
+      "name": "fenced issuance",
+      "status": "OPEN"
+    },
+    {
+      "id": "reproducible_ambiguous_write_recovery",
+      "name": "reproducible ambiguous-write recovery",
+      "status": "OPEN"
+    },
+    {
+      "id": "opt_in_github_qualification",
+      "name": "opt-in GitHub qualification",
+      "status": "OPEN"
+    }
+  ]
+}
