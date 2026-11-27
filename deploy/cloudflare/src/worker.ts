@@ -14,6 +14,7 @@ import {
   canonicalSlotHost,
   configuredAppId,
   parseCanonicalSlotKey,
+  serializeV6RouteResponseBody,
 } from "./v6-pr-coordinator";
 import { parseRepositoryCsv, redactSensitiveText } from "./v6-escrow-crypto";
 import {
@@ -887,8 +888,34 @@ async function v6Lease(
         body: JSON.stringify(values),
       }),
     );
-    const forwardedText = redactSensitiveText(await forwarded.text());
-    return new Response(forwardedText, {
+    const rawForwardedText = await forwarded.text();
+    let responseBodyText: string;
+    if (pathname === "/github/v6/lease/acquire" && forwarded.status === 200) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawForwardedText) as unknown;
+      } catch {
+        parsed = null;
+      }
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed) &&
+        typeof (parsed as Record<string, unknown>).token === "string" &&
+        ((parsed as Record<string, unknown>).token as string).length > 0
+      ) {
+        responseBodyText = serializeV6RouteResponseBody(
+          pathname,
+          forwarded.status,
+          parsed as Record<string, unknown>,
+        );
+      } else {
+        responseBodyText = redactSensitiveText(rawForwardedText);
+      }
+    } else {
+      responseBodyText = redactSensitiveText(rawForwardedText);
+    }
+    return new Response(responseBodyText, {
       status: forwarded.status,
       headers: {
         "content-type": "application/json; charset=utf-8",

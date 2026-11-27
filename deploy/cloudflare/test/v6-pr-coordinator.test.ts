@@ -34,6 +34,7 @@ import {
   V6PrCoordinatorEngine,
   buildCanonicalSlotKey,
   canonicalSlotHost,
+  serializeV6RouteResponseBody,
   type V6AuditEvent,
   type V6Clock,
   type V6ProviderAdapter,
@@ -2711,5 +2712,445 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect(provider.issueCommentsSinceArgs[1]).toBe(
       new Date(1_795_000_008_000).toISOString(),
     );
+  });
+});
+
+async function createSignedTestCredentials(claimsOverrides: Partial<OidcClaims> = {}) {
+  const kp = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const pubJwk = await crypto.subtle.exportKey("jwk", kp.publicKey);
+  const b64u = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const signClaims = async (overrides: Partial<OidcClaims> = {}) => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const claims = makeClaims({ iat: nowSec, exp: nowSec + 300, ...overrides });
+    const jwtInput = `${b64u({ alg: "RS256", kid: "k1" })}.${b64u({
+      ...claims,
+      repository_id: String(claims.repository_id),
+      actor_id: String(claims.actor_id),
+    })}`;
+    const sig = await crypto.subtle.sign(
+      "RSASSA-PKCS1-v1_5",
+      kp.privateKey,
+      new TextEncoder().encode(jwtInput),
+    );
+    return `${jwtInput}.${Buffer.from(sig).toString("base64url")}`;
+  };
+  const jwt = await signClaims(claimsOverrides);
+
+  const appKp = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const pkcs8 = Buffer.from(await crypto.subtle.exportKey("pkcs8", appKp.privateKey)).toString(
+    "base64",
+  );
+  const appPrivateKey = `-----BEGIN PRIVATE KEY-----\n${pkcs8}\n-----END PRIVATE KEY-----`;
+  return { jwt, pubJwk, appPrivateKey, signClaims };
+}
+
+function createInMemorySqlStorage(): SqlStorage {
+  const rows = new Map<string, Record<string, unknown>>();
+  return {
+    exec: vi.fn((query: string, ...bindings: unknown[]) => {
+      const normalized = query.trim().replace(/\s+/g, " ");
+      if (normalized.startsWith("PRAGMA table_info(v6_pr_slot)")) {
+        return {
+          toArray: () => [
+            { name: "slot_key" },
+            { name: "acquired_at_ms" },
+            { name: "token_cleared" },
+          ],
+        };
+      }
+      if (normalized.startsWith("SELECT")) {
+        const slotKey = String(bindings[0]);
+        const row = rows.get(slotKey);
+        return { toArray: () => (row ? [{ ...row }] : []) };
+      }
+      if (normalized.startsWith("INSERT INTO v6_pr_slot")) {
+        const record: Record<string, unknown> = {
+          slot_key: bindings[0],
+          state: bindings[1],
+          generation: bindings[2],
+          lease_epoch: bindings[3],
+          reservation_id: bindings[4],
+          owner_run_id: bindings[5],
+          owner_run_attempt: bindings[6],
+          owner_head_sha: bindings[7],
+          owner_workflow_sha: bindings[8],
+          owner_job: bindings[9],
+          owner_comment_id: bindings[10],
+          owner_record_sha256: bindings[11],
+          acquired_at_ms: bindings[12],
+          token_expires_at_ms: bindings[13],
+          token_cleared: bindings[14],
+          clock_margin_ms: bindings[15],
+          encrypted_escrow: bindings[16],
+          last_reason_code: bindings[17],
+          updated_at_ms: bindings[18],
+        };
+        rows.set(String(bindings[0]), record);
+        return { toArray: () => [] };
+      }
+      return { toArray: () => [] };
+    }),
+  } as unknown as SqlStorage;
+}
+
+describe("v6 acquire response redaction", () => {
+  afterEach(() => {
+    resetOidcJwksCacheForTesting();
+    vi.restoreAllMocks();
+  });
+
+  it("serializeV6RouteResponseBody preserves token only on 200 /acquire while redacting all other fields, routes, and statuses", () => {
+    const acquiredJson = serializeV6RouteResponseBody("/github/v6/lease/acquire", 200, {
+      slot_key: "v6-pr:github.com:12345:67890:987654321:42",
+      state: "ACTIVE",
+      token: "ghs_realToken123456",
+      operation_id: "op-ghs_leakedSecret999",
+      error: "err ghs_anotherSecret888",
+      nested: { auth: "Bearer secretHeaderToken" },
+    });
+    const acquired = JSON.parse(acquiredJson) as Record<string, unknown>;
+    expect(acquired.token).toBe("ghs_realToken123456");
+    expect(acquired.operation_id).toBe("op-[REDACTED_TOKEN]");
+    expect(acquired.error).toBe("err [REDACTED_TOKEN]");
+    expect(acquired.nested).toEqual({ auth: "Bearer [REDACTED]" });
+    expect(acquired.operation_id).not.toContain("ghs_");
+
+    for (const status of [409, 500]) {
+      const non200 = JSON.parse(
+        serializeV6RouteResponseBody("/github/v6/lease/acquire", status, {
+          error: "v6_lease_active_other_owner",
+          token: "ghs_realToken123456",
+          detail: "ghs_otherSecret777",
+        }),
+      ) as Record<string, unknown>;
+      expect(non200.token).toBe("[REDACTED_TOKEN]");
+      expect(non200.detail).toBe("[REDACTED_TOKEN]");
+    }
+
+    for (const route of [
+      "/github/v6/lease/status",
+      "/github/v6/lease/drain",
+      "/github/v6/lease/release",
+      "/github/v6/lease/complete-reconcile",
+      "/github/v6/lease/resolve-hold",
+    ]) {
+      const serialized = JSON.parse(
+        serializeV6RouteResponseBody(route, 200, {
+          slot_key: "v6-pr:github.com:12345:67890:987654321:42",
+          state: "ACTIVE",
+          token: "ghs_realToken123456",
+          note: "ghs_noteSecret555",
+        }),
+      ) as Record<string, unknown>;
+      expect(serialized.token, route).toBe("[REDACTED_TOKEN]");
+      expect(serialized.note, route).toBe("[REDACTED_TOKEN]");
+    }
+
+    const emptyToken = JSON.parse(
+      serializeV6RouteResponseBody("/github/v6/lease/acquire", 200, {
+        state: "ACTIVE",
+        token: "",
+        error: "ghs_leakWithEmptyToken",
+      }),
+    ) as Record<string, unknown>;
+    expect(emptyToken.token).toBe("");
+    expect(emptyToken.error).toBe("[REDACTED_TOKEN]");
+  });
+
+  it("V6PrCoordinator.fetch returns intact ghs_ token on 200 /acquire and redacts /status and non-200 responses", async () => {
+    const ownerCreds = await createSignedTestCredentials({ run_id: "10001", run_attempt: "1" });
+    const contenderJwt = await ownerCreds.signClaims({ run_id: "10002", run_attempt: "1" });
+    const mintedToken = "ghs_doLiveAcquireToken123456";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/.well-known/jwks")) {
+        return new Response(
+          JSON.stringify({ keys: [{ ...ownerCreds.pubJwk, kid: "k1", alg: "RS256" }] }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/app")) {
+        return new Response(JSON.stringify({ slug: "reviewsensei" }), { status: 200 });
+      }
+      if (url.endsWith("/repos/malsabbagh/review-sensei/git/ref/tags/v6-pilot")) {
+        return new Response(
+          JSON.stringify({ object: { type: "commit", sha: WORKFLOW_SHA } }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/installation`)) {
+        return new Response(JSON.stringify({ id: 67890 }), { status: 200 });
+      }
+      if (url.endsWith("/app/installations/67890/access_tokens")) {
+        const parsedInit = JSON.parse(String(init?.body ?? "{}")) as {
+          permissions?: Record<string, string>;
+        };
+        const isWriteMint = parsedInit.permissions?.pull_requests === "write";
+        return new Response(
+          JSON.stringify({
+            token: isWriteMint ? mintedToken : "ghs_doInternalReadOnly",
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            permissions: { metadata: "read", ...(parsedInit.permissions ?? {}) },
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}`)) {
+        return new Response(JSON.stringify({ id: 987654321, fork: false }), { status: 200 });
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/pulls/42`)) {
+        return new Response(
+          JSON.stringify({
+            state: "open",
+            head: { sha: HEAD_SHA_1, repo: { id: 987654321, fork: false } },
+            base: { repo: { id: 987654321, fork: false } },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/actions/runs/10001/attempts/1`)) {
+        return new Response(
+          JSON.stringify({
+            id: 10001,
+            run_attempt: 1,
+            status: "in_progress",
+            conclusion: null,
+            head_sha: HEAD_SHA_1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/actions/runs/10002/attempts/1`)) {
+        return new Response(
+          JSON.stringify({
+            id: 10002,
+            run_attempt: 1,
+            status: "in_progress",
+            conclusion: null,
+            head_sha: HEAD_SHA_1,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const stateMock = {
+      storage: { sql: createInMemorySqlStorage() },
+      blockConcurrencyWhile: vi.fn(async (fn: () => Promise<unknown>) => fn()),
+    } as unknown as DurableObjectState;
+    const env = baseEnv({ GITHUB_APP_PRIVATE_KEY: ownerCreds.appPrivateKey });
+    const doInstance = new V6PrCoordinator(stateMock, env);
+
+    const acquireRes = await doInstance.fetch(
+      new Request("https://do.internal/github/v6/lease/acquire", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          oidc_token: ownerCreds.jwt,
+          pull_request: 42,
+          head_sha: HEAD_SHA_1,
+          capabilities: ["review_publish"],
+        }),
+      }),
+    );
+    const acquireBody = (await acquireRes.json()) as Record<string, unknown>;
+    expect(acquireBody).toMatchObject({ state: "ACTIVE", token: mintedToken });
+    expect(acquireRes.status).toBe(200);
+    expect(acquireRes.headers.get("cache-control")).toBe("no-store");
+
+    const statusRes = await doInstance.fetch(
+      new Request("https://do.internal/github/v6/lease/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          oidc_token: ownerCreds.jwt,
+          pull_request: 42,
+        }),
+      }),
+    );
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.headers.get("cache-control")).toBe("no-store");
+    const statusText = await statusRes.text();
+    expect(statusText).not.toContain("ghs_");
+
+    const contenderRes = await doInstance.fetch(
+      new Request("https://do.internal/github/v6/lease/acquire", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          oidc_token: contenderJwt,
+          pull_request: 42,
+          head_sha: HEAD_SHA_1,
+          capabilities: ["review_publish"],
+        }),
+      }),
+    );
+    expect(contenderRes.status).toBe(409);
+    expect(contenderRes.headers.get("cache-control")).toBe("no-store");
+    const contenderText = await contenderRes.text();
+    expect(contenderText).not.toContain("ghs_");
+  });
+
+  it("worker.fetch v6Lease preserves token on 200 /acquire while redacting non-token fields, /status, and 409 responses", async () => {
+    const creds = await createSignedTestCredentials();
+    const slotKey = "v6-pr:github.com:12345:67890:987654321:42";
+    const liveAcquireToken = "ghs_liveAcquireToken98765";
+
+    const stubFetch = vi.fn(async (req: Request) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/github/v6/lease/acquire") {
+        const callIndex = stubFetch.mock.calls.filter(
+          ([callReq]) => new URL((callReq as Request).url).pathname === "/github/v6/lease/acquire",
+        ).length;
+        if (callIndex === 1) {
+          return new Response(
+            JSON.stringify({
+              slot_key: slotKey,
+              state: "ACTIVE",
+              generation: 1,
+              lease_epoch: 1,
+              capability: "review_publish",
+              token: liveAcquireToken,
+              operation_id: "op-ghs_mustBeRedactedInOtherField",
+            }),
+            { status: 200 },
+          );
+        }
+        if (callIndex === 2) {
+          const doBody = serializeV6RouteResponseBody(path, 200, {
+            slot_key: slotKey,
+            state: "ACTIVE",
+            generation: 1,
+            lease_epoch: 1,
+            capability: "review_publish",
+            token: liveAcquireToken,
+            operation_id: "op_clean",
+          });
+          return new Response(doBody, { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            error: "v6_lease_active_other_owner",
+            slot_state: "ACTIVE",
+            token: "ghs_mustBeRedactedOn409",
+          }),
+          { status: 409 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          slot_key: slotKey,
+          state: "ACTIVE",
+          generation: 1,
+          lease_epoch: 1,
+          token: "ghs_mustBeRedactedOnStatus",
+        }),
+        { status: 200 },
+      );
+    });
+
+    const idFromName = vi.fn(() => "do-id-1" as unknown as DurableObjectId);
+    const get = vi.fn(() => ({ fetch: stubFetch }) as unknown as DurableObjectStub);
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/.well-known/jwks")) {
+        return new Response(
+          JSON.stringify({ keys: [{ ...creds.pubJwk, kid: "k1", alg: "RS256" }] }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/installation`)) {
+        return new Response(JSON.stringify({ id: 67890 }), { status: 200 });
+      }
+      if (url.endsWith("/app/installations/67890/access_tokens")) {
+        return new Response(
+          JSON.stringify({
+            token: "ghs_edge_read",
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+            permissions: { metadata: "read", contents: "read", pull_requests: "read" },
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}`)) {
+        return new Response(JSON.stringify({ id: 987654321, fork: false }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const env = baseEnv({
+      GITHUB_APP_PRIVATE_KEY: creds.appPrivateKey,
+      V6_PR_COORDINATOR: { idFromName, get } as unknown as DurableObjectNamespace,
+    });
+
+    const callWorker = (path: string, bodyObj: Record<string, unknown>) => {
+      const payload = JSON.stringify({ oidc_token: creds.jwt, pull_request: 42, ...bodyObj });
+      return worker.fetch(
+        new Request(`https://github.reviewsensei.dev${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(payload)),
+          },
+          body: payload,
+        }),
+        env,
+      );
+    };
+
+    const acquire1 = await callWorker("/github/v6/lease/acquire", {
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acquire1.status).toBe(200);
+    expect(acquire1.headers.get("cache-control")).toBe("no-store");
+    const acquire1Body = (await acquire1.json()) as Record<string, unknown>;
+    expect(acquire1Body.token).toBe(liveAcquireToken);
+    expect(acquire1Body.operation_id).toBe("op-[REDACTED_TOKEN]");
+
+    const acquire2 = await callWorker("/github/v6/lease/acquire", {
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acquire2.status).toBe(200);
+    expect(acquire2.headers.get("cache-control")).toBe("no-store");
+    const acquire2Body = (await acquire2.json()) as Record<string, unknown>;
+    expect(acquire2Body.token).toBe(liveAcquireToken);
+
+    const statusRes = await callWorker("/github/v6/lease/status", {});
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.headers.get("cache-control")).toBe("no-store");
+    const statusBody = (await statusRes.json()) as Record<string, unknown>;
+    expect(statusBody.token).toBe("[REDACTED_TOKEN]");
+
+    const conflictRes = await callWorker("/github/v6/lease/acquire", {
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(conflictRes.status).toBe(409);
+    expect(conflictRes.headers.get("cache-control")).toBe("no-store");
+    const conflictBody = (await conflictRes.json()) as Record<string, unknown>;
+    expect(conflictBody.token).toBe("[REDACTED_TOKEN]");
   });
 });

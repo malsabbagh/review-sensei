@@ -4556,6 +4556,34 @@ export class V6PrCoordinatorEngine {
   }
 }
 
+/**
+ * Serializes a v6 coordinator JSON response body, preserving the granted
+ * installation token exclusively on `200 OK` `/github/v6/lease/acquire`
+ * responses while redacting all other fields, routes, and statuses.
+ */
+export function serializeV6RouteResponseBody(
+  pathname: string,
+  status: number,
+  body: Record<string, unknown>,
+): string {
+  if (
+    pathname === "/github/v6/lease/acquire" &&
+    status === 200 &&
+    typeof body.token === "string" &&
+    body.token.length > 0
+  ) {
+    const grantedToken = body.token;
+    const rest = Object.fromEntries(
+      Object.entries(body).filter(([key]) => key !== "token"),
+    );
+    const redactedRest = JSON.parse(
+      redactSensitiveText(JSON.stringify(rest)),
+    ) as Record<string, unknown>;
+    return JSON.stringify({ ...redactedRest, token: grantedToken });
+  }
+  return redactSensitiveText(JSON.stringify(body));
+}
+
 export class V6PrCoordinator extends DurableObject<WorkerEnv> {
   private readonly store: DurableObjectSqlV6CoordinatorStore;
   private engine: V6PrCoordinatorEngine | undefined;
@@ -4641,12 +4669,15 @@ export class V6PrCoordinator extends DurableObject<WorkerEnv> {
       }
     });
 
-    return new Response(redactSensitiveText(JSON.stringify(result.body)), {
-      status: result.status,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "no-store",
+    return new Response(
+      serializeV6RouteResponseBody(url.pathname, result.status, result.body),
+      {
+        status: result.status,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        },
       },
-    });
+    );
   }
 }
