@@ -37,6 +37,7 @@ EXPECTED_BULK_READ_ENDPOINTS = frozenset(
         "pr_compare",
         "git_tree",
         "git_blob",
+        "git_commit",
         "pr_files",
         "pr_issue_comments",
         "pr_review_comments",

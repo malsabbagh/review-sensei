@@ -34,7 +34,7 @@ from review_sensei.providers.routing import bind_stage_providers
 from review_sensei.service import DEFAULT_STAGES, ReviewService
 from review_sensei.validation import DEFAULT_REVIEW_LIMITS
 
-from .errors import GitHubResponseTooLargeError
+from .errors import GitHubHTTPError, GitHubResponseTooLargeError
 from .v6_credential_matrix import (
     CredentialKind,
     GitHubEventKind,
@@ -169,6 +169,132 @@ def _format_compare_file_diff(entry: Mapping[str, Any]) -> str:
     )
 
 
+_MAX_LCA_COMMIT_FETCHES = 256
+
+
+def _resolve_merge_base_via_git_commits(
+    *,
+    read_client: DualCredentialGitHubClient,
+    owner: str,
+    repo: str,
+    base_sha: str,
+    head_sha: str,
+    event: GitHubEventKind,
+    visibility: RepositoryVisibility,
+    granted_scopes: Collection[str],
+    clock: Callable[[], float],
+) -> str:
+    """Resolve a maximal common ancestor (LCA) of ``base_sha`` and ``head_sha`` via ``git_commit``."""
+
+    if base_sha == head_sha:
+        return base_sha
+
+    parents_cache: dict[str, tuple[str, ...]] = {}
+    fetches = 0
+
+    def _get_parents(commit_sha: str) -> tuple[str, ...]:
+        nonlocal fetches
+        if commit_sha in parents_cache:
+            return parents_cache[commit_sha]
+        if fetches >= _MAX_LCA_COMMIT_FETCHES:
+            return ()
+        fetches += 1
+        try:
+            resp = read_client.execute(
+                "git_commit",
+                method="GET",
+                path=f"/repos/{owner}/{repo}/git/commits/{commit_sha}",
+                event=event,
+                visibility=visibility,
+                granted_scopes=granted_scopes,
+                credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
+                now_epoch=clock(),
+            )
+        except (GitHubResponseTooLargeError, GitHubHTTPError):
+            parents_cache[commit_sha] = ()
+            return ()
+        if resp.status != 200 or not isinstance(resp.body, Mapping):
+            parents_cache[commit_sha] = ()
+            return ()
+        raw_parents = resp.body.get("parents")
+        parsed: list[str] = []
+        if isinstance(raw_parents, Sequence) and not isinstance(
+            raw_parents, (str, bytes, bytearray)
+        ):
+            for entry in raw_parents:
+                psha = entry.get("sha") if isinstance(entry, Mapping) else entry
+                if _is_40_hex(psha):
+                    parsed.append(str(psha))
+        result = tuple(parsed)
+        parents_cache[commit_sha] = result
+        return result
+
+    base_depth: dict[str, int] = {base_sha: 0}
+    head_depth: dict[str, int] = {head_sha: 0}
+    base_queue: deque[tuple[str, int]] = deque([(base_sha, 0)])
+    head_queue: deque[tuple[str, int]] = deque([(head_sha, 0)])
+    best_sum: int | None = None
+
+    while (base_queue or head_queue) and fetches < _MAX_LCA_COMMIT_FETCHES:
+        common = set(base_depth.keys()) & set(head_depth.keys())
+        if common:
+            best_sum = min(base_depth[c] + head_depth[c] for c in common)
+            min_base_q = base_queue[0][1] if base_queue else best_sum + 1
+            min_head_q = head_queue[0][1] if head_queue else best_sum + 1
+            if min_base_q >= best_sum and min_head_q >= best_sum:
+                break
+
+        expand_base: bool
+        if base_queue and head_queue:
+            expand_base = base_queue[0][1] <= head_queue[0][1]
+        elif base_queue:
+            expand_base = True
+        else:
+            expand_base = False
+
+        if expand_base:
+            cur_sha, cur_d = base_queue.popleft()
+            if best_sum is not None and cur_d >= best_sum:
+                continue
+            for psha in _get_parents(cur_sha):
+                if psha not in base_depth:
+                    base_depth[psha] = cur_d + 1
+                    base_queue.append((psha, cur_d + 1))
+        else:
+            cur_sha, cur_d = head_queue.popleft()
+            if best_sum is not None and cur_d >= best_sum:
+                continue
+            for psha in _get_parents(cur_sha):
+                if psha not in head_depth:
+                    head_depth[psha] = cur_d + 1
+                    head_queue.append((psha, cur_d + 1))
+
+    common = set(base_depth.keys()) & set(head_depth.keys())
+    if not common:
+        raise ReviewInputError(
+            f"unable to resolve merge base commit for {base_sha}...{head_sha}",
+            diagnostic="v6_merge_base_unavailable",
+        )
+
+    # Filter out any common ancestor that is a strict ancestor of another common ancestor.
+    ancestors_of_common: set[str] = set()
+    for c in common:
+        walk: deque[str] = deque(parents_cache.get(c, ()))
+        seen_walk: set[str] = set()
+        while walk:
+            p = walk.popleft()
+            if p in seen_walk:
+                continue
+            seen_walk.add(p)
+            ancestors_of_common.add(p)
+            for gp in parents_cache.get(p, ()):
+                if gp not in seen_walk:
+                    walk.append(gp)
+
+    maximal = [c for c in common if c not in ancestors_of_common] or list(common)
+    return min(maximal, key=lambda c: (base_depth[c] + head_depth[c], head_depth[c], c))
+
+
 def _fetch_compare_and_merge_base(
     *,
     read_client: DualCredentialGitHubClient,
@@ -181,11 +307,12 @@ def _fetch_compare_and_merge_base(
     granted_scopes: Collection[str],
     clock: Callable[[], float],
 ) -> tuple[str, Mapping[str, Any] | None, bool]:
-    """Fetch compare JSON (falling back to ``?per_page=1``) and extract ``merge_base_sha``."""
+    """Fetch compare JSON or resolve ``merge_base_sha`` via page=2 or commit-graph LCA."""
 
     compare_path = f"/repos/{owner}/{repo}/compare/{base_sha}...{head_sha}"
     compare_json: Mapping[str, Any] | None = None
     compare_too_large = False
+
     try:
         resp = read_client.execute(
             "pr_compare",
@@ -197,36 +324,53 @@ def _fetch_compare_and_merge_base(
             credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
             now_epoch=clock(),
         )
-    except GitHubResponseTooLargeError:
+        if resp.status == 200 and isinstance(resp.body, Mapping):
+            compare_json = resp.body
+            merge_base_info = resp.body.get("merge_base_commit")
+            raw_merge_base = (
+                merge_base_info.get("sha")
+                if isinstance(merge_base_info, Mapping)
+                else None
+            )
+            if _is_40_hex(raw_merge_base):
+                return str(raw_merge_base), compare_json, False
         compare_too_large = True
-        resp = read_client.execute(
+    except (GitHubResponseTooLargeError, GitHubHTTPError):
+        compare_too_large = True
+
+    # First fallback: Compare page=2 omits files[] while still returning merge_base_commit.sha.
+    try:
+        page2_resp = read_client.execute(
             "pr_compare",
             method="GET",
-            path=f"{compare_path}?per_page=1",
+            path=f"{compare_path}?per_page=1&page=2",
             event=event,
             visibility=visibility,
             granted_scopes=granted_scopes,
             credential_kind=CredentialKind.WORKFLOW_GITHUB_TOKEN,
             now_epoch=clock(),
         )
+        if page2_resp.status == 200 and isinstance(page2_resp.body, Mapping):
+            mb2_info = page2_resp.body.get("merge_base_commit")
+            raw_mb2 = mb2_info.get("sha") if isinstance(mb2_info, Mapping) else None
+            if _is_40_hex(raw_mb2):
+                return str(raw_mb2), None, compare_too_large
+    except (GitHubResponseTooLargeError, GitHubHTTPError):
+        pass
 
-    if resp.status != 200 or not isinstance(resp.body, Mapping):
-        raise ReviewInputError(
-            f"failed to fetch compare {base_sha}...{head_sha} (status={resp.status})",
-            diagnostic="v6_compare_unavailable",
-        )
-    if not compare_too_large:
-        compare_json = resp.body
-
-    merge_base_info = resp.body.get("merge_base_commit")
-    raw_merge_base = (
-        merge_base_info.get("sha") if isinstance(merge_base_info, Mapping) else None
+    # Second fallback: bidirectional commit-graph LCA over immutable git_commit objects.
+    merge_base_sha = _resolve_merge_base_via_git_commits(
+        read_client=read_client,
+        owner=owner,
+        repo=repo,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        event=event,
+        visibility=visibility,
+        granted_scopes=granted_scopes,
+        clock=clock,
     )
-    if _is_40_hex(raw_merge_base):
-        merge_base_sha = str(raw_merge_base)
-    else:
-        merge_base_sha = base_sha
-    return merge_base_sha, compare_json, compare_too_large
+    return merge_base_sha, None, compare_too_large
 
 
 def _fetch_complete_tree(

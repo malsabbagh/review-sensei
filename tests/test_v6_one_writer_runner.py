@@ -3531,6 +3531,11 @@ class V6OneWriterRunnerTests(unittest.TestCase):
                 path
                 == f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{HEAD_A}?per_page=1"
             ):
+                raise AssertionError("page 1 ?per_page=1 must never be retried")
+            if (
+                path
+                == f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{HEAD_A}?per_page=1&page=2"
+            ):
                 return 200, {}, {"merge_base_commit": {"sha": merge_base_sha}}
             if path == f"/repos/{OWNER}/{REPO}/git/trees/{merge_base_sha}?recursive=1":
                 raise GitHubResponseTooLargeError()
@@ -4310,6 +4315,228 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         self.assertEqual([r.record_id for r in res.records], [i + 1 for i in range(15)])
         self.assertTrue(any("per_page=12" in u for u in requested_urls))
         self.assertTrue(any("per_page=5" in u for u in requested_urls))
+
+    def test_merge_base_resolution_page2_git_commit_lca_and_fail_closed(self) -> None:
+        import base64
+        from unittest import mock
+
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+
+        base_sha = "1" * 40
+        head_sha = "a" * 40
+        mid_head = "9" * 40
+        lca_sha = "2" * 40
+        older_sha = "3" * 40
+        blob_base = "4" * 40
+        blob_head = "5" * 40
+
+        seen_compare_paths: list[str] = []
+
+        class _FakeService:
+            def __init__(self, *_a: Any, **_kw: Any) -> None:
+                pass
+
+            def review(self, _req: Any) -> ReviewResult:
+                return ReviewResult(
+                    summary="Clean",
+                    comments=(),
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                )
+
+        def _base_tree_and_blobs(
+            path: str,
+        ) -> tuple[int, Mapping[str, str], Any] | None:
+            if path == f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}":
+                return (
+                    200,
+                    {},
+                    {
+                        "state": "open",
+                        "title": "Merge-base resolution",
+                        "head": {"sha": head_sha},
+                        "base": {"sha": base_sha},
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{lca_sha}?recursive=1":
+                return (
+                    200,
+                    {},
+                    {
+                        "truncated": False,
+                        "tree": [
+                            {
+                                "path": "f.py",
+                                "type": "blob",
+                                "sha": blob_base,
+                                "mode": "100644",
+                            }
+                        ],
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/trees/{head_sha}?recursive=1":
+                return (
+                    200,
+                    {},
+                    {
+                        "truncated": False,
+                        "tree": [
+                            {
+                                "path": "f.py",
+                                "type": "blob",
+                                "sha": blob_head,
+                                "mode": "100644",
+                            }
+                        ],
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/blobs/{blob_base}":
+                return (
+                    200,
+                    {},
+                    {
+                        "sha": blob_base,
+                        "encoding": "base64",
+                        "content": base64.b64encode(b"x = 1\n").decode("ascii"),
+                    },
+                )
+            if path == f"/repos/{OWNER}/{REPO}/git/blobs/{blob_head}":
+                return (
+                    200,
+                    {},
+                    {
+                        "sha": blob_head,
+                        "encoding": "base64",
+                        "content": base64.b64encode(b"x = 2\n").decode("ascii"),
+                    },
+                )
+            return None
+
+        # 1. Compare page=1 >512 KiB -> resolves via page=2 (never refetching page=1 ?per_page=1)
+        def _page2_handler(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            path = call["path"]
+            common = _base_tree_and_blobs(path)
+            if common is not None:
+                return common
+            if "/compare/" in path:
+                seen_compare_paths.append(path)
+                if path == f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{head_sha}":
+                    raise GitHubResponseTooLargeError()
+                if path == (
+                    f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{head_sha}?per_page=1&page=2"
+                ):
+                    return 200, {}, {"merge_base_commit": {"sha": lca_sha}}
+            raise AssertionError(f"unexpected call: {call}")
+
+        with (
+            mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}),
+            mock.patch(
+                "review_sensei_github.v6_fresh_analysis.ReviewService", _FakeService
+            ),
+        ):
+            payloads, _ = run_v6_fresh_pr_analysis(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                head_sha=head_sha,
+                workflow_token_transport=_ScriptedTransport(_page2_handler),
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                provider="openai-compatible",
+                model="gpt-4o-mini",
+                provider_base_url="https://127.0.0.1:8443/v1",
+                allow_custom_endpoint=True,
+            )
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(
+            seen_compare_paths,
+            [
+                f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{head_sha}",
+                f"/repos/{OWNER}/{REPO}/compare/{base_sha}...{head_sha}?per_page=1&page=2",
+            ],
+        )
+
+        # 2. Compare page=1 and page=2 both fail -> resolves exact maximal LCA via git_commit
+        commit_parents = {
+            base_sha: [lca_sha],
+            head_sha: [mid_head],
+            mid_head: [lca_sha],
+            lca_sha: [older_sha],
+            older_sha: [],
+        }
+
+        def _lca_handler(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            path = call["path"]
+            common = _base_tree_and_blobs(path)
+            if common is not None:
+                return common
+            if "/compare/" in path:
+                return 500, {}, {"message": "Compare failed"}
+            if path.startswith(f"/repos/{OWNER}/{REPO}/git/commits/"):
+                sha = path.rsplit("/", 1)[-1]
+                return (
+                    200,
+                    {},
+                    {
+                        "sha": sha,
+                        "parents": [{"sha": p} for p in commit_parents[sha]],
+                    },
+                )
+            raise AssertionError(f"unexpected call: {call}")
+
+        with (
+            mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}),
+            mock.patch(
+                "review_sensei_github.v6_fresh_analysis.ReviewService", _FakeService
+            ),
+        ):
+            payloads_lca, _ = run_v6_fresh_pr_analysis(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                head_sha=head_sha,
+                workflow_token_transport=_ScriptedTransport(_lca_handler),
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                provider="openai-compatible",
+                model="gpt-4o-mini",
+                provider_base_url="https://127.0.0.1:8443/v1",
+                allow_custom_endpoint=True,
+            )
+        self.assertEqual(len(payloads_lca), 1)
+
+        # 3. Disjoint commit graphs -> fails closed with v6_merge_base_unavailable
+        def _disjoint_handler(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            path = call["path"]
+            common = _base_tree_and_blobs(path)
+            if common is not None:
+                return common
+            if "/compare/" in path:
+                raise GitHubResponseTooLargeError()
+            if path.startswith(f"/repos/{OWNER}/{REPO}/git/commits/"):
+                sha = path.rsplit("/", 1)[-1]
+                return 200, {}, {"sha": sha, "parents": []}
+            raise AssertionError(f"unexpected call: {call}")
+
+        with (
+            mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}),
+            self.assertRaises(ReviewInputError) as mb_exc,
+        ):
+            run_v6_fresh_pr_analysis(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                head_sha=head_sha,
+                workflow_token_transport=_ScriptedTransport(_disjoint_handler),
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                provider="openai-compatible",
+                model="gpt-4o-mini",
+                provider_base_url="https://127.0.0.1:8443/v1",
+                allow_custom_endpoint=True,
+            )
+        self.assertEqual(mb_exc.exception.diagnostic, "v6_merge_base_unavailable")
 
 
 if __name__ == "__main__":

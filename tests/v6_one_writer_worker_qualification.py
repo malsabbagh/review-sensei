@@ -624,6 +624,7 @@ class _SimulatedGitHubState:
     drop_reply_hook: _DropReplyHook | None = None
     trees: dict[tuple[str, bool], Any] = field(default_factory=dict)
     blobs: dict[str, bytes] = field(default_factory=dict)
+    commits: dict[str, list[str]] = field(default_factory=dict)
     head_advance_after_comment_hook: tuple[int, str, str] | None = None
     reject_review_status: dict[int, tuple[int, dict[str, Any]]] = field(
         default_factory=dict
@@ -789,6 +790,10 @@ def _make_github_handler(
             extra_headers: dict[str, str] | None = None,
         ) -> None:
             raw = json.dumps(payload).encode("utf-8")
+            if extra_headers:
+                for hk, hv in extra_headers.items():
+                    if "\r" in hk or "\n" in hk or "\r" in hv or "\n" in hv:
+                        raise ValueError("header injection rejected")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
@@ -1052,26 +1057,26 @@ def _make_github_handler(
                     self.end_headers()
                     self.wfile.write(diff_bytes)
                     return
-                per_page_cmp = query.get("per_page", [None])[0]
-                if per_page_cmp == "1":
+                page = int((query.get("page") or ["1"])[0])
+                per_page = int((query.get("per_page") or ["250"])[0])
+                commits_list = list(pr.get("compare_commits") or [{"sha": head_arg}])
+                start = max(0, (page - 1) * per_page)
+                commits_slice = commits_list[start : start + per_page]
+                if page >= 2:
+                    page2_status = pr.get("compare_page2_status")
+                    if page2_status is not None:
+                        self._send_json(
+                            int(page2_status),
+                            {"message": "compare page 2 unavailable"},
+                        )
+                        return
                     self._send_json(
                         200,
                         {
                             "merge_base_commit": {"sha": merge_base},
                             "base_commit": {"sha": merge_base},
                             "status": "ahead",
-                            "files": (pr.get("compare_files") or [])[:1],
-                        },
-                    )
-                    return
-                if pr.get("compare_json_oversized"):
-                    self._send_json(
-                        200,
-                        {
-                            "merge_base_commit": {"sha": merge_base},
-                            "base_commit": {"sha": merge_base},
-                            "padding": "z" * (530 * 1024),
-                            "files": [],
+                            "commits": commits_slice,
                         },
                     )
                     return
@@ -1085,13 +1090,52 @@ def _make_github_handler(
                             "patch": default_patch,
                         }
                     ]
+                if pr.get("compare_json_oversized"):
+                    oversized_files = [
+                        {
+                            "filename": "src/oversized.py",
+                            "status": "modified",
+                            "patch": "+" + ("z" * (530 * 1024)),
+                        }
+                    ]
+                    self._send_json(
+                        200,
+                        {
+                            "merge_base_commit": {"sha": merge_base},
+                            "base_commit": {"sha": merge_base},
+                            "status": "ahead",
+                            "commits": commits_slice,
+                            "files": oversized_files,
+                        },
+                    )
+                    return
                 self._send_json(
                     200,
                     {
                         "merge_base_commit": {"sha": merge_base},
                         "base_commit": {"sha": merge_base},
                         "status": "ahead",
+                        "commits": commits_slice,
                         "files": files,
+                    },
+                )
+                return
+
+            commit_match = re.fullmatch(
+                rf"/repos/{re.escape(REPO_FULL)}/git/commits/([0-9a-f]{{40}})", path
+            )
+            if commit_match:
+                commit_sha = commit_match.group(1)
+                with state.lock:
+                    parent_shas = state.commits.get(commit_sha)
+                if parent_shas is None:
+                    self._send_json(404, {"message": "Not Found"})
+                    return
+                self._send_json(
+                    200,
+                    {
+                        "sha": commit_sha,
+                        "parents": [{"sha": p} for p in parent_shas],
                     },
                 )
                 return
@@ -1153,9 +1197,14 @@ def _make_github_handler(
                 slice_items = items[start : start + per_page]
                 headers: dict[str, str] | None = None
                 if start + per_page < len(items):
+                    safe_comments_path = (
+                        f"/repos/{REPO_FULL}/issues/{int(pr_num)}/comments"
+                    )
                     headers = {
                         "Link": (
-                            f'<https://api.github.com{path}?per_page={per_page}&page={page + 1}&sort=created&direction=asc>; rel="next"'
+                            f"<https://api.github.com{safe_comments_path}"
+                            f"?per_page={int(per_page)}&page={int(page) + 1}"
+                            '&sort=created&direction=asc>; rel="next"'
                         )
                     }
                 self._send_json(200, slice_items, extra_headers=headers)
@@ -1195,9 +1244,13 @@ def _make_github_handler(
                 start = (page - 1) * per_page
                 headers = None
                 if start + per_page < len(items):
+                    safe_reviews_path = (
+                        f"/repos/{REPO_FULL}/pulls/{int(pr_num)}/reviews"
+                    )
                     headers = {
                         "Link": (
-                            f'<https://api.github.com{path}?per_page={per_page}&page={page + 1}>; rel="next"'
+                            f"<https://api.github.com{safe_reviews_path}"
+                            f'?per_page={int(per_page)}&page={int(page) + 1}>; rel="next"'
                         )
                     }
                 self._send_json(
@@ -1392,6 +1445,10 @@ def _make_openai_provider_handler(
             extra_headers: dict[str, str] | None = None,
         ) -> None:
             raw = json.dumps(payload).encode("utf-8")
+            if extra_headers:
+                for hk, hv in extra_headers.items():
+                    if "\r" in hk or "\n" in hk or "\r" in hv or "\n" in hv:
+                        raise ValueError("header injection rejected")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
@@ -2852,6 +2909,65 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertEqual(parsed_55["model_calls_started"], 0)
         with provider_state.lock:
             self.assertEqual(provider_state.calls, calls_after_r1)
+
+        # Sub-test: When Compare page=1 >512 KiB AND page=2 returns 500, git_commit LCA resolves diverged merge_base_sha != base_sha.
+        head_59 = "9a" * 20
+        mid_commit = "c" * 40
+        older_commit = "f" * 40
+        with self.gh_state.lock:
+            self.gh_state.commits[base_sha] = [merge_base_sha]
+            self.gh_state.commits[head_59] = [mid_commit]
+            self.gh_state.commits[mid_commit] = [merge_base_sha]
+            self.gh_state.commits[merge_base_sha] = [older_commit]
+            self.gh_state.commits[older_commit] = []
+            self.gh_state.trees[(head_59, True)] = {
+                "sha": head_59,
+                "truncated": True,
+                "tree": [],
+            }
+            self.gh_state.trees[(head_59, False)] = self.gh_state.trees[
+                (head_t4, False)
+            ]
+        pr59 = self.gh_state.ensure_pr(59, head_sha=head_59, base_sha=base_sha)
+        pr59["merge_base_sha"] = merge_base_sha
+        pr59["compare_json_oversized"] = True
+        pr59["compare_page2_status"] = 500
+        pr59["diff"] = "x" * (530 * 1024)
+        self.gh_state.set_run_attempt(
+            "9502", 1, status="in_progress", conclusion=None, head_sha=head_59
+        )
+        out_59 = self.tmp_path / "outcome-59.json"
+        sum_59 = self.tmp_path / "summary-59.md"
+        cwd_59 = self.tmp_path / "cwd-59"
+        cwd_59.mkdir()
+        res_59 = subprocess.run(
+            self._runner_argv(
+                pr_number=59,
+                operation_id=None,
+                run_id=9502,
+                run_attempt=1,
+                head_sha=head_59,
+                outcome_path=out_59,
+                step_summary_path=sum_59,
+                analyze_fresh_pr=True,
+                policy_root=policy_dir,
+            ),
+            cwd=str(cwd_59),
+            env=self._runner_env(run_id=9502, run_attempt=1, extra_env=provider_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res_59.returncode, 0, res_59.stderr + res_59.stdout)
+        parsed_59 = json.loads(out_59.read_text(encoding="utf-8"))
+        self.assertEqual(parsed_59["status"], "completed")
+        self.assertEqual(parsed_59["coordinator_state"], "IDLE")
+        with self.gh_state.lock:
+            self.assertIn(
+                ("GET", f"/repos/{REPO_FULL}/git/commits/{head_59}"),
+                self.gh_state.requests_log,
+            )
+
         self._assert_no_secret_leaks(
             self.worker_log,
             stdout_r1,
@@ -2866,6 +2982,10 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             res_55.stderr,
             out_55,
             sum_55,
+            res_59.stdout,
+            res_59.stderr,
+            out_59,
+            sum_59,
         )
 
     def test_trusted_policy_disabled_skips_before_coordinator(self) -> None:

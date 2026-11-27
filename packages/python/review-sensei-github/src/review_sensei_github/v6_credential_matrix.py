@@ -339,6 +339,15 @@ _MATRIX_ENTRIES: tuple[tuple[str, EndpointCredentialRule], ...] = (
         ),
     ),
     _bulk_read(
+        "git_commit",
+        "/repos/{owner}/{repo}/git/commits/{commit_sha}",
+        required_permissions=("contents: read",),
+        rationale=(
+            "Fetch immutable Git commit objects via workflow GITHUB_TOKEN "
+            "to compute commit-graph merge base when compare responses fail or overflow."
+        ),
+    ),
+    _bulk_read(
         "pr_files",
         "/repos/{owner}/{repo}/pulls/{pull_number}/files",
         required_permissions=("pull-requests: read", "contents: read"),
