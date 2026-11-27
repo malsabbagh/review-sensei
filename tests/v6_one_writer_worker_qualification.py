@@ -605,34 +605,21 @@ def _build_offline_venv_and_install(
         )
 
     venv_dir = runner_temp / "review-sensei-v6-venv"
-    src_checkout = runner_temp / "review-sensei-v6-src"
-    built_wheel_dir = temp_root / "built-wheels"
-    built_wheel_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-index",
-            "--no-deps",
-            "--no-build-isolation",
-            "--wheel-dir",
-            str(built_wheel_dir),
-            str(src_checkout),
-            str(src_checkout / "packages" / "python" / "review-sensei-github"),
-        ],
-        check=True,
-        cwd=str(temp_root),
-        env={k: v for k, v in bash_env.items() if k != "PYTHONPATH"},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    built_wheel_dir = runner_temp / "review-sensei-v6-wheels"
     wheel_sha256_by_name = {
         whl.name: hashlib.sha256(whl.read_bytes()).hexdigest()
         for whl in sorted(built_wheel_dir.glob("*.whl"))
     }
+    if len(wheel_sha256_by_name) != 2:
+        raise RuntimeError(
+            f"expected 2 built wheels from workflow install step, found {wheel_sha256_by_name}"
+        )
+    for whl_name, whl_digest in wheel_sha256_by_name.items():
+        expected_line = f"review_sensei_v6_wheel_sha256 {whl_name} {whl_digest}"
+        if expected_line not in proc.stdout:
+            raise RuntimeError(
+                f"workflow install step missing wheel hash line {expected_line!r}\nSTDOUT:\n{proc.stdout}"
+            )
     worker_digest = hashlib.sha256()
     for ts_file in sorted((ROOT / "deploy" / "cloudflare" / "src").glob("*.ts")):
         worker_digest.update(ts_file.name.encode("utf-8"))

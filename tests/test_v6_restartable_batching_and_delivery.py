@@ -52,6 +52,7 @@ from review_sensei_github.v6_recovery_engine import (
     _evidence_binding_for_request,
 )
 from review_sensei_github.v6_recovery_ledger import (
+    BatchAttemptRecord,
     BatchDispatchRecord,
     BatchOutputRecord,
     BatchPlanRecord,
@@ -2181,6 +2182,356 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         self.assertIsInstance(res, RecoveryHold)
         assert isinstance(res, RecoveryHold)
         self.assertEqual(res.blocker, "stale_detail_receipt_payload_mismatch")
+
+    def test_batch_attempt_record_marker_roundtrip(self) -> None:
+        rec = BatchAttemptRecord(
+            record_id="batch-attempt:op-1:aaaaaaaaaaaa:111111111111:batch-000:1",
+            operation_id="op-1",
+            batch_id="batch-000",
+            attempt=1,
+            plan_sha256="a" * 64,
+            status="partial",
+            provider_calls=3,
+            diagnostic="v6_batch_incomplete_coverage",
+        )
+        marker = format_v6_record_marker(rec)
+        parsed = extract_v6_record_markers(marker)
+        self.assertEqual(parsed, (rec,))
+        with self.assertRaises(Exception):
+            BatchAttemptRecord(
+                record_id="bad",
+                operation_id="op-1",
+                batch_id="batch-000",
+                attempt=1,
+                plan_sha256="a" * 64,
+                status="partial",
+                provider_calls=0,
+                diagnostic="v6_batch_incomplete_coverage",
+            )
+
+    def test_incomplete_batch_persists_durable_provider_calls_and_rerun_holds_with_count(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from review_sensei.configuration import default_configuration
+        from review_sensei.models import ReviewResult
+
+        diff_a = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n"
+        diff_b = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-b = 1\n+b = 2\n"
+        hunk_a = "src/a.py#h0:1,1+1,1:" + ("a" * 16)
+        hunk_b = "src/b.py#h0:1,1+1,1:" + ("b" * 16)
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+        inv = (
+            {
+                "path": "src/a.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [hunk_a],
+            },
+            {
+                "path": "src/b.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [hunk_b],
+            },
+        )
+        inv_sha = canonical_sha256(inv)
+        b0 = V6PlannedBatch(
+            batch_id="batch-000",
+            diff_text=diff_a,
+            diff_sha256=canonical_sha256(diff_a),
+            prompt_bytes=200,
+            paths=("src/a.py",),
+            primary_hunk_ids=(hunk_a,),
+            parent_hunk_ids=(hunk_a,),
+        )
+        b1 = V6PlannedBatch(
+            batch_id="batch-001",
+            diff_text=diff_b,
+            diff_sha256=canonical_sha256(diff_b),
+            prompt_bytes=200,
+            paths=("src/b.py",),
+            primary_hunk_ids=(hunk_b,),
+            parent_hunk_ids=(hunk_b,),
+        )
+
+        # Subcase A: batch-000 ends with review_status='partial' after provider_calls=2.
+        partial_calls = 0
+
+        class _PartialMultiSvc:
+            def run(self, req: Any, budget: Any = None) -> Any:
+                nonlocal partial_calls
+                partial_calls += 1
+                return SimpleNamespace(
+                    outcome=SimpleNamespace(status="complete", provider_calls=2),
+                    result=ReviewResult(
+                        summary="Partial A",
+                        comments=(),
+                        provider="openai-compatible",
+                        model="gpt-4o-mini",
+                        review_status="partial",
+                    ),
+                )
+
+        pr_a = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_a = _make_owner_record(
+            operation_id="op-inc-a",
+            pr_head_sha=HEAD_A,
+            slot_key=SLOT_B,
+        )
+        pr_a.add_comment(format_v6_record_marker(owner_a), is_app=True)
+        req_a = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-inc-a",
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-inc-a",
+                run_id=100,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_a,
+            fresh_analysis_context_loader=lambda: V6FreshAnalysisContext(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                pr_title="Partial multi",
+                base_sha=BASE_SHA,
+                merge_base_sha=BASE_SHA,
+                head_sha=HEAD_A,
+                inventory_sha256=inv_sha,
+                inventory=inv,
+                non_text_changes=(),
+                policy_digest=policy_digest,
+                configuration_digest=config_digest,
+                max_provider_calls=4,
+                planned_batches=(b0, b1),
+                all_expected_hunk_ids=(hunk_a, hunk_b),
+                sub_hunks_by_parent={},
+                combined_diff_sha256=canonical_sha256(diff_a + diff_b),
+                provider_name="openai-compatible",
+                model_name="gpt-4o-mini",
+                service=_PartialMultiSvc(),
+            ),
+        )
+        eng_a1 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_a.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_a.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_a1 = eng_a1.recover_and_publish(req_a)
+        self.assertIsInstance(res_a1, RecoveryHold)
+        assert isinstance(res_a1, RecoveryHold)
+        self.assertEqual(res_a1.blocker, "v6_batch_incomplete_coverage")
+        self.assertEqual(partial_calls, 1)
+        self.assertIn("calls:2", res_a1.missing_evidence[0])
+        attempt_recs = [
+            r
+            for c in pr_a.comments
+            for r in extract_v6_record_markers(c["body"])
+            if isinstance(r, BatchAttemptRecord)
+        ]
+        self.assertEqual(len(attempt_recs), 1)
+        self.assertEqual(attempt_recs[0].provider_calls, 2)
+        self.assertEqual(attempt_recs[0].status, "partial")
+        self.assertEqual(attempt_recs[0].diagnostic, "v6_batch_incomplete_coverage")
+        self.assertFalse(any("batch-output:" in c["body"] for c in pr_a.comments))
+
+        # Normal cold rerun holds with 0 extra provider calls and preserves calls:2 count!
+        res_a2 = eng_a1.recover_and_publish(req_a)
+        self.assertIsInstance(res_a2, RecoveryHold)
+        assert isinstance(res_a2, RecoveryHold)
+        self.assertEqual(partial_calls, 1)
+        self.assertIn("calls:2", res_a2.missing_evidence[0])
+
+        # Subcase B: execute_v6_batch fails with outcome.status='provider_failed' after provider_calls=3.
+        fail_calls = 0
+
+        class _FailedMultiSvc:
+            def run(self, req: Any, budget: Any = None) -> Any:
+                nonlocal fail_calls
+                fail_calls += 1
+                if fail_calls == 1:
+                    return SimpleNamespace(
+                        outcome=SimpleNamespace(
+                            status="provider_failed",
+                            provider_calls=3,
+                            diagnostic="v6_provider_upstream_502",
+                        ),
+                        result=None,
+                    )
+                return SimpleNamespace(
+                    outcome=SimpleNamespace(status="complete", provider_calls=1),
+                    result=ReviewResult(
+                        summary="OK B",
+                        comments=(),
+                        provider="openai-compatible",
+                        model="gpt-4o-mini",
+                        review_status="complete",
+                    ),
+                )
+
+        pr_b = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_b = _make_owner_record(
+            operation_id="op-inc-b",
+            pr_head_sha=HEAD_A,
+            slot_key=SLOT_B,
+        )
+        pr_b.add_comment(format_v6_record_marker(owner_b), is_app=True)
+        in_dig = canonical_sha256(
+            {
+                "base_sha": BASE_SHA,
+                "merge_base_sha": BASE_SHA,
+                "head_sha": HEAD_A,
+                "inventory_sha256": inv_sha,
+                "policy_digest": policy_digest,
+                "configuration_digest": config_digest,
+            }
+        )[:12]
+        plan_b = BatchPlanRecord(
+            record_id=f"batch-plan:op-inc-b:{HEAD_A[:12]}:{in_dig}",
+            operation_id="op-inc-b",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            pr_head_sha=HEAD_A,
+            inventory_sha256=inv_sha,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=3,
+            batches=(b0.to_plan_dict(), b1.to_plan_dict()),
+        )
+        plan_b_sha = canonical_sha256(record_to_dict(plan_b))
+        pr_b.add_comment(format_v6_record_marker(plan_b), is_app=True)
+        # Seed BatchAttemptRecord for b0=3 calls AND simulate resolved b0 output or verify b1 hits budget=3.
+        # First run b1 directly on fresh op with b0 failing after 3 calls:
+        req_b = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-inc-b",
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-inc-b",
+                run_id=100,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_b,
+            fresh_analysis_context_loader=lambda: V6FreshAnalysisContext(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                pr_title="Failed multi",
+                base_sha=BASE_SHA,
+                merge_base_sha=BASE_SHA,
+                head_sha=HEAD_A,
+                inventory_sha256=inv_sha,
+                inventory=inv,
+                non_text_changes=(),
+                policy_digest=policy_digest,
+                configuration_digest=config_digest,
+                max_provider_calls=3,
+                planned_batches=(b0, b1),
+                all_expected_hunk_ids=(hunk_a, hunk_b),
+                sub_hunks_by_parent={},
+                combined_diff_sha256=canonical_sha256(diff_a + diff_b),
+                provider_name="openai-compatible",
+                model_name="gpt-4o-mini",
+                service=_FailedMultiSvc(),
+            ),
+        )
+        eng_b1 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_b.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_b.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_b1 = eng_b1.recover_and_publish(req_b)
+        self.assertIsInstance(res_b1, RecoveryHold)
+        assert isinstance(res_b1, RecoveryHold)
+        self.assertEqual(res_b1.blocker, "v6_provider_upstream_502")
+        self.assertEqual(fail_calls, 1)
+        self.assertIn("calls:3", res_b1.missing_evidence[0])
+
+        # Also verify restart sees 3 calls spent against max_provider_calls=3 if b0 is later superseded/completed:
+        pr_b2 = _SimulatedPRSurface(head_sha=HEAD_A)
+        for c in pr_b.comments:
+            pr_b2.add_comment(c["body"], is_app=True)
+        # Even with a synthetic attempt=2 BatchOutputRecord (0 extra margin remaining), b1 sees used=3 >= 3!
+        pr_b2.add_comment(
+            format_v6_record_marker(
+                BatchOutputRecord(
+                    record_id=f"batch-output:op-inc-b:{HEAD_A[:12]}:{in_dig}:batch-000:2",
+                    operation_id="op-inc-b",
+                    batch_id="batch-000",
+                    plan_sha256=plan_b_sha,
+                    hunk_ids_reviewed=(hunk_a,),
+                    findings=(),
+                    summary="Recovered A",
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                    attempt=2,
+                    provider_calls=1,
+                )
+            ),
+            is_app=True,
+        )
+        eng_b2 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_b2.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_b2.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_b2 = eng_b2.recover_and_publish(req_b)
+        self.assertIsInstance(res_b2, RecoveryHold)
+        assert isinstance(res_b2, RecoveryHold)
+        self.assertEqual(res_b2.blocker, "review_provider_call_budget_exhausted")
+        self.assertEqual(fail_calls, 1)
 
 
 if __name__ == "__main__":

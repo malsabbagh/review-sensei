@@ -160,12 +160,37 @@ jobs:
           fi
           mkdir -p "$src_checkout"
           git --git-dir="$source_dir" archive "$workflow_commit" | tar -x -C "$src_checkout"
+          wheel_dir="$RUNNER_TEMP/review-sensei-v6-wheels"
+          rm -rf "$wheel_dir"
+          mkdir -p "$wheel_dir"
           python -m venv "$RUNNER_TEMP/review-sensei-v6-venv"
           python_bin="$RUNNER_TEMP/review-sensei-v6-venv/bin/python"
           "$python_bin" -m pip install --disable-pip-version-check --upgrade pip
-          "$python_bin" -m pip install --disable-pip-version-check \
+          "$python_bin" -m pip wheel \
+            --disable-pip-version-check \
+            --no-deps \
+            --wheel-dir "$wheel_dir" \
             "$src_checkout" \
             "$src_checkout/packages/python/review-sensei-github"
+          "$python_bin" - "$workflow_commit" "$wheel_dir" "${GITHUB_STEP_SUMMARY:-}" <<'PY'
+          import hashlib, pathlib, sys
+          workflow_commit, wheel_dir_raw, summary_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          wheels = sorted(pathlib.Path(wheel_dir_raw).glob("*.whl"))
+          if len(wheels) != 2:
+              raise SystemExit(f"expected exactly 2 built wheels, found {len(wheels)}")
+          lines = [f"review_sensei_v6_workflow_commit={workflow_commit}"]
+          for whl in wheels:
+              digest = hashlib.sha256(whl.read_bytes()).hexdigest()
+              lines.append(f"review_sensei_v6_wheel_sha256 {whl.name} {digest}")
+          for line in lines:
+              print(line)
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("### ReviewSensei v6 Runner Provenance\n")
+                  for line in lines:
+                      fh.write(f"- `{line}`\n")
+          PY
+          "$python_bin" -m pip install --disable-pip-version-check "$wheel_dir"/*.whl
           "$RUNNER_TEMP/review-sensei-v6-venv/bin/pip" check
           "$RUNNER_TEMP/review-sensei-v6-venv/bin/review-sensei-github" v6-pilot-run --help >/dev/null
 

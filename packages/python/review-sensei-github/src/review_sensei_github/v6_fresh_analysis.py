@@ -100,8 +100,15 @@ _LCA_RESULT = 8
 class V6FreshAnalysisError(ReviewInputError):
     """Fail-closed error raised during v6 fresh PR ancestry, diff, or batch planning."""
 
-    def __init__(self, diagnostic: str, message: str = "") -> None:
+    def __init__(
+        self,
+        diagnostic: str,
+        message: str = "",
+        *,
+        provider_calls: int = 0,
+    ) -> None:
         super().__init__(message or diagnostic, diagnostic=diagnostic)
+        self.provider_calls = max(0, int(provider_calls))
 
 
 def _is_40_hex(value: Any) -> bool:
@@ -2092,6 +2099,7 @@ def execute_v6_batch(
             raise V6FreshAnalysisError(
                 str(diag),
                 f"batch {batch.batch_id} failed during provider execution ({run.outcome.status})",
+                provider_calls=calls_made,
             )
         return run.result, calls_made
 
