@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schema_version": "v6-coordinator-contract-v1",
-  "description": "Frozen Phase 1 wire, state-machine, escrow, revocation, and PR-ledger contract for the ReviewSensei v6 one-writer-per-PR coordinator.",
+  "description": "Frozen Phase 1 wire, two-gate state-machine, escrow, revocation, and PR-ledger contract for the ReviewSensei v6 one-writer-per-PR coordinator.",
   "baseline": {
     "pinned_main_sha": "ff406a44754d5016fead2435e547b9fd0536e17b",
     "pinned_v5_tag": "v5",
@@ -62,7 +62,6 @@
       "HOLD"
     ],
     "DRAINING": [
-      "IDLE",
       "RECONCILING",
       "HOLD"
     ],
@@ -99,13 +98,13 @@
       "routes": [
         "/github/v6/lease/acquire"
       ],
-      "guard": "GitHub access_tokens succeeded with exact requested permissions and encrypted_escrow persisted."
+      "guard": "GitHub access_tokens succeeded with exact requested permissions, encrypted_escrow persisted, acquired_at_ms set, and token_cleared set to false."
     },
     "MINTING->RECONCILING": {
       "routes": [
         "/github/v6/lease/acquire"
       ],
-      "guard": "Mint request timed out or failed with uncertain outcome (v6_lease_mint_uncertain)."
+      "guard": "Mint request timed out or failed with uncertain outcome (v6_lease_mint_uncertain); enters RECONCILING with token_cleared=false."
     },
     "MINTING->HOLD": {
       "routes": [
@@ -124,14 +123,14 @@
         "/github/v6/lease/drain",
         "/github/v6/lease/release"
       ],
-      "guard": "/release is valid ONLY in ACTIVE for the matching verified owner (slot_key, generation, lease_epoch, reservation_id); any non-ACTIVE state fails closed with HTTP 409. /drain initiates revocation on takeover or head drift."
+      "guard": "/release is valid ONLY in ACTIVE for the matching verified owner (slot_key, generation, lease_epoch, reservation_id); any non-ACTIVE state fails closed with HTTP 409. Both /release and /drain enter Gate 1 revocation drain (DRAINING) and never skip directly to IDLE."
     },
     "ACTIVE->RECONCILING": {
       "routes": [
         "/github/v6/lease/acquire",
         "/github/v6/lease/drain"
       ],
-      "guard": "Ambiguous write or lease continuity check requires bounded PR ledger reconciliation."
+      "guard": "Ambiguous write or lease continuity check requires bounded PR ledger reconciliation (token_cleared=false until Gate 1 confirms revocation/expiry)."
     },
     "ACTIVE->HOLD": {
       "routes": [
@@ -141,19 +140,12 @@
       ],
       "guard": "Escrow lost/corrupt, clock untrusted, or PR ledger slot continuity unproved."
     },
-    "DRAINING->IDLE": {
-      "routes": [
-        "/github/v6/lease/drain",
-        "/github/v6/lease/release"
-      ],
-      "guard": "DELETE /installation/token confirmed 204, OR returned 401 with token_expires_at_ms > 0 and now_ms >= token_expires_at_ms + clock_margin_ms."
-    },
     "DRAINING->RECONCILING": {
       "routes": [
         "/github/v6/lease/drain",
         "/github/v6/lease/release"
       ],
-      "guard": "DELETE /installation/token returned 401 before expiry+margin, or exhausted retries on 429/rate-limit-403/5xx/timeout (v6_lease_revocation_uncertain)."
+      "guard": "Gate 1 (Token Clearance): always transitions DRAINING -> RECONCILING (never IDLE). Confirmed clearance (DELETE /installation/token 204, OR 401 when token_expires_at_ms > 0 and now_ms >= token_expires_at_ms + clock_margin_ms) clears escrow and sets token_cleared=true; uncertain clearance (401 pre-expiry or exhausted 429/rate-limit-403/5xx/timeout) retains token_cleared=false."
     },
     "DRAINING->HOLD": {
       "routes": [
@@ -166,32 +158,32 @@
       "routes": [
         "/github/v6/lease/complete-reconcile"
       ],
-      "guard": "Valid ONLY via /complete-reconcile when reconciliation_outcome is terminal ('adopted' or 'proved_not_submitted') AND credential clearance (204 or verified expiry past token_expires_at_ms + clock_margin_ms) is already confirmed."
+      "guard": "Gate 2 (Write Reconciliation): valid ONLY via /github/v6/lease/complete-reconcile when slot.token_cleared === true AND the Worker independently verifies reconciliation_evidence covering old_generation and 100% of App-authored intent:v1 records for that generation (never trusting a bare runner claim)."
     },
     "RECONCILING->DRAINING": {
       "routes": [
         "/github/v6/lease/complete-reconcile",
         "/github/v6/lease/drain"
       ],
-      "guard": "Reconciliation identifies an unrevoked escrowed token whose expiry+margin has not elapsed and enters revocation drain."
+      "guard": "Reconciliation identifies an unrevoked escrowed token (token_cleared=false) whose expiry+margin has not elapsed and enters Gate 1 revocation drain."
     },
     "RECONCILING->HOLD": {
       "routes": [
         "/github/v6/lease/complete-reconcile"
       ],
-      "guard": "Non-terminal reconciliation_outcome ('ambiguous_hold' or 'incomplete'), conflicting PR records, escrow loss, or unproved continuity; never clears obligations or advances generation."
+      "guard": "Non-terminal reconciliation_outcome ('ambiguous_hold' or 'incomplete'), invalid/missing reconciliation_evidence (v6_lease_reconciliation_evidence_invalid), conflicting PR records, escrow loss, or unproved continuity; never clears obligations or advances generation."
     },
     "HOLD->RECONCILING": {
       "routes": [
         "/github/v6/lease/resolve-hold"
       ],
-      "guard": "Valid ONLY via /resolve-hold with resolution_kind='enter_reconcile', confirmed credential clearance, and verified named hold-resolution proof; never an unconditional bypass."
+      "guard": "Valid ONLY via /resolve-hold with resolution_kind='enter_reconcile', confirmed credential clearance (token_cleared=true), and verified named hold-resolution proof; never an unconditional bypass."
     },
     "HOLD->IDLE": {
       "routes": [
         "/github/v6/lease/resolve-hold"
       ],
-      "guard": "Valid ONLY via /resolve-hold with resolution_kind='reconciled_clean', confirmed credential clearance, and verified named PR ledger continuity/hold-resolution proof."
+      "guard": "Valid ONLY via /resolve-hold with resolution_kind='reconciled_clean', confirmed credential clearance (token_cleared=true), and verified named PR ledger continuity/hold-resolution proof."
     }
   },
   "coordinator_storage": {
@@ -232,7 +224,9 @@
       "owner_job": "string|null",
       "owner_comment_id": "integer|null",
       "owner_record_sha256": "sha256_hex64|null",
+      "acquired_at_ms": "integer|null",
       "token_expires_at_ms": "integer|null",
+      "token_cleared": "boolean",
       "clock_margin_ms": "integer>=0",
       "encrypted_escrow": "object|null",
       "last_reason_code": "diagnostic_code|null",
@@ -251,7 +245,9 @@
       "owner_job",
       "owner_comment_id",
       "owner_record_sha256",
+      "acquired_at_ms",
       "token_expires_at_ms",
+      "token_cleared",
       "clock_margin_ms",
       "encrypted_escrow",
       "last_reason_code",
@@ -333,6 +329,14 @@
           "payload_sha256",
           "target_digest"
         ],
+        "optional_fields": [
+          "generation",
+          "target_location"
+        ],
+        "pilot_required_fields": [
+          "generation",
+          "target_location"
+        ],
         "properties": {
           "schema": "const:reviewsensei:v6:intent:v1",
           "record_id": "string",
@@ -341,7 +345,9 @@
           "pr_head_sha": "sha1_hex40",
           "effect_kind": "string",
           "payload_sha256": "sha256_hex64",
-          "target_digest": "string"
+          "target_digest": "string",
+          "generation": "integer>=1",
+          "target_location": "string"
         }
       },
       "receipt": {
@@ -363,6 +369,42 @@
           "github_effect_id": "string|integer>0",
           "payload_sha256": "sha256_hex64",
           "completed_at": "iso8601_utc"
+        }
+      },
+      "non_submission": {
+        "schema": "reviewsensei:v6:non-submission:v1",
+        "required_fields": [
+          "schema",
+          "record_id",
+          "slot_key",
+          "generation",
+          "operation_id",
+          "pr_head_sha",
+          "proof_kind",
+          "payload_sha256",
+          "recorded_at"
+        ],
+        "optional_fields": [
+          "http_status",
+          "diagnostic"
+        ],
+        "proof_kinds": [
+          "definitive_github_rejection",
+          "pre_dispatch_terminal_abort"
+        ],
+        "note": "Affirmative App-authored proof that an intent was never submitted or was definitively rejected by GitHub; an empty search is never valid proof.",
+        "properties": {
+          "schema": "const:reviewsensei:v6:non-submission:v1",
+          "record_id": "string",
+          "slot_key": "slot_key",
+          "generation": "integer>=1",
+          "operation_id": "string",
+          "pr_head_sha": "sha1_hex40",
+          "proof_kind": "enum:definitive_github_rejection|pre_dispatch_terminal_abort",
+          "payload_sha256": "sha256_hex64",
+          "recorded_at": "iso8601_utc",
+          "http_status": "integer>=100|null",
+          "diagnostic": "string|null"
         }
       },
       "hold": {
@@ -451,12 +493,14 @@
       "completed_at",
       "coordinator_attestation_mac",
       "cursor_hint",
+      "diagnostic",
       "effect_kind",
       "expires_at",
       "findings_payload",
       "generation",
       "github_effect_id",
       "held_at",
+      "http_status",
       "last_progress_digest",
       "last_verified_id",
       "lease_epoch",
@@ -464,8 +508,10 @@
       "operation_id",
       "payload_sha256",
       "pr_head_sha",
+      "proof_kind",
       "reason_code",
       "record_id",
+      "recorded_at",
       "recovery_phase",
       "required_evidence_digests",
       "reservation_id",
@@ -476,6 +522,7 @@
       "slot_key",
       "stall_count",
       "target_digest",
+      "target_location",
       "transient_error_count",
       "verified_prefix_count",
       "verified_prefix_digest",
@@ -506,8 +553,9 @@
       "http_204": {
         "status": 204,
         "classification": "confirmed_revoked",
-        "next_state": "IDLE",
-        "clear_escrow": true
+        "next_state": "RECONCILING",
+        "clear_escrow": true,
+        "sets_token_cleared": true
       },
       "http_401": {
         "status": 401,
@@ -516,8 +564,10 @@
         "null_expiry_next_state": "HOLD",
         "null_expiry_diagnostic": "v6_lease_escrow_lost",
         "expiry_fallback_condition": "token_expires_at_ms is integer > 0 AND now_ms >= token_expires_at_ms + clock_margin_ms",
-        "next_state_after_expiry": "IDLE",
+        "next_state_after_expiry": "RECONCILING",
+        "sets_token_cleared_after_expiry": true,
         "next_state_before_expiry": "RECONCILING",
+        "sets_token_cleared_before_expiry": false,
         "diagnostic_before_expiry": "v6_lease_revocation_uncertain"
       },
       "http_429_or_ratelimit_403": {
@@ -529,6 +579,7 @@
         "classification": "rate_limited",
         "action": "bounded_retry_with_reset_backoff",
         "exhausted_next_state": "RECONCILING",
+        "exhausted_sets_token_cleared": false,
         "exhausted_diagnostic": "v6_lease_revocation_uncertain"
       },
       "permission_403": {
@@ -537,6 +588,7 @@
         "classification": "permission_rejected",
         "action": "fail_closed_no_retry",
         "next_state": "HOLD",
+        "sets_token_cleared": false,
         "diagnostic": "v6_lease_revocation_uncertain"
       },
       "http_other_4xx": {
@@ -552,6 +604,7 @@
         "action": "fail_closed_no_retry_preserve_escrow",
         "clear_escrow": false,
         "next_state": "HOLD",
+        "sets_token_cleared": false,
         "diagnostic": "v6_lease_revocation_uncertain"
       },
       "http_5xx_or_timeout": {
@@ -565,6 +618,7 @@
         "classification": "transient_uncertain",
         "action": "bounded_retry",
         "exhausted_next_state": "RECONCILING",
+        "exhausted_sets_token_cleared": false,
         "exhausted_diagnostic": "v6_lease_revocation_uncertain"
       }
     }
@@ -657,6 +711,7 @@
           "state",
           "generation",
           "lease_epoch",
+          "token_cleared",
           "revocation_status"
         ],
         "error": [
@@ -699,7 +754,8 @@
           "oidc_token",
           "slot_key",
           "generation",
-          "reconciliation_outcome"
+          "reconciliation_outcome",
+          "reconciliation_evidence"
         ],
         "optional": [
           "anchor_comment_id",
@@ -707,15 +763,66 @@
           "control_budget"
         ]
       },
-      "reconciliation_outcomes": {
-        "terminal": [
-          "adopted",
-          "proved_not_submitted"
+      "reconciliation_outcomes": [
+        "clean_receipts",
+        "adopted_missing_receipt",
+        "proved_not_submitted",
+        "ambiguous_hold",
+        "incomplete"
+      ],
+      "terminal_reconciliation_outcomes": [
+        "clean_receipts",
+        "adopted_missing_receipt",
+        "proved_not_submitted"
+      ],
+      "non_terminal_reconciliation_outcomes": [
+        "ambiguous_hold",
+        "incomplete"
+      ],
+      "reconciliation_evidence_schema": {
+        "required_fields": [
+          "old_generation",
+          "intent_resolutions"
         ],
-        "non_terminal": [
-          "ambiguous_hold",
-          "incomplete"
-        ]
+        "optional_fields": [
+          "old_owner_comment_id"
+        ],
+        "properties": {
+          "old_generation": "integer>=1",
+          "old_owner_comment_id": "integer>=1|null",
+          "intent_resolutions": "array<intent_resolution>"
+        },
+        "intent_resolution_item": {
+          "required_fields": [
+            "operation_id",
+            "intent_comment_id",
+            "resolution"
+          ],
+          "optional_fields": [
+            "receipt_comment_id",
+            "native_effect_kind",
+            "native_effect_id",
+            "proof_comment_id"
+          ],
+          "resolution_enum": [
+            "receipt_present",
+            "adopted_effect",
+            "proved_not_submitted",
+            "ambiguous_hold"
+          ]
+        }
+      },
+      "worker_independent_verification": {
+        "owner_anchor_check": "O(1) GET /repos/{owner}/{repo}/issues/comments/{old_owner_comment_id} verifying App authorship, canonical SHA-256, slot_key, generation, and coordinator_attestation_mac.",
+        "bounded_intent_inventory_check": "Bounded GET /repos/{owner}/{repo}/issues/{pr}/comments?per_page=100&since={slot_acquired_at} (fail closed on truncation or Link rel=next) asserting 100% of old_generation App-authored intent:v1 records are covered in intent_resolutions.",
+        "intent_comment_check": "O(1) GET /repos/{owner}/{repo}/issues/comments/{intent_comment_id} verifying App authorship, canonical SHA-256, operation_id, and old_generation.",
+        "resolution_proof_checks": {
+          "receipt_present": "O(1) GET /repos/{owner}/{repo}/issues/comments/{receipt_comment_id} verifying matching App-authored receipt:v1.",
+          "adopted_effect": "O(1) GET against the live GitHub native_effect_kind/native_effect_id surface verifying the effect landed and matches payload_sha256/operation_id.",
+          "proved_not_submitted": "O(1) GET /repos/{owner}/{repo}/issues/comments/{proof_comment_id} verifying App-authored reviewsensei:v6:non-submission:v1 (empty search is never accepted).",
+          "ambiguous_hold": "Transitions RECONCILING -> HOLD without clearing obligations or advancing generation."
+        },
+        "zero_worker_pr_writes": true
       },
       "response_fields": {
         "success": [
@@ -749,7 +856,8 @@
         "v6_lease_clock_untrusted",
         "v6_lease_slot_continuity_unproved",
         "v6_lease_unauthorized_tuple",
-        "v6_lease_rollback_blocked"
+        "v6_lease_rollback_blocked",
+        "v6_lease_reconciliation_evidence_invalid"
       ]
     },
     "/github/v6/lease/release": {
@@ -775,6 +883,7 @@
           "state",
           "generation",
           "lease_epoch",
+          "token_cleared",
           "revocation_status"
         ],
         "error": [
@@ -836,7 +945,9 @@
           "owner_job",
           "owner_comment_id",
           "owner_record_sha256",
+          "acquired_at_ms",
           "token_expires_at_ms",
+          "token_cleared",
           "last_reason_code",
           "updated_at_ms"
         ],
@@ -859,7 +970,9 @@
         "owner_job": null,
         "owner_comment_id": null,
         "owner_record_sha256": null,
+        "acquired_at_ms": null,
         "token_expires_at_ms": null,
+        "token_cleared": false,
         "last_reason_code": null,
         "updated_at_ms": null
       },
@@ -928,7 +1041,8 @@
         "v6_lease_clock_untrusted",
         "v6_lease_slot_continuity_unproved",
         "v6_lease_unauthorized_tuple",
-        "v6_lease_rollback_blocked"
+        "v6_lease_rollback_blocked",
+        "v6_lease_reconciliation_evidence_invalid"
       ]
     }
   },
@@ -947,7 +1061,8 @@
     "v6_lease_slot_continuity_unproved",
     "v6_lease_unauthorized_tuple",
     "v6_lease_rollback_blocked",
-    "v6_lease_mint_uncertain"
+    "v6_lease_mint_uncertain",
+    "v6_lease_reconciliation_evidence_invalid"
   ],
   "blockers": [
     {

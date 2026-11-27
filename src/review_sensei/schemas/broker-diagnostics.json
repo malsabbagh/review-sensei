@@ -548,5 +548,10 @@
     "stage": "v6_issuance",
     "action": "reconcile_slot",
     "hint": "Installation token minting did not produce a confirmed outcome and may have issued an unescrowed token. Reconcile or drain before retrying."
+  },
+  "v6_lease_reconciliation_evidence_invalid": {
+    "stage": "v6_reconcile",
+    "action": "reconcile_slot",
+    "hint": "The coordinator could not independently verify reconciliation evidence for every write intent in the prior generation. Reconcile the PR ledger and supply complete verified evidence before completing Gate 2."
   }
 }
