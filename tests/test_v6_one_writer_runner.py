@@ -313,7 +313,7 @@ class _SimulatedCoordinatorStore:
                 eff_kind = item.get("native_effect_kind")
                 eff_id = item.get("native_effect_id")
                 found_native = False
-                if eff_kind == "pr_review_publish":
+                if eff_kind == "pull_request_review":
                     found_native = any(
                         r["id"] == eff_id
                         and verify_app_authored_record(r, expected_app_id=APP_ID)
@@ -321,7 +321,7 @@ class _SimulatedCoordinatorStore:
                         in r["body"]
                         for r in pr.reviews
                     )
-                elif eff_kind == "pr_check_run":
+                elif eff_kind == "check_run":
                     found_native = any(
                         cr["id"] == eff_id
                         and cr.get("head_sha") == intent.pr_head_sha
@@ -329,7 +329,7 @@ class _SimulatedCoordinatorStore:
                         in cr.get("output", {}).get("text", "")
                         for cr in pr.check_runs
                     )
-                elif eff_kind == "pr_issue_comment":
+                elif eff_kind == "issue_comment":
                     found_native = any(
                         c["id"] == eff_id
                         and verify_app_authored_record(c, expected_app_id=APP_ID)
@@ -337,7 +337,7 @@ class _SimulatedCoordinatorStore:
                         in c["body"]
                         for c in pr.comments
                     )
-                elif eff_kind == "pr_inline_reply":
+                elif eff_kind == "pull_request_review_comment":
                     found_native = any(
                         rc["id"] == eff_id
                         and verify_app_authored_record(rc, expected_app_id=APP_ID)
@@ -1922,7 +1922,7 @@ class V6OneWriterRunnerTests(unittest.TestCase):
                     "operation_id": "op-1",
                     "intent_comment_id": intent_1_c["id"],
                     "resolution": "adopted_effect",
-                    "native_effect_kind": "pr_review_publish",
+                    "native_effect_kind": "pull_request_review",
                     "native_effect_id": 5001,
                 }
             ],
@@ -2302,6 +2302,28 @@ class V6OneWriterRunnerTests(unittest.TestCase):
                     ],
                 },
             )
+        with self.assertRaises(V6CoordinatorError) as bad_eff_kind:
+            coord_client.complete_reconcile(
+                slot_key=slot_key,
+                generation=1,
+                reconciliation_outcome="adopted_missing_receipt",
+                reconciliation_evidence={
+                    "old_generation": 1,
+                    "intent_resolutions": [
+                        {
+                            "operation_id": "op-1",
+                            "intent_comment_id": 101,
+                            "resolution": "adopted_effect",
+                            "native_effect_kind": "pr_review_publish",
+                            "native_effect_id": 5001,
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(
+            bad_eff_kind.exception.diagnostic,
+            "v6_lease_reconciliation_evidence_invalid",
+        )
         with self.assertRaises(V6CoordinatorError):
             coord_client.complete_reconcile(
                 slot_key=slot_key,

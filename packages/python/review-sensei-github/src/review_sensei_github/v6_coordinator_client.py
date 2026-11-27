@@ -55,6 +55,14 @@ RECONCILIATION_ITEM_RESOLUTIONS: frozenset[str] = frozenset(
         "ambiguous_hold",
     }
 )
+ALLOWED_NATIVE_EFFECT_KINDS: frozenset[str] = frozenset(
+    {
+        "pull_request_review",
+        "pull_request_review_comment",
+        "issue_comment",
+        "check_run",
+    }
+)
 HOLD_RESOLUTION_KINDS: frozenset[str] = frozenset(
     {
         "reconciled_clean",
@@ -403,10 +411,16 @@ def _normalize_reconciliation_evidence(raw: Mapping[str, Any]) -> dict[str, Any]
                 minimum=1,
             )
         if item.get("native_effect_kind") is not None:
-            norm_item["native_effect_kind"] = _require_str(
+            eff_kind = _require_str(
                 item.get("native_effect_kind"),
                 name=f"intent_resolutions[{idx}].native_effect_kind",
             )
+            if eff_kind not in ALLOWED_NATIVE_EFFECT_KINDS:
+                raise V6CoordinatorError(
+                    f"invalid native_effect_kind {eff_kind!r}",
+                    diagnostic="v6_lease_reconciliation_evidence_invalid",
+                )
+            norm_item["native_effect_kind"] = eff_kind
         if item.get("native_effect_id") is not None:
             eff_id = item.get("native_effect_id")
             if type(eff_id) is int:

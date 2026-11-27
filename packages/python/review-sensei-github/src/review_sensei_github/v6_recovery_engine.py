@@ -683,11 +683,12 @@ def _match_review_thread_node(
 
 def _canonical_native_effect_kind(effect_kind: str) -> str:
     if effect_kind in {
+        "pull_request_review",
         "pr_review_publish",
         "companion_prose_review_publish",
         "pr_approval_publish",
     }:
-        return "pr_review_publish"
+        return "pull_request_review"
     if effect_kind in {
         "pr_issue_comment",
         "issue_comment",
@@ -696,11 +697,16 @@ def _canonical_native_effect_kind(effect_kind: str) -> str:
         "issue_reply",
         "session_comment",
     }:
-        return "pr_issue_comment"
-    if effect_kind in {"pr_inline_reply", "inline_reply", "pr_review_comment"}:
-        return "pr_inline_reply"
-    if effect_kind in {"pr_check_run", "check_run_write", "check_publish"}:
-        return "pr_check_run"
+        return "issue_comment"
+    if effect_kind in {
+        "pull_request_review_comment",
+        "pr_inline_reply",
+        "inline_reply",
+        "pr_review_comment",
+    }:
+        return "pull_request_review_comment"
+    if effect_kind in {"check_run", "pr_check_run", "check_run_write", "check_publish"}:
+        return "check_run"
     return effect_kind
 
 
@@ -723,6 +729,7 @@ def _match_native_effects_for_intent(
     contradictory = False
 
     if kind in {
+        "pull_request_review",
         "pr_review_publish",
         "companion_prose_review_publish",
         "pr_approval_publish",
@@ -737,9 +744,14 @@ def _match_native_effects_for_intent(
         "session_comment",
     }:
         candidates = issue_comments
-    elif kind in {"pr_inline_reply", "inline_reply", "pr_review_comment"}:
+    elif kind in {
+        "pull_request_review_comment",
+        "pr_inline_reply",
+        "inline_reply",
+        "pr_review_comment",
+    }:
         candidates = review_comments
-    elif kind in {"pr_check_run", "check_run_write", "check_publish"}:
+    elif kind in {"check_run", "pr_check_run", "check_run_write", "check_publish"}:
         for rec in check_runs:
             if not isinstance(rec.payload, Mapping):
                 continue
@@ -2118,6 +2130,7 @@ class V6RecoveryEngine:
         if scan_check_runs:
             for intent in target_intents:
                 if intent.effect_kind in {
+                    "check_run",
                     "pr_check_run",
                     "check_run_write",
                     "check_publish",
