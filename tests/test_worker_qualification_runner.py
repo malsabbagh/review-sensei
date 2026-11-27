@@ -134,6 +134,7 @@ class WorkerQualificationRunnerTests(unittest.TestCase):
             "tests.quarantine_lifecycle_transfer_qualification",
             "tests.quarantine_body_worker_qualification",
             "tests.quarantine_published_tail_worker_qualification",
+            "tests.v6_one_writer_worker_qualification",
         )
         plan = RUNNER.commands()
         actual = []

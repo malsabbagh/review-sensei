@@ -46,6 +46,7 @@ QUALIFICATIONS = (
     ("initial-admission", ("tests.epic238_initial_tail_qualification",), {}),
     ("review-caller", ("unittest", "tests.api_work_worker_qualification"), {}),
     ("command-caller", ("unittest", "tests.action_run_worker_qualification"), {}),
+    ("v6-one-writer", ("unittest", "tests.v6_one_writer_worker_qualification"), {}),
 )
 
 

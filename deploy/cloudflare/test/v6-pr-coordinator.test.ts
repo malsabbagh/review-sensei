@@ -1451,7 +1451,7 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       code: "v6_lease_slot_continuity_unproved",
     });
 
-    // With resolved_by_record_id present (and no active unrevoked token), enter_reconcile & reconciled_clean work
+    // With resolved_by_record_id present (and no active unrevoked token), reconciled_clean moves HOLD -> RECONCILING
     provider.comments.set(
       9003,
       await buildLedgerComment(crypto, {
@@ -1482,7 +1482,35 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       anchor_comment_id: 9001,
     });
     expect(resolved.status).toBe(200);
-    expect(resolved.body.state).toBe("IDLE");
+    expect(resolved.body.state).toBe("RECONCILING");
+
+    // Immediate /acquire MUST fail closed with 409 v6_lease_reconciling until Gate 2 completes
+    const blockedBeforeReconcile = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(blockedBeforeReconcile.status).toBe(409);
+    expect(blockedBeforeReconcile.body.diagnostic).toMatchObject({
+      code: "v6_lease_reconciling",
+    });
+
+    const gen3Complete = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 3,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: {
+        old_generation: 3,
+        old_owner_comment_id: 9001,
+        intent_resolutions: [],
+      },
+      anchor_comment_id: 9001,
+      head_sha: HEAD_SHA_1,
+    });
+    expect(gen3Complete.status).toBe(200);
+    expect(gen3Complete.body.state).toBe("IDLE");
 
     // 5. Rollback gate blocks /acquire while allowing /drain, /release, /status
     const acqBeforeRollback = await engine.handleAcquire(env, {

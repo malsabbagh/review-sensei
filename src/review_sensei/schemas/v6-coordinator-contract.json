@@ -71,8 +71,7 @@
       "HOLD"
     ],
     "HOLD": [
-      "RECONCILING",
-      "IDLE"
+      "RECONCILING"
     ]
   },
   "transition_rules": {
@@ -177,13 +176,7 @@
       "routes": [
         "/github/v6/lease/resolve-hold"
       ],
-      "guard": "Valid ONLY via /resolve-hold with resolution_kind='enter_reconcile', confirmed credential clearance (token_cleared=true), and verified named hold-resolution proof; never an unconditional bypass."
-    },
-    "HOLD->IDLE": {
-      "routes": [
-        "/github/v6/lease/resolve-hold"
-      ],
-      "guard": "Valid ONLY via /resolve-hold with resolution_kind='reconciled_clean', confirmed credential clearance (token_cleared=true), and verified named PR ledger continuity/hold-resolution proof."
+      "guard": "Valid ONLY via /github/v6/lease/resolve-hold (for both resolution_kind='enter_reconcile' and resolution_kind='reconciled_clean') with confirmed credential clearance (token_cleared=true) and verified named hold-resolution proof; always transitions HOLD -> RECONCILING and requires full Gate 2 /github/v6/lease/complete-reconcile verification before reaching IDLE or issuing a new token."
     }
   },
   "coordinator_storage": {
