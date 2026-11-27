@@ -38,9 +38,11 @@ from review_sensei_github.v6_recovery_engine import (
 from review_sensei_github.v6_recovery_ledger import (
     HOLD_SCHEMA,
     MAX_MARKER_ENCODED_BYTES,
+    NON_SUBMISSION_SCHEMA,
     OWNER_SCHEMA,
     CompletionReceiptRecord,
     DurableHoldRecord,
+    NonSubmissionProofRecord,
     OwnerMarkerRecord,
     UnresolvedResultRecord,
     V6LedgerIntegrityError,
@@ -53,6 +55,7 @@ from review_sensei_github.v6_recovery_ledger import (
     reconcile_immutable_records,
     redact_secrets,
     validate_owner_lineage,
+    verify_app_authored_record,
 )
 from review_sensei_github.v6_transport import DualCredentialGitHubClient
 
@@ -185,10 +188,16 @@ class _FakeUrllibResponse:
 
 
 class _SimulatedCoordinatorStore:
-    """In-memory v6 coordinator state machine implementing frozen contract routes."""
+    """In-memory two-gate v6 coordinator state machine enforcing Worker-independent checks."""
 
-    def __init__(self, *, clock: Callable[[], float]) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float],
+        pr: _SimulatedPRSurface | None = None,
+    ) -> None:
         self.clock = clock
+        self.pr = pr
         self.slot_key = build_v6_slot_key(
             host="github.com",
             app_id=APP_ID,
@@ -204,14 +213,167 @@ class _SimulatedCoordinatorStore:
         self.owner_run_attempt: int | None = None
         self.owner_head_sha: str | None = None
         self.owner_comment_id: int | None = None
+        self.acquired_at_ms: int | None = None
         self.token_expires_at_ms: int | None = None
+        self.token_cleared = False
         self.last_reason_code: str | None = None
         self.active_token: str | None = None
         self.rollback_blocked = False
         self.live_head_sha = HEAD_A
         self.predecessor_terminal = True
         self.drain_revocation_outcome = "204"
+        self.worker_pr_writes = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _verify_pr_reconciliation_evidence(
+        self,
+        *,
+        pr: _SimulatedPRSurface,
+        outcome: str,
+        evidence: Mapping[str, Any],
+    ) -> str | None:
+        """Worker-side O(1) + bounded verification of PR evidence (zero writes)."""
+
+        old_gen = evidence.get("old_generation")
+        if type(old_gen) is not int or old_gen != self.generation or old_gen < 1:
+            return "v6_lease_reconciliation_evidence_invalid"
+
+        comments_by_id = {c["id"]: c for c in pr.comments}
+        old_owner_cid = evidence.get("old_owner_comment_id")
+        if old_owner_cid is not None:
+            owner_c = comments_by_id.get(old_owner_cid)
+            if owner_c is None or not verify_app_authored_record(
+                owner_c, expected_app_id=APP_ID
+            ):
+                return "v6_lease_slot_continuity_unproved"
+            owners = [
+                r
+                for r in extract_v6_record_markers(owner_c["body"], strict=True)
+                if isinstance(r, OwnerMarkerRecord)
+                and r.slot_key == self.slot_key
+                and r.generation == old_gen
+            ]
+            if not owners:
+                return "v6_lease_slot_continuity_unproved"
+
+        # Collect 100% of App-authored intents for old_generation from PR comments.
+        pr_intents_for_gen: dict[int, WriteIntentRecord] = {}
+        for c in pr.comments:
+            if not verify_app_authored_record(c, expected_app_id=APP_ID):
+                continue
+            for r in extract_v6_record_markers(c["body"], strict=False):
+                if isinstance(r, WriteIntentRecord):
+                    belongs = (
+                        r.generation == old_gen
+                        if r.generation is not None
+                        else r.writer_epoch == self.lease_epoch
+                    )
+                    if belongs:
+                        pr_intents_for_gen[c["id"]] = r
+
+        raw_resolutions = evidence.get("intent_resolutions")
+        if not isinstance(raw_resolutions, list):
+            return "v6_lease_reconciliation_evidence_invalid"
+        res_by_intent_cid: dict[int, dict[str, Any]] = {}
+        for item in raw_resolutions:
+            if not isinstance(item, Mapping):
+                return "v6_lease_reconciliation_evidence_invalid"
+            icid = item.get("intent_comment_id")
+            if type(icid) is not int or icid not in pr_intents_for_gen:
+                return "v6_lease_reconciliation_evidence_invalid"
+            if icid in res_by_intent_cid:
+                return "v6_lease_reconciliation_evidence_invalid"
+            res_by_intent_cid[icid] = dict(item)
+
+        if set(res_by_intent_cid.keys()) != set(pr_intents_for_gen.keys()):
+            return "v6_lease_reconciliation_evidence_invalid"
+
+        for icid, intent in pr_intents_for_gen.items():
+            item = res_by_intent_cid[icid]
+            if item.get("operation_id") != intent.operation_id:
+                return "v6_lease_reconciliation_evidence_invalid"
+            res_kind = item.get("resolution")
+            if res_kind == "receipt_present":
+                rcid = item.get("receipt_comment_id")
+                rc = comments_by_id.get(rcid) if type(rcid) is int else None
+                if rc is None or not verify_app_authored_record(
+                    rc, expected_app_id=APP_ID
+                ):
+                    return "v6_lease_reconciliation_evidence_invalid"
+                matched = [
+                    r
+                    for r in extract_v6_record_markers(rc["body"], strict=True)
+                    if isinstance(r, CompletionReceiptRecord)
+                    and r.operation_id == intent.operation_id
+                    and r.payload_sha256 == intent.payload_sha256
+                ]
+                if not matched:
+                    return "v6_lease_reconciliation_evidence_invalid"
+            elif res_kind == "adopted_effect":
+                eff_kind = item.get("native_effect_kind")
+                eff_id = item.get("native_effect_id")
+                found_native = False
+                if eff_kind == "pr_review_publish":
+                    found_native = any(
+                        r["id"] == eff_id
+                        and verify_app_authored_record(r, expected_app_id=APP_ID)
+                        and _effect_tag(intent.operation_id, intent.payload_sha256)
+                        in r["body"]
+                        for r in pr.reviews
+                    )
+                elif eff_kind == "pr_check_run":
+                    found_native = any(
+                        cr["id"] == eff_id
+                        and cr.get("head_sha") == intent.pr_head_sha
+                        and _effect_tag(intent.operation_id, intent.payload_sha256)
+                        in cr.get("output", {}).get("text", "")
+                        for cr in pr.check_runs
+                    )
+                elif eff_kind == "pr_issue_comment":
+                    found_native = any(
+                        c["id"] == eff_id
+                        and verify_app_authored_record(c, expected_app_id=APP_ID)
+                        and _effect_tag(intent.operation_id, intent.payload_sha256)
+                        in c["body"]
+                        for c in pr.comments
+                    )
+                elif eff_kind == "pr_inline_reply":
+                    found_native = any(
+                        rc["id"] == eff_id
+                        and verify_app_authored_record(rc, expected_app_id=APP_ID)
+                        and _effect_tag(intent.operation_id, intent.payload_sha256)
+                        in rc["body"]
+                        for rc in pr.review_comments
+                    )
+                if not found_native:
+                    return "v6_lease_reconciliation_evidence_invalid"
+            elif res_kind == "proved_not_submitted":
+                pcid = item.get("proof_comment_id")
+                pc = comments_by_id.get(pcid) if type(pcid) is int else None
+                if pc is None or not verify_app_authored_record(
+                    pc, expected_app_id=APP_ID
+                ):
+                    return "v6_lease_reconciliation_evidence_invalid"
+                matched_proofs = [
+                    r
+                    for r in extract_v6_record_markers(pc["body"], strict=True)
+                    if isinstance(r, NonSubmissionProofRecord)
+                    and r.slot_key == self.slot_key
+                    and r.generation == old_gen
+                    and r.operation_id == intent.operation_id
+                    and r.payload_sha256 == intent.payload_sha256
+                    and r.pr_head_sha == intent.pr_head_sha
+                ]
+                if not matched_proofs:
+                    return "v6_lease_reconciliation_evidence_invalid"
+            else:
+                return "v6_lease_hold"
+
+        if outcome == "clean_receipts" and any(
+            item["resolution"] != "receipt_present" for item in raw_resolutions
+        ):
+            return "v6_lease_reconciliation_evidence_invalid"
+        return None
 
     def opener(self, request: Any, timeout: float | None = None) -> _FakeUrllibResponse:
         route = urlsplit(request.full_url).path
@@ -234,7 +396,9 @@ class _SimulatedCoordinatorStore:
                     "owner_job": "v6-pilot" if self.generation else None,
                     "owner_comment_id": self.owner_comment_id,
                     "owner_record_sha256": None,
+                    "acquired_at_ms": self.acquired_at_ms,
                     "token_expires_at_ms": self.token_expires_at_ms,
+                    "token_cleared": self.token_cleared,
                     "last_reason_code": self.last_reason_code,
                     "updated_at_ms": int(self.clock() * 1000),
                 },
@@ -260,17 +424,21 @@ class _SimulatedCoordinatorStore:
             if self.drain_revocation_outcome == "204":
                 self.state = "RECONCILING"
                 self.active_token = None
+                self.token_cleared = True
                 revocation_status = "confirmed_revoked"
             elif self.drain_revocation_outcome == "401_expired":
                 self.state = "RECONCILING"
                 self.active_token = None
+                self.token_cleared = True
                 revocation_status = "expired"
             elif self.drain_revocation_outcome == "uncertain":
                 self.state = "RECONCILING"
+                self.token_cleared = False
                 self.last_reason_code = "v6_lease_revocation_uncertain"
                 revocation_status = "revocation_uncertain"
             else:
                 self.state = "HOLD"
+                self.token_cleared = False
                 self.last_reason_code = "v6_lease_escrow_lost"
                 revocation_status = "escrow_lost"
             return self._json(
@@ -280,6 +448,7 @@ class _SimulatedCoordinatorStore:
                     "state": self.state,
                     "generation": self.generation,
                     "lease_epoch": self.lease_epoch,
+                    "token_cleared": self.token_cleared,
                     "revocation_status": revocation_status,
                 },
             )
@@ -287,10 +456,37 @@ class _SimulatedCoordinatorStore:
         if route == "/github/v6/lease/complete-reconcile":
             if self.state != "RECONCILING":
                 return self._err(409, "v6_lease_hold", "v6_lease_hold")
+            if not self.token_cleared:
+                return self._err(
+                    409,
+                    "v6_lease_revocation_uncertain",
+                    "v6_lease_revocation_uncertain",
+                )
+            evidence = payload.get("reconciliation_evidence")
+            if not isinstance(evidence, Mapping):
+                self.state = "HOLD"
+                self.last_reason_code = "v6_lease_reconciliation_evidence_invalid"
+                return self._err(
+                    400,
+                    "v6_lease_reconciliation_evidence_invalid",
+                    "v6_lease_reconciliation_evidence_invalid",
+                )
             outcome = payload["reconciliation_outcome"]
             if payload.get("anchor_comment_id") is not None:
                 self.owner_comment_id = payload["anchor_comment_id"]
-            if outcome in {"adopted", "proved_not_submitted"}:
+            if outcome in {
+                "clean_receipts",
+                "adopted_missing_receipt",
+                "proved_not_submitted",
+            }:
+                if self.pr is not None:
+                    err_diag = self._verify_pr_reconciliation_evidence(
+                        pr=self.pr, outcome=outcome, evidence=evidence
+                    )
+                    if err_diag is not None:
+                        self.state = "HOLD"
+                        self.last_reason_code = err_diag
+                        return self._err(409, err_diag, err_diag)
                 self.state = "IDLE"
                 self.reservation_id = None
                 self.last_reason_code = None
@@ -320,7 +516,9 @@ class _SimulatedCoordinatorStore:
             self.owner_run_id = "5002"
             self.owner_run_attempt = 1
             now_ms = int(self.clock() * 1000)
+            self.acquired_at_ms = now_ms
             self.token_expires_at_ms = now_ms + 3_600_000
+            self.token_cleared = False
             self.active_token = (
                 f"ghs_leased_{self.generation}_{self.lease_epoch}_secret"
             )
@@ -346,9 +544,22 @@ class _SimulatedCoordinatorStore:
         if route == "/github/v6/lease/release":
             if self.state != "ACTIVE":
                 return self._err(409, "v6_lease_not_active", "v6_lease_hold")
-            self.state = "IDLE"
-            self.active_token = None
-            self.reservation_id = None
+            # Gate 1: /release transitions ACTIVE -> DRAINING -> RECONCILING (NEVER directly to IDLE!).
+            if self.drain_revocation_outcome in {"204", "401_expired"}:
+                self.state = "RECONCILING"
+                self.active_token = None
+                self.token_cleared = True
+                revocation_status = "confirmed_revoked"
+            elif self.drain_revocation_outcome == "uncertain":
+                self.state = "RECONCILING"
+                self.token_cleared = False
+                self.last_reason_code = "v6_lease_revocation_uncertain"
+                revocation_status = "revocation_uncertain"
+            else:
+                self.state = "HOLD"
+                self.token_cleared = False
+                self.last_reason_code = "v6_lease_escrow_lost"
+                revocation_status = "escrow_lost"
             return self._json(
                 200,
                 {
@@ -356,7 +567,8 @@ class _SimulatedCoordinatorStore:
                     "state": self.state,
                     "generation": self.generation,
                     "lease_epoch": self.lease_epoch,
-                    "revocation_status": "confirmed_revoked",
+                    "token_cleared": self.token_cleared,
+                    "revocation_status": revocation_status,
                 },
             )
 
@@ -719,9 +931,9 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         self,
     ) -> None:
         now = 1_764_200_000.0
-        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
-        slot_key = coord_store.slot_key
         pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        slot_key = coord_store.slot_key
 
         # Predecessor (gen=1, epoch=1) acquired on HEAD_A, wrote owner + unresolved + intent,
         # landed a check-run on HEAD_A, and crashed before writing CompletionReceiptRecord.
@@ -746,6 +958,8 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             effect_kind="check_run_write",
             payload_sha256=payload_sha,
             target_digest=canonical_sha256({"head": HEAD_A}),
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/check-runs",
         )
         pr.add_comment(format_v6_record_marker(intent_1), is_app=True)
         pr.check_runs.append(
@@ -1001,7 +1215,7 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             expected_bot_user_id=BOT_USER_ID,
             graphql_query="query($after:String){...}",
         )
-        self.assertEqual(recon.reconciliation_outcome, "adopted")
+        self.assertEqual(recon.reconciliation_outcome, "adopted_missing_receipt")
         self.assertEqual(len(recon.adopted_effects), 3)
         self.assertEqual(recon.model_calls_started, 0)
 
@@ -1195,16 +1409,36 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             expected_bot_login=BOT_LOGIN,
             operation_id="op-neg",
         )
-        self.assertEqual(recon_shifted.reconciliation_outcome, "adopted")
+        self.assertEqual(
+            recon_shifted.reconciliation_outcome, "adopted_missing_receipt"
+        )
         self.assertEqual(len(recon_shifted.adopted_effects), 1)
         self.assertEqual(recon_shifted.adopted_effects[0][1], 9301)
 
-        # 3) Affirmative non-submission proof -> proved_not_submitted -> issues ONCE.
+        # 3) Affirmative PR-resident NonSubmissionProofRecord -> proved_not_submitted -> issues ONCE.
         now = 1_764_200_000.0
-        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        pr_empty.add_comment(
+            format_v6_record_marker(
+                NonSubmissionProofRecord(
+                    record_id="non-sub:op-neg:1",
+                    slot_key=slot_key,
+                    generation=1,
+                    operation_id="op-neg",
+                    pr_head_sha=HEAD_A,
+                    proof_kind="definitive_github_rejection",
+                    payload_sha256=unresolved.payload_sha256,
+                    recorded_at="2026-11-27T00:05:00Z",
+                    http_status=422,
+                    diagnostic="github_unprocessable_entity",
+                )
+            ),
+            is_app=True,
+        )
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr_empty)
         coord_store.state = "RECONCILING"
         coord_store.generation = 1
         coord_store.lease_epoch = 1
+        coord_store.token_cleared = True
         coord_client = V6CoordinatorClient(
             base_url="https://coordinator.invalid",
             oidc_token_provider=lambda: "oidc-jwt-token",
@@ -1230,10 +1464,11 @@ class V6OneWriterRunnerTests(unittest.TestCase):
                 expected_app_id=APP_ID,
                 expected_bot_login=BOT_LOGIN,
                 expected_bot_user_id=BOT_USER_ID,
-                affirmative_non_submission=True,
             )
         )
         self.assertEqual(issued_once.status, "completed")
+        self.assertTrue(issued_once.lease_released)
+        self.assertEqual(issued_once.coordinator_state, "IDLE")
         self.assertEqual(len(pr_empty.reviews), 1)
 
     def test_row_9_competing_or_spoofed_owner_markers_fail_closed_with_step_summary(
@@ -1301,10 +1536,11 @@ class V6OneWriterRunnerTests(unittest.TestCase):
 
         # End-to-end runner holds without mutating PR and writes sanitized step summary.
         now = 1_764_200_000.0
-        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        pr = _SimulatedPRSurface()
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
         coord_store.state = "RECONCILING"
         coord_store.generation = 1
-        pr = _SimulatedPRSurface()
+        coord_store.token_cleared = True
         pr.add_comment(format_v6_record_marker(o1), is_app=True)
         pr.add_comment(format_v6_record_marker(o1_competing), is_app=True)
         before_comments = [dict(c) for c in pr.comments]
@@ -1349,8 +1585,8 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         self,
     ) -> None:
         now = 1_764_200_000.0
-        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
         pr = _SimulatedPRSurface()
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
         unresolved = _make_unresolved(operation_id="op-rb")
         pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
 
@@ -1426,8 +1662,8 @@ class V6OneWriterRunnerTests(unittest.TestCase):
         from unittest.mock import patch
 
         now = time.time()
-        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
         pr = _SimulatedPRSurface()
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
         pr.add_comment(
             format_v6_record_marker(_make_unresolved(operation_id="op-cli")),
             is_app=True,
@@ -1517,6 +1753,571 @@ class V6OneWriterRunnerTests(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         mock_v6_cli.assert_called_once()
+
+    def test_key_two_gate_adopted_missing_receipt_and_clean_release(self) -> None:
+        """The Key Test: Gen 1 lands review 5001, dies before receipt; replacement adopts + attaches receipt ONCE."""
+
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        unresolved = _make_unresolved(operation_id="op-1")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+
+        # Gen 1 acquires token, writes OwnerMarkerRecord + WriteIntentRecord (what, where, generation=1),
+        # GitHub accepts review 5001, and Gen 1 crashes BEFORE writing CompletionReceiptRecord!
+        grant_1 = coord_client.acquire(
+            pull_request=PR_NUMBER,
+            head_sha=HEAD_A,
+            capabilities=("pull_requests:write", "issues:write"),
+            operation_id="op-1",
+        )
+        self.assertEqual(grant_1.generation, 1)
+        owner_1 = _make_owner_record(
+            slot_key=grant_1.slot_key,
+            generation=1,
+            lease_epoch=grant_1.lease_epoch,
+            reservation_id=grant_1.reservation_id,
+            operation_id="op-1",
+            pr_head_sha=HEAD_A,
+        )
+        owner_1_c = pr.add_comment(format_v6_record_marker(owner_1), is_app=True)
+        coord_store.owner_comment_id = owner_1_c["id"]
+
+        intent_1 = WriteIntentRecord(
+            record_id="intent:op-1:1",
+            operation_id="op-1",
+            writer_epoch=grant_1.lease_epoch,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256=unresolved.payload_sha256,
+            target_digest=canonical_sha256(
+                {"repo": REPO_ID, "pr": PR_NUMBER, "head": HEAD_A}
+            ),
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        intent_1_c = pr.add_comment(format_v6_record_marker(intent_1), is_app=True)
+        pr.add_review(
+            f"Gen 1 review\n{_effect_tag('op-1', unresolved.payload_sha256)}",
+            commit_id=HEAD_A,
+            review_id=5001,
+        )
+
+        # Worker revokes old token (204) -> slot moves to RECONCILING (token_cleared=True), NEVER IDLE!
+        drain_res = coord_client.drain(
+            slot_key=grant_1.slot_key,
+            expected_generation=1,
+            expected_lease_epoch=grant_1.lease_epoch,
+            predecessor_anchor_comment_id=owner_1_c["id"],
+        )
+        self.assertEqual(drain_res.state, "RECONCILING")
+        self.assertTrue(drain_res.token_cleared)
+
+        # /acquire MUST fail while slot is RECONCILING!
+        with self.assertRaises(V6CoordinatorError):
+            coord_client.acquire(
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                capabilities=("pull_requests:write",),
+                operation_id="op-1",
+            )
+
+        # Bare /complete-reconcile without covering intent_1 MUST fail (409 v6_lease_reconciliation_evidence_invalid) -> HOLD.
+        bare_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        bare_store.state = "RECONCILING"
+        bare_store.generation = 1
+        bare_store.lease_epoch = 1
+        bare_store.token_cleared = True
+        bare_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=bare_store.opener,
+            clock=lambda: now,
+        )
+        with self.assertRaises(V6CoordinatorError) as bad_ev:
+            bare_client.complete_reconcile(
+                slot_key=grant_1.slot_key,
+                generation=1,
+                reconciliation_outcome="clean_receipts",
+                reconciliation_evidence={"old_generation": 1, "intent_resolutions": []},
+            )
+        self.assertEqual(
+            bad_ev.exception.diagnostic, "v6_lease_reconciliation_evidence_invalid"
+        )
+        self.assertEqual(bare_store.state, "HOLD")
+
+        # Fresh replacement runner (zero artifacts, zero local state, read-only GITHUB_TOKEN)
+        # finds review 5001, passes Gate 2 -> acquires Gen 2 -> writes Gen 2 owner + receipt 1x -> Gate 1 + Gate 2 -> IDLE!
+        wf_tr = _ScriptedTransport(pr.handle_wf)
+        app_tr = _ScriptedTransport(pr.handle_app)
+        runner = V6PilotRunner(
+            coordinator=coord_client,
+            workflow_token_transport=wf_tr,
+            app_transport_factory=lambda _g: app_tr,
+            clock=lambda: now,
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-1",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+            )
+        )
+        self.assertEqual(outcome.status, "completed")
+        self.assertTrue(outcome.lease_released)
+        self.assertEqual(outcome.coordinator_state, "IDLE")
+        self.assertEqual(outcome.generation, 2)
+        self.assertEqual(outcome.model_calls_started, 0)
+        self.assertEqual(coord_store.worker_pr_writes, 0)
+        assert isinstance(outcome.recovery_outcome, RecoveryCompleted)
+        self.assertTrue(outcome.recovery_outcome.reconciled_from_existing_effect)
+        self.assertEqual(outcome.recovery_outcome.github_effect_id, 5001)
+
+        # Strictly 1 native review (5001), 0 duplicate reviews!
+        self.assertEqual([r["id"] for r in pr.reviews], [5001])
+        # Strictly 1 CompletionReceiptRecord for op-1!
+        receipts = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=False)
+            if isinstance(rec, CompletionReceiptRecord) and rec.operation_id == "op-1"
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].github_effect_id, 5001)
+
+        # Verify Gen 2 coordinator transitions: complete-reconcile (adopted_missing_receipt) -> acquire -> release -> complete-reconcile (clean_receipts)!
+        recon_calls = [
+            payload
+            for route, payload in coord_store.calls
+            if route == "/github/v6/lease/complete-reconcile"
+        ]
+        self.assertEqual(len(recon_calls), 2)
+        self.assertEqual(
+            recon_calls[0]["reconciliation_outcome"], "adopted_missing_receipt"
+        )
+        self.assertEqual(recon_calls[0]["reconciliation_evidence"]["old_generation"], 1)
+        self.assertEqual(
+            recon_calls[0]["reconciliation_evidence"]["old_owner_comment_id"],
+            owner_1_c["id"],
+        )
+        self.assertEqual(
+            recon_calls[0]["reconciliation_evidence"]["intent_resolutions"],
+            [
+                {
+                    "operation_id": "op-1",
+                    "intent_comment_id": intent_1_c["id"],
+                    "resolution": "adopted_effect",
+                    "native_effect_kind": "pr_review_publish",
+                    "native_effect_id": 5001,
+                }
+            ],
+        )
+        self.assertEqual(recon_calls[1]["reconciliation_outcome"], "clean_receipts")
+        self.assertEqual(recon_calls[1]["reconciliation_evidence"]["old_generation"], 2)
+        self.assertEqual(
+            recon_calls[1]["reconciliation_evidence"]["intent_resolutions"], []
+        )
+
+    def test_two_gate_empty_search_without_non_submission_proof_holds_no_token(
+        self,
+    ) -> None:
+        """Empty search without PR-resident NonSubmissionProofRecord MUST move to HOLD with NO token."""
+
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        slot_key = coord_store.slot_key
+
+        coord_store.state = "ACTIVE"
+        coord_store.generation = 1
+        coord_store.lease_epoch = 1
+        coord_store.reservation_id = "res-1-1"
+        owner_1_c = pr.add_comment(
+            format_v6_record_marker(
+                _make_owner_record(slot_key=slot_key, generation=1, lease_epoch=1)
+            ),
+            is_app=True,
+        )
+        coord_store.owner_comment_id = owner_1_c["id"]
+        unresolved = _make_unresolved(operation_id="op-empty")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+        pr.add_comment(
+            format_v6_record_marker(
+                WriteIntentRecord(
+                    record_id="intent:op-empty:1",
+                    operation_id="op-empty",
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    effect_kind="pr_review_publish",
+                    payload_sha256=unresolved.payload_sha256,
+                    target_digest="td-1",
+                    generation=1,
+                    target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+                )
+            ),
+            is_app=True,
+        )
+
+        app_calls: list[dict[str, Any]] = []
+        summary_lines: list[str] = []
+        runner = V6PilotRunner(
+            coordinator=V6CoordinatorClient(
+                base_url="https://coordinator.invalid",
+                oidc_token_provider=lambda: "oidc-jwt-token",
+                opener=coord_store.opener,
+                clock=lambda: now,
+            ),
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(
+                lambda c: app_calls.append(c) or pr.handle_app(c)
+            ),
+            clock=lambda: now,
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-empty",
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                affirmative_non_submission=True,
+                step_summary_sink=summary_lines.append,
+            )
+        )
+        self.assertEqual(outcome.status, "hold")
+        self.assertEqual(outcome.coordinator_state, "HOLD")
+        self.assertEqual(coord_store.state, "HOLD")
+        self.assertEqual(app_calls, [])
+        self.assertFalse(
+            any(r == "/github/v6/lease/acquire" for r, _ in coord_store.calls)
+        )
+        self.assertTrue(summary_lines)
+        self.assertEqual(pr.reviews, [])
+
+    def test_clean_exit_writes_receipt_before_release_then_gate2_clean_receipts(
+        self,
+    ) -> None:
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        unresolved = _make_unresolved(operation_id="op-clean")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+
+        events: list[str] = []
+        orig_app = pr.handle_app
+        orig_opener = coord_store.opener
+
+        def trace_app(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            if call["method"] == "POST":
+                body_str = str((call.get("body") or {}).get("body", ""))
+                if "reviewsensei:v6:owner:v1" in body_str:
+                    events.append("post_owner")
+                elif "reviewsensei:v6:intent:v1" in body_str:
+                    events.append("post_intent")
+                elif "reviewsensei:v6:receipt:v1" in body_str:
+                    events.append("post_receipt")
+                elif "/reviews" in call["path"]:
+                    events.append("post_review")
+            return orig_app(call)
+
+        def trace_coord(req: Any, timeout: float | None = None) -> _FakeUrllibResponse:
+            events.append(f"coord:{urlsplit(req.full_url).path.rsplit('/', 1)[-1]}")
+            return orig_opener(req, timeout=timeout)
+
+        runner = V6PilotRunner(
+            coordinator=V6CoordinatorClient(
+                base_url="https://coordinator.invalid",
+                oidc_token_provider=lambda: "oidc-jwt-token",
+                opener=trace_coord,
+                clock=lambda: now,
+            ),
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(trace_app),
+            clock=lambda: now,
+        )
+        outcome = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-clean",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+            )
+        )
+        self.assertEqual(outcome.status, "completed")
+        self.assertTrue(outcome.lease_released)
+        self.assertEqual(outcome.coordinator_state, "IDLE")
+
+        # Strict ordering: post_owner -> post_intent -> post_review -> post_receipt BEFORE coord:release -> coord:complete-reconcile!
+        self.assertLess(events.index("post_owner"), events.index("post_intent"))
+        self.assertLess(events.index("post_intent"), events.index("post_review"))
+        self.assertLess(events.index("post_review"), events.index("post_receipt"))
+        self.assertLess(events.index("post_receipt"), events.index("coord:release"))
+        self.assertLess(
+            events.index("coord:release"), events.index("coord:complete-reconcile")
+        )
+
+        # Intent written MUST have generation + target_location!
+        intents = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, WriteIntentRecord)
+        ]
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].generation, 1)
+        self.assertEqual(
+            intents[0].target_location,
+            f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+
+        # Verify Gate 2 clean_receipts evidence referenced the created owner/intent/receipt comments.
+        recon_calls = [
+            p
+            for r, p in coord_store.calls
+            if r == "/github/v6/lease/complete-reconcile"
+        ]
+        self.assertEqual(len(recon_calls), 1)
+        self.assertEqual(recon_calls[0]["reconciliation_outcome"], "clean_receipts")
+        ev = recon_calls[0]["reconciliation_evidence"]
+        self.assertEqual(ev["old_generation"], 1)
+        self.assertEqual(len(ev["intent_resolutions"]), 1)
+        self.assertEqual(ev["intent_resolutions"][0]["resolution"], "receipt_present")
+
+    def test_two_gate_422_rejection_writes_non_submission_proof_and_successor_publishes_once(
+        self,
+    ) -> None:
+        now = 1_764_200_000.0
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now, pr=pr)
+        unresolved = _make_unresolved(operation_id="op-422")
+        pr.add_comment(format_v6_record_marker(unresolved), is_app=True)
+
+        reject_next_review = True
+
+        def app_422_first_time(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            nonlocal reject_next_review
+            if (
+                reject_next_review
+                and call["method"] == "POST"
+                and f"/pulls/{PR_NUMBER}/reviews" in call["path"]
+            ):
+                reject_next_review = False
+                return (
+                    422,
+                    {"X-RateLimit-Remaining": "4990"},
+                    {"message": "Unprocessable Entity"},
+                )
+            return pr.handle_app(call)
+
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+        runner = V6PilotRunner(
+            coordinator=coord_client,
+            workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+            app_transport_factory=lambda _g: _ScriptedTransport(app_422_first_time),
+            clock=lambda: now,
+        )
+        first_run = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-422",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+            )
+        )
+        self.assertEqual(first_run.status, "hold")
+        self.assertEqual(first_run.diagnostic, "definitive_github_rejection_422")
+        self.assertEqual(coord_store.state, "RECONCILING")
+        self.assertTrue(coord_store.token_cleared)
+        proofs = [
+            rec
+            for c in pr.comments
+            for rec in extract_v6_record_markers(c["body"], strict=True)
+            if isinstance(rec, NonSubmissionProofRecord)
+        ]
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(proofs[0].schema, NON_SUBMISSION_SCHEMA)
+        self.assertEqual(proofs[0].proof_kind, "definitive_github_rejection")
+        self.assertEqual(proofs[0].http_status, 422)
+
+        # Successor takes over from RECONCILING -> Gate 2 (proved_not_submitted) -> IDLE -> acquires Gen 2 -> publishes ONCE -> Gate 1 + Gate 2 -> IDLE!
+        second_run = runner.run(
+            V6PilotRunConfig(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                head_sha=HEAD_A,
+                operation_id="op-422",
+                run_id=5002,
+                workflow_sha=WORKFLOW_SHA,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+            )
+        )
+        self.assertEqual(second_run.status, "completed")
+        self.assertTrue(second_run.lease_released)
+        self.assertEqual(second_run.coordinator_state, "IDLE")
+        self.assertEqual(second_run.generation, 2)
+        self.assertEqual(len(pr.reviews), 1)
+        assert second_run.takeover_reconciliation is not None
+        self.assertEqual(
+            second_run.takeover_reconciliation.reconciliation_outcome,
+            "proved_not_submitted",
+        )
+
+    def test_two_gate_ledger_and_coordinator_client_validation(self) -> None:
+        slot_key = build_v6_slot_key(
+            host="github.com",
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            base_repo_id=REPO_ID,
+            pr_number=PR_NUMBER,
+        )
+        intent_ext = WriteIntentRecord(
+            record_id="intent:ext:1",
+            operation_id="op-ext",
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            effect_kind="pr_review_publish",
+            payload_sha256="1" * 64,
+            target_digest="t1",
+            generation=1,
+            target_location=f"/repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews",
+        )
+        non_sub = NonSubmissionProofRecord(
+            record_id="ns:ext:1",
+            slot_key=slot_key,
+            generation=1,
+            operation_id="op-ext",
+            pr_head_sha=HEAD_A,
+            proof_kind="pre_dispatch_terminal_abort",
+            payload_sha256="1" * 64,
+            recorded_at="2026-11-27T00:00:00Z",
+            http_status=None,
+            diagnostic="preflight_aborted-->test",
+        )
+        for rec in (intent_ext, non_sub):
+            marker = format_v6_record_marker(rec)
+            self.assertNotIn("-->", marker[:-4])
+            self.assertEqual(parse_v6_record_marker(marker), rec)
+            self.assertEqual(extract_v6_record_markers(marker, strict=True), (rec,))
+
+        with self.assertRaises(Exception):
+            WriteIntentRecord(
+                record_id="bad-gen",
+                operation_id="op",
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                effect_kind="pr_review_publish",
+                payload_sha256="1" * 64,
+                target_digest="t1",
+                generation=0,
+            )
+        with self.assertRaises(Exception):
+            WriteIntentRecord(
+                record_id="bad-loc",
+                operation_id="op",
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                effect_kind="pr_review_publish",
+                payload_sha256="1" * 64,
+                target_digest="t1",
+                target_location="/bad\nline",
+            )
+
+        now = 1_764_200_000.0
+        coord_store = _SimulatedCoordinatorStore(clock=lambda: now)
+        coord_client = V6CoordinatorClient(
+            base_url="https://coordinator.invalid",
+            oidc_token_provider=lambda: "oidc-jwt-token",
+            opener=coord_store.opener,
+            clock=lambda: now,
+        )
+        with self.assertRaises(V6CoordinatorError):
+            coord_client.complete_reconcile(
+                slot_key=slot_key,
+                generation=1,
+                reconciliation_outcome="clean_receipts",
+                reconciliation_evidence={
+                    "old_generation": 1,
+                    "intent_resolutions": [
+                        {
+                            "operation_id": "op-1",
+                            "intent_comment_id": 101,
+                            "resolution": "receipt_present",
+                        }
+                    ],
+                },
+            )
+        with self.assertRaises(V6CoordinatorError):
+            coord_client.complete_reconcile(
+                slot_key=slot_key,
+                generation=1,
+                reconciliation_outcome="adopted_missing_receipt",
+                reconciliation_evidence={
+                    "old_generation": 1,
+                    "intent_resolutions": [
+                        {
+                            "operation_id": "op-1",
+                            "intent_comment_id": 101,
+                            "resolution": "adopted_effect",
+                        }
+                    ],
+                },
+            )
+        with self.assertRaises(V6CoordinatorError):
+            coord_client.complete_reconcile(
+                slot_key=slot_key,
+                generation=1,
+                reconciliation_outcome="proved_not_submitted",
+                reconciliation_evidence={
+                    "old_generation": 1,
+                    "intent_resolutions": [
+                        {
+                            "operation_id": "op-1",
+                            "intent_comment_id": 101,
+                            "resolution": "proved_not_submitted",
+                        }
+                    ],
+                },
+            )
 
 
 if __name__ == "__main__":

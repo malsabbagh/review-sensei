@@ -40,10 +40,19 @@ COORDINATOR_STATES: frozenset[str] = frozenset(
 )
 RECONCILIATION_OUTCOMES: frozenset[str] = frozenset(
     {
-        "adopted",
+        "clean_receipts",
+        "adopted_missing_receipt",
         "proved_not_submitted",
         "ambiguous_hold",
         "incomplete",
+    }
+)
+RECONCILIATION_ITEM_RESOLUTIONS: frozenset[str] = frozenset(
+    {
+        "receipt_present",
+        "adopted_effect",
+        "proved_not_submitted",
+        "ambiguous_hold",
     }
 )
 HOLD_RESOLUTION_KINDS: frozenset[str] = frozenset(
@@ -69,6 +78,7 @@ V6_COORDINATOR_DIAGNOSTICS: frozenset[str] = frozenset(
         "v6_lease_unauthorized_tuple",
         "v6_lease_rollback_blocked",
         "v6_lease_mint_uncertain",
+        "v6_lease_reconciliation_evidence_invalid",
     }
 )
 
@@ -237,6 +247,7 @@ class V6LeaseDrainResult:
     generation: int
     lease_epoch: int
     revocation_status: str
+    token_cleared: bool = False
 
 
 @dataclass(frozen=True)
@@ -265,7 +276,9 @@ class V6SlotStatus:
     owner_job: str | None = None
     owner_comment_id: int | None = None
     owner_record_sha256: str | None = None
+    acquired_at_ms: int | None = None
     token_expires_at_ms: int | None = None
+    token_cleared: bool = False
     last_reason_code: str | None = None
     updated_at_ms: int | None = None
 
@@ -317,6 +330,123 @@ def _require_opt_str(value: Any, *, name: str) -> str | None:
     if value is None:
         return None
     return _require_str(value, name=name)
+
+
+def _require_bool(value: Any, *, name: str) -> bool:
+    if type(value) is not bool:
+        raise V6CoordinatorError(f"coordinator field {name} must be a boolean")
+    return value
+
+
+def _normalize_reconciliation_evidence(raw: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise V6CoordinatorError(
+            "reconciliation_evidence must be a mapping",
+            diagnostic="v6_lease_reconciliation_evidence_invalid",
+        )
+    old_generation = _require_int(
+        raw.get("old_generation"),
+        name="reconciliation_evidence.old_generation",
+        minimum=1,
+    )
+    evidence: dict[str, Any] = {
+        "old_generation": old_generation,
+    }
+    if raw.get("old_owner_comment_id") is not None:
+        evidence["old_owner_comment_id"] = _require_int(
+            raw.get("old_owner_comment_id"),
+            name="reconciliation_evidence.old_owner_comment_id",
+            minimum=1,
+        )
+    raw_items = raw.get("intent_resolutions")
+    if not isinstance(raw_items, Sequence) or isinstance(
+        raw_items, (str, bytes, bytearray)
+    ):
+        raise V6CoordinatorError(
+            "reconciliation_evidence.intent_resolutions must be a list",
+            diagnostic="v6_lease_reconciliation_evidence_invalid",
+        )
+    normalized_items: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_items):
+        if not isinstance(item, Mapping):
+            raise V6CoordinatorError(
+                f"reconciliation_evidence.intent_resolutions[{idx}] must be a mapping",
+                diagnostic="v6_lease_reconciliation_evidence_invalid",
+            )
+        op_id = _require_str(
+            item.get("operation_id"),
+            name=f"intent_resolutions[{idx}].operation_id",
+        )
+        intent_cid = _require_int(
+            item.get("intent_comment_id"),
+            name=f"intent_resolutions[{idx}].intent_comment_id",
+            minimum=1,
+        )
+        resolution = _require_str(
+            item.get("resolution"),
+            name=f"intent_resolutions[{idx}].resolution",
+        )
+        if resolution not in RECONCILIATION_ITEM_RESOLUTIONS:
+            raise V6CoordinatorError(
+                f"invalid intent resolution {resolution!r}",
+                diagnostic="v6_lease_reconciliation_evidence_invalid",
+            )
+        norm_item: dict[str, Any] = {
+            "operation_id": op_id,
+            "intent_comment_id": intent_cid,
+            "resolution": resolution,
+        }
+        if item.get("receipt_comment_id") is not None:
+            norm_item["receipt_comment_id"] = _require_int(
+                item.get("receipt_comment_id"),
+                name=f"intent_resolutions[{idx}].receipt_comment_id",
+                minimum=1,
+            )
+        if item.get("native_effect_kind") is not None:
+            norm_item["native_effect_kind"] = _require_str(
+                item.get("native_effect_kind"),
+                name=f"intent_resolutions[{idx}].native_effect_kind",
+            )
+        if item.get("native_effect_id") is not None:
+            eff_id = item.get("native_effect_id")
+            if type(eff_id) is int:
+                if eff_id < 1:
+                    raise V6CoordinatorError(
+                        f"intent_resolutions[{idx}].native_effect_id must be >= 1",
+                        diagnostic="v6_lease_reconciliation_evidence_invalid",
+                    )
+            elif type(eff_id) is not str or not eff_id.strip():
+                raise V6CoordinatorError(
+                    f"intent_resolutions[{idx}].native_effect_id must be non-empty str or positive int",
+                    diagnostic="v6_lease_reconciliation_evidence_invalid",
+                )
+            norm_item["native_effect_id"] = eff_id
+        if item.get("proof_comment_id") is not None:
+            norm_item["proof_comment_id"] = _require_int(
+                item.get("proof_comment_id"),
+                name=f"intent_resolutions[{idx}].proof_comment_id",
+                minimum=1,
+            )
+        if resolution == "receipt_present" and "receipt_comment_id" not in norm_item:
+            raise V6CoordinatorError(
+                "receipt_present resolution requires receipt_comment_id",
+                diagnostic="v6_lease_reconciliation_evidence_invalid",
+            )
+        if resolution == "adopted_effect" and (
+            "native_effect_kind" not in norm_item or "native_effect_id" not in norm_item
+        ):
+            raise V6CoordinatorError(
+                "adopted_effect resolution requires native_effect_kind and native_effect_id",
+                diagnostic="v6_lease_reconciliation_evidence_invalid",
+            )
+        if resolution == "proved_not_submitted" and "proof_comment_id" not in norm_item:
+            raise V6CoordinatorError(
+                "proved_not_submitted resolution requires proof_comment_id",
+                diagnostic="v6_lease_reconciliation_evidence_invalid",
+            )
+        normalized_items.append(norm_item)
+    evidence["intent_resolutions"] = normalized_items
+    return evidence
 
 
 def _require_state(value: Any) -> str:
@@ -641,6 +771,11 @@ class V6CoordinatorClient:
             revocation_status=_require_str(
                 data.get("revocation_status"), name="revocation_status"
             ),
+            token_cleared=(
+                _require_bool(data["token_cleared"], name="token_cleared")
+                if "token_cleared" in data
+                else False
+            ),
         )
 
     def complete_reconcile(
@@ -649,20 +784,25 @@ class V6CoordinatorClient:
         slot_key: str,
         generation: int,
         reconciliation_outcome: str,
+        reconciliation_evidence: Mapping[str, Any],
         anchor_comment_id: int | None = None,
         head_sha: str | None = None,
         control_budget: Mapping[str, Any] | None = None,
     ) -> V6LeaseStateTransition:
-        """Report reconciliation outcome via ``POST /github/v6/lease/complete-reconcile``."""
+        """Report Gate 2 reconciliation evidence via ``POST /github/v6/lease/complete-reconcile``."""
 
         if reconciliation_outcome not in RECONCILIATION_OUTCOMES:
             raise V6CoordinatorError(
                 f"invalid reconciliation_outcome: {reconciliation_outcome!r}"
             )
+        normalized_evidence = _normalize_reconciliation_evidence(
+            reconciliation_evidence
+        )
         payload: dict[str, Any] = {
             "slot_key": validate_v6_slot_key(slot_key),
             "generation": _require_int(generation, name="generation", minimum=0),
             "reconciliation_outcome": reconciliation_outcome,
+            "reconciliation_evidence": normalized_evidence,
         }
         if anchor_comment_id is not None:
             payload["anchor_comment_id"] = _require_int(
@@ -698,7 +838,7 @@ class V6CoordinatorClient:
         reservation_id: str,
         control_budget: Mapping[str, Any] | None = None,
     ) -> V6LeaseDrainResult:
-        """Release an ACTIVE lease via ``POST /github/v6/lease/release``."""
+        """Release an ACTIVE lease into Gate 1 drain via ``POST /github/v6/lease/release``."""
 
         payload: dict[str, Any] = {
             "slot_key": validate_v6_slot_key(slot_key),
@@ -723,6 +863,11 @@ class V6CoordinatorClient:
             ),
             revocation_status=_require_str(
                 data.get("revocation_status"), name="revocation_status"
+            ),
+            token_cleared=(
+                _require_bool(data["token_cleared"], name="token_cleared")
+                if "token_cleared" in data
+                else False
             ),
         )
 
@@ -777,8 +922,16 @@ class V6CoordinatorClient:
             owner_record_sha256=_require_opt_str(
                 data.get("owner_record_sha256"), name="owner_record_sha256"
             ),
+            acquired_at_ms=_require_opt_int(
+                data.get("acquired_at_ms"), name="acquired_at_ms", minimum=0
+            ),
             token_expires_at_ms=_require_opt_int(
                 data.get("token_expires_at_ms"), name="token_expires_at_ms", minimum=1
+            ),
+            token_cleared=(
+                _require_bool(data["token_cleared"], name="token_cleared")
+                if "token_cleared" in data
+                else False
             ),
             last_reason_code=_require_opt_str(
                 data.get("last_reason_code"), name="last_reason_code"

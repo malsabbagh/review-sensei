@@ -31,17 +31,26 @@ class V6LedgerIntegrityError(ReviewInputError):
 OWNER_SCHEMA = "reviewsensei:v6:owner:v1"
 INTENT_SCHEMA = "reviewsensei:v6:intent:v1"
 RECEIPT_SCHEMA = "reviewsensei:v6:receipt:v1"
+NON_SUBMISSION_SCHEMA = "reviewsensei:v6:non-submission:v1"
 HOLD_SCHEMA = "reviewsensei:v6:hold:v1"
 UNRESOLVED_RESULT_SCHEMA = "reviewsensei:v6:unresolved:v1"
 PROGRESS_HINT_SCHEMA = "reviewsensei:v6:progress:v1"
 
 MAX_MARKER_ENCODED_BYTES = 65536
 
+VALID_NON_SUBMISSION_PROOF_KINDS: frozenset[str] = frozenset(
+    {
+        "definitive_github_rejection",
+        "pre_dispatch_terminal_abort",
+    }
+)
+
 VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
     {
         OWNER_SCHEMA,
         INTENT_SCHEMA,
         RECEIPT_SCHEMA,
+        NON_SUBMISSION_SCHEMA,
         HOLD_SCHEMA,
         UNRESOLVED_RESULT_SCHEMA,
         PROGRESS_HINT_SCHEMA,
@@ -390,6 +399,8 @@ class WriteIntentRecord:
     effect_kind: str
     payload_sha256: str
     target_digest: str
+    generation: int | None = None
+    target_location: str | None = None
     schema: str = INTENT_SCHEMA
 
     def __post_init__(self) -> None:
@@ -405,6 +416,63 @@ class WriteIntentRecord:
         _require_non_empty_str(self.effect_kind, name="effect_kind")
         _require_sha256_64(self.payload_sha256, name="payload_sha256")
         _require_non_empty_str(self.target_digest, name="target_digest")
+        if self.generation is not None:
+            _require_strict_int(self.generation, name="generation", minimum=1)
+        if self.target_location is not None:
+            if (
+                type(self.target_location) is not str
+                or not self.target_location.strip()
+                or "\n" in self.target_location
+                or "\r" in self.target_location
+            ):
+                raise ReviewInputError(
+                    "target_location must be a non-empty single-line string",
+                    diagnostic="v6_invalid_ledger_field",
+                )
+
+
+@dataclass(frozen=True)
+class NonSubmissionProofRecord:
+    """Affirmative App-authored proof that an intent was not submitted or rejected."""
+
+    record_id: str
+    slot_key: str
+    generation: int
+    operation_id: str
+    pr_head_sha: str
+    proof_kind: str
+    payload_sha256: str
+    recorded_at: str
+    http_status: int | None = None
+    diagnostic: str | None = None
+    schema: str = NON_SUBMISSION_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != NON_SUBMISSION_SCHEMA:
+            raise ReviewInputError(
+                f"invalid NonSubmissionProofRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_slot_key(self.slot_key, name="slot_key")
+        _require_strict_int(self.generation, name="generation", minimum=1)
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        if (
+            type(self.proof_kind) is not str
+            or self.proof_kind not in VALID_NON_SUBMISSION_PROOF_KINDS
+        ):
+            raise ReviewInputError(
+                f"invalid NonSubmissionProofRecord proof_kind: {self.proof_kind!r}",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        _require_sha256_64(self.payload_sha256, name="payload_sha256")
+        _require_iso8601_utc(self.recorded_at, name="recorded_at")
+        if self.http_status is not None:
+            _require_strict_int(self.http_status, name="http_status", minimum=100)
+        if self.diagnostic is not None:
+            _require_non_empty_str(self.diagnostic, name="diagnostic")
+            assert_no_secrets_in_text(self.diagnostic, context="diagnostic")
 
 
 @dataclass(frozen=True)
@@ -611,6 +679,7 @@ V6LedgerRecord: TypeAlias = (
     OwnerMarkerRecord
     | WriteIntentRecord
     | CompletionReceiptRecord
+    | NonSubmissionProofRecord
     | DurableHoldRecord
     | UnresolvedResultRecord
     | AdvisoryProgressHint
@@ -638,7 +707,7 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "coordinator_attestation_mac": record.coordinator_attestation_mac,
         }
     if isinstance(record, WriteIntentRecord):
-        return {
+        intent_dict: dict[str, Any] = {
             "schema": record.schema,
             "record_id": record.record_id,
             "operation_id": record.operation_id,
@@ -648,6 +717,11 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "payload_sha256": record.payload_sha256,
             "target_digest": record.target_digest,
         }
+        if record.generation is not None:
+            intent_dict["generation"] = record.generation
+        if record.target_location is not None:
+            intent_dict["target_location"] = record.target_location
+        return intent_dict
     if isinstance(record, CompletionReceiptRecord):
         return {
             "schema": record.schema,
@@ -658,6 +732,23 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "payload_sha256": record.payload_sha256,
             "completed_at": record.completed_at,
         }
+    if isinstance(record, NonSubmissionProofRecord):
+        proof_dict: dict[str, Any] = {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "slot_key": record.slot_key,
+            "generation": record.generation,
+            "operation_id": record.operation_id,
+            "pr_head_sha": record.pr_head_sha,
+            "proof_kind": record.proof_kind,
+            "payload_sha256": record.payload_sha256,
+            "recorded_at": record.recorded_at,
+        }
+        if record.http_status is not None:
+            proof_dict["http_status"] = record.http_status
+        if record.diagnostic is not None:
+            proof_dict["diagnostic"] = record.diagnostic
+        return proof_dict
     if isinstance(record, DurableHoldRecord):
         return {
             "schema": record.schema,
@@ -727,6 +818,16 @@ def _require_mapping_int(payload: Mapping[str, Any], key: str) -> int:
     if type(value) is not int:
         raise V6LedgerIntegrityError(
             f"field {key!r} must be strict int, got {type(value).__name__}",
+            diagnostic="v6_malformed_marker",
+        )
+    return value
+
+
+def _require_mapping_opt_int(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload[key]
+    if value is not None and type(value) is not int:
+        raise V6LedgerIntegrityError(
+            f"field {key!r} must be strict int or None, got {type(value).__name__}",
             diagnostic="v6_malformed_marker",
         )
     return value
@@ -848,7 +949,7 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
             )
 
         if schema == INTENT_SCHEMA:
-            expected_keys = {
+            required_keys = {
                 "schema",
                 "record_id",
                 "operation_id",
@@ -858,11 +959,25 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 "payload_sha256",
                 "target_digest",
             }
-            if set(payload.keys()) != expected_keys:
+            optional_keys = {"generation", "target_location"}
+            keys = set(payload.keys())
+            if not required_keys.issubset(keys) or not keys.issubset(
+                required_keys | optional_keys
+            ):
                 raise V6LedgerIntegrityError(
                     "WriteIntentRecord has unexpected or missing keys",
                     diagnostic="v6_malformed_marker",
                 )
+            generation = (
+                _require_mapping_opt_int(payload, "generation")
+                if "generation" in payload
+                else None
+            )
+            target_location = (
+                _require_mapping_opt_str(payload, "target_location")
+                if "target_location" in payload
+                else None
+            )
             return WriteIntentRecord(
                 schema=schema,
                 record_id=_require_mapping_str(payload, "record_id"),
@@ -872,6 +987,53 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 effect_kind=_require_mapping_str(payload, "effect_kind"),
                 payload_sha256=_require_mapping_str(payload, "payload_sha256"),
                 target_digest=_require_mapping_str(payload, "target_digest"),
+                generation=generation,
+                target_location=target_location,
+            )
+
+        if schema == NON_SUBMISSION_SCHEMA:
+            required_keys = {
+                "schema",
+                "record_id",
+                "slot_key",
+                "generation",
+                "operation_id",
+                "pr_head_sha",
+                "proof_kind",
+                "payload_sha256",
+                "recorded_at",
+            }
+            optional_keys = {"http_status", "diagnostic"}
+            keys = set(payload.keys())
+            if not required_keys.issubset(keys) or not keys.issubset(
+                required_keys | optional_keys
+            ):
+                raise V6LedgerIntegrityError(
+                    "NonSubmissionProofRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            http_status = (
+                _require_mapping_opt_int(payload, "http_status")
+                if "http_status" in payload
+                else None
+            )
+            diagnostic = (
+                _require_mapping_opt_str(payload, "diagnostic")
+                if "diagnostic" in payload
+                else None
+            )
+            return NonSubmissionProofRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                slot_key=_require_mapping_str(payload, "slot_key"),
+                generation=_require_mapping_int(payload, "generation"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                proof_kind=_require_mapping_str(payload, "proof_kind"),
+                payload_sha256=_require_mapping_str(payload, "payload_sha256"),
+                recorded_at=_require_mapping_str(payload, "recorded_at"),
+                http_status=http_status,
+                diagnostic=diagnostic,
             )
 
         if schema == RECEIPT_SCHEMA:
