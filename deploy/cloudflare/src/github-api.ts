@@ -1171,10 +1171,12 @@ export class GitHubApi {
             }
             if (commentsById.size >= maxComments) {
               const hasMoreItems = idx < fetched.items.length - 1 || fetched.hasMorePage;
-              return {
-                comments: Array.from(commentsById.values()),
-                truncated: hasMoreItems,
-              };
+              if (hasMoreItems) {
+                return {
+                  comments: Array.from(commentsById.values()),
+                  truncated: true,
+                };
+              }
             }
           }
           pageIds.push(currentPageIds);

@@ -820,6 +820,7 @@ class BatchOutputRecord:
     model: str | None = None
     review_status: str = "complete"
     attempt: int = 1
+    provider_calls: int = 1
     schema: str = BATCH_OUTPUT_SCHEMA
 
     def __post_init__(self) -> None:
@@ -857,6 +858,7 @@ class BatchOutputRecord:
             _require_non_empty_str(self.model, name="model")
         _require_non_empty_str(self.review_status, name="review_status")
         _require_strict_int(self.attempt, name="attempt", minimum=1)
+        _require_strict_int(self.provider_calls, name="provider_calls", minimum=1)
 
 
 @dataclass(frozen=True)
@@ -1161,6 +1163,7 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "model": record.model,
             "review_status": record.review_status,
             "attempt": record.attempt,
+            "provider_calls": record.provider_calls,
         }
     if isinstance(record, AdvisoryProgressHint):
         return {
@@ -1685,7 +1688,10 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 "review_status",
                 "attempt",
             }
-            if set(payload.keys()) != expected_keys:
+            optional_keys = {"provider_calls"}
+            if not (
+                expected_keys <= set(payload.keys()) <= expected_keys | optional_keys
+            ):
                 raise V6LedgerIntegrityError(
                     "BatchOutputRecord has unexpected or missing keys",
                     diagnostic="v6_malformed_marker",
@@ -1706,6 +1712,11 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                     "field 'findings' must be a list of mappings",
                     diagnostic="v6_malformed_marker",
                 )
+            provider_calls = (
+                _require_mapping_int(payload, "provider_calls")
+                if "provider_calls" in payload
+                else 1
+            )
             return BatchOutputRecord(
                 schema=schema,
                 record_id=_require_mapping_str(payload, "record_id"),
@@ -1719,6 +1730,7 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 model=_require_mapping_opt_str(payload, "model"),
                 review_status=_require_mapping_str(payload, "review_status"),
                 attempt=_require_mapping_int(payload, "attempt"),
+                provider_calls=provider_calls,
             )
 
         # PROGRESS_HINT_SCHEMA

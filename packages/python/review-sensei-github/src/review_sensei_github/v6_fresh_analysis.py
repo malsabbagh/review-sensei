@@ -217,6 +217,15 @@ class V6FreshAnalysisContext:
     has_unsupported: bool = False
 
 
+def filtered_hosted_environ(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return allowlisted hosted execution environment variables."""
+
+    source = os.environ if environ is None else environ
+    return {k: source[k] for k in _ALLOWED_ENV_KEYS if k in source}
+
+
 def compute_trusted_policy_and_config_digests(
     configuration: ProductConfiguration,
     *,
@@ -226,6 +235,7 @@ def compute_trusted_policy_and_config_digests(
     allow_custom_endpoint: bool = False,
     upstream_provider: str | None = None,
     timeout_seconds: float | None = 120.0,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     """Compute real 64-hex ``(policy_digest, configuration_digest)`` from trusted config."""
 
@@ -233,8 +243,13 @@ def compute_trusted_policy_and_config_digests(
     effective_model: str | None
     effective_base_url: str | None
     effective_timeout: float | None
-    if provider_name is None:
-        resolved_plan = plan_hosted_execution(configuration, environ={})
+    if provider_name is None or environ is not None:
+        resolved_plan = plan_hosted_execution(
+            configuration,
+            cli_provider=provider_name,
+            cli_model=model_name,
+            environ=filtered_hosted_environ(environ) if environ is not None else {},
+        )
         effective_provider = _BACKEND_ADAPTERS.get(
             resolved_plan.backend, resolved_plan.backend
         )
@@ -1461,12 +1476,28 @@ def _split_and_group_diff_units(
                     )
                 )
             if part_failed:
-                # Remove any partial fragments for this oversized hunk and mark file unsupported.
-                units = [u for u in units if u.parent_hunk_id != parent_hunk_id]
+                # Remove ALL units for this oversized file so inventory, units, and batches stay consistent.
                 if rec.canonical_path is not None:
                     oversized_paths.add(rec.canonical_path)
+                    units = [u for u in units if u.file_path != rec.canonical_path]
+                else:
+                    units = [u for u in units if u.parent_hunk_id != parent_hunk_id]
             else:
                 sub_hunks_by_parent[parent_hunk_id] = tuple(part_ids)
+
+    if oversized_paths:
+        units = [u for u in units if u.file_path not in oversized_paths]
+        pruned_parents = {
+            hid
+            for rec in parsed_records
+            if rec.canonical_path in oversized_paths
+            for hunk in rec.hunks
+            for hid in (
+                _compute_hunk_id(rec.canonical_path or rec.old_path or "", hunk),
+            )
+        }
+        for hid in pruned_parents:
+            sub_hunks_by_parent.pop(hid, None)
 
     units.sort(key=lambda u: u.group_key)
     return units, sub_hunks_by_parent, oversized_paths
@@ -2068,6 +2099,28 @@ def execute_v6_batch(
     return res, 1
 
 
+def verify_expected_hunks_reviewed(
+    context: V6FreshAnalysisContext,
+    reviewed_hunk_ids: Collection[str],
+) -> None:
+    """Verify every expected primary hunk/sub-hunk was covered after successful batches."""
+
+    reviewed_set = set(reviewed_hunk_ids)
+    expected: set[str] = set()
+    for hid in context.all_expected_hunk_ids:
+        sub_ids = context.sub_hunks_by_parent.get(hid)
+        if sub_ids:
+            expected.update(sub_ids)
+        else:
+            expected.add(hid)
+    missing = sorted(expected - reviewed_set)
+    if missing:
+        raise V6FreshAnalysisError(
+            "v6_batch_incomplete_coverage",
+            f"missing reviewed coverage for expected hunk(s): {missing[:5]}",
+        )
+
+
 def finalize_v6_fresh_analysis_result(
     context: V6FreshAnalysisContext,
     batch_results: Sequence[ReviewResult],
@@ -2143,13 +2196,21 @@ def run_v6_fresh_pr_analysis(
     )
 
     batch_results: list[ReviewResult] = []
+    reviewed_hunk_ids: list[str] = []
     calls_used = 0
     for batch in context.planned_batches:
         remaining = context.max_provider_calls - calls_used
         result, batch_calls = execute_v6_batch(
             context, batch, remaining_provider_calls=remaining
         )
+        if result.review_status != "complete":
+            raise V6FreshAnalysisError(
+                "v6_batch_incomplete_coverage",
+                f"batch {batch.batch_id} returned incomplete review_status={result.review_status!r}",
+            )
         calls_used += batch_calls
+        reviewed_hunk_ids.extend(batch.primary_hunk_ids)
         batch_results.append(result)
 
+    verify_expected_hunks_reviewed(context, reviewed_hunk_ids)
     return finalize_v6_fresh_analysis_result(context, batch_results)

@@ -37,6 +37,7 @@ from .v6_fresh_analysis import (
     V6FreshAnalysisContext,
     _load_trusted_configuration,
     compute_trusted_policy_and_config_digests,
+    filtered_hosted_environ,
     prepare_v6_fresh_analysis_context,
     run_v6_fresh_pr_analysis,
     verify_live_pr_head,
@@ -957,6 +958,7 @@ class V6PilotRunner:
             )
             resolved_policy_digest = config.policy_digest
             resolved_config_digest = config.configuration_digest
+            hosted_env = filtered_hosted_environ()
             if (
                 resolved_policy_digest is None or resolved_config_digest is None
             ) and config.policy_root is not None:
@@ -967,16 +969,18 @@ class V6PilotRunner:
                     model_name=config.model,
                     base_url=config.provider_base_url,
                     allow_custom_endpoint=config.allow_custom_endpoint,
+                    environ=hosted_env,
                 )
                 resolved_policy_digest = resolved_policy_digest or computed_pol
                 resolved_config_digest = resolved_config_digest or computed_cfg
             elif resolved_policy_digest is None and resolved_config_digest is None:
                 computed_pol, computed_cfg = compute_trusted_policy_and_config_digests(
                     default_configuration(),
-                    provider_name=config.provider or "ollama",
-                    model_name=config.model or "llama3.2",
+                    provider_name=config.provider,
+                    model_name=config.model,
                     base_url=config.provider_base_url,
                     allow_custom_endpoint=config.allow_custom_endpoint,
+                    environ=hosted_env,
                 )
                 resolved_policy_digest = computed_pol
                 resolved_config_digest = computed_cfg
