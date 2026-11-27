@@ -28,9 +28,12 @@ from review_sensei_github.v6_credential_matrix import (
 from review_sensei_github.v6_fresh_analysis import (
     V6FreshAnalysisContext,
     V6FreshAnalysisError,
+    V6PlannedBatch,
     _resolve_merge_base_via_git_commits,
     compute_trusted_policy_and_config_digests,
+    filtered_hosted_environ,
     prepare_v6_fresh_analysis_context,
+    verify_expected_hunks_reviewed,
 )
 from review_sensei_github.v6_pagination import NoProgressGuard
 from review_sensei_github.v6_pilot_runner import (
@@ -1589,6 +1592,595 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
             self.assertTrue(
                 any(name == "v6-one-writer" for name, _, _ in rq.QUALIFICATIONS)
             )
+
+    def test_batch_output_replay_preserves_line_none_and_provider_calls_budget(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from review_sensei.configuration import default_configuration
+        from review_sensei.models import ReviewComment, ReviewResult
+
+        diff_a = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n"
+        diff_b = "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-b = 1\n+b = 2\n"
+        hunk_a = "src/a.py#h0:1,1+1,1:" + ("a" * 16)
+        hunk_b = "src/b.py#h0:1,1+1,1:" + ("b" * 16)
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+        inv = (
+            {
+                "path": "src/a.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [hunk_a],
+            },
+            {
+                "path": "src/b.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [hunk_b],
+            },
+        )
+        inv_sha = canonical_sha256(inv)
+        b0 = V6PlannedBatch(
+            batch_id="batch-000",
+            diff_text=diff_a,
+            diff_sha256=canonical_sha256(diff_a),
+            prompt_bytes=200,
+            paths=("src/a.py",),
+            primary_hunk_ids=(hunk_a,),
+            parent_hunk_ids=(hunk_a,),
+        )
+        b1 = V6PlannedBatch(
+            batch_id="batch-001",
+            diff_text=diff_b,
+            diff_sha256=canonical_sha256(diff_b),
+            prompt_bytes=200,
+            paths=("src/b.py",),
+            primary_hunk_ids=(hunk_b,),
+            parent_hunk_ids=(hunk_b,),
+        )
+
+        svc_calls = 0
+
+        class _MultiCallSvc:
+            def run(self, req: Any, budget: Any = None) -> Any:
+                nonlocal svc_calls
+                svc_calls += 1
+                return SimpleNamespace(
+                    outcome=SimpleNamespace(status="complete", provider_calls=2),
+                    result=ReviewResult(
+                        summary="Summary A",
+                        comments=(
+                            ReviewComment(
+                                path="src/a.py",
+                                line=None,
+                                side="FILE",
+                                body="File-level finding",
+                            ),
+                        ),
+                        provider="openai-compatible",
+                        model="gpt-4o-mini",
+                        review_status="complete",
+                    ),
+                )
+
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_rec = _make_owner_record(
+            operation_id="op-multicall",
+            pr_head_sha=HEAD_A,
+            slot_key=SLOT_B,
+        )
+        pr.add_comment(format_v6_record_marker(owner_rec), is_app=True)
+        proof = WriterOwnershipProof(
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-multicall",
+            run_id=100,
+            run_attempt=1,
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            verified_by_broker=True,
+        )
+
+        def _make_ctx(max_calls: int) -> V6FreshAnalysisContext:
+            return V6FreshAnalysisContext(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                pr_title="Multicall test",
+                base_sha=BASE_SHA,
+                merge_base_sha=BASE_SHA,
+                head_sha=HEAD_A,
+                inventory_sha256=inv_sha,
+                inventory=inv,
+                non_text_changes=(),
+                policy_digest=policy_digest,
+                configuration_digest=config_digest,
+                max_provider_calls=max_calls,
+                planned_batches=(b0, b1),
+                all_expected_hunk_ids=(hunk_a, hunk_b),
+                sub_hunks_by_parent={},
+                combined_diff_sha256=canonical_sha256(diff_a + diff_b),
+                provider_name="openai-compatible",
+                model_name="gpt-4o-mini",
+                service=_MultiCallSvc(),
+            )
+
+        req_tight = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-multicall",
+            ownership_proof=proof,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_rec,
+            fresh_analysis_context_loader=lambda: _make_ctx(2),
+        )
+        eng1 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res1 = eng1.recover_and_publish(req_tight)
+        self.assertIsInstance(res1, RecoveryHold)
+        self.assertEqual(svc_calls, 1)
+
+        # Restart with max_provider_calls=2 MUST see b0 consumed 2 calls and hold for b1 with 0 calls!
+        eng2 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_budget = eng2.recover_and_publish(req_tight)
+        self.assertIsInstance(res_budget, RecoveryHold)
+        assert isinstance(res_budget, RecoveryHold)
+        self.assertEqual(res_budget.blocker, "review_provider_call_budget_exhausted")
+        self.assertEqual(svc_calls, 1)
+
+        # Now increase review budget? Since BatchPlan is bound to max_provider_calls=2, start fresh op with max=4
+        # and replay a pre-seeded BatchOutputRecord containing line=None + provider_calls=2 -> completes cleanly!
+        pr3 = _SimulatedPRSurface(head_sha=HEAD_A)
+        in_dig = canonical_sha256(
+            {
+                "base_sha": BASE_SHA,
+                "merge_base_sha": BASE_SHA,
+                "head_sha": HEAD_A,
+                "inventory_sha256": inv_sha,
+                "policy_digest": policy_digest,
+                "configuration_digest": config_digest,
+            }
+        )[:12]
+        plan4 = BatchPlanRecord(
+            record_id=f"batch-plan:op-multicall4:{HEAD_A[:12]}:{in_dig}",
+            operation_id="op-multicall4",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            pr_head_sha=HEAD_A,
+            inventory_sha256=inv_sha,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            batches=(b0.to_plan_dict(), b1.to_plan_dict()),
+        )
+        plan4_sha = canonical_sha256(record_to_dict(plan4))
+        owner4 = _make_owner_record(
+            operation_id="op-multicall4",
+            pr_head_sha=HEAD_A,
+            slot_key=SLOT_B,
+        )
+        pr3.add_comment(format_v6_record_marker(owner4), is_app=True)
+        pr3.add_comment(format_v6_record_marker(plan4), is_app=True)
+        pr3.add_comment(
+            format_v6_record_marker(
+                BatchOutputRecord(
+                    record_id=f"batch-output:op-multicall4:{HEAD_A[:12]}:{in_dig}:batch-000:1",
+                    operation_id="op-multicall4",
+                    batch_id="batch-000",
+                    plan_sha256=plan4_sha,
+                    hunk_ids_reviewed=(hunk_a,),
+                    findings=(
+                        {
+                            "path": "src/a.py",
+                            "line": None,
+                            "side": "FILE",
+                            "body": "File-level finding",
+                        },
+                    ),
+                    summary="Summary A",
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                    attempt=1,
+                    provider_calls=2,
+                )
+            ),
+            is_app=True,
+        )
+        proof4 = replace(proof, operation_id="op-multicall4")
+        req4 = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-multicall4",
+            ownership_proof=proof4,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner4,
+            fresh_analysis_context_loader=lambda: _make_ctx(4),
+        )
+        eng3 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr3.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr3.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_ok = eng3.recover_and_publish(req4)
+        self.assertIsInstance(res_ok, RecoveryCompleted)
+        self.assertEqual(len(pr3.reviews), 1)
+        self.assertIn("File-level finding", pr3.reviews[0]["body"])
+
+    def test_partial_batch_review_status_and_verify_expected_hunks_fail_closed(
+        self,
+    ) -> None:
+        from review_sensei.configuration import default_configuration
+        from review_sensei.models import ReviewResult
+
+        diff_a = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n"
+        hunk_a = "src/a.py#h0:1,1+1,1:" + ("a" * 16)
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+        b0 = V6PlannedBatch(
+            batch_id="batch-000",
+            diff_text=diff_a,
+            diff_sha256=canonical_sha256(diff_a),
+            prompt_bytes=200,
+            paths=("src/a.py",),
+            primary_hunk_ids=(hunk_a,),
+            parent_hunk_ids=(hunk_a,),
+        )
+
+        class _PartialSvc:
+            def review(self, req: Any) -> ReviewResult:
+                return ReviewResult(
+                    summary="Partial",
+                    comments=(),
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="partial",
+                )
+
+        ctx = V6FreshAnalysisContext(
+            owner=OWNER,
+            repo=REPO,
+            pull_request=PR_NUMBER,
+            pr_title="Partial test",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            head_sha=HEAD_A,
+            inventory_sha256="c" * 64,
+            inventory=(
+                {
+                    "path": "src/a.py",
+                    "status": "modified",
+                    "disposition": "text",
+                    "hunk_ids": [hunk_a],
+                },
+            ),
+            non_text_changes=(),
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            planned_batches=(b0,),
+            all_expected_hunk_ids=(hunk_a,),
+            sub_hunks_by_parent={},
+            combined_diff_sha256=canonical_sha256(diff_a),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+            service=_PartialSvc(),
+        )
+        with self.assertRaises(V6FreshAnalysisError) as err_ctx:
+            verify_expected_hunks_reviewed(ctx, ())
+        self.assertEqual(err_ctx.exception.diagnostic, "v6_batch_incomplete_coverage")
+
+        ctx_sub = replace(
+            ctx, sub_hunks_by_parent={hunk_a: (f"{hunk_a}#p0", f"{hunk_a}#p1")}
+        )
+        with self.assertRaises(V6FreshAnalysisError) as sub_err:
+            verify_expected_hunks_reviewed(ctx_sub, (f"{hunk_a}#p0",))
+        self.assertEqual(sub_err.exception.diagnostic, "v6_batch_incomplete_coverage")
+        verify_expected_hunks_reviewed(ctx_sub, (f"{hunk_a}#p0", f"{hunk_a}#p1"))
+
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_rec = _make_owner_record(
+            operation_id="op-partial",
+            pr_head_sha=HEAD_A,
+            slot_key=SLOT_B,
+        )
+        pr.add_comment(format_v6_record_marker(owner_rec), is_app=True)
+        req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-partial",
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-partial",
+                run_id=100,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_rec,
+            fresh_analysis_context_loader=lambda: ctx,
+        )
+        eng = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        hold = eng.recover_and_publish(req)
+        self.assertIsInstance(hold, RecoveryHold)
+        assert isinstance(hold, RecoveryHold)
+        self.assertEqual(hold.blocker, "v6_batch_incomplete_coverage")
+        self.assertFalse(
+            any("batch-output:" in c["body"] for c in pr.comments),
+            "partial batch must never persist BatchOutputRecord",
+        )
+
+    def test_oversized_multihunk_file_prunes_earlier_hunks_consistently(self) -> None:
+        from review_sensei_github.v6_fresh_analysis import (
+            _pack_units_into_planned_batches,
+            _split_and_group_diff_units,
+        )
+
+        from review_sensei.evidence import EvidenceSnapshot
+
+        # Construct a single file with hunk 0 small and hunk 1 exceeding prompt ceiling on a single line.
+        raw_diff = (
+            "diff --git a/src/mixed.py b/src/mixed.py\n"
+            "--- a/src/mixed.py\n"
+            "+++ b/src/mixed.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+            "@@ -50,1 +50,1 @@\n"
+            "-x\n"
+            "+" + ("Y" * 5000) + "\n"
+        )
+        snap = EvidenceSnapshot(
+            repository=f"{OWNER}/{REPO}",
+            pull_request=PR_NUMBER,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_A,
+        )
+        units, subs, oversized = _split_and_group_diff_units(
+            [raw_diff],
+            snapshot=snap,
+            batch_max_bytes=2000,
+            batch_max_hunks=10,
+            prompt_ceiling_bytes=4000,
+            measure_prompt_fn=lambda diff: len(diff.encode("utf-8")) + 100,
+        )
+        self.assertIn("src/mixed.py", oversized)
+        self.assertEqual(units, [])
+        self.assertEqual(subs, {})
+        planned = _pack_units_into_planned_batches(
+            units,
+            batch_max_bytes=2000,
+            batch_max_files=5,
+            batch_max_hunks=10,
+            prompt_ceiling_bytes=4000,
+            measure_prompt_fn=lambda diff: len(diff.encode("utf-8")) + 100,
+        )
+        self.assertEqual(planned, ())
+
+    def test_env_var_config_digest_parity_with_filtered_hosted_environ(self) -> None:
+        from review_sensei.configuration import default_configuration
+
+        cfg = default_configuration()
+        env_pair = {
+            "REVIEWSENSEI_PROVIDER": "openai-compatible",
+            "REVIEWSENSEI_MODEL": "gpt-4o-mini",
+        }
+        pol_a, cfg_a = compute_trusted_policy_and_config_digests(
+            cfg,
+            environ=filtered_hosted_environ(env_pair),
+        )
+        pol_b, cfg_b = compute_trusted_policy_and_config_digests(
+            cfg,
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+            environ=filtered_hosted_environ({}),
+        )
+        self.assertEqual(pol_a, pol_b)
+        self.assertEqual(cfg_a, cfg_b)
+
+    def test_deliver_detail_comments_holds_on_mismatched_receipt_payload_digest(
+        self,
+    ) -> None:
+        from review_sensei_github.v6_recovery_ledger import (
+            UnresolvedResultRecord,
+            WriteIntentRecord,
+        )
+
+        from review_sensei.configuration import default_configuration
+
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+        op_id = "op-detail-mismatch"
+        detail_op = f"{op_id}:detail:0"
+        owner_rec = _make_owner_record(
+            operation_id=op_id,
+            pr_head_sha=HEAD_A,
+            slot_key=SLOT_B,
+        )
+        pr.add_comment(format_v6_record_marker(owner_rec), is_app=True)
+        # Seed a stale/mismatched receipt for detail:1 while PR has >50 findings requiring detail:1
+        findings = tuple(
+            {
+                "path": f"src/f{i}.py",
+                "line": 1,
+                "side": "RIGHT",
+                "body": f"Finding body number {i}",
+            }
+            for i in range(55)
+        )
+        proof = WriterOwnershipProof(
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id=op_id,
+            run_id=100,
+            run_attempt=1,
+            writer_epoch=1,
+            pr_head_sha=HEAD_A,
+            verified_by_broker=True,
+        )
+        req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id=op_id,
+            ownership_proof=proof,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_rec,
+            base_sha=BASE_SHA,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+        )
+        in_dig = canonical_sha256(
+            {
+                "base_sha": BASE_SHA,
+                "merge_base_sha": None,
+                "head_sha": HEAD_A,
+                "inventory_sha256": None,
+                "policy_digest": policy_digest,
+                "configuration_digest": config_digest,
+            }
+        )[:12]
+        unres = UnresolvedResultRecord(
+            record_id=f"result:{op_id}:{HEAD_A[:12]}:{in_dig}",
+            operation_id=op_id,
+            pr_head_sha=HEAD_A,
+            payload_sha256=canonical_sha256(findings),
+            findings_payload=findings,
+            required_evidence_digests=(
+                f"v6:base:{BASE_SHA}",
+                f"v6:policy:{policy_digest}",
+                f"v6:config:{config_digest}",
+            ),
+        )
+        pr.add_comment(format_v6_record_marker(unres), is_app=True)
+        wrong_sha = "f" * 64
+        pr.add_comment(
+            format_v6_record_marker(
+                WriteIntentRecord(
+                    record_id=f"intent:{detail_op}:1:1",
+                    operation_id=detail_op,
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    effect_kind="issue_comment",
+                    payload_sha256=wrong_sha,
+                    target_digest=canonical_sha256(
+                        f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments"
+                    ),
+                    generation=1,
+                    target_location=f"/repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments",
+                )
+            ),
+            is_app=True,
+        )
+        pr.add_comment(
+            format_v6_record_marker(
+                CompletionReceiptRecord(
+                    record_id=f"receipt:{detail_op}:999",
+                    operation_id=detail_op,
+                    writer_epoch=1,
+                    github_effect_id=999,
+                    payload_sha256=wrong_sha,
+                    completed_at="2026-11-27T00:05:00Z",
+                )
+            ),
+            is_app=True,
+        )
+
+        eng = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        res = eng.recover_and_publish(req)
+        self.assertIsInstance(res, RecoveryHold)
+        assert isinstance(res, RecoveryHold)
+        self.assertEqual(res.blocker, "stale_detail_receipt_payload_mismatch")
 
 
 if __name__ == "__main__":

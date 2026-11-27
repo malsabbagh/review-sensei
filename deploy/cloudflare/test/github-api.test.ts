@@ -1554,4 +1554,40 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       outputText: "x",
     });
   });
+
+  it("re-verifies multi-page boundary when maxComments is hit at exact end of page 2", async () => {
+    const client = api();
+    const issueUrl = "https://api.example.test/repos/acme/widgets/issues/42";
+    const mkComment = (id: number, body = `comment-${id}`) => ({
+      id,
+      body,
+      author_association: "NONE",
+      issue_url: issueUrl,
+      user: { login: "reviewer", type: "User" },
+    });
+    const page1Initial = Array.from({ length: 100 }, (_, i) => mkComment(1000 + i));
+    const page2Initial = Array.from({ length: 50 }, (_, i) => mkComment(2000 + i));
+    const shiftedPage1 = [
+      ...page1Initial.slice(1),
+      mkComment(2000, "comment-2000"),
+    ];
+    const request = vi
+      .spyOn(client, "request")
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: page1Initial })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: false, data: page2Initial })
+      // Verification refetch of page 1 shows shift after deletion on page 1.
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: shiftedPage1 })
+      // Retry attempts also fail stability or resolve to truncated=true if remaining unstable.
+      .mockResolvedValue({ status: 200, hasNextPage: false, data: shiftedPage1 });
+
+    const result = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-26T00:00:00Z",
+      "read-tok",
+      150,
+    );
+    expect(result.truncated).toBe(true);
+    expect(request.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
 });

@@ -48,6 +48,7 @@ from .v6_fresh_analysis import (
     compute_trusted_policy_and_config_digests,
     execute_v6_batch,
     finalize_v6_fresh_analysis_result,
+    verify_expected_hunks_reviewed,
 )
 from .v6_pagination import (
     NoProgressGuard,
@@ -4031,7 +4032,10 @@ class V6RecoveryEngine:
                     expected_hunks = set(
                         planned_by_id[out_rec.batch_id].primary_hunk_ids
                     )
-                    if set(out_rec.hunk_ids_reviewed) != expected_hunks:
+                    if (
+                        out_rec.review_status != "complete"
+                        or set(out_rec.hunk_ids_reviewed) != expected_hunks
+                    ):
                         return (
                             scoped_request,
                             None,
@@ -4078,10 +4082,18 @@ class V6RecoveryEngine:
                         ),
                     )
 
+            output_calls_by_key: dict[tuple[str, int], int] = {}
+            for out_rec in matching_outputs:
+                key = (out_rec.batch_id, out_rec.attempt)
+                output_calls_by_key[key] = max(
+                    output_calls_by_key.get(key, 1), out_rec.provider_calls
+                )
             consumed_keys: set[tuple[str, int]] = {
                 (d.batch_id, d.attempt) for d in matching_dispatches
-            } | {(o.batch_id, o.attempt) for o in matching_outputs}
-            used_provider_calls = len(consumed_keys)
+            } | set(output_calls_by_key)
+            used_provider_calls = sum(
+                output_calls_by_key.get(k, 1) for k in consumed_keys
+            )
             dispatch_gen = (
                 scoped_request.generation
                 if type(scoped_request.generation) is int
@@ -4201,7 +4213,7 @@ class V6RecoveryEngine:
                     reconstructed_comments = tuple(
                         ReviewComment(
                             path=str(c["path"]),
-                            line=int(c["line"]),
+                            line=(None if c.get("line") is None else int(c["line"])),
                             body=str(c["body"]),
                             side=str(c.get("side") or "RIGHT"),
                             severity=(
@@ -4314,6 +4326,27 @@ class V6RecoveryEngine:
                 )
                 used_provider_calls += batch_calls
                 calls_started_this_run += batch_calls
+                if batch_res.review_status != "complete":
+                    return (
+                        scoped_request,
+                        None,
+                        calls_started_this_run,
+                        owners,
+                        owner_cid,
+                        unresolved_results,
+                        result_parts,
+                        result_manifests,
+                        comment_ids_by_record_id,
+                        self._finalize_hold(
+                            request=scoped_request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker="v6_batch_incomplete_coverage",
+                            missing_evidence=(
+                                f"batch_incomplete:{b.batch_id}:{batch_res.review_status}",
+                            ),
+                        ),
+                    )
                 batch_results_by_id[b.batch_id] = batch_res
 
                 serialized_findings = tuple(
@@ -4345,6 +4378,7 @@ class V6RecoveryEngine:
                     model=batch_res.model,
                     review_status=batch_res.review_status,
                     attempt=attempt,
+                    provider_calls=batch_calls,
                 )
                 try:
                     format_v6_record_marker(output_rec)
@@ -4400,6 +4434,17 @@ class V6RecoveryEngine:
                         )
                         format_v6_record_marker(bp_rec)
                         candidate_bparts.append(bp_rec)
+
+                    if (
+                        self.mutation_bound.writes_attempted + len(candidate_bparts) + 1
+                        > self.mutation_bound.max_writes
+                    ):
+                        raise MutationSanityBoundError(
+                            f"mutation sanity bound insufficient for batch-output parts "
+                            f"({self.mutation_bound.writes_attempted}+"
+                            f"{len(candidate_bparts) + 1}/{self.mutation_bound.max_writes})",
+                            diagnostic="v6_mutation_sanity_bound_exceeded",
+                        )
 
                     for bp_rec in candidate_bparts:
 
@@ -4465,6 +4510,7 @@ class V6RecoveryEngine:
                         model=batch_res.model,
                         review_status=batch_res.review_status,
                         attempt=attempt,
+                        provider_calls=batch_calls,
                     )
 
                 def _find_output_cid(
@@ -4515,6 +4561,33 @@ class V6RecoveryEngine:
         ordered_batch_results = [
             batch_results_by_id[b.batch_id] for b in context.planned_batches
         ]
+        reviewed_hunk_ids = [
+            hid
+            for b in context.planned_batches
+            if batch_results_by_id[b.batch_id].review_status == "complete"
+            for hid in b.primary_hunk_ids
+        ]
+        try:
+            verify_expected_hunks_reviewed(context, reviewed_hunk_ids)
+        except V6FreshAnalysisError as cov_exc:
+            return (
+                scoped_request,
+                None,
+                calls_started_this_run,
+                owners,
+                owner_cid,
+                unresolved_results,
+                result_parts,
+                result_manifests,
+                comment_ids_by_record_id,
+                self._finalize_hold(
+                    request=scoped_request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker=cov_exc.diagnostic or "v6_batch_incomplete_coverage",
+                    missing_evidence=(str(cov_exc),),
+                ),
+            )
         raw_findings, raw_digests = finalize_v6_fresh_analysis_result(
             context, ordered_batch_results
         )
@@ -4708,6 +4781,23 @@ class V6RecoveryEngine:
                 matched = next(
                     r for r in summary.matched_receipts if r.operation_id == d_op_id
                 )
+                if matched.payload_sha256 != detail.payload_sha256:
+                    return (
+                        (),
+                        (),
+                        (),
+                        owner_cid,
+                        readback_gets,
+                        self._finalize_hold(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker="stale_detail_receipt_payload_mismatch",
+                            missing_evidence=(
+                                f"detail_receipt_payload_mismatch:{d_op_id}",
+                            ),
+                        ),
+                    )
                 eff_id = matched.github_effect_id
                 eff_int = int(eff_id) if str(eff_id).isdigit() else 0
                 if eff_int > 0:
