@@ -10,6 +10,7 @@ without ever starting a fresh model call as a recovery fallback.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -63,6 +64,8 @@ from .v6_recovery_ledger import (
     BatchAttemptRecord,
     BatchDispatchRecord,
     BatchOutputRecord,
+    BatchPlanManifestRecord,
+    BatchPlanPartRecord,
     BatchPlanRecord,
     CompletionReceiptRecord,
     DurableHoldRecord,
@@ -75,7 +78,10 @@ from .v6_recovery_ledger import (
     V6LedgerRecord,
     WriteIntentRecord,
     WriterOwnershipProof,
+    _record_from_mapping,
+    _reject_json_constant,
     _to_json_compatible,
+    canonical_json_dumps,
     canonical_sha256,
     extract_v6_record_markers,
     format_v6_record_marker,
@@ -390,6 +396,8 @@ class _CollectedLedger:
     result_parts: tuple[ResultPartRecord, ...] = ()
     result_manifests: tuple[ResultManifestRecord, ...] = ()
     batch_plans: tuple[BatchPlanRecord, ...] = ()
+    batch_plan_parts: tuple[BatchPlanPartRecord, ...] = ()
+    batch_plan_manifests: tuple[BatchPlanManifestRecord, ...] = ()
     batch_dispatches: tuple[BatchDispatchRecord, ...] = ()
     batch_attempts: tuple[BatchAttemptRecord, ...] = ()
     batch_outputs: tuple[BatchOutputRecord, ...] = ()
@@ -1340,6 +1348,245 @@ def _reconstruct_partitioned_result(
     )
 
 
+def _escaped_json_string_content_bytes(text: str) -> int:
+    """Return UTF-8 byte length of ``text`` after JSON string and HTML-comment escaping."""
+
+    escaped = (
+        json.dumps(text, ensure_ascii=False, allow_nan=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+    return len(escaped.encode("utf-8")) - 2
+
+
+def _split_json_into_escaped_chunks(
+    plan_json: str, *, max_escaped_bytes: int
+) -> tuple[str, ...]:
+    """Split ``plan_json`` deterministically into substrings bounded after escaping."""
+
+    if max_escaped_bytes < 16:
+        raise V6LedgerIntegrityError(
+            "insufficient remaining marker budget for batch-plan part chunk",
+            diagnostic="v6_marker_too_large",
+        )
+    if not plan_json:
+        return ("",)
+    chunks: list[str] = []
+    start = 0
+    total_len = len(plan_json)
+    while start < total_len:
+        hi = min(total_len, start + max_escaped_bytes)
+        if _escaped_json_string_content_bytes(plan_json[start:hi]) <= max_escaped_bytes:
+            best = hi
+        else:
+            lo = start + 1
+            if (
+                _escaped_json_string_content_bytes(plan_json[start:lo])
+                > max_escaped_bytes
+            ):
+                raise V6LedgerIntegrityError(
+                    "single character exceeded remaining batch-plan marker budget",
+                    diagnostic="v6_marker_too_large",
+                )
+            best = lo
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if (
+                    _escaped_json_string_content_bytes(plan_json[start:mid])
+                    <= max_escaped_bytes
+                ):
+                    best = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+        chunks.append(plan_json[start:best])
+        start = best
+    return tuple(chunks)
+
+
+def _split_batch_plan_into_parts(
+    plan_rec: BatchPlanRecord,
+    *,
+    input_digest: str,
+) -> tuple[str, tuple[BatchPlanPartRecord, ...], BatchPlanManifestRecord]:
+    """Split an oversized ``BatchPlanRecord`` deterministically into bounded parts + manifest."""
+
+    plan_dict = record_to_dict(plan_rec)
+    plan_sha256 = canonical_sha256(plan_dict)
+    plan_json = canonical_json_dumps(plan_dict)
+    part_prefix = (
+        f"batch-plan-part:{plan_rec.operation_id}:"
+        f"{plan_rec.pr_head_sha[:12]}:{input_digest}"
+    )
+    probe_part = BatchPlanPartRecord(
+        record_id=f"{part_prefix}:999999",
+        operation_id=plan_rec.operation_id,
+        pr_head_sha=plan_rec.pr_head_sha,
+        plan_sha256=plan_sha256,
+        part_index=999_998,
+        total_parts=999_999,
+        part_sha256=canonical_sha256({"chunk": ""}),
+        part_payload={"chunk": ""},
+    )
+    overhead_bytes = len(format_v6_record_marker(probe_part).encode("utf-8"))
+    max_escaped_chunk_bytes = MAX_MARKER_ENCODED_BYTES - overhead_bytes - 16
+    chunks = _split_json_into_escaped_chunks(
+        plan_json, max_escaped_bytes=max_escaped_chunk_bytes
+    )
+    total_parts = len(chunks)
+
+    parts: list[BatchPlanPartRecord] = []
+    for idx, chunk in enumerate(chunks):
+        part_payload = {"chunk": chunk}
+        part_sha256 = canonical_sha256(part_payload)
+        part_rec = BatchPlanPartRecord(
+            record_id=f"{part_prefix}:{idx:04d}",
+            operation_id=plan_rec.operation_id,
+            pr_head_sha=plan_rec.pr_head_sha,
+            plan_sha256=plan_sha256,
+            part_index=idx,
+            total_parts=total_parts,
+            part_sha256=part_sha256,
+            part_payload=part_payload,
+        )
+        format_v6_record_marker(part_rec)
+        parts.append(part_rec)
+
+    manifest_rec = BatchPlanManifestRecord(
+        record_id=(
+            f"batch-plan-manifest:{plan_rec.operation_id}:"
+            f"{plan_rec.pr_head_sha[:12]}:{input_digest}"
+        ),
+        operation_id=plan_rec.operation_id,
+        base_sha=plan_rec.base_sha,
+        merge_base_sha=plan_rec.merge_base_sha,
+        pr_head_sha=plan_rec.pr_head_sha,
+        inventory_sha256=plan_rec.inventory_sha256,
+        policy_digest=plan_rec.policy_digest,
+        configuration_digest=plan_rec.configuration_digest,
+        max_provider_calls=plan_rec.max_provider_calls,
+        plan_sha256=plan_sha256,
+        total_parts=total_parts,
+        part_record_ids=tuple(part.record_id for part in parts),
+        part_sha256s=tuple(part.part_sha256 for part in parts),
+        batch_count=len(plan_rec.batches),
+    )
+    format_v6_record_marker(manifest_rec)
+    return plan_sha256, tuple(parts), manifest_rec
+
+
+def _reconstruct_split_batch_plan(
+    *,
+    manifest_rec: BatchPlanManifestRecord,
+    plan_parts: Sequence[BatchPlanPartRecord],
+) -> BatchPlanRecord:
+    """Verify all referenced ``BatchPlanPartRecord``s and reconstruct ``BatchPlanRecord``."""
+
+    expected_rids = set(manifest_rec.part_record_ids)
+    parts_by_record_id: dict[str, BatchPlanPartRecord] = {}
+    for part in plan_parts:
+        if part.operation_id != manifest_rec.operation_id:
+            continue
+        if (
+            part.pr_head_sha == manifest_rec.pr_head_sha
+            and part.record_id not in expected_rids
+        ):
+            raise ReviewInputError(
+                f"unexpected extra batch plan part {part.record_id!r} for operation {manifest_rec.operation_id!r}",
+                diagnostic="corrupted_pr_batch_plan",
+            )
+        if part.record_id not in expected_rids:
+            continue
+        existing = parts_by_record_id.get(part.record_id)
+        if existing is not None and existing != part:
+            raise ReviewInputError(
+                f"conflicting batch plan part {part.record_id!r}",
+                diagnostic="corrupted_pr_batch_plan",
+            )
+        parts_by_record_id[part.record_id] = part
+
+    chunks: list[str] = []
+    for idx, (expected_rid, expected_sha) in enumerate(
+        zip(manifest_rec.part_record_ids, manifest_rec.part_sha256s)
+    ):
+        part_rec = parts_by_record_id.get(expected_rid)
+        if part_rec is None:
+            raise ReviewInputError(
+                f"missing batch plan part {expected_rid!r} referenced by manifest",
+                diagnostic="incomplete_partitioned_batch_plan_missing_part",
+            )
+        if (
+            part_rec.pr_head_sha != manifest_rec.pr_head_sha
+            or part_rec.plan_sha256 != manifest_rec.plan_sha256
+            or part_rec.part_index != idx
+            or part_rec.total_parts != manifest_rec.total_parts
+            or part_rec.part_sha256 != expected_sha
+        ):
+            raise ReviewInputError(
+                f"batch plan part {expected_rid!r} metadata or digest mismatch",
+                diagnostic="corrupted_pr_batch_plan",
+            )
+        part_payload_plain = _to_json_compatible(part_rec.part_payload)
+        if canonical_sha256(part_payload_plain) != expected_sha:
+            raise ReviewInputError(
+                f"batch plan part {expected_rid!r} payload SHA-256 mismatch",
+                diagnostic="corrupted_pr_batch_plan_digest",
+            )
+        chunk = part_rec.part_payload.get("chunk")
+        if type(chunk) is not str or set(part_rec.part_payload.keys()) != {"chunk"}:
+            raise ReviewInputError(
+                f"batch plan part {expected_rid!r} has invalid chunk payload",
+                diagnostic="corrupted_pr_batch_plan",
+            )
+        chunks.append(chunk)
+
+    reassembled_json = "".join(chunks)
+    try:
+        parsed = json.loads(reassembled_json, parse_constant=_reject_json_constant)
+    except ValueError as error:
+        raise ReviewInputError(
+            f"reassembled batch plan JSON is malformed: {error}",
+            diagnostic="corrupted_pr_batch_plan",
+        ) from error
+    if not isinstance(parsed, Mapping):
+        raise ReviewInputError(
+            "reassembled batch plan must decode to a JSON object",
+            diagnostic="corrupted_pr_batch_plan",
+        )
+    if canonical_sha256(parsed) != manifest_rec.plan_sha256:
+        raise ReviewInputError(
+            "reassembled batch plan SHA-256 mismatch",
+            diagnostic="corrupted_pr_batch_plan_digest",
+        )
+    reconstructed = _record_from_mapping(parsed)
+    if not isinstance(reconstructed, BatchPlanRecord):
+        raise ReviewInputError(
+            "reassembled batch plan decoded to unexpected record type",
+            diagnostic="corrupted_pr_batch_plan",
+        )
+    if canonical_sha256(record_to_dict(reconstructed)) != manifest_rec.plan_sha256:
+        raise ReviewInputError(
+            "reconstructed BatchPlanRecord SHA-256 mismatch",
+            diagnostic="corrupted_pr_batch_plan_digest",
+        )
+    if (
+        reconstructed.operation_id != manifest_rec.operation_id
+        or reconstructed.base_sha != manifest_rec.base_sha
+        or reconstructed.merge_base_sha != manifest_rec.merge_base_sha
+        or reconstructed.pr_head_sha != manifest_rec.pr_head_sha
+        or reconstructed.inventory_sha256 != manifest_rec.inventory_sha256
+        or reconstructed.policy_digest != manifest_rec.policy_digest
+        or reconstructed.configuration_digest != manifest_rec.configuration_digest
+        or reconstructed.max_provider_calls != manifest_rec.max_provider_calls
+        or len(reconstructed.batches) != manifest_rec.batch_count
+    ):
+        raise ReviewInputError(
+            "reconstructed BatchPlanRecord does not match manifest bindings",
+            diagnostic="corrupted_pr_batch_plan",
+        )
+    return reconstructed
+
+
 @dataclass(frozen=True)
 class _PlannedDetailComment:
     """Single bounded, deterministically addressable PR issue detail comment."""
@@ -2278,6 +2525,8 @@ class V6RecoveryEngine:
         result_parts: list[ResultPartRecord] = []
         result_manifests: list[ResultManifestRecord] = []
         batch_plans: list[BatchPlanRecord] = []
+        batch_plan_parts: list[BatchPlanPartRecord] = []
+        batch_plan_manifests: list[BatchPlanManifestRecord] = []
         batch_dispatches: list[BatchDispatchRecord] = []
         batch_attempts: list[BatchAttemptRecord] = []
         batch_outputs: list[BatchOutputRecord] = []
@@ -2354,6 +2603,10 @@ class V6RecoveryEngine:
                     result_manifests.append(rec)
                 elif isinstance(rec, BatchPlanRecord):
                     batch_plans.append(rec)
+                elif isinstance(rec, BatchPlanPartRecord):
+                    batch_plan_parts.append(rec)
+                elif isinstance(rec, BatchPlanManifestRecord):
+                    batch_plan_manifests.append(rec)
                 elif isinstance(rec, BatchDispatchRecord):
                     batch_dispatches.append(rec)
                 elif isinstance(rec, BatchAttemptRecord):
@@ -2377,6 +2630,8 @@ class V6RecoveryEngine:
             result_parts=tuple(result_parts),
             result_manifests=tuple(result_manifests),
             batch_plans=tuple(batch_plans),
+            batch_plan_parts=tuple(batch_plan_parts),
+            batch_plan_manifests=tuple(batch_plan_manifests),
             batch_dispatches=tuple(batch_dispatches),
             batch_attempts=tuple(batch_attempts),
             batch_outputs=tuple(batch_outputs),
@@ -4147,6 +4402,335 @@ class V6RecoveryEngine:
         new_summary = reconcile_immutable_records(intents, updated_receipts)
         return tuple(updated_receipts), new_summary, owner_cid, readback_gets, None
 
+    def _ensure_pr_batch_plan(
+        self,
+        *,
+        request: RecoveryRequest,
+        context: V6FreshAnalysisContext,
+        input_digest: str,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        collected: _CollectedLedger,
+        comment_ids_by_record_id: dict[str, int],
+        model_calls_started: int = 0,
+        operation_model_calls_total: int | None = None,
+        operation_model_calls_unknown: bool = False,
+    ) -> tuple[BatchPlanRecord | None, RecoveryHold | None]:
+        """Load, reconstruct, or persist the PR-resident batch plan (inline or split)."""
+
+        def _hold(
+            blocker: str, missing_evidence: tuple[str, ...]
+        ) -> tuple[None, RecoveryHold]:
+            return (
+                None,
+                self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker=blocker,
+                    missing_evidence=missing_evidence,
+                    model_calls_started=model_calls_started,
+                    operation_model_calls_total=operation_model_calls_total,
+                    operation_model_calls_unknown=operation_model_calls_unknown,
+                ),
+            )
+
+        matching_plans = [
+            p
+            for p in collected.batch_plans
+            if p.operation_id == request.operation_id
+            and p.base_sha == context.base_sha
+            and p.merge_base_sha == context.merge_base_sha
+            and p.pr_head_sha == context.head_sha
+            and p.inventory_sha256 == context.inventory_sha256
+            and p.policy_digest == context.policy_digest
+            and p.configuration_digest == context.configuration_digest
+        ]
+        matching_manifests = [
+            m
+            for m in collected.batch_plan_manifests
+            if m.operation_id == request.operation_id
+            and m.base_sha == context.base_sha
+            and m.merge_base_sha == context.merge_base_sha
+            and m.pr_head_sha == context.head_sha
+            and m.inventory_sha256 == context.inventory_sha256
+            and m.policy_digest == context.policy_digest
+            and m.configuration_digest == context.configuration_digest
+        ]
+        if len({canonical_sha256(record_to_dict(p)) for p in matching_plans}) > 1:
+            return _hold(
+                "corrupted_pr_batch_plan",
+                tuple(f"conflicting_batch_plan:{p.record_id}" for p in matching_plans),
+            )
+        if len({m.plan_sha256 for m in matching_manifests}) > 1:
+            return _hold(
+                "corrupted_pr_batch_plan",
+                tuple(
+                    f"conflicting_batch_plan_manifest:{m.record_id}"
+                    for m in matching_manifests
+                ),
+            )
+        if matching_plans and matching_manifests:
+            plan_sha = canonical_sha256(record_to_dict(matching_plans[-1]))
+            manifest_sha = matching_manifests[-1].plan_sha256
+            if plan_sha != manifest_sha:
+                return _hold(
+                    "corrupted_pr_batch_plan",
+                    (
+                        f"conflicting_batch_plan:{matching_plans[-1].record_id}",
+                        f"conflicting_batch_plan_manifest:{matching_manifests[-1].record_id}",
+                    ),
+                )
+        if matching_plans:
+            return matching_plans[-1], None
+
+        if matching_manifests:
+            manifest_rec = matching_manifests[-1]
+            try:
+                reconstructed = _reconstruct_split_batch_plan(
+                    manifest_rec=manifest_rec,
+                    plan_parts=collected.batch_plan_parts,
+                )
+            except ReviewInputError as exc:
+                if exc.diagnostic == "incomplete_partitioned_batch_plan_missing_part":
+                    present_rids = {
+                        p.record_id
+                        for p in collected.batch_plan_parts
+                        if p.operation_id == manifest_rec.operation_id
+                        and p.pr_head_sha == manifest_rec.pr_head_sha
+                    }
+                    missing_evidence: tuple[str, ...] = (
+                        *(
+                            f"batch_plan_part:{rid}"
+                            for rid in manifest_rec.part_record_ids
+                            if rid not in present_rids
+                        ),
+                        f"batch_plan_manifest:{manifest_rec.record_id}",
+                        str(exc),
+                    )
+                else:
+                    missing_evidence = (
+                        f"batch_plan_manifest:{manifest_rec.record_id}",
+                        str(exc),
+                    )
+                return _hold(
+                    exc.diagnostic or "corrupted_pr_batch_plan", missing_evidence
+                )
+            return reconstructed, None
+
+        plan_rec = BatchPlanRecord(
+            record_id=(
+                f"batch-plan:{request.operation_id}:"
+                f"{context.head_sha[:12]}:{input_digest}"
+            ),
+            operation_id=request.operation_id,
+            base_sha=context.base_sha,
+            merge_base_sha=context.merge_base_sha,
+            pr_head_sha=context.head_sha,
+            inventory_sha256=context.inventory_sha256,
+            policy_digest=context.policy_digest,
+            configuration_digest=context.configuration_digest,
+            max_provider_calls=context.max_provider_calls,
+            batches=tuple(b.to_plan_dict() for b in context.planned_batches),
+            non_text_changes=context.non_text_changes,
+        )
+
+        fits_inline = False
+        try:
+            inline_marker = format_v6_record_marker(plan_rec)
+            fits_inline = len(inline_marker.encode("utf-8")) <= MAX_MARKER_ENCODED_BYTES
+        except V6LedgerIntegrityError as exc:
+            if exc.diagnostic != "v6_marker_too_large":
+                raise
+            fits_inline = False
+
+        if fits_inline:
+
+            def _find_plan_cid(ledger: _CollectedLedger) -> int | None:
+                for cand in ledger.batch_plans:
+                    if cand.record_id == plan_rec.record_id:
+                        return ledger.comment_ids_by_record_id.get(cand.record_id)
+                return None
+
+            try:
+                plan_cid = self._post_ledger_marker_with_rescan(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    record=plan_rec,
+                    effect_kind_label="batch_plan",
+                    find_existing_cid=_find_plan_cid,
+                )
+                comment_ids_by_record_id[plan_rec.record_id] = plan_cid
+                return plan_rec, None
+            except (
+                _AmbiguousWriteOutcomeError,
+                TimeoutError,
+                ConnectionError,
+                GitHubHTTPTransientError,
+            ):
+                return _hold(
+                    "ambiguous_write_outcome",
+                    (f"batch_plan:{plan_rec.record_id}",),
+                )
+
+        plan_sha256, candidate_parts, manifest_rec = _split_batch_plan_into_parts(
+            plan_rec, input_digest=input_digest
+        )
+        expected_by_rid = {part.record_id: part for part in candidate_parts}
+        reusable_parts_by_idx: dict[int, BatchPlanPartRecord] = {}
+        for existing in collected.batch_plan_parts:
+            if existing.operation_id != request.operation_id:
+                continue
+            if existing.record_id in expected_by_rid:
+                expected = expected_by_rid[existing.record_id]
+                if (
+                    existing != expected
+                    or canonical_sha256(_to_json_compatible(existing.part_payload))
+                    != expected.part_sha256
+                ):
+                    return _hold(
+                        "corrupted_pr_batch_plan_digest",
+                        (
+                            f"batch_plan_part:{existing.record_id}:{existing.part_sha256}",
+                        ),
+                    )
+                reusable_parts_by_idx[expected.part_index] = existing
+            elif existing.pr_head_sha == context.head_sha:
+                if existing.plan_sha256 != plan_sha256:
+                    return _hold(
+                        "corrupted_pr_batch_plan",
+                        (
+                            f"unexpected_batch_plan_part:{existing.record_id}:{existing.plan_sha256}",
+                        ),
+                    )
+                if (
+                    existing.part_index >= len(candidate_parts)
+                    or existing.total_parts != len(candidate_parts)
+                    or existing != candidate_parts[existing.part_index]
+                    or canonical_sha256(_to_json_compatible(existing.part_payload))
+                    != candidate_parts[existing.part_index].part_sha256
+                ):
+                    return _hold(
+                        "corrupted_pr_batch_plan_digest",
+                        (
+                            f"batch_plan_part:{existing.record_id}:{existing.part_sha256}",
+                        ),
+                    )
+                reusable_parts_by_idx[existing.part_index] = existing
+
+        pending_part_writes = sum(
+            1
+            for part in candidate_parts
+            if part.part_index not in reusable_parts_by_idx
+        )
+        planned_writes = pending_part_writes + 1
+        if (
+            self.mutation_bound.writes_attempted + planned_writes
+            > self.mutation_bound.max_writes
+        ):
+            raise MutationSanityBoundError(
+                f"mutation sanity bound insufficient for split batch plan "
+                f"({self.mutation_bound.writes_attempted}+{planned_writes}/"
+                f"{self.mutation_bound.max_writes})",
+                diagnostic="v6_mutation_sanity_bound_exceeded",
+            )
+
+        persisted_parts: list[BatchPlanPartRecord] = []
+        for part_rec in candidate_parts:
+            reused = reusable_parts_by_idx.get(part_rec.part_index)
+            if reused is not None:
+                persisted_parts.append(reused)
+                continue
+
+            def _find_plan_part_cid(
+                ledger: _CollectedLedger,
+                *,
+                expected_part: BatchPlanPartRecord = part_rec,
+            ) -> int | None:
+                for cand in ledger.batch_plan_parts:
+                    if (
+                        cand == expected_part
+                        and canonical_sha256(_to_json_compatible(cand.part_payload))
+                        == expected_part.part_sha256
+                    ):
+                        return ledger.comment_ids_by_record_id.get(cand.record_id)
+                return None
+
+            try:
+                part_cid = self._post_ledger_marker_with_rescan(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    record=part_rec,
+                    effect_kind_label="batch_plan_part",
+                    find_existing_cid=_find_plan_part_cid,
+                )
+                comment_ids_by_record_id[part_rec.record_id] = part_cid
+                persisted_parts.append(part_rec)
+            except (
+                _AmbiguousWriteOutcomeError,
+                TimeoutError,
+                ConnectionError,
+                GitHubHTTPTransientError,
+            ):
+                return _hold(
+                    "ambiguous_write_outcome",
+                    (f"batch_plan_part:{part_rec.record_id}",),
+                )
+
+        def _find_plan_manifest_cid(ledger: _CollectedLedger) -> int | None:
+            for cand in ledger.batch_plan_manifests:
+                if cand == manifest_rec:
+                    return ledger.comment_ids_by_record_id.get(cand.record_id)
+            return None
+
+        try:
+            manifest_cid = self._post_ledger_marker_with_rescan(
+                request=request,
+                guard=guard,
+                prior_hint=prior_hint,
+                record=manifest_rec,
+                effect_kind_label="batch_plan_manifest",
+                find_existing_cid=_find_plan_manifest_cid,
+            )
+            comment_ids_by_record_id[manifest_rec.record_id] = manifest_cid
+        except (
+            _AmbiguousWriteOutcomeError,
+            TimeoutError,
+            ConnectionError,
+            GitHubHTTPTransientError,
+        ):
+            return _hold(
+                "ambiguous_write_outcome",
+                (f"batch_plan_manifest:{manifest_rec.record_id}",),
+            )
+
+        try:
+            verified_plan = _reconstruct_split_batch_plan(
+                manifest_rec=manifest_rec,
+                plan_parts=persisted_parts,
+            )
+        except ReviewInputError as exc:
+            if exc.diagnostic == "incomplete_partitioned_batch_plan_missing_part":
+                present_rids = {p.record_id for p in persisted_parts}
+                missing_evidence = (
+                    *(
+                        f"batch_plan_part:{rid}"
+                        for rid in manifest_rec.part_record_ids
+                        if rid not in present_rids
+                    ),
+                    f"batch_plan_manifest:{manifest_rec.record_id}",
+                    str(exc),
+                )
+            else:
+                missing_evidence = (
+                    f"batch_plan_manifest:{manifest_rec.record_id}",
+                    str(exc),
+                )
+            return _hold(exc.diagnostic or "corrupted_pr_batch_plan", missing_evidence)
+        return verified_plan, None
+
     def _run_restartable_batch_analysis(
         self,
         *,
@@ -4350,82 +4934,59 @@ class V6RecoveryEngine:
         batch_results_by_id: dict[str, Any] = {}
 
         if context.planned_batches:
-            matching_plans = [
-                p
-                for p in collected.batch_plans
-                if p.operation_id == scoped_request.operation_id
-                and p.base_sha == context.base_sha
-                and p.merge_base_sha == context.merge_base_sha
-                and p.pr_head_sha == context.head_sha
-                and p.inventory_sha256 == context.inventory_sha256
-                and p.policy_digest == context.policy_digest
-                and p.configuration_digest == context.configuration_digest
-            ]
-            if matching_plans:
-                plan_rec = matching_plans[-1]
-            else:
-                plan_rec = BatchPlanRecord(
-                    record_id=(
-                        f"batch-plan:{scoped_request.operation_id}:"
-                        f"{context.head_sha[:12]}:{input_digest}"
-                    ),
-                    operation_id=scoped_request.operation_id,
-                    base_sha=context.base_sha,
-                    merge_base_sha=context.merge_base_sha,
-                    pr_head_sha=context.head_sha,
-                    inventory_sha256=context.inventory_sha256,
-                    policy_digest=context.policy_digest,
-                    configuration_digest=context.configuration_digest,
-                    max_provider_calls=context.max_provider_calls,
-                    batches=tuple(b.to_plan_dict() for b in context.planned_batches),
-                    non_text_changes=context.non_text_changes,
+            plan_rec, plan_hold = self._ensure_pr_batch_plan(
+                request=scoped_request,
+                context=context,
+                input_digest=input_digest,
+                guard=guard,
+                prior_hint=prior_hint,
+                collected=collected,
+                comment_ids_by_record_id=comment_ids_by_record_id,
+                model_calls_started=calls_started_this_run,
+                operation_model_calls_total=(
+                    None if op_calls_unknown else known_op_calls
+                ),
+                operation_model_calls_unknown=op_calls_unknown,
+            )
+            if plan_hold is not None:
+                return (
+                    scoped_request,
+                    None,
+                    calls_started_this_run,
+                    owners,
+                    owner_cid,
+                    unresolved_results,
+                    result_parts,
+                    result_manifests,
+                    comment_ids_by_record_id,
+                    plan_hold,
                 )
-
-                def _find_plan_cid(ledger: _CollectedLedger) -> int | None:
-                    for cand in ledger.batch_plans:
-                        if cand.record_id == plan_rec.record_id:
-                            return ledger.comment_ids_by_record_id.get(cand.record_id)
-                    return None
-
-                try:
-                    plan_cid = self._post_ledger_marker_with_rescan(
+            if plan_rec is None:
+                return (
+                    scoped_request,
+                    None,
+                    calls_started_this_run,
+                    owners,
+                    owner_cid,
+                    unresolved_results,
+                    result_parts,
+                    result_manifests,
+                    comment_ids_by_record_id,
+                    self._finalize_hold(
                         request=scoped_request,
                         guard=guard,
                         prior_hint=prior_hint,
-                        record=plan_rec,
-                        effect_kind_label="batch_plan",
-                        find_existing_cid=_find_plan_cid,
-                    )
-                    comment_ids_by_record_id[plan_rec.record_id] = plan_cid
-                except (
-                    _AmbiguousWriteOutcomeError,
-                    TimeoutError,
-                    ConnectionError,
-                    GitHubHTTPTransientError,
-                ):
-                    return (
-                        scoped_request,
-                        None,
-                        calls_started_this_run,
-                        owners,
-                        owner_cid,
-                        unresolved_results,
-                        result_parts,
-                        result_manifests,
-                        comment_ids_by_record_id,
-                        self._finalize_hold(
-                            request=scoped_request,
-                            guard=guard,
-                            prior_hint=prior_hint,
-                            blocker="ambiguous_write_outcome",
-                            missing_evidence=(f"batch_plan:{plan_rec.record_id}",),
-                            model_calls_started=calls_started_this_run,
-                            operation_model_calls_total=(
-                                None if op_calls_unknown else known_op_calls
-                            ),
-                            operation_model_calls_unknown=op_calls_unknown,
+                        blocker="corrupted_pr_batch_plan",
+                        missing_evidence=(
+                            f"batch_plan:{scoped_request.operation_id}:{context.head_sha[:12]}",
                         ),
-                    )
+                        model_calls_started=calls_started_this_run,
+                        operation_model_calls_total=(
+                            None if op_calls_unknown else known_op_calls
+                        ),
+                        operation_model_calls_unknown=op_calls_unknown,
+                    ),
+                )
 
             plan_sha256 = canonical_sha256(record_to_dict(plan_rec))
             planned_by_id = {b.batch_id: b for b in context.planned_batches}

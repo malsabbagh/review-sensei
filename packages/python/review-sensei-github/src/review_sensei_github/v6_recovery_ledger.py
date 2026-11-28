@@ -37,6 +37,8 @@ UNRESOLVED_RESULT_SCHEMA = "reviewsensei:v6:unresolved:v1"
 RESULT_PART_SCHEMA = "reviewsensei:v6:result-part:v1"
 RESULT_MANIFEST_SCHEMA = "reviewsensei:v6:result-manifest:v1"
 BATCH_PLAN_SCHEMA = "reviewsensei:v6:batch-plan:v1"
+BATCH_PLAN_PART_SCHEMA = "reviewsensei:v6:batch-plan-part:v1"
+BATCH_PLAN_MANIFEST_SCHEMA = "reviewsensei:v6:batch-plan-manifest:v1"
 BATCH_DISPATCH_SCHEMA = "reviewsensei:v6:batch-dispatch:v1"
 BATCH_ATTEMPT_SCHEMA = "reviewsensei:v6:batch-attempt:v1"
 BATCH_OUTPUT_SCHEMA = "reviewsensei:v6:batch-output:v1"
@@ -76,6 +78,8 @@ VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
         RESULT_PART_SCHEMA,
         RESULT_MANIFEST_SCHEMA,
         BATCH_PLAN_SCHEMA,
+        BATCH_PLAN_PART_SCHEMA,
+        BATCH_PLAN_MANIFEST_SCHEMA,
         BATCH_DISPATCH_SCHEMA,
         BATCH_ATTEMPT_SCHEMA,
         BATCH_OUTPUT_SCHEMA,
@@ -791,6 +795,126 @@ class BatchPlanRecord:
 
 
 @dataclass(frozen=True)
+class BatchPlanPartRecord:
+    """Lossless partitioned chunk of an oversized PR-resident batch plan."""
+
+    record_id: str
+    operation_id: str
+    pr_head_sha: str
+    plan_sha256: str
+    part_index: int
+    total_parts: int
+    part_sha256: str
+    part_payload: Mapping[str, Any]
+    schema: str = BATCH_PLAN_PART_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != BATCH_PLAN_PART_SCHEMA:
+            raise ReviewInputError(
+                f"invalid BatchPlanPartRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_sha256_64(self.plan_sha256, name="plan_sha256")
+        idx = _require_strict_int(self.part_index, name="part_index", minimum=0)
+        total = _require_strict_int(self.total_parts, name="total_parts", minimum=1)
+        if idx >= total:
+            raise ReviewInputError(
+                f"part_index {idx} must be < total_parts {total}",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        _require_sha256_64(self.part_sha256, name="part_sha256")
+        if not isinstance(self.part_payload, Mapping):
+            raise ReviewInputError(
+                "part_payload must be a mapping",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        frozen_part = MappingProxyType(_to_json_compatible(dict(self.part_payload)))
+        if canonical_sha256(dict(frozen_part)) != self.part_sha256:
+            raise ReviewInputError(
+                "BatchPlanPartRecord part_sha256 does not match part_payload",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        object.__setattr__(self, "part_payload", frozen_part)
+
+
+@dataclass(frozen=True)
+class BatchPlanManifestRecord:
+    """Manifest binding partitioned BatchPlanPartRecord comments into a BatchPlanRecord."""
+
+    record_id: str
+    operation_id: str
+    base_sha: str
+    merge_base_sha: str
+    pr_head_sha: str
+    inventory_sha256: str
+    policy_digest: str
+    configuration_digest: str
+    max_provider_calls: int
+    plan_sha256: str
+    total_parts: int
+    part_record_ids: tuple[str, ...]
+    part_sha256s: tuple[str, ...]
+    batch_count: int
+    schema: str = BATCH_PLAN_MANIFEST_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != BATCH_PLAN_MANIFEST_SCHEMA:
+            raise ReviewInputError(
+                f"invalid BatchPlanManifestRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_sha1_40(self.base_sha, name="base_sha")
+        _require_sha1_40(self.merge_base_sha, name="merge_base_sha")
+        _require_sha1_40(self.pr_head_sha, name="pr_head_sha")
+        _require_sha256_64(self.inventory_sha256, name="inventory_sha256")
+        _require_sha256_64(self.policy_digest, name="policy_digest")
+        _require_sha256_64(self.configuration_digest, name="configuration_digest")
+        _require_strict_int(
+            self.max_provider_calls, name="max_provider_calls", minimum=1
+        )
+        _require_sha256_64(self.plan_sha256, name="plan_sha256")
+        total = _require_strict_int(self.total_parts, name="total_parts", minimum=1)
+        if (
+            not isinstance(self.part_record_ids, Sequence)
+            or isinstance(self.part_record_ids, (str, bytes, bytearray))
+            or len(self.part_record_ids) != total
+        ):
+            raise ReviewInputError(
+                "part_record_ids must be a sequence matching total_parts",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_part_ids = tuple(
+            _require_non_empty_str(pid, name="part_record_id")
+            for pid in self.part_record_ids
+        )
+        if len(set(validated_part_ids)) != len(validated_part_ids):
+            raise ReviewInputError(
+                "part_record_ids must be unique",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        object.__setattr__(self, "part_record_ids", validated_part_ids)
+        if (
+            not isinstance(self.part_sha256s, Sequence)
+            or isinstance(self.part_sha256s, (str, bytes, bytearray))
+            or len(self.part_sha256s) != total
+        ):
+            raise ReviewInputError(
+                "part_sha256s must be a sequence matching total_parts",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        validated_part_shas = tuple(
+            _require_sha256_64(sha, name="part_sha256") for sha in self.part_sha256s
+        )
+        object.__setattr__(self, "part_sha256s", validated_part_shas)
+        _require_strict_int(self.batch_count, name="batch_count", minimum=0)
+
+
+@dataclass(frozen=True)
 class BatchDispatchRecord:
     """Immutable PR-resident marker recorded BEFORE a provider batch request."""
 
@@ -1057,6 +1181,8 @@ V6LedgerRecord: TypeAlias = (
     | ResultPartRecord
     | ResultManifestRecord
     | BatchPlanRecord
+    | BatchPlanPartRecord
+    | BatchPlanManifestRecord
     | BatchDispatchRecord
     | BatchAttemptRecord
     | BatchOutputRecord
@@ -1191,6 +1317,36 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "max_provider_calls": record.max_provider_calls,
             "batches": _to_json_compatible(record.batches),
             "non_text_changes": _to_json_compatible(record.non_text_changes),
+        }
+    if isinstance(record, BatchPlanPartRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "pr_head_sha": record.pr_head_sha,
+            "plan_sha256": record.plan_sha256,
+            "part_index": record.part_index,
+            "total_parts": record.total_parts,
+            "part_sha256": record.part_sha256,
+            "part_payload": _to_json_compatible(record.part_payload),
+        }
+    if isinstance(record, BatchPlanManifestRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "base_sha": record.base_sha,
+            "merge_base_sha": record.merge_base_sha,
+            "pr_head_sha": record.pr_head_sha,
+            "inventory_sha256": record.inventory_sha256,
+            "policy_digest": record.policy_digest,
+            "configuration_digest": record.configuration_digest,
+            "max_provider_calls": record.max_provider_calls,
+            "plan_sha256": record.plan_sha256,
+            "total_parts": record.total_parts,
+            "part_record_ids": list(record.part_record_ids),
+            "part_sha256s": list(record.part_sha256s),
+            "batch_count": record.batch_count,
         }
     if isinstance(record, BatchDispatchRecord):
         return {
@@ -1710,6 +1866,100 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 max_provider_calls=_require_mapping_int(payload, "max_provider_calls"),
                 batches=tuple(raw_batches),
                 non_text_changes=tuple(raw_non_text),
+            )
+
+        if schema == BATCH_PLAN_PART_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "pr_head_sha",
+                "plan_sha256",
+                "part_index",
+                "total_parts",
+                "part_sha256",
+                "part_payload",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "BatchPlanPartRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_part = payload["part_payload"]
+            if not isinstance(raw_part, Mapping):
+                raise V6LedgerIntegrityError(
+                    "field 'part_payload' must be a mapping",
+                    diagnostic="v6_malformed_marker",
+                )
+            return BatchPlanPartRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                plan_sha256=_require_mapping_str(payload, "plan_sha256"),
+                part_index=_require_mapping_int(payload, "part_index"),
+                total_parts=_require_mapping_int(payload, "total_parts"),
+                part_sha256=_require_mapping_str(payload, "part_sha256"),
+                part_payload=raw_part,
+            )
+
+        if schema == BATCH_PLAN_MANIFEST_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "base_sha",
+                "merge_base_sha",
+                "pr_head_sha",
+                "inventory_sha256",
+                "policy_digest",
+                "configuration_digest",
+                "max_provider_calls",
+                "plan_sha256",
+                "total_parts",
+                "part_record_ids",
+                "part_sha256s",
+                "batch_count",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "BatchPlanManifestRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_part_ids = payload["part_record_ids"]
+            if not isinstance(raw_part_ids, (list, tuple)) or any(
+                type(item) is not str for item in raw_part_ids
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'part_record_ids' must be a list of strings",
+                    diagnostic="v6_malformed_marker",
+                )
+            raw_part_shas = payload["part_sha256s"]
+            if not isinstance(raw_part_shas, (list, tuple)) or any(
+                type(item) is not str for item in raw_part_shas
+            ):
+                raise V6LedgerIntegrityError(
+                    "field 'part_sha256s' must be a list of strings",
+                    diagnostic="v6_malformed_marker",
+                )
+            return BatchPlanManifestRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                base_sha=_require_mapping_str(payload, "base_sha"),
+                merge_base_sha=_require_mapping_str(payload, "merge_base_sha"),
+                pr_head_sha=_require_mapping_str(payload, "pr_head_sha"),
+                inventory_sha256=_require_mapping_str(payload, "inventory_sha256"),
+                policy_digest=_require_mapping_str(payload, "policy_digest"),
+                configuration_digest=_require_mapping_str(
+                    payload, "configuration_digest"
+                ),
+                max_provider_calls=_require_mapping_int(payload, "max_provider_calls"),
+                plan_sha256=_require_mapping_str(payload, "plan_sha256"),
+                total_parts=_require_mapping_int(payload, "total_parts"),
+                part_record_ids=tuple(raw_part_ids),
+                part_sha256s=tuple(raw_part_shas),
+                batch_count=_require_mapping_int(payload, "batch_count"),
             )
 
         if schema == BATCH_DISPATCH_SCHEMA:
