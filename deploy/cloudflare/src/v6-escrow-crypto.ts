@@ -291,7 +291,10 @@ export class V6EscrowCrypto {
         false,
         ["encrypt", "decrypt"],
       );
-    })();
+    })().catch((error) => {
+      this.escrowKeyPromise = undefined;
+      throw error;
+    });
     return this.escrowKeyPromise;
   }
 
@@ -299,7 +302,10 @@ export class V6EscrowCrypto {
     this.attestationKeyPromise ??= this.deriveHmacKey(
       V6_ATTESTATION_HKDF_SALT,
       V6_ATTESTATION_HKDF_INFO,
-    );
+    ).catch((error) => {
+      this.attestationKeyPromise = undefined;
+      throw error;
+    });
     return this.attestationKeyPromise;
   }
 
@@ -307,7 +313,10 @@ export class V6EscrowCrypto {
     this.reconcileCursorKeyPromise ??= this.deriveHmacKey(
       V6_RECONCILE_CURSOR_HKDF_SALT,
       V6_RECONCILE_CURSOR_HKDF_INFO,
-    );
+    ).catch((error) => {
+      this.reconcileCursorKeyPromise = undefined;
+      throw error;
+    });
     return this.reconcileCursorKeyPromise;
   }
 

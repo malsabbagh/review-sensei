@@ -1878,4 +1878,97 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
     expect(tightTurn.nextPage).toBe(11);
     expect(request).toHaveBeenCalledTimes(1);
   });
+
+  it("steps down cleanly on mid-page maxComments overflow and discards unverified multi-page prefix on Pass-1 pause", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+    const issueUrl = "https://api.example.test/repos/acme/widgets/issues/42";
+    const mkComment = (id: number) => ({
+      id,
+      body: `comment-${id}`,
+      author_association: "NONE",
+      issue_url: issueUrl,
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    });
+
+    // 1. RS-C162C9(3): page 1 at initialPageSize=100 has 20 comments (> maxComments=15) -> steps down
+    // to pageSize=12, nextPage=1, and subsequent resumed turns drain all 20 comments without skipping.
+    const twenty = Array.from({ length: 20 }, (_, idx) => mkComment(idx + 1));
+    request.mockImplementation(async (_method, path) => {
+      const perPage = Number(/[?&]per_page=([0-9]+)/.exec(path)?.[1] ?? "100");
+      const page = Number(/[?&]page=([0-9]+)/.exec(path)?.[1] ?? "1");
+      const start = (page - 1) * perPage;
+      const slice = twenty.slice(start, start + perPage);
+      return {
+        status: 200,
+        hasNextPage: start + slice.length < twenty.length,
+        data: slice,
+      };
+    });
+    const ov1 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { maxComments: 15, initialPageSize: 100 },
+    );
+    expect(ov1.incomplete).toBe(true);
+    expect(ov1.truncated).toBe(true);
+    expect(ov1.pageSize).toBe(12);
+    expect(ov1.nextPage).toBe(1);
+    expect(ov1.comments).toHaveLength(15);
+
+    const ov2 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { startPage: ov1.nextPage!, initialPageSize: ov1.pageSize!, maxComments: 15 },
+    );
+    expect(ov2.incomplete).toBe(true);
+    expect(ov2.truncated).toBe(true);
+    expect(ov2.pageSize).toBe(12);
+    expect(ov2.nextPage).toBe(2);
+    expect(ov2.comments.map((c) => c.id)).toEqual(twenty.slice(0, 12).map((c) => c.id));
+
+    const ov3 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { startPage: ov2.nextPage!, initialPageSize: ov2.pageSize!, maxComments: 15 },
+    );
+    expect(ov3.incomplete).toBe(false);
+    expect(ov3.truncated).toBe(false);
+    expect(ov3.nextPage).toBeNull();
+    expect([...ov2.comments, ...ov3.comments].map((c) => c.id)).toEqual(twenty.map((c) => c.id));
+
+    // 2. Pass-1 pause on page 3 (>= 2 unverified pages scanned) must NOT advance nextPage past
+    // unverified pages 1..2; it must return nextPage=resumeStartPage with empty comments so resume re-verifies.
+    request.mockReset();
+    request
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: [mkComment(1)] })
+      .mockResolvedValueOnce({ status: 200, hasNextPage: true, data: [mkComment(2)] })
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { message: "secondary rate limit" },
+        lookupMetadata: { retry_after: 9 },
+      });
+    const multiPause = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { startPage: 4, initialPageSize: 12 },
+    );
+    expect(multiPause).toMatchObject({
+      truncated: true,
+      incomplete: true,
+      nextPage: 4,
+      pageSize: 12,
+      retryAfterMs: 9000,
+      rateLimited: true,
+      comments: [],
+    });
+  });
 });

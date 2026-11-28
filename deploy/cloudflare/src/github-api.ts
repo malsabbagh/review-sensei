@@ -1393,7 +1393,10 @@ export class GitHubApi {
             break;
           }
           if (fetched.kind === "paused") {
-            return pausedPage(Array.from(commentsById.values()), page, size, fetched);
+            if (pageIds.length <= 1) {
+              return pausedPage(Array.from(commentsById.values()), page, size, fetched);
+            }
+            return pausedPage([], resumeStartPage, size, fetched);
           }
           const currentPageIds: number[] = [];
           const currentPageItems: LiveIssueComment[] = [];

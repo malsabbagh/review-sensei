@@ -3918,10 +3918,11 @@ export class V6PrCoordinatorEngine {
       const pageSize = isPositiveSafeInt(page.pageSize) ? page.pageSize : initialPageSize;
       if (
         useCursor &&
-        page.rateLimited !== true &&
-        page.transientFailure !== true &&
         pageSize === validSavedCursor!.page_size &&
-        nextPage <= validSavedCursor!.next_page
+        (nextPage < validSavedCursor!.next_page ||
+          (page.rateLimited !== true &&
+            page.transientFailure !== true &&
+            nextPage <= validSavedCursor!.next_page))
       ) {
         throw new Error("v6_lease_reconciliation_evidence_invalid");
       }

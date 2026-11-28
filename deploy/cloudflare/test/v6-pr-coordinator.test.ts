@@ -3355,12 +3355,20 @@ function createInMemorySqlStorage(): SqlStorage & {
           ],
         };
       }
-      if (normalized.startsWith("SELECT cursor_json FROM v6_pr_reconcile_cursor")) {
+      if (
+        normalized === "SELECT cursor_json FROM v6_pr_reconcile_cursor WHERE slot_key = ?"
+      ) {
+        expect(bindings).toHaveLength(1);
         const slotKey = String(bindings[0]);
         const row = cursorRows.get(slotKey);
-        return { toArray: () => (row ? [{ ...row }] : []) };
+        return { toArray: () => (row ? [{ cursor_json: row.cursor_json }] : []) };
       }
-      if (normalized.startsWith("INSERT INTO v6_pr_reconcile_cursor")) {
+      if (
+        normalized.startsWith(
+          "INSERT INTO v6_pr_reconcile_cursor (slot_key, cursor_json, updated_at_ms) VALUES (?, ?, ?) ON CONFLICT(slot_key) DO UPDATE",
+        )
+      ) {
+        expect(bindings).toHaveLength(3);
         cursorRows.set(String(bindings[0]), {
           slot_key: bindings[0],
           cursor_json: bindings[1],
@@ -3368,7 +3376,8 @@ function createInMemorySqlStorage(): SqlStorage & {
         });
         return { toArray: () => [] };
       }
-      if (normalized.startsWith("DELETE FROM v6_pr_reconcile_cursor")) {
+      if (normalized === "DELETE FROM v6_pr_reconcile_cursor WHERE slot_key = ?") {
+        expect(bindings).toHaveLength(1);
         cursorRows.delete(String(bindings[0]));
         return { toArray: () => [] };
       }
@@ -4167,25 +4176,27 @@ describe("v6 resumable Gate 2 reconciliation", () => {
     });
 
     const ghApi = new GitHubApi(env);
-    let callCount = 0;
+    let servedPage1At12 = false;
+    let rateLimitedPage2At12Once = false;
     const calledPaths: string[] = [];
     vi.spyOn(ghApi, "request").mockImplementation(async (_method, path) => {
       calledPaths.push(path);
-      callCount += 1;
       const perPage = Number(/[?&]per_page=([0-9]+)/.exec(path)?.[1] ?? "100");
       const page = Number(/[?&]page=([0-9]+)/.exec(path)?.[1] ?? "1");
       if (perPage === 100) {
         throw new Error("github_response_too_large");
       }
-      if (perPage === 12 && callCount === 2) {
+      if (perPage === 12 && page === 1 && !servedPage1At12) {
         // Turn 1 serves page 1 at per_page=12 (next call hits 429 on page 2 -> saves page_size=12, next_page=2)
+        servedPage1At12 = true;
         return {
           status: 200,
           hasNextPage: true,
           data: Array.from({ length: 12 }, (_, idx) => makeRawNoiseComment(idx + 1)),
         };
       }
-      if (perPage === 12 && page === 2 && callCount === 3) {
+      if (perPage === 12 && page === 2 && !rateLimitedPage2At12Once) {
+        rateLimitedPage2At12Once = true;
         return {
           status: 429,
           data: { message: "rate limit" },
@@ -4740,5 +4751,289 @@ describe("v6 resumable Gate 2 reconciliation", () => {
     expect(turn2.body.state).toBe("IDLE");
     expect(Math.min(...fetchedPages)).toBe(20);
     expect((await store.getSlot(slotKey42))?.reconcile_scan_cursor).toBeNull();
+  });
+
+  it("enforces FakeV6Provider options tracking, rejects backwards rate-limited nextPage, recovers from transient HKDF failure, and purges bad-MAC cursors", async () => {
+    const { env, engine, provider, store, slotKey42 } = createHarness();
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acq.status).toBe(200);
+    await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acq.body.reservation_id,
+    });
+
+    // 1. RS-7706FA & RS-3C38A9: FakeV6Provider records startPage/initialPageSize; backwards
+    // nextPage during a rate-limited resume is rejected fail-closed with HOLD.
+    provider.commentsSinceOverride = {
+      comments: [],
+      truncated: true,
+      incomplete: true,
+      nextPage: 5,
+      pageSize: 100,
+      rateLimited: true,
+      retryAfterMs: 2000,
+    };
+    const r1 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+    });
+    expect(r1.status).toBe(409);
+    expect(provider.issueCommentsSinceOptions[0]).toMatchObject({
+      startPage: 1,
+      initialPageSize: 100,
+    });
+
+    // Same-page retry on rateLimited is allowed, preserves startPage=5, then backwards nextPage=4 holds.
+    provider.commentsSinceOverride = {
+      comments: [],
+      truncated: true,
+      incomplete: true,
+      nextPage: 4,
+      pageSize: 100,
+      rateLimited: true,
+      retryAfterMs: 2000,
+    };
+    const rBack = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+    });
+    expect(rBack.status).toBe(409);
+    expect(rBack.body.diagnostic).toMatchObject({
+      code: "v6_lease_reconciliation_evidence_invalid",
+    });
+    expect(rBack.body.slot_state).toBe("HOLD");
+    expect(provider.issueCommentsSinceOptions[1]).toMatchObject({
+      startPage: 5,
+      initialPageSize: 100,
+    });
+    expect((await store.getSlot(slotKey42))?.reconcile_scan_cursor).toBeNull();
+
+    // 2. RS-9AAD0A: transient deriveKey failure must not permanently poison V6EscrowCrypto.
+    const cryptoInst = new V6EscrowCrypto(SIGNING_KEY);
+    const realDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
+    let failNextDerive = true;
+    const deriveSpy = vi.spyOn(crypto.subtle, "deriveKey").mockImplementation(async (...args) => {
+      if (failNextDerive) {
+        failNextDerive = false;
+        throw new Error("transient_webcrypto_failure");
+      }
+      return realDeriveKey(...args);
+    });
+    const cursorFields = {
+      version: 1 as const,
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      evidence_sha256: "a".repeat(64),
+      since_iso: "2026-11-27T00:00:00Z",
+      page_size: 100,
+      next_page: 2,
+      matched_intents: [],
+      old_owner_sha256: null,
+    };
+    await expect(cryptoInst.signReconcileCursor(cursorFields)).rejects.toThrow(
+      "transient_webcrypto_failure",
+    );
+    const macAfterRetry = await cryptoInst.signReconcileCursor(cursorFields);
+    await expect(cryptoInst.verifyReconcileCursor(cursorFields, macAfterRetry)).resolves.toBe(
+      true,
+    );
+    deriveSpy.mockRestore();
+
+    // 3. RS-3C5627: tampered-MAC cursor in SQLite DO is ignored and removed once complete.
+    const ownerCreds = await createSignedTestCredentials({ run_id: "20001", run_attempt: "1" });
+    const sql = createInMemorySqlStorage();
+    const stateMock = {
+      storage: { sql },
+      blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn(),
+    } as unknown as DurableObjectState;
+    const cryptoHelper = new V6EscrowCrypto(SIGNING_KEY);
+    const slotKeyDo = buildCanonicalSlotKey({
+      host: "github.com",
+      appId: 12345,
+      installationId: 67890,
+      baseRepoId: 987654321,
+      pullRequest: 42,
+    });
+    const seenUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      seenUrls.push(url);
+      if (url.includes("/.well-known/jwks")) {
+        return new Response(
+          JSON.stringify({ keys: [{ ...ownerCreds.pubJwk, kid: "k1", alg: "RS256" }] }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/app")) {
+        return new Response(JSON.stringify({ slug: "reviewsensei" }), { status: 200 });
+      }
+      if (url.endsWith("/repos/malsabbagh/review-sensei/git/ref/tags/v6-pilot")) {
+        return new Response(
+          JSON.stringify({ object: { type: "commit", sha: WORKFLOW_SHA } }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/installation`)) {
+        return new Response(JSON.stringify({ id: 67890 }), { status: 200 });
+      }
+      if (url.endsWith("/app/installations/67890/access_tokens")) {
+        const parsedInit = JSON.parse(String(init?.body ?? "{}")) as {
+          permissions?: Record<string, string>;
+        };
+        const isWriteMint = parsedInit.permissions?.pull_requests === "write";
+        return new Response(
+          JSON.stringify({
+            token: isWriteMint ? "ghs_badMacWriteToken" : "ghs_badMacReadOnly",
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            permissions: { metadata: "read", ...(parsedInit.permissions ?? {}) },
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/installation/token")) {
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}`)) {
+        return new Response(JSON.stringify({ id: 987654321, fork: false }), { status: 200 });
+      }
+      if (url.endsWith(`/repos/${PILOT_REPO}/pulls/42`)) {
+        return new Response(
+          JSON.stringify({
+            state: "open",
+            head: { sha: HEAD_SHA_1, repo: { id: 987654321, fork: false } },
+            base: { repo: { id: 987654321, fork: false } },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/actions/runs/")) {
+        return new Response(
+          JSON.stringify({
+            id: 20001,
+            run_attempt: 1,
+            status: "in_progress",
+            conclusion: null,
+            head_sha: HEAD_SHA_1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes(`/repos/${PILOT_REPO}/issues/42/comments?`)) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const envDo = baseEnv({ GITHUB_APP_PRIVATE_KEY: ownerCreds.appPrivateKey });
+    const doInst = new V6PrCoordinator(stateMock, envDo);
+    const acqDoRes = await doInst.fetch(
+      new Request("https://do.internal/github/v6/lease/acquire", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          oidc_token: ownerCreds.jwt,
+          pull_request: 42,
+          head_sha: HEAD_SHA_1,
+          capabilities: ["review_publish"],
+        }),
+      }),
+    );
+    expect(acqDoRes.status).toBe(200);
+    const acqDo = (await acqDoRes.json()) as Record<string, unknown>;
+    const relDoRes = await doInst.fetch(
+      new Request("https://do.internal/github/v6/lease/release", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          oidc_token: ownerCreds.jwt,
+          slot_key: slotKeyDo,
+          generation: 1,
+          lease_epoch: 1,
+          reservation_id: acqDo.reservation_id,
+        }),
+      }),
+    );
+    expect(relDoRes.status).toBe(200);
+    // Inject valid-shape cursor with tampered MAC directly into SQLite cursor table:
+    const badMacCursor = {
+      version: 1,
+      slot_key: slotKeyDo,
+      generation: 1,
+      lease_epoch: 1,
+      evidence_sha256: await sha256Hex(
+        canonicalJsonString({
+          old_generation: 1,
+          old_owner_comment_id: null,
+          intent_resolutions: [],
+          anchor_comment_id: null,
+        }),
+      ),
+      since_iso: "2026-11-27T00:00:00Z",
+      page_size: 100,
+      next_page: 9,
+      matched_intents: [],
+      old_owner_sha256: null,
+      retry_after_ms: null,
+      cursor_mac: "f".repeat(64),
+    };
+    expect(
+      await cryptoHelper.verifyReconcileCursor(
+        {
+          version: 1,
+          slot_key: badMacCursor.slot_key,
+          generation: badMacCursor.generation,
+          lease_epoch: badMacCursor.lease_epoch,
+          evidence_sha256: badMacCursor.evidence_sha256,
+          since_iso: badMacCursor.since_iso,
+          page_size: badMacCursor.page_size,
+          next_page: badMacCursor.next_page,
+          matched_intents: badMacCursor.matched_intents,
+          old_owner_sha256: badMacCursor.old_owner_sha256,
+        },
+        badMacCursor.cursor_mac,
+      ),
+    ).toBe(false);
+    sql.cursorRows.set(slotKeyDo, {
+      slot_key: slotKeyDo,
+      cursor_json: JSON.stringify(badMacCursor),
+      updated_at_ms: Date.now(),
+    });
+    const recRes = await doInst.fetch(
+      new Request("https://do.internal/github/v6/lease/complete-reconcile", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          oidc_token: ownerCreds.jwt,
+          slot_key: slotKeyDo,
+          generation: 1,
+          reconciliation_outcome: "clean_receipts",
+          reconciliation_evidence: { old_generation: 1, intent_resolutions: [] },
+        }),
+      }),
+    );
+    expect(recRes.status).toBe(200);
+    // Must restart from page 1 (ignoring tampered next_page=9) and purge the tampered cursor row.
+    expect(seenUrls.some((u) => u.includes("issues/42/comments") && u.includes("page=1"))).toBe(
+      true,
+    );
+    expect(seenUrls.some((u) => u.includes("issues/42/comments") && u.includes("page=9"))).toBe(
+      false,
+    );
+    expect(sql.cursorRows.has(slotKeyDo)).toBe(false);
   });
 });
