@@ -4086,9 +4086,6 @@ class V6RecoveryEngine:
             and p.policy_digest == context.policy_digest
             and p.configuration_digest == context.configuration_digest
         ]
-        if matching_plans:
-            return matching_plans[-1], None
-
         matching_manifests = [
             m
             for m in collected.batch_plan_manifests
@@ -4100,6 +4097,53 @@ class V6RecoveryEngine:
             and m.policy_digest == context.policy_digest
             and m.configuration_digest == context.configuration_digest
         ]
+        if len({canonical_sha256(record_to_dict(p)) for p in matching_plans}) > 1:
+            return (
+                None,
+                self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="corrupted_pr_batch_plan",
+                    missing_evidence=tuple(
+                        f"conflicting_batch_plan:{p.record_id}" for p in matching_plans
+                    ),
+                ),
+            )
+        if len({m.plan_sha256 for m in matching_manifests}) > 1:
+            return (
+                None,
+                self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="corrupted_pr_batch_plan",
+                    missing_evidence=tuple(
+                        f"conflicting_batch_plan_manifest:{m.record_id}"
+                        for m in matching_manifests
+                    ),
+                ),
+            )
+        if matching_plans and matching_manifests:
+            plan_sha = canonical_sha256(record_to_dict(matching_plans[-1]))
+            manifest_sha = matching_manifests[-1].plan_sha256
+            if plan_sha != manifest_sha:
+                return (
+                    None,
+                    self._finalize_hold(
+                        request=request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        blocker="corrupted_pr_batch_plan",
+                        missing_evidence=(
+                            f"conflicting_batch_plan:{matching_plans[-1].record_id}",
+                            f"conflicting_batch_plan_manifest:{matching_manifests[-1].record_id}",
+                        ),
+                    ),
+                )
+        if matching_plans:
+            return matching_plans[-1], None
+
         if matching_manifests:
             manifest_rec = matching_manifests[-1]
             try:
@@ -4269,11 +4313,9 @@ class V6RecoveryEngine:
             ) -> int | None:
                 for cand in ledger.batch_plan_parts:
                     if (
-                        cand.record_id == expected_part.record_id
-                        and cand.operation_id == expected_part.operation_id
-                        and cand.pr_head_sha == expected_part.pr_head_sha
-                        and cand.plan_sha256 == expected_part.plan_sha256
-                        and cand.part_sha256 == expected_part.part_sha256
+                        cand == expected_part
+                        and canonical_sha256(_to_json_compatible(cand.part_payload))
+                        == expected_part.part_sha256
                     ):
                         return ledger.comment_ids_by_record_id.get(cand.record_id)
                 return None
@@ -4308,11 +4350,7 @@ class V6RecoveryEngine:
 
         def _find_plan_manifest_cid(ledger: _CollectedLedger) -> int | None:
             for cand in ledger.batch_plan_manifests:
-                if (
-                    cand.record_id == manifest_rec.record_id
-                    and cand.operation_id == manifest_rec.operation_id
-                    and cand.plan_sha256 == manifest_rec.plan_sha256
-                ):
+                if cand == manifest_rec:
                     return ledger.comment_ids_by_record_id.get(cand.record_id)
             return None
 
@@ -4511,7 +4549,27 @@ class V6RecoveryEngine:
                     comment_ids_by_record_id,
                     plan_hold,
                 )
-            assert plan_rec is not None
+            if plan_rec is None:
+                return (
+                    scoped_request,
+                    None,
+                    calls_started_this_run,
+                    owners,
+                    owner_cid,
+                    unresolved_results,
+                    result_parts,
+                    result_manifests,
+                    comment_ids_by_record_id,
+                    self._finalize_hold(
+                        request=scoped_request,
+                        guard=guard,
+                        prior_hint=prior_hint,
+                        blocker="corrupted_pr_batch_plan",
+                        missing_evidence=(
+                            f"batch_plan:{scoped_request.operation_id}:{context.head_sha[:12]}",
+                        ),
+                    ),
+                )
 
             plan_sha256 = canonical_sha256(record_to_dict(plan_rec))
             planned_by_id = {b.batch_id: b for b in context.planned_batches}

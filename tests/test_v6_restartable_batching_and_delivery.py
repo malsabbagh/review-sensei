@@ -2709,6 +2709,110 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
             len([r for r in resumed_recs if isinstance(r, BatchPlanManifestRecord)]), 1
         )
 
+        # 9. Tampered part_payload (even with unchanged part_sha256 header matching manifest)
+        # fails closed with corrupted_pr_batch_plan_digest and 0 model calls (pre- and post-manifest).
+        tampered_payload_part = replace(
+            final_parts[0], part_payload={"chunk": '{"tampered":true}'}
+        )
+        pr_tampered_payload = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_tampered_payload.add_comment(
+            format_v6_record_marker(owner_wide), is_app=True
+        )
+        for idx_p, part_rec in enumerate(final_parts):
+            pr_tampered_payload.add_comment(
+                format_v6_record_marker(
+                    tampered_payload_part if idx_p == 0 else part_rec
+                ),
+                is_app=True,
+            )
+        pr_tampered_payload.add_comment(
+            format_v6_record_marker(final_manifests[0]), is_app=True
+        )
+        model_calls.clear()
+        eng_tampered_payload = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(
+                    pr_tampered_payload.handle_wf
+                ),
+                broker_app_transport=_ScriptedTransport(pr_tampered_payload.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        hold_tampered_payload = eng_tampered_payload.recover_and_publish(req_wide)
+        self.assertIsInstance(hold_tampered_payload, RecoveryHold)
+        assert isinstance(hold_tampered_payload, RecoveryHold)
+        self.assertEqual(
+            hold_tampered_payload.blocker, "corrupted_pr_batch_plan_digest"
+        )
+        self.assertEqual(len(model_calls), 0)
+
+        # Pre-manifest reuse path also rejects tampered part_payload.
+        pr_tampered_pre = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_tampered_pre.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+        pr_tampered_pre.add_comment(
+            format_v6_record_marker(tampered_payload_part), is_app=True
+        )
+        eng_tampered_pre = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_tampered_pre.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_tampered_pre.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        hold_tampered_pre = eng_tampered_pre.recover_and_publish(req_wide)
+        self.assertIsInstance(hold_tampered_pre, RecoveryHold)
+        assert isinstance(hold_tampered_pre, RecoveryHold)
+        self.assertEqual(hold_tampered_pre.blocker, "corrupted_pr_batch_plan_digest")
+        self.assertEqual(len(model_calls), 0)
+
+        # 10. Conflicting BatchPlanManifestRecord records fail closed with corrupted_pr_batch_plan.
+        pr_conflict_manifest = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_conflict_manifest.add_comment(
+            format_v6_record_marker(owner_wide), is_app=True
+        )
+        for part_rec in final_parts:
+            pr_conflict_manifest.add_comment(
+                format_v6_record_marker(part_rec), is_app=True
+            )
+        pr_conflict_manifest.add_comment(
+            format_v6_record_marker(final_manifests[0]), is_app=True
+        )
+        pr_conflict_manifest.add_comment(
+            format_v6_record_marker(
+                replace(
+                    final_manifests[0],
+                    record_id=f"{final_manifests[0].record_id}:conflict",
+                    plan_sha256="f" * 64,
+                )
+            ),
+            is_app=True,
+        )
+        eng_conflict_manifest = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(
+                    pr_conflict_manifest.handle_wf
+                ),
+                broker_app_transport=_ScriptedTransport(
+                    pr_conflict_manifest.handle_app
+                ),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        hold_conflict_manifest = eng_conflict_manifest.recover_and_publish(req_wide)
+        self.assertIsInstance(hold_conflict_manifest, RecoveryHold)
+        assert isinstance(hold_conflict_manifest, RecoveryHold)
+        self.assertEqual(hold_conflict_manifest.blocker, "corrupted_pr_batch_plan")
+        self.assertEqual(len(model_calls), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
