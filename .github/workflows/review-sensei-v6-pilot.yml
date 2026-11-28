@@ -176,11 +176,20 @@ jobs:
           import hashlib, pathlib, sys
           workflow_commit, wheel_dir_raw, summary_path = sys.argv[1], sys.argv[2], sys.argv[3]
           wheels = sorted(pathlib.Path(wheel_dir_raw).glob("*.whl"))
-          if len(wheels) != 2:
-              raise SystemExit(f"expected exactly 2 built wheels, found {len(wheels)}")
+          names = [w.name for w in wheels]
+          has_core = [w for w in wheels if w.name.startswith("review_sensei-")]
+          has_github = [w for w in wheels if w.name.startswith("review_sensei_github-")]
+          if len(wheels) != 2 or len(has_core) != 1 or len(has_github) != 1:
+              raise SystemExit(
+                  f"expected 1 review_sensei-*.whl and 1 review_sensei_github-*.whl, found {names}"
+              )
           lines = [f"review_sensei_v6_workflow_commit={workflow_commit}"]
           for whl in wheels:
-              digest = hashlib.sha256(whl.read_bytes()).hexdigest()
+              h = hashlib.sha256()
+              with whl.open("rb") as fh:
+                  while chunk := fh.read(65536):
+                      h.update(chunk)
+              digest = h.hexdigest()
               lines.append(f"review_sensei_v6_wheel_sha256 {whl.name} {digest}")
           for line in lines:
               print(line)

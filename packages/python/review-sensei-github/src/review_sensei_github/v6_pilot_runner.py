@@ -191,6 +191,14 @@ def _build_fresh_analysis_context_loader(
     """Return a lazy restartable batch context builder when fresh PR analysis is active."""
 
     if config.fresh_analysis_context_loader is not None:
+        if (
+            config.initial_result_loader is not None
+            or config.initial_findings_path is not None
+        ):
+            raise ReviewInputError(
+                "fresh_analysis_context_loader cannot be combined with initial_result_loader or initial_findings_path",
+                diagnostic="v6_conflicting_analysis_config",
+            )
         return config.fresh_analysis_context_loader
     if (
         not config.analyze_fresh_pr
@@ -1316,12 +1324,48 @@ class V6PilotRunner:
             )
             if model_calls_started == "unknown":
                 operation_model_calls_total = "unknown"
-            else:
+            elif (
+                recovery_outcome.operation_model_calls_total is not None
+                or recovery_outcome.operation_model_calls_unknown
+            ):
                 operation_model_calls_total = _format_operation_calls(
                     recovery_outcome.operation_model_calls_total,
                     recovery_outcome.operation_model_calls_unknown,
                     fallback=model_calls_started,
                 )
+            elif takeover_recon is not None:
+                if takeover_recon.operation_model_calls_unknown:
+                    operation_model_calls_total = "unknown"
+                elif type(takeover_recon.operation_model_calls_total) is int:
+                    operation_model_calls_total = (
+                        takeover_recon.operation_model_calls_total + model_calls_started
+                    )
+                else:
+                    operation_model_calls_total = "unknown"
+            else:
+                try:
+                    ro_total, ro_unknown = (
+                        read_only_engine.summarize_operation_provider_calls_read_only(
+                            owner=config.owner,
+                            repo=config.repo,
+                            pull_request=config.pull_request,
+                            operation_id=config.operation_id,
+                            event=config.event,
+                            visibility=config.visibility,
+                            granted_scopes=config.granted_scopes,
+                            expected_app_id=effective_expected_app_id,
+                            expected_bot_login=config.expected_bot_login,
+                            expected_bot_user_id=config.expected_bot_user_id,
+                        )
+                    )
+                    if ro_unknown:
+                        operation_model_calls_total = "unknown"
+                    elif type(ro_total) is int and ro_total >= 0:
+                        operation_model_calls_total = max(ro_total, model_calls_started)
+                    else:
+                        operation_model_calls_total = model_calls_started
+                except Exception:
+                    operation_model_calls_total = "unknown"
         elif isinstance(recovery_outcome, RecoveryCompleted):
             model_calls_started = recovery_outcome.model_calls_started
             operation_model_calls_total = (

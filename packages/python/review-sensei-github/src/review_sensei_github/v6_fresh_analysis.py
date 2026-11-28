@@ -2109,7 +2109,13 @@ def execute_v6_batch(
                 f"batch {batch.batch_id} failed during provider execution ({run.outcome.status})",
                 provider_calls=calls_made,
             )
-        return run.result, (calls_made if calls_made is not None else 1)
+        if calls_made is None:
+            raise V6FreshAnalysisError(
+                "v6_batch_provider_calls_unknown",
+                f"batch {batch.batch_id} completed without a valid integer outcome.provider_calls",
+                provider_calls=None,
+            )
+        return run.result, calls_made
 
     res = context.service.review(req)
     return res, 1

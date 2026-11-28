@@ -376,7 +376,8 @@ def _verify_install_provenance(
     }
     if len(wheel_sha256_by_name) != 2:
         raise RuntimeError(
-            f"expected 2 built wheels from workflow install step, found {wheel_sha256_by_name}"
+            "expected 2 built wheels from workflow install step, "
+            f"found {len(wheel_sha256_by_name)}: {sorted(wheel_sha256_by_name)}"
         )
     has_core_wheel = any(
         whl.name.startswith("review_sensei-") and whl.name.endswith(".whl")
