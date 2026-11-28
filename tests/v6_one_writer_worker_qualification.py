@@ -70,8 +70,17 @@ INSTALLATION_ID = 67890
 HEAD_SHA = "a" * 40
 HEAD_SHA_B = "d" * 40
 BASE_SHA = "0" * 40
-WORKFLOW_SHA = "b" * 40
-WORKFLOW_REF = f"malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@{WORKFLOW_SHA}"
+
+
+def _workflow_ref_for_sha(workflow_sha: str) -> str:
+    """Return the exact pinned pilot workflow ref for ``workflow_sha``."""
+
+    return (
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@"
+        f"{workflow_sha}"
+    )
+
+
 SIGNING_KEY = "v6-integrated-acceptance-signing-key-material-32bytes"
 WF_READ_TOKEN = "ghp_wf_readonly_acceptance_token_0001"
 PROVIDER_API_KEY = "sk-test-v6-provider-key-0001"
@@ -352,6 +361,91 @@ def _materialize_installed_dist_wheel(dist_name: str, wheel_dir: Path) -> None:
         zf.writestr(record_arc, "\n".join(record_rows) + "\n")
 
 
+def _verify_install_provenance(
+    *,
+    expected_commit_sha: str,
+    wheel_dir: Path,
+    stdout_text: str,
+    step_summary_path: Path,
+) -> dict[str, str]:
+    """Verify workflow install stdout and GITHUB_STEP_SUMMARY match exact commit and built wheels."""
+
+    built_wheels = sorted(wheel_dir.glob("*.whl"))
+    wheel_sha256_by_name = {
+        whl.name: hashlib.sha256(whl.read_bytes()).hexdigest() for whl in built_wheels
+    }
+    if len(wheel_sha256_by_name) != 2:
+        raise RuntimeError(
+            f"expected 2 built wheels from workflow install step, found {wheel_sha256_by_name}"
+        )
+    has_core_wheel = any(
+        whl.name.startswith("review_sensei-") and whl.name.endswith(".whl")
+        for whl in built_wheels
+    )
+    has_github_wheel = any(
+        whl.name.startswith("review_sensei_github-") and whl.name.endswith(".whl")
+        for whl in built_wheels
+    )
+    if not (has_core_wheel and has_github_wheel):
+        raise RuntimeError(
+            "expected both review_sensei-*.whl and review_sensei_github-*.whl, "
+            f"found {sorted(wheel_sha256_by_name)}"
+        )
+    if not step_summary_path.is_file():
+        raise RuntimeError(
+            f"workflow install step missing GITHUB_STEP_SUMMARY file: {step_summary_path}"
+        )
+
+    stdout_lines = stdout_text.splitlines()
+    summary_lines = step_summary_path.read_text(encoding="utf-8").splitlines()
+
+    expected_commit_line = f"review_sensei_v6_workflow_commit={expected_commit_sha}"
+    stdout_commit_lines = [
+        line
+        for line in stdout_lines
+        if line.startswith("review_sensei_v6_workflow_commit=")
+    ]
+    if stdout_commit_lines != [expected_commit_line]:
+        raise RuntimeError(
+            "workflow install step stdout commit provenance mismatch: "
+            f"expected [{expected_commit_line!r}], got {stdout_commit_lines!r}"
+        )
+    summary_commit_lines = [
+        line
+        for line in summary_lines
+        if line.startswith("- `review_sensei_v6_workflow_commit=")
+    ]
+    if summary_commit_lines != [f"- `{expected_commit_line}`"]:
+        raise RuntimeError(
+            "workflow install step summary commit provenance mismatch: "
+            f"expected ['- `{expected_commit_line}`'], got {summary_commit_lines!r}"
+        )
+
+    for whl_name, whl_digest in wheel_sha256_by_name.items():
+        expected_wheel_line = f"review_sensei_v6_wheel_sha256 {whl_name} {whl_digest}"
+        stdout_wheel_lines = [
+            line
+            for line in stdout_lines
+            if line.startswith(f"review_sensei_v6_wheel_sha256 {whl_name} ")
+        ]
+        if stdout_wheel_lines != [expected_wheel_line]:
+            raise RuntimeError(
+                "workflow install step stdout wheel hash mismatch: "
+                f"expected [{expected_wheel_line!r}], got {stdout_wheel_lines!r}"
+            )
+        summary_wheel_lines = [
+            line
+            for line in summary_lines
+            if line.startswith(f"- `review_sensei_v6_wheel_sha256 {whl_name} ")
+        ]
+        if summary_wheel_lines != [f"- `{expected_wheel_line}`"]:
+            raise RuntimeError(
+                "workflow install step summary wheel hash mismatch: "
+                f"expected ['- `{expected_wheel_line}`'], got {summary_wheel_lines!r}"
+            )
+    return wheel_sha256_by_name
+
+
 def _build_offline_venv_and_install(
     temp_root: Path,
 ) -> tuple[Path, Path, dict[str, Any]]:
@@ -577,11 +671,13 @@ def _build_offline_venv_and_install(
         stderr=subprocess.PIPE,
         text=True,
     ).stdout.strip()
+    install_step_summary = runner_temp / "install-step-summary.md"
     bash_env.update(
         {
             "PATH": f"{shim_bin}:{os.environ.get('PATH', '')}",
             "HOME": str(temp_root),
             "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_STEP_SUMMARY": str(install_step_summary),
             "REVIEW_SENSEI_WORKFLOW_SHA": commit_sha,
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": f"url.{git_origin.resolve().as_uri()}.insteadOf",
@@ -606,20 +702,12 @@ def _build_offline_venv_and_install(
 
     venv_dir = runner_temp / "review-sensei-v6-venv"
     built_wheel_dir = runner_temp / "review-sensei-v6-wheels"
-    wheel_sha256_by_name = {
-        whl.name: hashlib.sha256(whl.read_bytes()).hexdigest()
-        for whl in sorted(built_wheel_dir.glob("*.whl"))
-    }
-    if len(wheel_sha256_by_name) != 2:
-        raise RuntimeError(
-            f"expected 2 built wheels from workflow install step, found {wheel_sha256_by_name}"
-        )
-    for whl_name, whl_digest in wheel_sha256_by_name.items():
-        expected_line = f"review_sensei_v6_wheel_sha256 {whl_name} {whl_digest}"
-        if expected_line not in proc.stdout:
-            raise RuntimeError(
-                f"workflow install step missing wheel hash line {expected_line!r}\nSTDOUT:\n{proc.stdout}"
-            )
+    wheel_sha256_by_name = _verify_install_provenance(
+        expected_commit_sha=commit_sha,
+        wheel_dir=built_wheel_dir,
+        stdout_text=proc.stdout,
+        step_summary_path=install_step_summary,
+    )
     worker_digest = hashlib.sha256()
     for ts_file in sorted((ROOT / "deploy" / "cloudflare" / "src").glob("*.ts")):
         worker_digest.update(ts_file.name.encode("utf-8"))
@@ -628,6 +716,9 @@ def _build_offline_venv_and_install(
         "workflow_commit_sha": commit_sha,
         "trusted_policy_revision": trusted_policy_rev,
         "wheel_sha256s": wheel_sha256_by_name,
+        "wheel_dir": str(built_wheel_dir),
+        "install_stdout": proc.stdout,
+        "install_step_summary_path": str(install_step_summary),
         "worker_source_sha256": worker_digest.hexdigest(),
     }
 
@@ -671,6 +762,7 @@ class _DropReplyHook:
 class _SimulatedGitHubState:
     oidc_key: rsa.RSAPrivateKey
     app_key: rsa.RSAPrivateKey
+    workflow_sha: str
     lock: threading.Lock = field(default_factory=threading.Lock)
     requests_log: list[tuple[str, str]] = field(default_factory=list)
     active_tokens: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -837,10 +929,18 @@ class _SimulatedGitHubState:
         run_attempt: int,
         repository: str = REPO_FULL,
         repository_id: int = REPO_ID,
-        workflow_sha: str = WORKFLOW_SHA,
-        job_workflow_ref: str = WORKFLOW_REF,
+        workflow_sha: str | None = None,
+        job_workflow_ref: str | None = None,
         audience: str = "sts.reviewsensei.dev",
     ) -> str:
+        effective_workflow_sha = (
+            workflow_sha if workflow_sha is not None else self.workflow_sha
+        )
+        effective_job_workflow_ref = (
+            job_workflow_ref
+            if job_workflow_ref is not None
+            else _workflow_ref_for_sha(effective_workflow_sha)
+        )
         now = int(time.time())
         repo_owner = repository.split("/", 1)[0]
         claims = {
@@ -858,10 +958,10 @@ class _SimulatedGitHubState:
             "actor_id": "100",
             "event_name": "pull_request",
             "workflow": "ReviewSensei v6",
-            "workflow_ref": job_workflow_ref,
-            "workflow_sha": workflow_sha,
-            "job_workflow_ref": job_workflow_ref,
-            "job_workflow_sha": workflow_sha,
+            "workflow_ref": effective_job_workflow_ref,
+            "workflow_sha": effective_workflow_sha,
+            "job_workflow_ref": effective_job_workflow_ref,
+            "job_workflow_sha": effective_workflow_sha,
             "ref": "refs/pull/42/merge",
             "sha": HEAD_SHA,
             "run_id": str(run_id),
@@ -1010,8 +1110,8 @@ def _make_github_handler(
                     run_attempt=int(parts.get("run_attempt", "1")),
                     repository=parts.get("repository", REPO_FULL),
                     repository_id=int(parts.get("repository_id", str(REPO_ID))),
-                    workflow_sha=parts.get("workflow_sha", WORKFLOW_SHA),
-                    job_workflow_ref=parts.get("job_workflow_ref", WORKFLOW_REF),
+                    workflow_sha=parts.get("workflow_sha"),
+                    job_workflow_ref=parts.get("job_workflow_ref"),
                     audience=aud,
                 )
                 self._send_json(200, {"value": jwt_val})
@@ -1665,6 +1765,13 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="v6-worker-qual-")
         self.addCleanup(self._tmp.cleanup)
         self.tmp_path = Path(self._tmp.name)
+        self.venv_dir, self.cli_bin, self.provenance = _build_offline_venv_and_install(
+            self.tmp_path
+        )
+        self.venv_python = self.venv_dir / "bin" / "python"
+        self.workflow_sha = str(self.provenance["workflow_commit_sha"])
+        self.workflow_ref = _workflow_ref_for_sha(self.workflow_sha)
+
         self.ca_pem, self.cert_pem, self.key_pem = _generate_tls_materials(
             self.tmp_path
         )
@@ -1681,7 +1788,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         ).decode("ascii")
 
         self.gh_state = _SimulatedGitHubState(
-            oidc_key=self.oidc_key, app_key=self.app_key
+            oidc_key=self.oidc_key,
+            app_key=self.app_key,
+            workflow_sha=self.workflow_sha,
         )
         server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -1715,7 +1824,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
                         "GITHUB_APP_PRIVATE_KEY": self.app_key_pem,
                         "REVIEWSENSEI_SIGNING_KEY": SIGNING_KEY,
                         "V6_PILOT_REPOSITORIES": REPO_FULL,
-                        "V6_PILOT_WORKFLOW_REF": WORKFLOW_REF,
+                        "V6_PILOT_WORKFLOW_REF": self.workflow_ref,
                     },
                 }
             ),
@@ -1743,11 +1852,6 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             raise RuntimeError(f"worker bridge failed to start: {stderr_text}")
         self.worker_port = int(json.loads(ready_line)["port"])
         self.worker_url = f"https://127.0.0.1:{self.worker_port}"
-
-        self.venv_dir, self.cli_bin, self.provenance = _build_offline_venv_and_install(
-            self.tmp_path
-        )
-        self.venv_python = self.venv_dir / "bin" / "python"
 
     def _stop_gh_server(self) -> None:
         self.gh_server.shutdown()
@@ -1802,9 +1906,18 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         run_attempt: int = 1,
         repository: str = REPO_FULL,
         repository_id: int = REPO_ID,
-        workflow_sha: str = WORKFLOW_SHA,
+        workflow_sha: str | None = None,
+        job_workflow_ref: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
+        effective_workflow_sha = (
+            workflow_sha if workflow_sha is not None else self.workflow_sha
+        )
+        effective_job_workflow_ref = (
+            job_workflow_ref
+            if job_workflow_ref is not None
+            else _workflow_ref_for_sha(effective_workflow_sha)
+        )
         env = {
             "PATH": f"{self.venv_dir / 'bin'}:{os.environ.get('PATH', '')}",
             "SSL_CERT_FILE": str(self.ca_pem),
@@ -1814,11 +1927,12 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": (
                 f"{OIDC_REQUEST_PREFIX}run_id={run_id},run_attempt={run_attempt},"
                 f"repository={repository},repository_id={repository_id},"
-                f"workflow_sha={workflow_sha}"
+                f"workflow_sha={effective_workflow_sha},"
+                f"job_workflow_ref={effective_job_workflow_ref}"
             ),
             "GITHUB_RUN_ID": str(run_id),
             "GITHUB_RUN_ATTEMPT": str(run_attempt),
-            "REVIEW_SENSEI_WORKFLOW_SHA": workflow_sha,
+            "REVIEW_SENSEI_WORKFLOW_SHA": effective_workflow_sha,
         }
         if extra_env:
             env.update(extra_env)
@@ -1832,12 +1946,16 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         run_id: int,
         run_attempt: int = 1,
         head_sha: str = HEAD_SHA,
+        workflow_sha: str | None = None,
         outcome_path: Path,
         step_summary_path: Path,
         initial_findings_path: Path | None = None,
         analyze_fresh_pr: bool = False,
         policy_root: Path | None = None,
     ) -> list[str]:
+        effective_workflow_sha = (
+            workflow_sha if workflow_sha is not None else self.workflow_sha
+        )
         argv = [
             str(self.cli_bin),
             "v6-pilot-run",
@@ -1858,7 +1976,7 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             "--run-attempt",
             str(run_attempt),
             "--workflow-sha",
-            WORKFLOW_SHA,
+            effective_workflow_sha,
             "--expected-bot-login",
             BOT_LOGIN,
             "--outcome",
@@ -1954,15 +2072,60 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
                 )
             )
 
+    def _assert_coordinator_slot_state(
+        self,
+        *,
+        pr_number: int,
+        run_id: int,
+        expected_state: str,
+        run_attempt: int = 1,
+    ) -> dict[str, Any]:
+        """Verify live coordinator slot state via ``POST /github/v6/lease/status``."""
+
+        status_oidc = self.gh_state.issue_oidc_jwt(
+            run_id=str(run_id), run_attempt=run_attempt
+        )
+        st_code, st_raw, st_body = self._post_worker(
+            "/github/v6/lease/status",
+            {"oidc_token": status_oidc, "pull_request": pr_number},
+        )
+        self.assertEqual(st_code, 200, st_raw)
+        self.assertEqual(st_body["state"], expected_state, st_raw)
+        self._assert_no_secret_leaks(st_raw)
+        return st_body
+
     def test_integrated_worker_and_wheel_runner_acceptance_scenarios(self) -> None:
         # 0. Verify provenance hashes and installed packages inside venv (never repo checkout).
         provenance = self.provenance
         self.assertRegex(provenance["workflow_commit_sha"], r"^[0-9a-f]{40}$")
+        self.assertEqual(provenance["workflow_commit_sha"], self.workflow_sha)
+        self.assertEqual(self.workflow_ref, _workflow_ref_for_sha(self.workflow_sha))
         self.assertRegex(provenance["trusted_policy_revision"], r"^[0-9a-f]{40}$")
         self.assertRegex(provenance["worker_source_sha256"], r"^[0-9a-f]{64}$")
-        self.assertGreaterEqual(len(provenance["wheel_sha256s"]), 2)
+        self.assertEqual(len(provenance["wheel_sha256s"]), 2)
+        wheel_names = sorted(provenance["wheel_sha256s"])
+        self.assertTrue(
+            any(
+                name.startswith("review_sensei-") and name.endswith(".whl")
+                for name in wheel_names
+            ),
+            wheel_names,
+        )
+        self.assertTrue(
+            any(
+                name.startswith("review_sensei_github-") and name.endswith(".whl")
+                for name in wheel_names
+            ),
+            wheel_names,
+        )
         for whl_sha in provenance["wheel_sha256s"].values():
             self.assertRegex(whl_sha, r"^[0-9a-f]{64}$")
+        _verify_install_provenance(
+            expected_commit_sha=self.workflow_sha,
+            wheel_dir=Path(provenance["wheel_dir"]),
+            stdout_text=str(provenance["install_stdout"]),
+            step_summary_path=Path(provenance["install_step_summary_path"]),
+        )
 
         pkg_paths = subprocess.run(
             [
@@ -2073,13 +2236,14 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertEqual(len(self.gh_state.prs[41]["reviews"]), 1)
         # Ensure real ghs_ token was minted and then revoked on clean release.
         self.assertEqual(len(self.gh_state.revoked_tokens), 1)
-        # Verify status route body never echoes tokens.
+        # Verify status route body reports slot back to IDLE and never echoes tokens.
         status_oidc = self.gh_state.issue_oidc_jwt(run_id="901", run_attempt=1)
-        st_code, st_raw, _ = self._post_worker(
+        st_code, st_raw, st_body = self._post_worker(
             "/github/v6/lease/status",
             {"oidc_token": status_oidc, "pull_request": 41},
         )
-        self.assertEqual(st_code, 200)
+        self.assertEqual(st_code, 200, st_raw)
+        self.assertEqual(st_body["state"], "IDLE", st_raw)
         self._assert_no_secret_leaks(
             self.worker_log,
             st_raw,
@@ -2212,6 +2376,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertEqual(parsed_42_r2["generation"], 2)
         self.assertEqual(parsed_42_r2["model_calls_started"], 0)
         self.assertTrue(parsed_42_r2["reconciled_from_existing_effect"])
+        self._assert_coordinator_slot_state(
+            pr_number=42, run_id=1002, expected_state="IDLE"
+        )
         # Gen 1 token was revoked via DELETE (204) and returns 401 if used against GitHub.
         self.assertIn(gen1_token_42, self.gh_state.revoked_tokens)
         req_revoked = urllib.request.Request(
@@ -2554,6 +2721,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertTrue(parsed_r2["lease_released"])
         self.assertEqual(parsed_r2["model_calls_started"], 0)
         self.assertTrue(parsed_r2["reconciled_from_existing_effect"])
+        self._assert_coordinator_slot_state(
+            pr_number=51, run_id=9102, run_attempt=2, expected_state="IDLE"
+        )
         with provider_state.lock:
             self.assertEqual(provider_state.calls, 1)
         self.assertIn(gen1_token, self.gh_state.revoked_tokens)
@@ -2694,6 +2864,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertTrue(parsed_r2["lease_released"])
         self.assertEqual(parsed_r2["generation"], 2)
         self.assertEqual(parsed_r2["model_calls_started"], 1)
+        self._assert_coordinator_slot_state(
+            pr_number=52, run_id=9202, expected_state="IDLE"
+        )
         with provider_state.lock:
             self.assertEqual(provider_state.calls, 2)
 
@@ -2772,6 +2945,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertEqual(parsed["model_calls_started"], 1)
         self.assertTrue(parsed["reconciled_from_existing_effect"])
         self.assertTrue(parsed["reconciled_after_lost_write"])
+        self._assert_coordinator_slot_state(
+            pr_number=53, run_id=9301, expected_state="IDLE"
+        )
         with provider_state.lock:
             self.assertEqual(provider_state.calls, 1)
         self.assertEqual(len(self.gh_state.prs[53]["reviews"]), 1)
@@ -2988,6 +3164,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self.assertEqual(parsed_r2["status"], "completed")
         self.assertEqual(parsed_r2["coordinator_state"], "IDLE")
         self.assertEqual(parsed_r2["model_calls_started"], 0)
+        self._assert_coordinator_slot_state(
+            pr_number=54, run_id=9402, expected_state="IDLE"
+        )
         with provider_state.lock:
             self.assertEqual(provider_state.calls, calls_after_r1)
         self.assertEqual(len(self.gh_state.prs[54]["reviews"]), 1)
@@ -3105,6 +3284,9 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         parsed_59 = json.loads(out_59.read_text(encoding="utf-8"))
         self.assertEqual(parsed_59["status"], "completed")
         self.assertEqual(parsed_59["coordinator_state"], "IDLE")
+        self._assert_coordinator_slot_state(
+            pr_number=59, run_id=9502, expected_state="IDLE"
+        )
         with self.gh_state.lock:
             self.assertIn(
                 ("GET", f"/repos/{REPO_FULL}/git/commits/{head_59}"),
@@ -3293,6 +3475,166 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
         self._assert_no_secret_leaks(
             self.worker_log, res.stdout, res.stderr, out_p, sum_p
         )
+
+    def test_mismatched_workflow_identity_and_provenance_rejected(self) -> None:
+        """Test 8: Mismatched workflow_sha / job_workflow_ref returns 403 (0 tokens) and provenance mismatches fail closed."""
+
+        mismatched_sha = "0" * 40 if self.workflow_sha != "0" * 40 else "1" * 40
+        mismatched_pilot_ref = _workflow_ref_for_sha(mismatched_sha)
+        untrusted_ref = (
+            f"{REPO_FULL}/.github/workflows/untrusted.yml@{self.workflow_sha}"
+        )
+        self.gh_state.ensure_pr(60, head_sha=HEAD_SHA)
+        self.gh_state.set_run_attempt("9901", 1, status="in_progress", conclusion=None)
+        self.gh_state.set_run_attempt("9902", 1, status="in_progress", conclusion=None)
+
+        with self.gh_state.lock:
+            mints_before = self.gh_state.runner_mint_count
+
+        for bad_run_id, oidc_sha, oidc_ref in (
+            ("9901", mismatched_sha, mismatched_pilot_ref),
+            ("9902", self.workflow_sha, untrusted_ref),
+        ):
+            bad_oidc = self.gh_state.issue_oidc_jwt(
+                run_id=bad_run_id,
+                run_attempt=1,
+                workflow_sha=oidc_sha,
+                job_workflow_ref=oidc_ref,
+            )
+            status, raw, body = self._post_worker(
+                "/github/v6/lease/acquire",
+                {
+                    "oidc_token": bad_oidc,
+                    "pull_request": 60,
+                    "head_sha": HEAD_SHA,
+                    "capabilities": ["review_publish"],
+                },
+            )
+            self.assertEqual(status, 403, raw)
+            self.assertEqual(
+                body["diagnostic"]["code"], "v6_lease_unauthorized_tuple", raw
+            )
+            self._assert_no_secret_leaks(raw, self.worker_log)
+
+        findings_60 = self.tmp_path / "findings-pr60.json"
+        findings_60.write_text(
+            json.dumps(
+                {
+                    "findings": [
+                        {
+                            "path": "src/example.py",
+                            "line": 5,
+                            "body": "Check boundary.",
+                        }
+                    ],
+                    "required_evidence_digests": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        for idx, (run_id, runner_sha, runner_ref) in enumerate(
+            (
+                (9901, mismatched_sha, mismatched_pilot_ref),
+                (9902, self.workflow_sha, untrusted_ref),
+            ),
+            start=1,
+        ):
+            out_60 = self.tmp_path / f"outcome-60-{idx}.json"
+            sum_60 = self.tmp_path / f"summary-60-{idx}.md"
+            cwd_60 = self.tmp_path / f"cwd-60-{idx}"
+            cwd_60.mkdir()
+            res = subprocess.run(
+                self._runner_argv(
+                    pr_number=60,
+                    operation_id=f"op-mismatch-{idx}",
+                    run_id=run_id,
+                    workflow_sha=runner_sha,
+                    outcome_path=out_60,
+                    step_summary_path=sum_60,
+                    initial_findings_path=findings_60,
+                ),
+                cwd=str(cwd_60),
+                env=self._runner_env(
+                    run_id=run_id,
+                    workflow_sha=runner_sha,
+                    job_workflow_ref=runner_ref,
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 1, res.stderr + res.stdout)
+            parsed = json.loads(out_60.read_text(encoding="utf-8"))
+            self.assertEqual(parsed["status"], "hold", parsed)
+            self.assertEqual(
+                parsed["diagnostic"], "v6_lease_unauthorized_tuple", parsed
+            )
+            self.assertEqual(parsed["model_calls_started"], 0)
+            self._assert_no_secret_leaks(
+                self.worker_log, res.stdout, res.stderr, out_60, sum_60
+            )
+
+        with self.gh_state.lock:
+            self.assertEqual(self.gh_state.runner_mint_count, mints_before)
+            self.assertEqual(len(self.gh_state.prs[60]["reviews"]), 0)
+
+        # Provenance verification must fail closed on commit/wheel digest mismatches in stdout or $GITHUB_STEP_SUMMARY.
+        wheel_dir = Path(self.provenance["wheel_dir"])
+        install_stdout = str(self.provenance["install_stdout"])
+        install_summary_text = Path(
+            self.provenance["install_step_summary_path"]
+        ).read_text(encoding="utf-8")
+        first_whl_name, first_whl_digest = next(
+            iter(sorted(self.provenance["wheel_sha256s"].items()))
+        )
+        tampered_digest = ("0" * 64) if first_whl_digest != ("0" * 64) else ("1" * 64)
+
+        prov_tmp = self.tmp_path / "provenance-negatives"
+        prov_tmp.mkdir()
+        valid_summary = prov_tmp / "valid-summary.md"
+        valid_summary.write_text(install_summary_text, encoding="utf-8")
+
+        bad_stdout_commit = install_stdout.replace(
+            f"review_sensei_v6_workflow_commit={self.workflow_sha}",
+            f"review_sensei_v6_workflow_commit={mismatched_sha}",
+        )
+        bad_summary_commit = prov_tmp / "bad-commit-summary.md"
+        bad_summary_commit.write_text(
+            install_summary_text.replace(
+                f"review_sensei_v6_workflow_commit={self.workflow_sha}",
+                f"review_sensei_v6_workflow_commit={mismatched_sha}",
+            ),
+            encoding="utf-8",
+        )
+        bad_stdout_digest = install_stdout.replace(
+            f"review_sensei_v6_wheel_sha256 {first_whl_name} {first_whl_digest}",
+            f"review_sensei_v6_wheel_sha256 {first_whl_name} {tampered_digest}",
+        )
+        bad_summary_digest = prov_tmp / "bad-digest-summary.md"
+        bad_summary_digest.write_text(
+            install_summary_text.replace(
+                f"review_sensei_v6_wheel_sha256 {first_whl_name} {first_whl_digest}",
+                f"review_sensei_v6_wheel_sha256 {first_whl_name} {tampered_digest}",
+            ),
+            encoding="utf-8",
+        )
+        missing_summary = prov_tmp / "does-not-exist.md"
+
+        for label, stdout_candidate, summary_candidate in (
+            ("stdout_commit_mismatch", bad_stdout_commit, valid_summary),
+            ("summary_commit_mismatch", install_stdout, bad_summary_commit),
+            ("stdout_wheel_digest_mismatch", bad_stdout_digest, valid_summary),
+            ("summary_wheel_digest_mismatch", install_stdout, bad_summary_digest),
+            ("missing_step_summary", install_stdout, missing_summary),
+        ):
+            with self.subTest(case=label):
+                with self.assertRaises(RuntimeError):
+                    _verify_install_provenance(
+                        expected_commit_sha=self.workflow_sha,
+                        wheel_dir=wheel_dir,
+                        stdout_text=stdout_candidate,
+                        step_summary_path=summary_candidate,
+                    )
 
 
 if __name__ == "__main__":
