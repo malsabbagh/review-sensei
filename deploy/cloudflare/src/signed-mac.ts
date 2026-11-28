@@ -3,6 +3,19 @@ const SETUP_CURSOR_TTL_MS = 10 * 60 * 1000;
 const HKDF_SALT = new Uint8Array(32);
 const SESSION_GRANT_LABEL = "session-grant-v1";
 const SETUP_CURSOR_LABEL = "setup-cursor-v1";
+const V6_ONBOARDING_RECEIPT_LABEL = "v6-onboarding-receipt-v1";
+
+export async function issueV6OnboardingReceipt(secret: string, message: string): Promise<string> {
+  const key = await hmacKey(secret, V6_ONBOARDING_RECEIPT_LABEL);
+  const mac = await crypto.subtle.sign("HMAC", key, text(message).buffer as ArrayBuffer);
+  return base64Url(new Uint8Array(mac));
+}
+
+export async function verifyV6OnboardingReceipt(secret: string, message: string, receipt: string): Promise<boolean> {
+  const mac = fromBase64Url(receipt);
+  return mac !== null && mac.length === 32 &&
+    await macMatches(secret, V6_ONBOARDING_RECEIPT_LABEL, message, mac);
+}
 
 export interface SessionGrantFields {
   scope: string;
@@ -20,6 +33,7 @@ export interface SetupCursorClaims {
   expiry: number;
   listingSha256: string;
   failureCount: number;
+  onboardingProof?: string;
 }
 
 function text(value: string): Uint8Array {
@@ -148,6 +162,7 @@ function cursorMessage(claims: SetupCursorClaims): string {
     String(claims.expiry),
     claims.listingSha256,
     String(claims.failureCount),
+    ...(claims.onboardingProof === undefined ? [] : [claims.onboardingProof]),
   ].join("\n");
 }
 
@@ -160,6 +175,7 @@ function cursorPayload(claims: SetupCursorClaims): string {
     expiry: claims.expiry,
     listing_sha256: claims.listingSha256,
     failure_count: claims.failureCount,
+    ...(claims.onboardingProof === undefined ? {} : { onboarding_proof: claims.onboardingProof }),
   });
 }
 
@@ -168,7 +184,11 @@ function parseCursorPayload(value: unknown): SetupCursorClaims | null {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== 7) {
+  const onboardingProof = record.onboarding_proof;
+  if (onboardingProof !== undefined && (typeof onboardingProof !== "string" || !/^[a-f0-9]{64}$/.test(onboardingProof))) {
+    return null;
+  }
+  if (Object.keys(record).length !== (onboardingProof === undefined ? 7 : 8)) {
     return null;
   }
   const installationId = record.installation_id;
@@ -212,12 +232,14 @@ function parseCursorPayload(value: unknown): SetupCursorClaims | null {
     expiry,
     listingSha256,
     failureCount,
+    ...(onboardingProof === undefined ? {} : { onboardingProof }),
   };
 }
 
 export function freshSetupCursor(input: {
   installationId: number;
   deliveryId: string;
+  onboardingProof?: string;
   now?: number;
 }): SetupCursorClaims {
   return {
@@ -228,6 +250,7 @@ export function freshSetupCursor(input: {
     expiry: (input.now ?? Date.now()) + SETUP_CURSOR_TTL_MS,
     listingSha256: "",
     failureCount: 0,
+    ...(input.onboardingProof === undefined ? {} : { onboardingProof: input.onboardingProof }),
   };
 }
 

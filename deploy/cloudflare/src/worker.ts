@@ -16,7 +16,7 @@ import {
   parseCanonicalSlotKey,
   serializeV6RouteResponseBody,
 } from "./v6-pr-coordinator";
-import { parseRepositoryCsv, redactSensitiveText } from "./v6-escrow-crypto";
+import { redactSensitiveText } from "./v6-escrow-crypto";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
@@ -25,6 +25,7 @@ import {
   processDelivery,
 } from "./github-app";
 import { freshSetupCursor, signSetupCursor } from "./signed-mac";
+import { requireV6Admission, verifyFirstInstallDelivery } from "./v6-onboarding";
 import { runSignedSetupStep, scheduleSetupContinue } from "./setup-step";
 
 export { V6PrCoordinator };
@@ -606,6 +607,10 @@ async function webhook(
 
   try {
     const delivery = parseVerifiedDelivery(body, event, deliveryId, app);
+    if (delivery !== null) {
+      const proof = await verifyFirstInstallDelivery(env, delivery, body);
+      if (proof !== undefined) delivery.onboardingProof = proof;
+    }
     if (delivery !== null && deferInstallationSetup(delivery)) {
       if (
         ctx === undefined ||
@@ -620,6 +625,7 @@ async function webhook(
         freshSetupCursor({
           installationId: delivery.installationId,
           deliveryId: delivery.deliveryId,
+          onboardingProof: delivery.onboardingProof,
         }),
       );
       scheduleSetupContinue(env, ctx, cursor);
@@ -848,12 +854,10 @@ async function v6Lease(
         dispatchControl: control,
         requestLifetime: lifetime,
       });
-      if (!parseRepositoryCsv(env.V6_PILOT_REPOSITORIES).has(claims.repository.toLowerCase())) {
-        throw new Error("v6_lease_unauthorized_tuple");
-      }
+      const enrollment = await requireV6Admission(env, claims);
       const github = new GitHubApi(env).withRequestLifetime(lifetime, control);
       const installationId = await github.installationFor(claims.repository);
-      if (installationId === null) {
+      if (installationId === null || (enrollment !== null && installationId !== enrollment.installationId)) {
         throw new Error("v6_lease_unauthorized_tuple");
       }
       const readToken = await github.capabilityToken(installationId, claims.repository, {

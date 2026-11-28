@@ -1,3 +1,4 @@
+import { V6_ONBOARDING_TAG, onboardingRuntimeMatches, requireV6Admission } from "./v6-onboarding";
 import { DurableObject } from "cloudflare:workers";
 import { brokerDiagnostic } from "./broker-diagnostics";
 import type { BrokerDispatchControl } from "./broker-dispatch-control";
@@ -1380,7 +1381,6 @@ interface VerifiedEdgeContext {
   host: string;
   clockMarginMs: number;
   crypto: V6EscrowCrypto;
-  pilotRepos: Set<string>;
   rollbackRepos: Set<string>;
   readToken: string;
 }
@@ -1485,15 +1485,17 @@ export class V6PrCoordinatorEngine {
       throw new Error("v6_lease_unauthorized_tuple");
     }
 
-    const pilotRepos = parseRepositoryCsv(env.V6_PILOT_REPOSITORIES);
-    if (!pilotRepos.has(claims.repository.toLowerCase())) {
-      throw new Error("v6_lease_unauthorized_tuple");
-    }
-
-    await this.verifyPinnedWorkflow(env, claims);
+    const enrollment = await requireV6Admission(
+      env, claims, this.clock.isTrusted() ? this.clock.nowMs() : NaN,
+    );
+    if (enrollment === null) await this.verifyPinnedWorkflow(env, claims);
 
     const installationId = await this.provider.installationFor(claims.repository);
-    if (installationId === null) {
+    if (installationId === null || (enrollment !== null && installationId !== enrollment.installationId)) {
+      throw new Error("v6_lease_unauthorized_tuple");
+    }
+    if (enrollment !== null &&
+        !onboardingRuntimeMatches(enrollment, await this.provider.workflowRuntimeShas(V6_ONBOARDING_TAG))) {
       throw new Error("v6_lease_unauthorized_tuple");
     }
     const readToken = await this.provider.readOnlyToken(
@@ -1514,7 +1516,6 @@ export class V6PrCoordinatorEngine {
       host,
       clockMarginMs,
       crypto: escrowCrypto,
-      pilotRepos,
       rollbackRepos: parseRepositoryCsv(env.V6_PILOT_ROLLBACK_REPOSITORIES),
       readToken,
     };

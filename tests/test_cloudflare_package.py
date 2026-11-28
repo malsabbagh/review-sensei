@@ -34,6 +34,31 @@ class CloudflarePackageTests(unittest.TestCase):
         lock = json.loads((CLOUDFLARE / "package-lock.json").read_text())
         self.assertNotIn("node_modules/@cloudflare/containers", lock["packages"])
 
+    def test_new_install_caller_matches_the_v6_callable_contract(self):
+        import yaml
+
+        caller_path = CLOUDFLARE / "fixtures" / "v6-new-install-caller.yml"
+        callee_path = ROOT / ".github" / "workflows" / "review-sensei-v6-pilot.yml"
+        caller = yaml.load(caller_path.read_text(), Loader=yaml.BaseLoader)
+        callee = yaml.load(callee_path.read_text(), Loader=yaml.BaseLoader)
+        job = caller["jobs"]["review"]
+        contract = callee["on"]["workflow_call"]
+        self.assertEqual(
+            job["uses"],
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@v6",
+        )
+        self.assertLessEqual(set(job["with"]), set(contract["inputs"]))
+        self.assertLessEqual(
+            {name for name, schema in contract["inputs"].items() if schema.get("required") == "true"},
+            set(job["with"]),
+        )
+        self.assertEqual(set(job["secrets"]), set(contract["secrets"]))
+        self.assertEqual(caller["permissions"], callee["permissions"])
+        self.assertEqual(caller["permissions"], callee["jobs"]["v6-pilot"]["permissions"])
+        self.assertEqual(set(caller["on"]), {"pull_request"})
+        self.assertEqual(job["with"]["event"], "pull_request")
+        self.assertIn("head.repo.full_name == github.repository", job["if"])
+
     def test_wrangler_declares_sqlite_ledgers(self):
         config = json.loads((CLOUDFLARE / "wrangler.jsonc").read_text())
         self.assertEqual(config["main"], "src/worker.ts")

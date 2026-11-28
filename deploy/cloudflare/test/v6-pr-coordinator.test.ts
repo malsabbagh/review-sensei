@@ -1,3 +1,4 @@
+import { generateOnboardingReceipt, readV6Onboarding } from "../src/v6-onboarding";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import contract from "../../../src/review_sensei/schemas/v6-coordinator-contract.json";
 import type { WorkerEnv } from "../src/env";
@@ -2499,6 +2500,57 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     });
     expect(badSha.status).toBe(403);
     expect(badSha.body.diagnostic).toMatchObject({ code: "v6_lease_unauthorized_tuple" });
+  });
+
+
+  it("independently requires the activated enrollment, installation, and exact signed v6 ref", async () => {
+    const { env, clock, engine, provider } = createHarness({
+      V6_PILOT_REPOSITORIES: undefined,
+      V6_PILOT_WORKFLOW_REF: undefined,
+    });
+    const approvedConfiguration = {
+      app_id: 12345,
+      start_at: "2026-11-01T00:00:00Z",
+      tag_object: "e".repeat(40),
+      source_sha: WORKFLOW_SHA,
+      enrollments: [{
+        installation_id: 67890,
+        repository_id: 987654321,
+        repository: PILOT_REPO,
+        delivery_id: "initial-delivery",
+        body_sha256: "a".repeat(64),
+      }],
+    };
+    env.V6_NEW_INSTALL_ONBOARDING = JSON.stringify(approvedConfiguration);
+    const prepared = readV6Onboarding(env)!;
+    const receipt = await generateOnboardingReceipt(env, prepared, prepared.enrollments[0]!);
+    env.V6_NEW_INSTALL_ONBOARDING = JSON.stringify({
+      ...approvedConfiguration,
+      enrollments: [{ ...approvedConfiguration.enrollments[0], activation: {
+        receipt, fenced_at: "2026-11-02T00:00:00Z",
+      } }],
+    });
+    clock.now = Date.parse("2026-11-02T01:00:00Z");
+    provider.registerOidc("onboarded-workflow", makeClaims({
+      workflow_ref: PILOT_REPO + "/.github/workflows/review-sensei-review.yml@refs/pull/42/merge",
+      job_workflow_ref: "malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@refs/tags/v6",
+    }));
+    const request = {
+      oidc_token: "onboarded-workflow", pull_request: 42, head_sha: HEAD_SHA_1, capabilities: ["review_publish"],
+    };
+    // Same peeled commit with a different object is a different release identity.
+    provider.runtimeShas = { commitSha: WORKFLOW_SHA, refSha: "d".repeat(40) };
+    expect((await engine.handleAcquire(env, request)).status).toBe(403);
+    provider.runtimeShas.refSha = "e".repeat(40);
+    provider.installationId = 67891;
+    expect((await engine.handleAcquire(env, request)).status).toBe(403);
+    provider.installationId = 67890;
+    clock.trusted = false;
+    expect((await engine.handleAcquire(env, request)).status).toBe(403);
+    expect(provider.calls.mints).toBe(0);
+    clock.trusted = true;
+    expect((await engine.handleAcquire(env, request)).status).toBe(200);
+    expect(provider.calls.mints).toBe(1);
   });
 
   it("floors issueCommentsSince down by 2s to whole seconds for sub-second acquired_at_ms", async () => {

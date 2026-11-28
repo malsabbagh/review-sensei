@@ -22,6 +22,8 @@ export interface WorkerEnv {
   SELF?: Fetcher;
   /** Per-PR v6 coordinator SQLite Durable Object namespace. */
   V6_PR_COORDINATOR?: DurableObjectNamespace;
+  /** Verified first-time installation evidence. Absent disables new-install onboarding. */
+  V6_NEW_INSTALL_ONBOARDING?: string;
   /** Comma-separated opt-in owner/repo slugs for v6 pilot isolation. */
   V6_PILOT_REPOSITORIES?: string;
   /** Pinned v6 reusable workflow ref (owner/repo/path@ref). */

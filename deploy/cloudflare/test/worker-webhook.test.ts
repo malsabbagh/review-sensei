@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const processDelivery = vi.hoisted(() => vi.fn(async () => []));
@@ -17,12 +18,13 @@ import worker from "../src/worker";
 const SECRET = "test-webhook-secret";
 const SIGNING_KEY = "test-signing-key";
 
-function installationPayload(repositories: string[]) {
+function installationPayload(repositories: string[], verified = false) {
   return {
     action: "created",
     installation: {
       id: 2468,
       suspended_at: null,
+      ...(verified ? { created_at: "2026-11-28T12:00:00Z" } : {}),
       permissions: {
         contents: "write",
         pull_requests: "write",
@@ -30,7 +32,7 @@ function installationPayload(repositories: string[]) {
         workflows: "write",
       },
     },
-    repositories: repositories.map((full_name) => ({ full_name })),
+    repositories: repositories.map((full_name, index) => ({ full_name, ...(verified ? { id: 100 + index } : {}) })),
   };
 }
 
@@ -47,8 +49,8 @@ async function signature(body: Uint8Array): Promise<string> {
   return `sha256=${hex}`;
 }
 
-async function webhook(repositories: string[], options: { signingKey?: string; self?: boolean } = {}) {
-  const bodyText = JSON.stringify(installationPayload(repositories));
+async function webhook(repositories: string[], options: { signingKey?: string; self?: boolean; onboarding?: boolean; cutoff?: string; wrongBodyDigest?: boolean } = {}) {
+  const bodyText = JSON.stringify(installationPayload(repositories, options.onboarding));
   const body = new TextEncoder().encode(bodyText);
   const calls: string[] = [];
   const self = {
@@ -65,6 +67,20 @@ async function webhook(repositories: string[], options: { signingKey?: string; s
     GITHUB_APP_PRIVATE_KEY: "unused",
     GITHUB_APP_WEBHOOK_SECRET: SECRET,
     PUBLIC_WORKFLOW_TAG: "v5",
+    ...(options.onboarding ? { V6_NEW_INSTALL_ONBOARDING: JSON.stringify({
+      app_id: 12345,
+      setup_enabled: true,
+      start_at: options.cutoff ?? "2026-11-28T11:00:00Z",
+      tag_object: "e".repeat(40),
+      source_sha: "f".repeat(40),
+      enrollments: repositories.map((repository, index) => ({
+        installation_id: 2468,
+        repository_id: 100 + index,
+        repository,
+        delivery_id: "delivery-1",
+        body_sha256: options.wrongBodyDigest ? "0".repeat(64) : createHash("sha256").update(body).digest("hex"),
+      })),
+    }) } : {}),
     REVIEWSENSEI_SIGNING_KEY: options.signingKey === undefined ? SIGNING_KEY : options.signingKey,
     SELF: options.self === false ? undefined : self,
   } as unknown as WorkerEnv;
@@ -138,4 +154,29 @@ describe("stateless installation webhooks", () => {
       offset: 0,
     });
   });
+});
+
+it("binds a verified first-time setup delivery to its continuation", async () => {
+  const repositories = ["acme/one", "acme/two"];
+  const { response, init } = await webhook(repositories, { onboarding: true });
+  expect(response.status).toBe(202);
+  const cursor = JSON.parse(String(init?.body)).cursor as string;
+  const digest = createHash("sha256").update(JSON.stringify(installationPayload(repositories, true))).digest("hex");
+  const rows = repositories.map((repository, index) => ({
+    installationId: 2468, repositoryId: 100 + index, repository, deliveryId: "delivery-1", bodySha256: digest,
+  }));
+  const proof = createHash("sha256").update(JSON.stringify([
+    Date.parse("2026-11-28T11:00:00Z"), "e".repeat(40), "f".repeat(40), rows,
+  ])).digest("hex");
+  expect(await verifySetupCursor(SIGNING_KEY, cursor)).toMatchObject({ onboardingProof: proof });
+});
+
+it.each([
+  { cutoff: "2026-11-28T12:00:01Z" },
+  { wrongBodyDigest: true },
+])("does not mark old or changed delivery evidence as first-time (%j)", async (options) => {
+  const { response, init } = await webhook(["acme/one", "acme/two"], { onboarding: true, ...options });
+  expect(response.status).toBe(202);
+  const cursor = JSON.parse(String(init?.body)).cursor as string;
+  expect(await verifySetupCursor(SIGNING_KEY, cursor)).not.toHaveProperty("onboardingProof");
 });

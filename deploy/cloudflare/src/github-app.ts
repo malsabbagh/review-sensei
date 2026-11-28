@@ -1,3 +1,12 @@
+import {
+  V6_ONBOARDING_TAG,
+  generateOnboardingReceipt,
+  onboardingForRepository,
+  onboardingRuntimeMatches,
+  readV6Onboarding,
+  setupEnrollmentMatches,
+  type V6Onboarding,
+} from "./v6-onboarding";
 import type { WorkerEnv } from "./env";
 import {
   GitHubApi,
@@ -38,6 +47,7 @@ import {
   releasedRunnerSwitchV4WorkflowTemplate,
   buildPinnedV4SetupFiles,
   buildSetupFiles,
+  buildV6NewInstallSetupFiles,
   previousMinimalV5Config,
   validatePublicWorkflowSha,
   validatePublicWorkflowTag,
@@ -114,6 +124,7 @@ export interface VerifiedDelivery {
   action: string;
   installationId: number;
   deliveryId: string;
+  onboardingProof?: string;
   repository: string | null;
   repositories: string[];
   suspended: boolean;
@@ -638,14 +649,14 @@ function pullRequestNumber(value: unknown): number | null {
 export class GitHubSetupService {
   private readonly github: Pick<
     GitHubApi,
-    "request" | "installationToken" | "installationRepositories" | "publicWorkflowSha"
+    "request" | "installationToken" | "installationRepositories" | "publicWorkflowSha" | "publicWorkflowRuntimeShas"
   >;
 
   constructor(
     private readonly env: WorkerEnv,
     github?: Pick<
       GitHubApi,
-      "request" | "installationToken" | "installationRepositories" | "publicWorkflowSha"
+      "request" | "installationToken" | "installationRepositories" | "publicWorkflowSha" | "publicWorkflowRuntimeShas"
     >,
   ) {
     try {
@@ -710,6 +721,11 @@ export class GitHubSetupService {
       }));
     }
 
+    const onboarding = readV6Onboarding(this.env);
+    if (delivery.onboardingProof !== undefined &&
+        (onboarding === null || !(await setupEnrollmentMatches(onboarding, delivery)))) {
+      throw new GitHubSetupError("configuration_unavailable");
+    }
     const publicWorkflowTag = validatePublicWorkflowTag(
       this.env.PUBLIC_WORKFLOW_TAG ?? "",
     );
@@ -739,6 +755,7 @@ export class GitHubSetupService {
           token.token,
           setupFiles,
           publicWorkflowTag,
+          onboarding === null ? undefined : { policy: onboarding, delivery },
         ),
       );
     }
@@ -812,13 +829,36 @@ export class GitHubSetupService {
     installationToken: string,
     setupFiles: readonly { path: string; content: string }[],
     publicWorkflowTag: string,
+    onboarding?: { policy: V6Onboarding; delivery: VerifiedDelivery },
   ): Promise<SetupResult> {
-    const baseBranch = await this.defaultBranch(repository, installationToken);
+    const { branch: baseBranch, id, fork } = await this.defaultRepository(repository, installationToken);
+    let v6Setup: { policy: V6Onboarding; repositoryId: number; files: readonly { path: string; content: string }[] } | undefined;
+    if (onboarding !== undefined) {
+      if (id === undefined) throw new GitHubSetupError("github_repository_response_invalid");
+      const { policy, delivery } = onboarding;
+      const enrollment = onboardingForRepository(policy, id);
+      if (enrollment === undefined && policy.enrollments.some((entry) => entry.repository === repository.toLowerCase())) {
+        return { repository, status: "skipped_v6_enrollment_required" };
+      }
+      if (enrollment !== undefined) {
+        if (fork !== false || enrollment.repository !== repository.toLowerCase() ||
+            delivery.installationId !== enrollment.installationId || delivery.deliveryId !== enrollment.deliveryId ||
+            delivery.onboardingProof === undefined) {
+          return { repository, status: "skipped_v6_enrollment_required" };
+        }
+        publicWorkflowTag = V6_ONBOARDING_TAG;
+        const receipt = await generateOnboardingReceipt(this.env, policy, enrollment);
+        v6Setup = { policy, repositoryId: id, files: buildV6NewInstallSetupFiles(receipt) };
+        setupFiles = v6Setup.files;
+      }
+    }
+    const v6Files = v6Setup?.files;
     const setupState = await this.inspectRepositorySetup(
       repository,
       installationToken,
       baseBranch,
       publicWorkflowTag,
+      v6Files,
     );
     if (setupState === "current") {
       return { repository, status: "skipped_current" };
@@ -826,11 +866,15 @@ export class GitHubSetupService {
     if (setupState === "unknown") {
       return { repository, status: "skipped_unknown_setup" };
     }
-    const importedConfiguration = await this.importLegacyConfiguration(
-      repository,
-      installationToken,
-      baseBranch,
-    );
+    if (v6Setup !== undefined) {
+      const runtime = await this.github.publicWorkflowRuntimeShas(V6_ONBOARDING_TAG);
+      if (!onboardingRuntimeMatches(v6Setup.policy, runtime)) {
+        throw new GitHubSetupError("public_workflow_ref_invalid");
+      }
+    }
+    const importedConfiguration = v6Files === undefined
+      ? await this.importLegacyConfiguration(repository, installationToken, baseBranch)
+      : null;
     const repositoryFiles =
       importedConfiguration === null
         ? setupFiles
@@ -845,6 +889,10 @@ export class GitHubSetupService {
       baseBranch,
     );
     const branch = setupBranch(baseSha, publicWorkflowTag);
+    if (v6Setup !== undefined &&
+        await this.hasEarlierSetupPullRequest(repository, installationToken, branch, v6Setup.repositoryId)) {
+      return { repository, status: "skipped_unknown_setup" };
+    }
     const branchAlreadyExists = await this.branchExists(
       repository,
       installationToken,
@@ -856,6 +904,7 @@ export class GitHubSetupService {
       branch,
       baseSha,
       publicWorkflowTag,
+      v6Files,
     ))) {
       return { repository, status: "skipped_branch_conflict" };
     }
@@ -873,6 +922,7 @@ export class GitHubSetupService {
         branch,
         baseSha,
         publicWorkflowTag,
+        v6Files,
       ))) {
         return { repository, status: "skipped_branch_conflict" };
       }
@@ -936,6 +986,7 @@ export class GitHubSetupService {
     token: string,
     baseBranch: string,
     publicWorkflowTag: string,
+    v6Files?: readonly { path: string; content: string }[],
   ): Promise<SetupInspectionState> {
     const files: Record<string, string | null> = {};
     for (const path of SETUP_FILE_PATHS) {
@@ -953,6 +1004,12 @@ export class GitHubSetupService {
         continue;
       }
       files[path] = decodeRepositoryFile(requireSuccessful(response));
+    }
+    if (v6Files !== undefined) {
+      if (Object.values(files).every((content) => content === null)) return "absent";
+      const expected = new Map(v6Files.map((file) => [file.path, file.content]));
+      return Object.entries(files).every(([path, content]) => content === (expected.get(path) ?? null))
+        ? "current" : "unknown";
     }
     return await classifySetupFiles(files, publicWorkflowTag);
   }
@@ -980,10 +1037,10 @@ export class GitHubSetupService {
     return importLegacySetupConfiguration(content);
   }
 
-  private async defaultBranch(
+  private async defaultRepository(
     repository: string,
     token: string,
-  ): Promise<string> {
+  ): Promise<{ branch: string; id?: number; fork?: boolean }> {
     const response = await this.request(
       "GET",
       `/repos/${repositoryPath(repository)}`,
@@ -996,7 +1053,11 @@ export class GitHubSetupService {
     if (typeof data.default_branch !== "string" || !data.default_branch.trim()) {
       throw new GitHubSetupError("GitHub setup response did not include a default branch");
     }
-    return data.default_branch;
+    return {
+      branch: data.default_branch,
+      id: positiveInteger(data.id) ? data.id : undefined,
+      fork: typeof data.fork === "boolean" ? data.fork : undefined,
+    };
   }
 
   private async branchExists(
@@ -1046,6 +1107,7 @@ export class GitHubSetupService {
     branch: string,
     baseSha: string,
     publicWorkflowTag: string,
+    v6Files?: readonly { path: string; content: string }[],
   ): Promise<boolean> {
     const response = await this.request(
       "GET",
@@ -1108,6 +1170,7 @@ export class GitHubSetupService {
         token,
         branch,
         publicWorkflowTag,
+        v6Files,
       )) === "current";
   }
 
@@ -1169,6 +1232,29 @@ export class GitHubSetupService {
     }
     requireSuccessful(refResponse);
     return true;
+  }
+
+  private async hasEarlierSetupPullRequest(
+    repository: string,
+    token: string,
+    branch: string,
+    repositoryId: number,
+  ): Promise<boolean> {
+    const response = await this.request(
+      "GET",
+      "/repos/" + repositoryPath(repository) + "/pulls?state=all&per_page=30",
+      token,
+    );
+    const data = requireSuccessful(response);
+    if (!Array.isArray(data) || data.length > 30 || response.hasNextPage) return true;
+    return data.some((item) => {
+      if (!isObject(item) || !isObject(item.head)) return true;
+      const head = item.head;
+      if (typeof head.ref !== "string") return true;
+      if (!/^review-sensei\/setup(?:-|$)/.test(head.ref)) return false;
+      if (!isObject(head.repo) || !positiveInteger(head.repo.id)) return true;
+      return head.repo.id === repositoryId && (head.ref !== branch || item.state !== "open");
+    });
   }
 
   private async existingPullRequest(
