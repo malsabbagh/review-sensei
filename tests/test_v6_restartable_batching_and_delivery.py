@@ -3936,7 +3936,10 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         ) -> tuple[int, Mapping[str, str], Any]:
             if call["method"] == "POST" and "/comments" in str(call["path"]):
                 body = str((call.get("body") or {}).get("body", ""))
-                if "batch-dispatch:op-pause-mid-batch:" in body and ":batch-001:" in body:
+                if (
+                    "batch-dispatch:op-pause-mid-batch:" in body
+                    and ":batch-001:" in body
+                ):
                     return (
                         429,
                         {"Retry-After": "3600"},
