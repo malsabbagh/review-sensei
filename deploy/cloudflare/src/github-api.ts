@@ -1337,6 +1337,21 @@ export class GitHubApi {
     let lastComments: LiveIssueComment[] = [];
     let lastPageSize = initialPageSize;
 
+    const flattenPageComments = (
+      pages: LiveIssueComment[][],
+      pageCount: number,
+    ): LiveIssueComment[] => {
+      const merged = new Map<number, LiveIssueComment>();
+      for (let idx = 0; idx < pageCount; idx += 1) {
+        for (const item of pages[idx]) {
+          if (!merged.has(item.id)) {
+            merged.set(item.id, item);
+          }
+        }
+      }
+      return Array.from(merged.values());
+    };
+
     for (let attempt = 0; attempt <= maxStabilityRetries; attempt += 1) {
       let retryForInstability = false;
       let exhausted = false;
@@ -1346,14 +1361,27 @@ export class GitHubApi {
         lastPageSize = size;
         const resumeStartPage =
           size === initialPageSize ? startPage : Math.floor(coveredOffset / size) + 1;
+        const remainingBudget = maxRequests - requests;
+        if (remainingBudget <= 0) {
+          return pausedPage([], resumeStartPage, size);
+        }
+        // Bound each turn to a verifiable window so Pass 1 + Pass 2 fit inside maxRequests
+        // and every completed turn monotonically advances nextPage.
+        const windowLimit = remainingBudget >= 2 ? Math.floor(remainingBudget / 2) : 1;
+
         const commentsById = new Map<number, LiveIssueComment>();
         const pageIds: number[][] = [];
+        const pageComments: LiveIssueComment[][] = [];
         let hitTooLarge = false;
         let scanDone = false;
+        let hitWindowPause = false;
+        let windowNextPage = resumeStartPage;
 
         for (let page = resumeStartPage; ; page += 1) {
           if (requests >= maxRequests) {
-            return pausedPage(Array.from(commentsById.values()), page, size);
+            hitWindowPause = true;
+            windowNextPage = resumeStartPage + pageIds.length;
+            break;
           }
           const fetched = await fetchPage(size, page);
           if (fetched.kind === "too_large") {
@@ -1364,6 +1392,7 @@ export class GitHubApi {
             return pausedPage(Array.from(commentsById.values()), page, size, fetched);
           }
           const currentPageIds: number[] = [];
+          const currentPageItems: LiveIssueComment[] = [];
           let hitMaxCommentsMidPage = false;
           for (let idx = 0; idx < fetched.items.length; idx += 1) {
             const parsed = fetched.items[idx];
@@ -1372,6 +1401,7 @@ export class GitHubApi {
               break;
             }
             currentPageIds.push(parsed.id);
+            currentPageItems.push(parsed);
             if (!commentsById.has(parsed.id)) {
               commentsById.set(parsed.id, parsed);
             }
@@ -1383,16 +1413,27 @@ export class GitHubApi {
               const steppedPage = Math.floor(((page - 1) * size) / smallerSize) + 1;
               return pausedPage(Array.from(commentsById.values()), steppedPage, smallerSize);
             }
-            return pausedPage(Array.from(commentsById.values()), page, size);
-          }
-
-          if (commentsById.size >= maxComments && fetched.hasNextPageExplicit === true) {
-            return pausedPage(Array.from(commentsById.values()), page + 1, size);
+            if (pageIds.length === 0) {
+              return pausedPage(Array.from(commentsById.values()), page, size);
+            }
+            // Verify the completed whole pages before this overflowed page and resume at `page`.
+            hitWindowPause = true;
+            windowNextPage = page;
+            break;
           }
 
           pageIds.push(currentPageIds);
+          pageComments.push(currentPageItems);
           if (!fetched.hasMorePage) {
             scanDone = true;
+            break;
+          }
+          if (
+            (commentsById.size >= maxComments && fetched.hasNextPageExplicit === true) ||
+            pageIds.length >= windowLimit
+          ) {
+            hitWindowPause = true;
+            windowNextPage = page + 1;
             break;
           }
         }
@@ -1401,11 +1442,12 @@ export class GitHubApi {
           lastComments = Array.from(commentsById.values());
           continue;
         }
-        if (!scanDone) {
+        if (!scanDone && !hitWindowPause) {
           break;
         }
-        lastComments = Array.from(commentsById.values());
-        if (pageIds.length <= 1) {
+        const verifiedWindowComments = flattenPageComments(pageComments, pageIds.length);
+        lastComments = scanDone ? Array.from(commentsById.values()) : verifiedWindowComments;
+        if (scanDone && pageIds.length <= 1) {
           return {
             comments: lastComments,
             truncated: false,
@@ -1414,11 +1456,19 @@ export class GitHubApi {
             pageSize: size,
           };
         }
+        if (!scanDone && (pageIds.length === 0 || requests >= maxRequests)) {
+          return pausedPage(lastComments, windowNextPage, size);
+        }
 
         let unstable = false;
-        for (let verifyIdx = 0; verifyIdx < pageIds.length - 1; verifyIdx += 1) {
+        const verifyCount = scanDone ? pageIds.length - 1 : pageIds.length;
+        for (let verifyIdx = 0; verifyIdx < verifyCount; verifyIdx += 1) {
           if (requests >= maxRequests) {
-            return pausedPage(lastComments, resumeStartPage, size);
+            return pausedPage(
+              flattenPageComments(pageComments, verifyIdx),
+              resumeStartPage + verifyIdx,
+              size,
+            );
           }
           const verifyPage = resumeStartPage + verifyIdx;
           const refetched = await fetchPage(size, verifyPage);
@@ -1427,7 +1477,12 @@ export class GitHubApi {
             break;
           }
           if (refetched.kind === "paused") {
-            return pausedPage(lastComments, resumeStartPage, size, refetched);
+            return pausedPage(
+              flattenPageComments(pageComments, verifyIdx),
+              resumeStartPage + verifyIdx,
+              size,
+              refetched,
+            );
           }
           const expectedIds = pageIds[verifyIdx];
           if (
@@ -1442,9 +1497,16 @@ export class GitHubApi {
           lastComments = Array.from(commentsById.values());
           continue;
         }
-        if (!unstable) {
+        if (!scanDone && !unstable) {
+          return pausedPage(verifiedWindowComments, windowNextPage, size);
+        }
+        if (scanDone && !unstable) {
           if (requests >= maxRequests) {
-            return pausedPage(lastComments, resumeStartPage, size);
+            return pausedPage(
+              flattenPageComments(pageComments, pageIds.length - 1),
+              resumeStartPage + pageIds.length - 1,
+              size,
+            );
           }
           const lastPageNumber = resumeStartPage + pageIds.length - 1;
           const tailRefetched = await fetchPage(size, lastPageNumber);
@@ -1452,7 +1514,12 @@ export class GitHubApi {
             continue;
           }
           if (tailRefetched.kind === "paused") {
-            return pausedPage(lastComments, resumeStartPage, size, tailRefetched);
+            return pausedPage(
+              flattenPageComments(pageComments, pageIds.length - 1),
+              lastPageNumber,
+              size,
+              tailRefetched,
+            );
           }
           const prevTailIds = pageIds[pageIds.length - 1];
           const prefixMatches =
@@ -1482,6 +1549,9 @@ export class GitHubApi {
 
         if (unstable) {
           if (attempt < maxStabilityRetries) {
+            if (maxRequests - requests < 2) {
+              return pausedPage([], resumeStartPage, size);
+            }
             retryForInstability = true;
           } else {
             exhausted = true;

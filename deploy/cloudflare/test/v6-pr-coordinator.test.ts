@@ -4595,4 +4595,150 @@ describe("v6 resumable Gate 2 reconciliation", () => {
     });
     expect(sql.cursorRows.has(slotKey)).toBe(false);
   });
+
+  it("completes 25-page Gate 2 reconciliation across cold restarts without Pass-2 livelock under maxRequests=40", async () => {
+    const { env, engine, makeEngine, provider, store, slotKey42 } = createHarness();
+    const escrowCrypto = new V6EscrowCrypto(SIGNING_KEY);
+    const { intentBody: intentBody1, receiptBody: receiptBody1 } =
+      await buildSignedIntentAndReceipt(escrowCrypto, 1, "op-25p-early", "1".repeat(64), 9501);
+    const { intentBody: intentBody2, receiptBody: receiptBody2 } =
+      await buildSignedIntentAndReceipt(escrowCrypto, 1, "op-25p-late", "2".repeat(64), 9502);
+
+    const earlyId = 405; // page 5 of 25 (per_page=12)
+    const lateId = 2405; // page 24 of 25 (per_page=12)
+    provider.comments.set(earlyId, {
+      id: earlyId,
+      body: intentBody1,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(9501, {
+      id: 9501,
+      body: receiptBody1,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(lateId, {
+      id: lateId,
+      body: intentBody2,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+    provider.comments.set(9502, {
+      id: 9502,
+      body: receiptBody2,
+      login: "reviewsensei[bot]",
+      userType: "Bot",
+      association: "NONE",
+    });
+
+    const acq = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-1",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(acq.status).toBe(200);
+    await engine.handleRelease(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      lease_epoch: 1,
+      reservation_id: acq.body.reservation_id,
+    });
+
+    const ghApi = new GitHubApi(env);
+    const fetchedPages: number[] = [];
+    vi.spyOn(ghApi, "request").mockImplementation(async (_method, path) => {
+      const perPage = Number(/[?&]per_page=([0-9]+)/.exec(path)?.[1] ?? "100");
+      const page = Number(/[?&]page=([0-9]+)/.exec(path)?.[1] ?? "1");
+      if (perPage === 100) {
+        throw new Error("github_response_too_large");
+      }
+      fetchedPages.push(page);
+      const totalPages = 25;
+      return {
+        status: 200,
+        hasNextPage: page < totalPages,
+        data: Array.from({ length: 12 }, (_, idx) => {
+          const cid = page * 100 + idx + 1;
+          if (cid === earlyId) {
+            return makeRawNoiseComment(cid, intentBody1);
+          }
+          if (cid === lateId) {
+            return makeRawNoiseComment(cid, intentBody2);
+          }
+          return makeRawNoiseComment(cid, `noise-${cid}`);
+        }),
+      };
+    });
+    provider.issueCommentsSince = (repo, pr, sinceIso, token, options) =>
+      ghApi.issueCommentsSince(repo, pr, sinceIso, token, options);
+
+    const evidence = {
+      old_generation: 1,
+      intent_resolutions: [
+        {
+          operation_id: "op-25p-early",
+          intent_comment_id: earlyId,
+          resolution: "receipt_present",
+          receipt_comment_id: 9501,
+        },
+        {
+          operation_id: "op-25p-late",
+          intent_comment_id: lateId,
+          resolution: "receipt_present",
+          receipt_comment_id: 9502,
+        },
+      ],
+    };
+
+    // Turn 1: hits per_page=100 too_large (1 request -> remainingBudget=39, windowLimit=19),
+    // scans & verifies pages 1..19 (38 requests) and advances cursor cleanly to next_page=20!
+    const turn1 = await engine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(turn1.status).toBe(409);
+    expect(turn1.body.slot_state).toBe("RECONCILING");
+    expect(turn1.body.diagnostic).toMatchObject({ code: "v6_lease_reconciling" });
+
+    const midSlot = await store.getSlot(slotKey42);
+    expect(midSlot?.state).toBe("RECONCILING");
+    expect(midSlot?.reconcile_scan_cursor).toMatchObject({
+      page_size: 12,
+      next_page: 20,
+    });
+
+    // /acquire MUST fail closed while RECONCILING
+    const blocked = await engine.handleAcquire(env, {
+      oidc_token: "oidc-run-2",
+      pull_request: 42,
+      head_sha: HEAD_SHA_1,
+      capabilities: ["review_publish"],
+    });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.slot_state).toBe("RECONCILING");
+
+    // Turn 2 on cold-restarted engine resumes at page 20 (never re-fetches 1..19), completes 20..25 -> IDLE!
+    fetchedPages.length = 0;
+    const coldEngine = makeEngine();
+    const turn2 = await coldEngine.handleCompleteReconcile(env, {
+      oidc_token: "oidc-run-1",
+      slot_key: slotKey42,
+      generation: 1,
+      reconciliation_outcome: "clean_receipts",
+      reconciliation_evidence: evidence,
+    });
+    expect(turn2.status).toBe(200);
+    expect(turn2.body.state).toBe("IDLE");
+    expect(Math.min(...fetchedPages)).toBe(20);
+    expect((await store.getSlot(slotKey42))?.reconcile_scan_cursor).toBeNull();
+  });
 });

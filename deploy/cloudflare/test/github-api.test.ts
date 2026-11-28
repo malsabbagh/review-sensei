@@ -1805,4 +1805,77 @@ describe("GitHubApi v6 coordinator read and revocation helpers", () => {
       "read-tok",
     );
   });
+
+  it("advances monotonically without livelock when 25 pages remain under maxRequests=40", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+    const issueUrl = "https://api.example.test/repos/acme/widgets/issues/42";
+    const mkComment = (id: number) => ({
+      id,
+      body: `comment-${id}`,
+      author_association: "NONE",
+      issue_url: issueUrl,
+      user: { login: "reviewsensei[bot]", type: "Bot" },
+    });
+
+    // 25 pages at per_page=12 (starting at startPage=10 through page=34 = 25 remaining pages)
+    request.mockImplementation(async (_method, path) => {
+      const pageMatch = /[?&]page=([0-9]+)/.exec(path);
+      const page = Number(pageMatch?.[1] ?? "1");
+      const totalPages = 34;
+      const pageItems = Array.from({ length: 12 }, (_, idx) => mkComment(page * 100 + idx + 1));
+      return {
+        status: 200,
+        hasNextPage: page < totalPages,
+        data: pageItems,
+      };
+    });
+
+    // Turn 1: remaining 25 pages (10..34) exceeds 40/2=20 verifiable window.
+    // Scans & verifies pages 10..29 (20+20 = 40 requests) and advances nextPage=30!
+    const turn1 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { startPage: 10, initialPageSize: 12, maxRequests: 40 },
+    );
+    expect(turn1.truncated).toBe(true);
+    expect(turn1.incomplete).toBe(true);
+    expect(turn1.nextPage).toBe(30);
+    expect(turn1.pageSize).toBe(12);
+    expect(turn1.comments).toHaveLength(20 * 12);
+    expect(request).toHaveBeenCalledTimes(40);
+
+    // Turn 2: resumes at startPage=30, finishes pages 30..34 (5+5 = 10 requests).
+    request.mockClear();
+    const turn2 = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { startPage: turn1.nextPage!, initialPageSize: turn1.pageSize!, maxRequests: 40 },
+    );
+    expect(turn2.truncated).toBe(false);
+    expect(turn2.incomplete).toBe(false);
+    expect(turn2.nextPage).toBeNull();
+    expect(turn2.comments).toHaveLength(5 * 12);
+    expect(request).toHaveBeenCalledTimes(10);
+
+    const allIds = new Set([...turn1.comments, ...turn2.comments].map((c) => c.id));
+    expect(allIds.size).toBe(25 * 12);
+
+    // Also verify extreme maxRequests=1 makes strict forward progress (windowLimit=1).
+    request.mockClear();
+    const tightTurn = await client.issueCommentsSince(
+      "acme/widgets",
+      42,
+      "2026-11-27T00:00:00Z",
+      "read-tok",
+      { startPage: 10, initialPageSize: 12, maxRequests: 1 },
+    );
+    expect(tightTurn.incomplete).toBe(true);
+    expect(tightTurn.nextPage).toBe(11);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 });
