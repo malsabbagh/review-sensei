@@ -868,7 +868,9 @@ class V6ReleaseGateTests(unittest.TestCase):
                 self.assertFalse(paused.reused_prior_durable_state)
                 self.assertEqual(paused.model_calls_started, 0)
                 self.assertGreater(paused.resume_after_epoch, 1000.0)
-                self.assertEqual([c["method"] for c in app1.calls], ["PATCH"])
+                self.assertEqual(
+                    [c["method"] for c in app1.calls], ["GET", "GET", "PATCH"]
+                )
 
                 # Maintainer rerun resumes cleanly from PR alone.
                 client2, _, _ = _build_client(pr)

@@ -393,6 +393,7 @@ class _CollectedLedger:
     batch_dispatches: tuple[BatchDispatchRecord, ...] = ()
     batch_attempts: tuple[BatchAttemptRecord, ...] = ()
     batch_outputs: tuple[BatchOutputRecord, ...] = ()
+    malformed_app_markers: tuple[tuple[int | None, str], ...] = ()
 
 
 def _sanitize_attempt_diagnostic(raw_diagnostic: Any) -> str:
@@ -1820,9 +1821,13 @@ class V6RecoveryEngine:
         guard: NoProgressGuard,
         prior_durable_hint: AdvisoryProgressHint | None,
         call_fn: Callable[[float], DualCredentialResponse],
+        pre_attempt_hook: Callable[[], None] | None = None,
+        allow_throttle_pause: bool = True,
     ) -> DualCredentialResponse:
         attempt = 1
         while True:
+            if pre_attempt_hook is not None:
+                pre_attempt_hook()
             now_epoch = self.now_fn()
             try:
                 return call_fn(now_epoch)
@@ -1830,6 +1835,8 @@ class V6RecoveryEngine:
                 # Never retry 403 permission errors or fall back to App token.
                 raise
             except GitHubHTTPRateLimitError as rate_err:
+                if not allow_throttle_pause:
+                    raise
                 decision = evaluate_throttle_wait(
                     rate_err,
                     max_in_job_sleep_seconds=self.max_in_job_sleep_seconds,
@@ -1879,6 +1886,10 @@ class V6RecoveryEngine:
         current_hint = guard.to_advisory_hint()
         if request.advisory_comment_id is None:
             return current_hint, False
+        patch_path = (
+            f"/repos/{request.owner}/{request.repo}/issues/"
+            f"{request.pull_request}/comments/{request.advisory_comment_id}"
+        )
         authorize_v6_endpoint_credential(
             "advisory_progress_hint",
             CredentialKind.APP_BROKER,
@@ -1887,16 +1898,20 @@ class V6RecoveryEngine:
             granted_scopes=request.granted_scopes,
         )
         try:
+            self._verify_write_boundary(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_durable_hint,
+                target_path=patch_path,
+                allow_throttle_pause=False,
+            )
             self.mutation_bound.consume(
                 "advisory_progress_hint", "advisory_progress_hint"
             )
             self.client.execute(
                 "advisory_progress_hint",
                 method="PATCH",
-                path=(
-                    f"/repos/{request.owner}/{request.repo}/issues/"
-                    f"{request.pull_request}/comments/{request.advisory_comment_id}"
-                ),
+                path=patch_path,
                 event=request.event,
                 visibility=request.visibility,
                 granted_scopes=request.granted_scopes,
@@ -1912,7 +1927,7 @@ class V6RecoveryEngine:
                 now_epoch=now_epoch,
             )
             return current_hint, False
-        except GitHubHTTPPermissionError:
+        except (GitHubHTTPPermissionError, StaleWriterOwnershipError):
             raise
         except (GitHubHTTPRateLimitError, GitHubHTTPTransientError, TimeoutError):
             fallback = (
@@ -1936,6 +1951,34 @@ class V6RecoveryEngine:
                 diagnostic="v6_lease_clock_untrusted",
             )
 
+    def _make_write_pre_attempt_hook(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_durable_hint: AdvisoryProgressHint | None,
+        endpoint_id: str,
+        target_path: str | None = None,
+    ) -> Callable[[], None]:
+        """Build a pre-attempt authority and write-policy recheck hook."""
+
+        def _hook() -> None:
+            authorize_v6_endpoint_credential(
+                endpoint_id,
+                CredentialKind.APP_BROKER,
+                event=request.event,
+                visibility=request.visibility,
+                granted_scopes=request.granted_scopes,
+            )
+            self._verify_write_boundary(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_durable_hint,
+                target_path=target_path,
+            )
+
+        return _hook
+
     def _verify_write_boundary(
         self,
         *,
@@ -1943,6 +1986,7 @@ class V6RecoveryEngine:
         guard: NoProgressGuard,
         prior_durable_hint: AdvisoryProgressHint | None,
         target_path: str | None = None,
+        allow_throttle_pause: bool = True,
     ) -> None:
         if not request.has_active_write_lease:
             raise StaleWriterOwnershipError(
@@ -2008,6 +2052,7 @@ class V6RecoveryEngine:
             request=request,
             guard=guard,
             prior_durable_hint=prior_durable_hint,
+            allow_throttle_pause=allow_throttle_pause,
             call_fn=lambda ts: self.client.execute(
                 "broker_pr_binding_fence",
                 method="GET",
@@ -2026,6 +2071,7 @@ class V6RecoveryEngine:
             request=request,
             guard=guard,
             prior_durable_hint=prior_durable_hint,
+            allow_throttle_pause=allow_throttle_pause,
             call_fn=lambda ts: self.client.execute(
                 "broker_active_writer_fence",
                 method="GET",
@@ -2193,6 +2239,15 @@ class V6RecoveryEngine:
         )
         return comment_records, review_res.records, latest_hint
 
+    @staticmethod
+    def _format_malformed_marker_evidence(
+        malformed: Sequence[tuple[int | None, str]],
+    ) -> tuple[str, ...]:
+        return tuple(
+            f"comment:{cid}:{diag}" if cid is not None else f"comment:unknown:{diag}"
+            for cid, diag in malformed
+        )
+
     def _collect_full_ledger(
         self,
         comment_records: Sequence[PaginatedRecord],
@@ -2218,6 +2273,7 @@ class V6RecoveryEngine:
         anchor_comment_id: int | None = None
         comment_ids_by_record_id: dict[str, int] = {}
         owner_comment_ids_by_generation: dict[int, int] = {}
+        malformed_app_markers: list[tuple[int | None, str]] = []
 
         for item in comment_records:
             payload = item.payload
@@ -2236,12 +2292,27 @@ class V6RecoveryEngine:
                     # Preserve spoofed owner comments so validate_owner_lineage fails closed.
                     app_marker_comments.append(item)
                 continue
-            parsed = extract_v6_record_markers(body, strict=False)
-            if not parsed:
-                continue
-            app_marker_comments.append(item)
             raw_cid = payload.get("id", item.record_id)
             cid: int | None = raw_cid if type(raw_cid) is int and raw_cid > 0 else None
+            parsed_records: list[V6LedgerRecord] = []
+            for raw_line in body.splitlines():
+                stripped = raw_line.strip()
+                if not (
+                    stripped.startswith("<!-- reviewsensei:v6:")
+                    or "<!-- reviewsensei:v6:record" in stripped
+                ):
+                    continue
+                try:
+                    parsed_records.extend(
+                        extract_v6_record_markers(stripped, strict=True)
+                    )
+                except ReviewInputError as exc:
+                    diag = getattr(exc, "diagnostic", None) or "v6_malformed_marker"
+                    malformed_app_markers.append((cid, str(diag)))
+            if not parsed_records:
+                continue
+            parsed = tuple(parsed_records)
+            app_marker_comments.append(item)
             if cid is not None:
                 anchor_comment_id = (
                     cid if anchor_comment_id is None else max(anchor_comment_id, cid)
@@ -2296,6 +2367,7 @@ class V6RecoveryEngine:
             batch_dispatches=tuple(batch_dispatches),
             batch_attempts=tuple(batch_attempts),
             batch_outputs=tuple(batch_outputs),
+            malformed_app_markers=tuple(malformed_app_markers),
         )
 
     def _collect_ledger_records(
@@ -2519,6 +2591,11 @@ class V6RecoveryEngine:
             expected_bot_login=request.expected_bot_login,
             expected_bot_user_id=request.expected_bot_user_id,
         )
+        if collected.malformed_app_markers:
+            raise V6LedgerIntegrityError(
+                "corrupted App ledger marker detected during receipt rescan",
+                diagnostic="corrupted_app_ledger_marker",
+            )
         for existing in collected.receipts:
             if (
                 existing.operation_id == receipt.operation_id
@@ -2556,11 +2633,6 @@ class V6RecoveryEngine:
                 )
                 return existing, 0, existing_cid
 
-        self._verify_write_boundary(
-            request=request,
-            guard=guard,
-            prior_durable_hint=prior_hint,
-        )
         receipt = CompletionReceiptRecord(
             record_id=f"receipt:{target_op_id}:{request.ownership_proof.writer_epoch}",
             operation_id=target_op_id,
@@ -2569,19 +2641,27 @@ class V6RecoveryEngine:
             payload_sha256=payload_sha256,
             completed_at=_utc_now_iso(),
         )
+        receipt_path = (
+            f"/repos/{request.owner}/{request.repo}/issues/"
+            f"{request.pull_request}/comments"
+        )
         self.mutation_bound.consume("completion_receipt_comment", "completion_receipt")
         try:
             resp = self._execute_with_throttle(
                 request=request,
                 guard=guard,
                 prior_durable_hint=prior_hint,
+                pre_attempt_hook=self._make_write_pre_attempt_hook(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                    endpoint_id="completion_receipt_comment",
+                    target_path=receipt_path,
+                ),
                 call_fn=lambda ts: self.client.execute(
                     "completion_receipt_comment",
                     method="POST",
-                    path=(
-                        f"/repos/{request.owner}/{request.repo}/issues/"
-                        f"{request.pull_request}/comments"
-                    ),
+                    path=receipt_path,
                     event=request.event,
                     visibility=request.visibility,
                     granted_scopes=request.granted_scopes,
@@ -2632,11 +2712,6 @@ class V6RecoveryEngine:
             and request.generation is not None
         ):
             try:
-                self._verify_write_boundary(
-                    request=request,
-                    guard=guard,
-                    prior_durable_hint=prior_hint,
-                )
                 hold_record = DurableHoldRecord(
                     record_id=(
                         f"hold:{request.operation_id}:{request.generation}:"
@@ -2652,18 +2727,26 @@ class V6RecoveryEngine:
                     held_at=_utc_now_iso(),
                     resolved_by_record_id=None,
                 )
+                hold_path = (
+                    f"/repos/{request.owner}/{request.repo}/issues/"
+                    f"{request.pull_request}/comments"
+                )
                 self.mutation_bound.consume("write_intent_comment", "durable_hold")
                 hold_resp = self._execute_with_throttle(
                     request=request,
                     guard=guard,
                     prior_durable_hint=prior_hint,
+                    pre_attempt_hook=self._make_write_pre_attempt_hook(
+                        request=request,
+                        guard=guard,
+                        prior_durable_hint=prior_hint,
+                        endpoint_id="write_intent_comment",
+                        target_path=hold_path,
+                    ),
                     call_fn=lambda ts: self.client.execute(
                         "write_intent_comment",
                         method="POST",
-                        path=(
-                            f"/repos/{request.owner}/{request.repo}/issues/"
-                            f"{request.pull_request}/comments"
-                        ),
+                        path=hold_path,
                         event=request.event,
                         visibility=request.visibility,
                         granted_scopes=request.granted_scopes,
@@ -2776,23 +2859,26 @@ class V6RecoveryEngine:
                 if comment_ids_by_record_id is not None:
                     return comment_ids_by_record_id.get(existing.record_id)
                 return None
-        self._verify_write_boundary(
-            request=request,
-            guard=guard,
-            prior_durable_hint=prior_hint,
+        owner_path = (
+            f"/repos/{request.owner}/{request.repo}/issues/"
+            f"{request.pull_request}/comments"
         )
         self.mutation_bound.consume("write_intent_comment", "owner_marker")
         resp = self._execute_with_throttle(
             request=request,
             guard=guard,
             prior_durable_hint=prior_hint,
+            pre_attempt_hook=self._make_write_pre_attempt_hook(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_hint,
+                endpoint_id="write_intent_comment",
+                target_path=owner_path,
+            ),
             call_fn=lambda ts: self.client.execute(
                 "write_intent_comment",
                 method="POST",
-                path=(
-                    f"/repos/{request.owner}/{request.repo}/issues/"
-                    f"{request.pull_request}/comments"
-                ),
+                path=owner_path,
                 event=request.event,
                 visibility=request.visibility,
                 granted_scopes=request.granted_scopes,
@@ -2824,11 +2910,6 @@ class V6RecoveryEngine:
         ):
             return None
         target_op_id = operation_id or request.operation_id
-        self._verify_write_boundary(
-            request=request,
-            guard=guard,
-            prior_durable_hint=prior_hint,
-        )
         proof_record = NonSubmissionProofRecord(
             record_id=(
                 f"non-submission:{target_op_id}:{request.generation}:"
@@ -2844,18 +2925,26 @@ class V6RecoveryEngine:
             http_status=http_status,
             diagnostic=diagnostic,
         )
+        proof_path = (
+            f"/repos/{request.owner}/{request.repo}/issues/"
+            f"{request.pull_request}/comments"
+        )
         self.mutation_bound.consume("write_intent_comment", "non_submission_proof")
         resp = self._execute_with_throttle(
             request=request,
             guard=guard,
             prior_durable_hint=prior_hint,
+            pre_attempt_hook=self._make_write_pre_attempt_hook(
+                request=request,
+                guard=guard,
+                prior_durable_hint=prior_hint,
+                endpoint_id="write_intent_comment",
+                target_path=proof_path,
+            ),
             call_fn=lambda ts: self.client.execute(
                 "write_intent_comment",
                 method="POST",
-                path=(
-                    f"/repos/{request.owner}/{request.repo}/issues/"
-                    f"{request.pull_request}/comments"
-                ),
+                path=proof_path,
                 event=request.event,
                 visibility=request.visibility,
                 granted_scopes=request.granted_scopes,
@@ -3021,10 +3110,9 @@ class V6RecoveryEngine:
         find_existing_cid: Callable[[_CollectedLedger], int | None],
     ) -> int:
         marker_body = format_v6_record_marker(record)
-        self._verify_write_boundary(
-            request=request,
-            guard=guard,
-            prior_durable_hint=prior_hint,
+        marker_path = (
+            f"/repos/{request.owner}/{request.repo}/issues/"
+            f"{request.pull_request}/comments"
         )
         self.mutation_bound.consume("write_intent_comment", effect_kind_label)
         try:
@@ -3032,13 +3120,17 @@ class V6RecoveryEngine:
                 request=request,
                 guard=guard,
                 prior_durable_hint=prior_hint,
+                pre_attempt_hook=self._make_write_pre_attempt_hook(
+                    request=request,
+                    guard=guard,
+                    prior_durable_hint=prior_hint,
+                    endpoint_id="write_intent_comment",
+                    target_path=marker_path,
+                ),
                 call_fn=lambda ts: self.client.execute(
                     "write_intent_comment",
                     method="POST",
-                    path=(
-                        f"/repos/{request.owner}/{request.repo}/issues/"
-                        f"{request.pull_request}/comments"
-                    ),
+                    path=marker_path,
                     event=request.event,
                     visibility=request.visibility,
                     granted_scopes=request.granted_scopes,
@@ -3082,6 +3174,11 @@ class V6RecoveryEngine:
                 expected_bot_login=request.expected_bot_login,
                 expected_bot_user_id=request.expected_bot_user_id,
             )
+            if rescanned.malformed_app_markers:
+                raise V6LedgerIntegrityError(
+                    "corrupted App ledger marker detected during rescan",
+                    diagnostic="corrupted_app_ledger_marker",
+                ) from exc
             found_cid = find_existing_cid(rescanned)
             if found_cid is not None:
                 return found_cid
@@ -3453,6 +3550,37 @@ class V6RecoveryEngine:
         unresolved_results = collected.unresolved_results
         app_marker_comments = collected.app_marker_comments
         anchor_comment_id = collected.anchor_comment_id
+
+        if collected.malformed_app_markers:
+            blocker = "corrupted_app_ledger_marker"
+            missing = self._format_malformed_marker_evidence(
+                collected.malformed_app_markers
+            )
+            write_v6_step_summary(
+                render_v6_hold_summary(
+                    operation_id=operation_id,
+                    blocker=blocker,
+                    missing_evidence=missing,
+                    slot_key=slot_key,
+                    repository=f"{owner}/{repo}",
+                    pull_request=pull_request,
+                ),
+                sink=step_summary_sink,
+            )
+            return TakeoverReconciliationResult(
+                reconciliation_outcome="ambiguous_hold",
+                adopted_effects=(),
+                unsubmitted_intents=(),
+                pending_unresolved_results=unresolved_results,
+                owner_lineage=(),
+                unresolved_holds=holds,
+                completed_operations=(),
+                reconciliation_evidence=None,
+                old_owner_comment_id=anchor_comment_id,
+                blocker=blocker,
+                missing_evidence=missing,
+                anchor_comment_id=anchor_comment_id,
+            )
 
         # Validate App-authored owner lineage if slot/bot login is configured or owners exist.
         validated_owners: tuple[OwnerMarkerRecord, ...] = owners
@@ -5515,12 +5643,6 @@ class V6RecoveryEngine:
                         existing_owners=owners,
                         comment_ids_by_record_id=comment_ids_by_record_id,
                     )
-                self._verify_write_boundary(
-                    request=request,
-                    guard=guard,
-                    prior_durable_hint=prior_hint,
-                    target_path=detail.effect_path,
-                )
                 cur_intent = WriteIntentRecord(
                     record_id=(
                         f"intent:{d_op_id}:g{request.generation or 0}:"
@@ -5556,6 +5678,13 @@ class V6RecoveryEngine:
                     request=request,
                     guard=guard,
                     prior_durable_hint=prior_hint,
+                    pre_attempt_hook=self._make_write_pre_attempt_hook(
+                        request=request,
+                        guard=guard,
+                        prior_durable_hint=prior_hint,
+                        endpoint_id="write_intent_comment",
+                        target_path=intent_path,
+                    ),
                     call_fn=_post_detail_intent,
                 )
                 c_id = verify_write_response_readback(
@@ -5605,12 +5734,6 @@ class V6RecoveryEngine:
                         ),
                     )
 
-            self._verify_write_boundary(
-                request=request,
-                guard=guard,
-                prior_durable_hint=prior_hint,
-                target_path=detail.effect_path,
-            )
             self.mutation_bound.consume("write_intent_comment", "issue_comment")
             detail_effect_id: str | int | None = None
             detail_resp_body: Mapping[str, Any] | None = None
@@ -5635,6 +5758,13 @@ class V6RecoveryEngine:
                     request=request,
                     guard=guard,
                     prior_durable_hint=prior_hint,
+                    pre_attempt_hook=self._make_write_pre_attempt_hook(
+                        request=request,
+                        guard=guard,
+                        prior_durable_hint=prior_hint,
+                        endpoint_id="write_intent_comment",
+                        target_path=detail_post_path,
+                    ),
                     call_fn=_post_detail_comment,
                 )
                 if post_resp.status in {400, 404, 409, 410, 413, 422}:
@@ -5821,6 +5951,16 @@ class V6RecoveryEngine:
                 expected_bot_login=request.expected_bot_login,
                 expected_bot_user_id=request.expected_bot_user_id,
             )
+            if collected.malformed_app_markers:
+                return self._finalize_hold(
+                    request=replace(request, emit_durable_hold_on_pr=False),
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="corrupted_app_ledger_marker",
+                    missing_evidence=self._format_malformed_marker_evidence(
+                        collected.malformed_app_markers
+                    ),
+                )
             owners = collected.owners
             intents = collected.intents
             receipts = collected.receipts
@@ -6346,12 +6486,6 @@ class V6RecoveryEngine:
                         existing_owners=owners,
                         comment_ids_by_record_id=comment_ids_by_record_id,
                     )
-                self._verify_write_boundary(
-                    request=request,
-                    guard=guard,
-                    prior_durable_hint=prior_hint,
-                    target_path=effect_path,
-                )
                 target_digest = request.target_digest or effect_payload_sha256
                 intent_record_id = (
                     f"intent:{request.operation_id}:{request.ownership_proof.writer_epoch}"
@@ -6372,18 +6506,26 @@ class V6RecoveryEngine:
                     generation=request.generation,
                     target_location=effect_path,
                 )
+                intent_comment_path = (
+                    f"/repos/{request.owner}/{request.repo}/issues/"
+                    f"{request.pull_request}/comments"
+                )
                 self.mutation_bound.consume("write_intent_comment", "write_intent")
                 intent_resp = self._execute_with_throttle(
                     request=request,
                     guard=guard,
                     prior_durable_hint=prior_hint,
+                    pre_attempt_hook=self._make_write_pre_attempt_hook(
+                        request=request,
+                        guard=guard,
+                        prior_durable_hint=prior_hint,
+                        endpoint_id="write_intent_comment",
+                        target_path=intent_comment_path,
+                    ),
                     call_fn=lambda ts: self.client.execute(
                         "write_intent_comment",
                         method="POST",
-                        path=(
-                            f"/repos/{request.owner}/{request.repo}/issues/"
-                            f"{request.pull_request}/comments"
-                        ),
+                        path=intent_comment_path,
                         event=request.event,
                         visibility=request.visibility,
                         granted_scopes=request.granted_scopes,
@@ -6432,13 +6574,6 @@ class V6RecoveryEngine:
                         missing_evidence=missing,
                     )
 
-            self._verify_write_boundary(
-                request=request,
-                guard=guard,
-                prior_durable_hint=prior_hint,
-                target_path=effect_path,
-            )
-
             self.mutation_bound.consume(request.effect_endpoint_id, request.effect_kind)
             effect_id: str | int | None = None
             reconciled_after_lost_write = False
@@ -6447,6 +6582,13 @@ class V6RecoveryEngine:
                     request=request,
                     guard=guard,
                     prior_durable_hint=prior_hint,
+                    pre_attempt_hook=self._make_write_pre_attempt_hook(
+                        request=request,
+                        guard=guard,
+                        prior_durable_hint=prior_hint,
+                        endpoint_id=request.effect_endpoint_id,
+                        target_path=effect_path,
+                    ),
                     call_fn=lambda ts: self.client.execute(
                         request.effect_endpoint_id,
                         method=request.effect_method,
@@ -6633,6 +6775,16 @@ class V6RecoveryEngine:
                     if op_calls_unknown
                     else (op_calls_total or 0) + model_calls_started
                 ),
+            )
+        except V6LedgerIntegrityError as integrity_err:
+            if integrity_err.diagnostic != "corrupted_app_ledger_marker":
+                raise
+            return self._finalize_hold(
+                request=replace(request, emit_durable_hold_on_pr=False),
+                guard=guard,
+                prior_hint=prior_hint,
+                blocker="corrupted_app_ledger_marker",
+                missing_evidence=(str(integrity_err),),
             )
         except _ThrottlePausedSignal as paused:
             if paused.accounting_attached:
