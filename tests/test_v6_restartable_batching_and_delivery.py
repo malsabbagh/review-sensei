@@ -2594,6 +2594,10 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         self.assertEqual(
             hold_missing.blocker, "incomplete_partitioned_batch_plan_missing_part"
         )
+        self.assertIn(
+            f"batch_plan_part:{final_parts[-1].record_id}",
+            hold_missing.missing_evidence,
+        )
         self.assertEqual(len(model_calls), 0)
 
         # 6. Corrupted part digest under manifest fails closed with 0 model calls.
@@ -2603,7 +2607,12 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         )
         for idx_p, part_rec in enumerate(final_parts):
             if idx_p == 0:
-                tampered = replace(part_rec, part_sha256="f" * 64)
+                tampered_m_payload = {"chunk": "tampered-chunk-payload"}
+                tampered = replace(
+                    part_rec,
+                    part_payload=tampered_m_payload,
+                    part_sha256=canonical_sha256(tampered_m_payload),
+                )
                 pr_corrupt_manifest.add_comment(
                     format_v6_record_marker(tampered), is_app=True
                 )
@@ -2635,7 +2644,12 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         # 7. Conflicting part digest when NO manifest exists yet fails closed with 0 model calls.
         pr_conflict_part = _SimulatedPRSurface(head_sha=HEAD_A)
         pr_conflict_part.add_comment(format_v6_record_marker(owner_wide), is_app=True)
-        tampered_pre = replace(final_parts[0], part_sha256="e" * 64)
+        tampered_pre_payload = {"chunk": "tampered-pre-manifest"}
+        tampered_pre = replace(
+            final_parts[0],
+            part_payload=tampered_pre_payload,
+            part_sha256=canonical_sha256(tampered_pre_payload),
+        )
         pr_conflict_part.add_comment(format_v6_record_marker(tampered_pre), is_app=True)
         eng_conflict = V6RecoveryEngine(
             DualCredentialGitHubClient(
@@ -2712,9 +2726,20 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         )
 
         # 9. Tampered part_payload (even with unchanged part_sha256 header matching manifest)
-        # fails closed with corrupted_pr_batch_plan_digest and 0 model calls (pre- and post-manifest).
-        tampered_payload_part = replace(
-            final_parts[0], part_payload={"chunk": '{"tampered":true}'}
+        # is rejected by BatchPlanPartRecord.__post_init__ AND fails closed with 0 model calls (pre- and post-manifest).
+        from review_sensei_github.v6_recovery_ledger import canonical_json_dumps
+
+        from review_sensei.errors import ReviewInputError
+
+        with self.assertRaises(ReviewInputError):
+            replace(final_parts[0], part_payload={"chunk": '{"tampered":true}'})
+
+        tampered_raw_dict = record_to_dict(final_parts[0])
+        tampered_raw_dict["part_payload"] = {"chunk": '{"tampered":true}'}
+        tampered_raw_sha = canonical_sha256(tampered_raw_dict)
+        tampered_raw_marker = (
+            f"<!-- reviewsensei:v6:record sha256={tampered_raw_sha} "
+            f"payload={canonical_json_dumps(tampered_raw_dict)} -->"
         )
         pr_tampered_payload = _SimulatedPRSurface(head_sha=HEAD_A)
         pr_tampered_payload.add_comment(
@@ -2722,9 +2747,9 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         )
         for idx_p, part_rec in enumerate(final_parts):
             pr_tampered_payload.add_comment(
-                format_v6_record_marker(
-                    tampered_payload_part if idx_p == 0 else part_rec
-                ),
+                tampered_raw_marker
+                if idx_p == 0
+                else format_v6_record_marker(part_rec),
                 is_app=True,
             )
         pr_tampered_payload.add_comment(
@@ -2746,17 +2771,13 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         hold_tampered_payload = eng_tampered_payload.recover_and_publish(req_wide)
         self.assertIsInstance(hold_tampered_payload, RecoveryHold)
         assert isinstance(hold_tampered_payload, RecoveryHold)
-        self.assertEqual(
-            hold_tampered_payload.blocker, "corrupted_pr_batch_plan_digest"
-        )
+        self.assertEqual(hold_tampered_payload.blocker, "corrupted_app_ledger_marker")
         self.assertEqual(len(model_calls), 0)
 
-        # Pre-manifest reuse path also rejects tampered part_payload.
+        # Pre-manifest reuse path also rejects tampered part_payload at parse time.
         pr_tampered_pre = _SimulatedPRSurface(head_sha=HEAD_A)
         pr_tampered_pre.add_comment(format_v6_record_marker(owner_wide), is_app=True)
-        pr_tampered_pre.add_comment(
-            format_v6_record_marker(tampered_payload_part), is_app=True
-        )
+        pr_tampered_pre.add_comment(tampered_raw_marker, is_app=True)
         eng_tampered_pre = V6RecoveryEngine(
             DualCredentialGitHubClient(
                 workflow_token_transport=_ScriptedTransport(pr_tampered_pre.handle_wf),
@@ -2770,7 +2791,7 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         hold_tampered_pre = eng_tampered_pre.recover_and_publish(req_wide)
         self.assertIsInstance(hold_tampered_pre, RecoveryHold)
         assert isinstance(hold_tampered_pre, RecoveryHold)
-        self.assertEqual(hold_tampered_pre.blocker, "corrupted_pr_batch_plan_digest")
+        self.assertEqual(hold_tampered_pre.blocker, "corrupted_app_ledger_marker")
         self.assertEqual(len(model_calls), 0)
 
         # 10. Conflicting BatchPlanManifestRecord records fail closed with corrupted_pr_batch_plan.
@@ -2814,6 +2835,106 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         assert isinstance(hold_conflict_manifest, RecoveryHold)
         self.assertEqual(hold_conflict_manifest.blocker, "corrupted_pr_batch_plan")
         self.assertEqual(len(model_calls), 0)
+
+        # 11. RS-3D271E: Extra/unexpected BatchPlanPartRecord for same operation fails closed
+        # both post-manifest and pre-manifest with corrupted_pr_batch_plan and 0 model calls.
+        extra_part = BatchPlanPartRecord(
+            record_id=f"{final_parts[0].record_id}:extra-conflicting",
+            operation_id=final_parts[0].operation_id,
+            pr_head_sha=final_parts[0].pr_head_sha,
+            plan_sha256="a" * 64,
+            part_index=0,
+            total_parts=1,
+            part_sha256=canonical_sha256({"chunk": "{}"}),
+            part_payload={"chunk": "{}"},
+        )
+        pr_extra_post = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_extra_post.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+        for part_rec in final_parts:
+            pr_extra_post.add_comment(format_v6_record_marker(part_rec), is_app=True)
+        pr_extra_post.add_comment(format_v6_record_marker(extra_part), is_app=True)
+        pr_extra_post.add_comment(
+            format_v6_record_marker(final_manifests[0]), is_app=True
+        )
+        hold_extra_post = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_extra_post.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_extra_post.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        ).recover_and_publish(req_wide)
+        self.assertIsInstance(hold_extra_post, RecoveryHold)
+        assert isinstance(hold_extra_post, RecoveryHold)
+        self.assertEqual(hold_extra_post.blocker, "corrupted_pr_batch_plan")
+        self.assertEqual(len(model_calls), 0)
+
+        pr_extra_pre = _SimulatedPRSurface(head_sha=HEAD_A)
+        pr_extra_pre.add_comment(format_v6_record_marker(owner_wide), is_app=True)
+        pr_extra_pre.add_comment(format_v6_record_marker(extra_part), is_app=True)
+        hold_extra_pre = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_extra_pre.handle_wf),
+                broker_app_transport=_ScriptedTransport(pr_extra_pre.handle_app),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=64),
+        ).recover_and_publish(req_wide)
+        self.assertIsInstance(hold_extra_pre, RecoveryHold)
+        assert isinstance(hold_extra_pre, RecoveryHold)
+        self.assertEqual(hold_extra_pre.blocker, "corrupted_pr_batch_plan")
+        self.assertEqual(len(model_calls), 0)
+
+        # 12. RS-4F6981: Split boundary with heavy <, >, quotes, backslashes, and 4-byte UTF-8 emojis.
+        from review_sensei_github.v6_recovery_engine import (
+            _reconstruct_split_batch_plan,
+            _split_batch_plan_into_parts,
+        )
+
+        tricky_hunks = tuple(
+            f'src/<tag_"{idx}">_\\\\_🚀/file_{idx}.py#h0:1,1+1,1:{idx:016x}'
+            for idx in range(520)
+        )
+        tricky_plan = BatchPlanRecord(
+            record_id=f"batch-plan:op-tricky:{HEAD_A[:12]}:probe",
+            operation_id="op-tricky",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            pr_head_sha=HEAD_A,
+            inventory_sha256="b" * 64,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            batches=(
+                {
+                    "batch_id": "batch-000",
+                    "paths": [
+                        f'src/<tag_"{i}">_\\\\_🚀/file_{i}.py' for i in range(520)
+                    ],
+                    "primary_hunk_ids": list(tricky_hunks),
+                    "diff_sha256": "c" * 64,
+                    "prompt_bytes": 1234,
+                },
+            ),
+            non_text_changes=(),
+        )
+        _t_sha, tricky_parts, tricky_manifest = _split_batch_plan_into_parts(
+            tricky_plan, input_digest="tricky123456"
+        )
+        self.assertGreaterEqual(len(tricky_parts), 2)
+        for tp in tricky_parts:
+            marker_str = format_v6_record_marker(tp)
+            self.assertLessEqual(
+                len(marker_str.encode("utf-8")), MAX_MARKER_ENCODED_BYTES
+            )
+        rebuilt_tricky = _reconstruct_split_batch_plan(
+            manifest_rec=tricky_manifest, plan_parts=tricky_parts
+        )
+        self.assertEqual(rebuilt_tricky, tricky_plan)
 
     def test_corrupt_app_batch_dispatch_marker_halts_fail_closed_zero_calls_zero_writes(
         self,

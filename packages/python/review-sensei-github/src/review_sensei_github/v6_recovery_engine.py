@@ -1288,7 +1288,7 @@ def _split_batch_plan_into_parts(
         plan_sha256=plan_sha256,
         part_index=999_998,
         total_parts=999_999,
-        part_sha256="0" * 64,
+        part_sha256=canonical_sha256({"chunk": ""}),
         part_payload={"chunk": ""},
     )
     overhead_bytes = len(format_v6_record_marker(probe_part).encode("utf-8"))
@@ -1350,6 +1350,14 @@ def _reconstruct_split_batch_plan(
     for part in plan_parts:
         if part.operation_id != manifest_rec.operation_id:
             continue
+        if (
+            part.pr_head_sha == manifest_rec.pr_head_sha
+            and part.record_id not in expected_rids
+        ):
+            raise ReviewInputError(
+                f"unexpected extra batch plan part {part.record_id!r} for operation {manifest_rec.operation_id!r}",
+                diagnostic="corrupted_pr_batch_plan",
+            )
         if part.record_id not in expected_rids:
             continue
         existing = parts_by_record_id.get(part.record_id)
@@ -4280,6 +4288,27 @@ class V6RecoveryEngine:
                     plan_parts=collected.batch_plan_parts,
                 )
             except ReviewInputError as exc:
+                if exc.diagnostic == "incomplete_partitioned_batch_plan_missing_part":
+                    present_rids = {
+                        p.record_id
+                        for p in collected.batch_plan_parts
+                        if p.operation_id == manifest_rec.operation_id
+                        and p.pr_head_sha == manifest_rec.pr_head_sha
+                    }
+                    missing_evidence = (
+                        *(
+                            f"batch_plan_part:{rid}"
+                            for rid in manifest_rec.part_record_ids
+                            if rid not in present_rids
+                        ),
+                        f"batch_plan_manifest:{manifest_rec.record_id}",
+                        str(exc),
+                    )
+                else:
+                    missing_evidence = (
+                        f"batch_plan_manifest:{manifest_rec.record_id}",
+                        str(exc),
+                    )
                 return (
                     None,
                     self._finalize_hold(
@@ -4287,10 +4316,7 @@ class V6RecoveryEngine:
                         guard=guard,
                         prior_hint=prior_hint,
                         blocker=exc.diagnostic or "corrupted_pr_batch_plan",
-                        missing_evidence=(
-                            f"batch_plan_manifest:{manifest_rec.record_id}",
-                            str(exc),
-                        ),
+                        missing_evidence=missing_evidence,
                     ),
                 )
             return reconstructed, None
@@ -4385,10 +4411,20 @@ class V6RecoveryEngine:
                         ),
                     )
                 reusable_parts_by_idx[expected.part_index] = existing
-            elif (
-                existing.pr_head_sha == context.head_sha
-                and existing.plan_sha256 == plan_sha256
-            ):
+            elif existing.pr_head_sha == context.head_sha:
+                if existing.plan_sha256 != plan_sha256:
+                    return (
+                        None,
+                        self._finalize_hold(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker="corrupted_pr_batch_plan",
+                            missing_evidence=(
+                                f"unexpected_batch_plan_part:{existing.record_id}:{existing.plan_sha256}",
+                            ),
+                        ),
+                    )
                 if (
                     existing.part_index >= len(candidate_parts)
                     or existing.total_parts != len(candidate_parts)
@@ -4515,6 +4551,22 @@ class V6RecoveryEngine:
                 plan_parts=persisted_parts,
             )
         except ReviewInputError as exc:
+            if exc.diagnostic == "incomplete_partitioned_batch_plan_missing_part":
+                present_rids = {p.record_id for p in persisted_parts}
+                missing_evidence = (
+                    *(
+                        f"batch_plan_part:{rid}"
+                        for rid in manifest_rec.part_record_ids
+                        if rid not in present_rids
+                    ),
+                    f"batch_plan_manifest:{manifest_rec.record_id}",
+                    str(exc),
+                )
+            else:
+                missing_evidence = (
+                    f"batch_plan_manifest:{manifest_rec.record_id}",
+                    str(exc),
+                )
             return (
                 None,
                 self._finalize_hold(
@@ -4522,10 +4574,7 @@ class V6RecoveryEngine:
                     guard=guard,
                     prior_hint=prior_hint,
                     blocker=exc.diagnostic or "corrupted_pr_batch_plan",
-                    missing_evidence=(
-                        f"batch_plan_manifest:{manifest_rec.record_id}",
-                        str(exc),
-                    ),
+                    missing_evidence=missing_evidence,
                 ),
             )
         return verified_plan, None

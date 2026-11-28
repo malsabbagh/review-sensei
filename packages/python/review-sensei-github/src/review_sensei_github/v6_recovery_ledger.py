@@ -819,6 +819,11 @@ class BatchPlanPartRecord:
                 diagnostic="v6_invalid_ledger_field",
             )
         frozen_part = MappingProxyType(_to_json_compatible(dict(self.part_payload)))
+        if canonical_sha256(dict(frozen_part)) != self.part_sha256:
+            raise ReviewInputError(
+                "BatchPlanPartRecord part_sha256 does not match part_payload",
+                diagnostic="v6_invalid_ledger_field",
+            )
         object.__setattr__(self, "part_payload", frozen_part)
 
 
