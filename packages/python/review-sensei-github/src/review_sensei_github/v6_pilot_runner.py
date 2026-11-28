@@ -1331,11 +1331,20 @@ class V6PilotRunner:
             )
         elif isinstance(recovery_outcome, RecoveryPaused):
             model_calls_started = recovery_outcome.model_calls_started
-            if takeover_recon is not None:
+            if (
+                recovery_outcome.operation_model_calls_total is not None
+                or recovery_outcome.operation_model_calls_unknown
+            ):
+                operation_model_calls_total = _format_operation_calls(
+                    recovery_outcome.operation_model_calls_total,
+                    recovery_outcome.operation_model_calls_unknown,
+                    fallback=model_calls_started,
+                )
+            elif takeover_recon is not None:
                 operation_model_calls_total = _format_operation_calls(
                     takeover_recon.operation_model_calls_total,
                     takeover_recon.operation_model_calls_unknown,
-                    fallback=0,
+                    fallback=model_calls_started,
                 )
             else:
                 try:
@@ -1354,7 +1363,7 @@ class V6PilotRunner:
                         )
                     )
                     operation_model_calls_total = _format_operation_calls(
-                        ro_total, ro_unknown, fallback=0
+                        ro_total, ro_unknown, fallback=model_calls_started
                     )
                 except Exception:
                     operation_model_calls_total = "unknown"

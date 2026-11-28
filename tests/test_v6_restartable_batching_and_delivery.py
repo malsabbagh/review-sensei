@@ -48,6 +48,7 @@ from review_sensei_github.v6_recovery_engine import (
     MutationSanityBoundError,
     RecoveryCompleted,
     RecoveryHold,
+    RecoveryPaused,
     RecoveryRequest,
     V6RecoveryEngine,
     _evidence_binding_for_request,
@@ -3570,6 +3571,422 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         self.assertEqual(out_hold.status, "hold")
         self.assertEqual(out_hold.model_calls_started, 0)
         self.assertEqual(out_hold.operation_model_calls_total, "unknown")
+
+    def test_pause_after_model_calls_reports_exact_counts_fresh_and_after_takeover(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from review_sensei.configuration import default_configuration
+        from review_sensei.models import ReviewComment, ReviewResult
+
+        # 1. RecoveryPaused validation allows non-negative int & cumulative total, rejects invalid values.
+        hint_sample = NoProgressGuard(operation_id="op-paused-val").to_advisory_hint()
+        valid_paused = RecoveryPaused(
+            operation_id="op-paused-val",
+            resume_after_epoch=1_700_003_600.0,
+            checkpoint_state=hint_sample,
+            reason="secondary rate limit",
+            model_calls_started=2,
+            operation_model_calls_total=2,
+            operation_model_calls_unknown=False,
+        )
+        self.assertEqual(valid_paused.model_calls_started, 2)
+        self.assertEqual(valid_paused.operation_model_calls_total, 2)
+        with self.assertRaises(ValueError):
+            RecoveryPaused(
+                operation_id="op-paused-val",
+                resume_after_epoch=1_700_003_600.0,
+                checkpoint_state=hint_sample,
+                reason="bad negative",
+                model_calls_started=-1,
+            )
+        with self.assertRaises(ValueError):
+            RecoveryPaused(
+                operation_id="op-paused-val",
+                resume_after_epoch=1_700_003_600.0,
+                checkpoint_state=hint_sample,
+                reason="bad bool",
+                model_calls_started=True,  # type: ignore[arg-type]
+            )
+        with self.assertRaises(ValueError):
+            RecoveryPaused(
+                operation_id="op-paused-val",
+                resume_after_epoch=1_700_003_600.0,
+                checkpoint_state=hint_sample,
+                reason="bad unknown",
+                model_calls_started=0,
+                operation_model_calls_total=1,
+                operation_model_calls_unknown=True,
+            )
+
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+        hunk_a = "src/pa.py#h0:1,1+1,1:" + ("a" * 16)
+        hunk_b = "src/pb.py#h0:1,1+1,1:" + ("b" * 16)
+        diff_a = (
+            "diff --git a/src/pa.py b/src/pa.py\n"
+            "--- a/src/pa.py\n+++ b/src/pa.py\n@@ -1 +1 @@\n-1\n+2\n"
+        )
+        diff_b = (
+            "diff --git a/src/pb.py b/src/pb.py\n"
+            "--- a/src/pb.py\n+++ b/src/pb.py\n@@ -1 +1 @@\n-3\n+4\n"
+        )
+        inv = (
+            {
+                "path": "src/pa.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [hunk_a],
+            },
+            {
+                "path": "src/pb.py",
+                "status": "modified",
+                "disposition": "text",
+                "hunk_ids": [hunk_b],
+            },
+        )
+        inv_sha = canonical_sha256(inv)
+        b0 = V6PlannedBatch(
+            batch_id="batch-000",
+            diff_text=diff_a,
+            diff_sha256=canonical_sha256(diff_a),
+            prompt_bytes=200,
+            paths=("src/pa.py",),
+            primary_hunk_ids=(hunk_a,),
+            parent_hunk_ids=(hunk_a,),
+        )
+        b1 = V6PlannedBatch(
+            batch_id="batch-001",
+            diff_text=diff_b,
+            diff_sha256=canonical_sha256(diff_b),
+            prompt_bytes=200,
+            paths=("src/pb.py",),
+            primary_hunk_ids=(hunk_b,),
+            parent_hunk_ids=(hunk_b,),
+        )
+
+        def _make_two_batch_ctx() -> V6FreshAnalysisContext:
+            def _run(req: Any, *, budget: Any = None) -> Any:
+                target = "src/pa.py" if "src/pa.py" in req.diff else "src/pb.py"
+                return SimpleNamespace(
+                    outcome=SimpleNamespace(status="complete", provider_calls=1),
+                    result=ReviewResult(
+                        summary=f"OK {target}",
+                        comments=(
+                            ReviewComment(path=target, line=1, body=f"Note {target}"),
+                        ),
+                        provider="openai-compatible",
+                        model="gpt-4o-mini",
+                        review_status="complete",
+                    ),
+                )
+
+            return V6FreshAnalysisContext(
+                owner=OWNER,
+                repo=REPO,
+                pull_request=PR_NUMBER,
+                pr_title="Pause call accounting",
+                base_sha=BASE_SHA,
+                merge_base_sha=BASE_SHA,
+                head_sha=HEAD_A,
+                inventory_sha256=inv_sha,
+                inventory=inv,
+                non_text_changes=(),
+                policy_digest=policy_digest,
+                configuration_digest=config_digest,
+                max_provider_calls=4,
+                planned_batches=(b0, b1),
+                all_expected_hunk_ids=(hunk_a, hunk_b),
+                sub_hunks_by_parent={},
+                combined_diff_sha256=canonical_sha256(diff_a + diff_b),
+                provider_name="openai-compatible",
+                model_name="gpt-4o-mini",
+                service=SimpleNamespace(run=_run),
+            )
+
+        # 2. Fresh run: executes 2 batches (2 calls), then GitHub throttles POST /reviews -> Retry-After 3600.
+        with tempfile.TemporaryDirectory() as tmpdir_s:
+            tmpdir = Path(tmpdir_s)
+            pr_fresh = _SimulatedPRSurface(head_sha=HEAD_A)
+            coord_fresh = _SimulatedCoordinatorStore(
+                clock=lambda: 1_700_000_000.0, pr=pr_fresh
+            )
+            client_fresh = V6CoordinatorClient(
+                base_url="https://coordinator.invalid",
+                oidc_token_provider=lambda: "oidc-jwt-token",
+                opener=coord_fresh.opener,
+                clock=lambda: 1_700_000_000.0,
+            )
+
+            def _throttle_review_app(
+                surface: _SimulatedPRSurface,
+            ) -> Callable[[dict[str, Any]], tuple[int, Mapping[str, str], Any]]:
+                def _handler(
+                    call: dict[str, Any],
+                ) -> tuple[int, Mapping[str, str], Any]:
+                    if call["method"] == "POST" and str(call["path"]).endswith(
+                        "/reviews"
+                    ):
+                        return (
+                            429,
+                            {"Retry-After": "3600"},
+                            {"message": "secondary rate limit on review post"},
+                        )
+                    return surface.handle_app(call)
+
+                return _handler
+
+            out_fresh = V6PilotRunner(
+                coordinator=client_fresh,
+                workflow_token_transport=_ScriptedTransport(pr_fresh.handle_wf),
+                app_transport_factory=lambda _g: _ScriptedTransport(
+                    _throttle_review_app(pr_fresh)
+                ),
+                clock=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+            ).run(
+                V6PilotRunConfig(
+                    owner=OWNER,
+                    repo=REPO,
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    head_sha=HEAD_A,
+                    operation_id="op-pause-fresh-post",
+                    workflow_sha=WORKFLOW_SHA,
+                    expected_app_id=APP_ID,
+                    expected_bot_login=BOT_LOGIN,
+                    expected_bot_user_id=BOT_USER_ID,
+                    policy_digest=policy_digest,
+                    configuration_digest=config_digest,
+                    outcome_path=tmpdir / "fresh_paused.json",
+                    fresh_analysis_context_loader=_make_two_batch_ctx,
+                )
+            )
+            fresh_report = json.loads(
+                (tmpdir / "fresh_paused.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(out_fresh.status, "paused")
+            self.assertIsInstance(out_fresh.recovery_outcome, RecoveryPaused)
+            assert isinstance(out_fresh.recovery_outcome, RecoveryPaused)
+            self.assertEqual(out_fresh.recovery_outcome.model_calls_started, 2)
+            self.assertEqual(out_fresh.recovery_outcome.operation_model_calls_total, 2)
+            self.assertEqual(out_fresh.model_calls_started, 2)
+            self.assertEqual(out_fresh.operation_model_calls_total, 2)
+            self.assertEqual(fresh_report["status"], "paused")
+            self.assertEqual(fresh_report["model_calls_started"], 2)
+            self.assertEqual(fresh_report["operation_model_calls_total"], 2)
+
+            # 3. Takeover run: prior generation ran batch-000 (1 call) and left ACQUIRED slot;
+            # successor takes over (takeover_recon.operation_model_calls_total == 1),
+            # executes batch-001 (1 new call), then GitHub throttles POST /reviews.
+            pr_takeover = _SimulatedPRSurface(head_sha=HEAD_A)
+            coord_takeover = _SimulatedCoordinatorStore(
+                clock=lambda: 1_700_000_000.0, pr=pr_takeover
+            )
+            old_owner = _make_owner_record(
+                operation_id="op-pause-takeover-post",
+                slot_key=coord_takeover.slot_key,
+                generation=1,
+                lease_epoch=1,
+                run_id="5001",
+                run_attempt=1,
+                pr_head_sha=HEAD_A,
+            )
+            old_owner_cid = int(
+                pr_takeover.add_comment(
+                    format_v6_record_marker(old_owner), is_app=True
+                )["id"]
+            )
+            in_dig = canonical_sha256(
+                {
+                    "pr_head_sha": HEAD_A,
+                    "effect_kind": "pr_review_publish",
+                    "findings": [],
+                    "required_evidence_digests": [],
+                    "artifact_cache_sha256": None,
+                }
+            )
+            plan_rec = BatchPlanRecord(
+                record_id=f"batch-plan:op-pause-takeover-post:{HEAD_A[:12]}:{in_dig}",
+                operation_id="op-pause-takeover-post",
+                base_sha=BASE_SHA,
+                merge_base_sha=BASE_SHA,
+                pr_head_sha=HEAD_A,
+                inventory_sha256=inv_sha,
+                policy_digest=policy_digest,
+                configuration_digest=config_digest,
+                max_provider_calls=4,
+                batches=(b0.to_plan_dict(), b1.to_plan_dict()),
+                non_text_changes=(),
+            )
+            plan_sha = canonical_sha256(record_to_dict(plan_rec))
+            b0_disp = BatchDispatchRecord(
+                record_id=f"batch-dispatch:op-pause-takeover-post:{HEAD_A[:12]}:{in_dig}:batch-000:1",
+                operation_id="op-pause-takeover-post",
+                batch_id="batch-000",
+                attempt=1,
+                plan_sha256=plan_sha,
+                prompt_sha256=canonical_sha256(b0.to_plan_dict()),
+                generation=1,
+            )
+            b0_out = BatchOutputRecord(
+                record_id=f"batch-output:op-pause-takeover-post:{HEAD_A[:12]}:{in_dig}:batch-000:1",
+                operation_id="op-pause-takeover-post",
+                batch_id="batch-000",
+                plan_sha256=plan_sha,
+                hunk_ids_reviewed=(hunk_a,),
+                findings=(
+                    {"path": "src/pa.py", "line": 1, "side": "RIGHT", "body": "Prior"},
+                ),
+                summary="Prior Batch 0",
+                provider="openai-compatible",
+                model="gpt-4o-mini",
+                review_status="complete",
+                attempt=1,
+                provider_calls=1,
+            )
+            for ledger_rec in (plan_rec, b0_disp, b0_out):
+                pr_takeover.add_comment(
+                    format_v6_record_marker(ledger_rec), is_app=True
+                )
+
+            coord_takeover.state = "ACTIVE"
+            coord_takeover.generation = 1
+            coord_takeover.lease_epoch = 1
+            coord_takeover.reservation_id = old_owner.reservation_id
+            coord_takeover.owner_run_id = "5001"
+            coord_takeover.owner_run_attempt = 1
+            coord_takeover.owner_head_sha = HEAD_A
+            coord_takeover.owner_comment_id = old_owner_cid
+            coord_takeover.acquired_at_ms = 1_699_999_000_000
+            coord_takeover.token_expires_at_ms = 1_700_000_600_000
+            coord_takeover.token_cleared = False
+            coord_takeover.predecessor_terminal = True
+
+            client_takeover = V6CoordinatorClient(
+                base_url="https://coordinator.invalid",
+                oidc_token_provider=lambda: "oidc-jwt-token",
+                opener=coord_takeover.opener,
+                clock=lambda: 1_700_000_000.0,
+            )
+            out_takeover = V6PilotRunner(
+                coordinator=client_takeover,
+                workflow_token_transport=_ScriptedTransport(pr_takeover.handle_wf),
+                app_transport_factory=lambda _g: _ScriptedTransport(
+                    _throttle_review_app(pr_takeover)
+                ),
+                clock=lambda: 1_700_000_000.0,
+                sleeper=lambda _s: None,
+                broker_fence_verifier=_fence_verifier,
+            ).run(
+                V6PilotRunConfig(
+                    owner=OWNER,
+                    repo=REPO,
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    head_sha=HEAD_A,
+                    operation_id="op-pause-takeover-post",
+                    run_id=5001,
+                    run_attempt=2,
+                    workflow_sha=WORKFLOW_SHA,
+                    expected_app_id=APP_ID,
+                    expected_bot_login=BOT_LOGIN,
+                    expected_bot_user_id=BOT_USER_ID,
+                    policy_digest=policy_digest,
+                    configuration_digest=config_digest,
+                    outcome_path=tmpdir / "takeover_paused.json",
+                    fresh_analysis_context_loader=_make_two_batch_ctx,
+                )
+            )
+            takeover_report = json.loads(
+                (tmpdir / "takeover_paused.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNotNone(out_takeover.takeover_reconciliation)
+            assert out_takeover.takeover_reconciliation is not None
+            self.assertEqual(
+                out_takeover.takeover_reconciliation.operation_model_calls_total, 1
+            )
+            self.assertEqual(out_takeover.status, "paused")
+            self.assertIsInstance(out_takeover.recovery_outcome, RecoveryPaused)
+            assert isinstance(out_takeover.recovery_outcome, RecoveryPaused)
+            self.assertEqual(out_takeover.recovery_outcome.model_calls_started, 1)
+            self.assertEqual(
+                out_takeover.recovery_outcome.operation_model_calls_total, 2
+            )
+            self.assertEqual(out_takeover.model_calls_started, 1)
+            self.assertEqual(out_takeover.operation_model_calls_total, 2)
+            self.assertEqual(takeover_report["status"], "paused")
+            self.assertEqual(takeover_report["model_calls_started"], 1)
+            self.assertEqual(takeover_report["operation_model_calls_total"], 2)
+
+        # 4. Mid-batch throttle after Batch 1 completes (1 call) when posting Batch 2 dispatch.
+        pr_mid = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_mid = _make_owner_record(
+            operation_id="op-pause-mid-batch", pr_head_sha=HEAD_A, slot_key=SLOT_B
+        )
+        pr_mid.add_comment(format_v6_record_marker(owner_mid), is_app=True)
+
+        def _throttle_b1_dispatch(
+            call: dict[str, Any],
+        ) -> tuple[int, Mapping[str, str], Any]:
+            if call["method"] == "POST" and "/comments" in str(call["path"]):
+                body = str((call.get("body") or {}).get("body", ""))
+                if "batch-dispatch:op-pause-mid-batch:" in body and ":batch-001:" in body:
+                    return (
+                        429,
+                        {"Retry-After": "3600"},
+                        {"message": "secondary rate limit on batch-001 dispatch"},
+                    )
+            return pr_mid.handle_app(call)
+
+        eng_mid = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr_mid.handle_wf),
+                broker_app_transport=_ScriptedTransport(_throttle_b1_dispatch),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        res_mid = eng_mid.recover_and_publish(
+            RecoveryRequest(
+                owner=OWNER,
+                repo=REPO,
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-pause-mid-batch",
+                ownership_proof=WriterOwnershipProof(
+                    repository_id=REPO_ID,
+                    pull_request=PR_NUMBER,
+                    operation_id="op-pause-mid-batch",
+                    run_id=710,
+                    run_attempt=1,
+                    writer_epoch=1,
+                    pr_head_sha=HEAD_A,
+                    verified_by_broker=True,
+                ),
+                event=GitHubEventKind.PULL_REQUEST,
+                visibility=RepositoryVisibility.PUBLIC,
+                granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                expected_app_id=APP_ID,
+                expected_bot_login=BOT_LOGIN,
+                expected_bot_user_id=BOT_USER_ID,
+                slot_key=SLOT_B,
+                generation=1,
+                owner_marker=owner_mid,
+                fresh_analysis_context_loader=_make_two_batch_ctx,
+            )
+        )
+        self.assertIsInstance(res_mid, RecoveryPaused)
+        assert isinstance(res_mid, RecoveryPaused)
+        self.assertEqual(res_mid.model_calls_started, 1)
+        self.assertEqual(res_mid.operation_model_calls_total, 1)
 
 
 if __name__ == "__main__":
