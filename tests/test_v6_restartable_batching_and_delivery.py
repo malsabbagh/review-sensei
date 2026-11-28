@@ -48,6 +48,8 @@ from review_sensei_github.v6_recovery_engine import (
     RecoveryCompleted,
     RecoveryHold,
     RecoveryRequest,
+    StaleWriterOwnershipError,
+    TakeoverReconciliationResult,
     V6RecoveryEngine,
     _evidence_binding_for_request,
 )
@@ -2181,6 +2183,350 @@ class V6RestartableBatchingAndDeliveryTests(unittest.TestCase):
         self.assertIsInstance(res, RecoveryHold)
         assert isinstance(res, RecoveryHold)
         self.assertEqual(res.blocker, "stale_detail_receipt_payload_mismatch")
+
+    def test_corrupt_app_batch_dispatch_marker_halts_fail_closed_zero_calls_zero_writes(
+        self,
+    ) -> None:
+        config = default_configuration()
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            config, provider_name="openai-compatible", model_name="gpt-4o-mini"
+        )
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        owner_rec = _make_owner_record(slot_key=SLOT_B, generation=1, lease_epoch=1)
+        pr.add_comment(format_v6_record_marker(owner_rec), is_app=True)
+        # Ordinary human/App prose, non-App malformed marker, and valid effect marker must not disrupt.
+        pr.add_comment(
+            'Human note: <!-- reviewsensei:v6:record sha256=bad payload={"truncated":true',
+            is_app=False,
+        )
+        pr.add_comment(
+            "App summary prose.\n"
+            f"<!-- reviewsensei:v6:effect op=op-prior sha256={'e' * 64} -->",
+            is_app=True,
+        )
+
+        diff_a = (
+            "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+            "@@ -1 +1 @@\n-a = 1\n+a = 2\n"
+        )
+        diff_b = (
+            "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n"
+            "@@ -1 +1 @@\n-b = 1\n+b = 2\n"
+        )
+        hunk_a = canonical_sha256({"path": "src/a.py", "idx": 0})[:16]
+        hunk_b = canonical_sha256({"path": "src/b.py", "idx": 1})[:16]
+        b0 = V6PlannedBatch(
+            batch_id="batch-000",
+            diff_text=diff_a,
+            diff_sha256=canonical_sha256(diff_a),
+            prompt_bytes=512,
+            paths=("src/a.py",),
+            primary_hunk_ids=(hunk_a,),
+            parent_hunk_ids=(hunk_a,),
+        )
+        b1 = V6PlannedBatch(
+            batch_id="batch-001",
+            diff_text=diff_b,
+            diff_sha256=canonical_sha256(diff_b),
+            prompt_bytes=512,
+            paths=("src/b.py",),
+            primary_hunk_ids=(hunk_b,),
+            parent_hunk_ids=(hunk_b,),
+        )
+        inv_sha = canonical_sha256(["src/a.py", "src/b.py"])
+        in_dig = canonical_sha256(
+            {
+                "base_sha": BASE_SHA,
+                "merge_base_sha": BASE_SHA,
+                "head_sha": HEAD_A,
+                "inventory_sha256": inv_sha,
+                "policy_digest": policy_digest,
+                "configuration_digest": config_digest,
+            }
+        )[:12]
+        plan_rec = BatchPlanRecord(
+            record_id=f"batch-plan:op-batch-corrupt:{HEAD_A[:12]}:{in_dig}",
+            operation_id="op-batch-corrupt",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            pr_head_sha=HEAD_A,
+            inventory_sha256=inv_sha,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            batches=tuple(b.to_plan_dict() for b in (b0, b1)),
+            non_text_changes=(),
+        )
+        plan_sha = canonical_sha256(record_to_dict(plan_rec))
+        pr.add_comment(format_v6_record_marker(plan_rec), is_app=True)
+        pr.add_comment(
+            format_v6_record_marker(
+                BatchDispatchRecord(
+                    record_id=f"batch-dispatch:op-batch-corrupt:{HEAD_A[:12]}:{in_dig}:batch-000:1",
+                    operation_id="op-batch-corrupt",
+                    batch_id="batch-000",
+                    attempt=1,
+                    plan_sha256=plan_sha,
+                    prompt_sha256=canonical_sha256(b0.to_plan_dict()),
+                    generation=1,
+                )
+            ),
+            is_app=True,
+        )
+        pr.add_comment(
+            format_v6_record_marker(
+                BatchOutputRecord(
+                    record_id=f"batch-output:op-batch-corrupt:{HEAD_A[:12]}:{in_dig}:batch-000:1",
+                    operation_id="op-batch-corrupt",
+                    batch_id="batch-000",
+                    plan_sha256=plan_sha,
+                    hunk_ids_reviewed=(hunk_a,),
+                    findings=(),
+                    summary="ok",
+                    provider="openai-compatible",
+                    model="gpt-4o-mini",
+                    review_status="complete",
+                    attempt=1,
+                )
+            ),
+            is_app=True,
+        )
+        # Corrupt App-authored BatchDispatchRecord for batch-001 (tampered/corrupted digest).
+        corrupt_dispatch = format_v6_record_marker(
+            BatchDispatchRecord(
+                record_id=f"batch-dispatch:op-batch-corrupt:{HEAD_A[:12]}:{in_dig}:batch-001:1",
+                operation_id="op-batch-corrupt",
+                batch_id="batch-001",
+                attempt=1,
+                plan_sha256=plan_sha,
+                prompt_sha256=canonical_sha256(b1.to_plan_dict()),
+                generation=1,
+            )
+        ).replace('"batch-001"', '"batch-001-corrupted"')
+        pr.add_comment(corrupt_dispatch, is_app=True)
+
+        calls_made: list[str] = []
+
+        class _Svc:
+            def review(self, req: Any) -> ReviewResult:
+                calls_made.append(req.diff)
+                raise AssertionError(
+                    "must not invoke model when App dispatch marker is corrupt"
+                )
+
+        ctx = V6FreshAnalysisContext(
+            owner=OWNER,
+            repo=REPO,
+            pull_request=PR_NUMBER,
+            pr_title="Corrupt dispatch PR",
+            base_sha=BASE_SHA,
+            merge_base_sha=BASE_SHA,
+            head_sha=HEAD_A,
+            inventory_sha256=inv_sha,
+            inventory=(
+                {
+                    "path": "src/a.py",
+                    "status": "modified",
+                    "disposition": "text",
+                    "hunk_ids": [hunk_a],
+                },
+                {
+                    "path": "src/b.py",
+                    "status": "modified",
+                    "disposition": "text",
+                    "hunk_ids": [hunk_b],
+                },
+            ),
+            non_text_changes=(),
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+            max_provider_calls=4,
+            planned_batches=(b0, b1),
+            all_expected_hunk_ids=(hunk_a, hunk_b),
+            sub_hunks_by_parent={},
+            combined_diff_sha256=canonical_sha256(diff_a + diff_b),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+            service=_Svc(),
+        )
+        app_transport = _ScriptedTransport(pr.handle_app)
+        eng = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=app_transport,
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: None,
+            broker_fence_verifier=_fence_verifier,
+            mutation_bound=MutationSanityBound(max_writes=32),
+        )
+        req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id="op-batch-corrupt",
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id="op-batch-corrupt",
+                run_id=100,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_rec,
+            emit_durable_hold_on_pr=True,
+            fresh_analysis_context_loader=lambda: ctx,
+        )
+        hold = eng.recover_and_publish(req)
+        self.assertIsInstance(hold, RecoveryHold)
+        assert isinstance(hold, RecoveryHold)
+        self.assertEqual(hold.blocker, "corrupted_app_ledger_marker")
+        self.assertTrue(hold.zero_model_calls_started)
+        self.assertEqual(calls_made, [])
+        self.assertEqual(app_transport.calls, [])
+
+        takeover = eng.reconcile_takeover_read_only(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            slot_key=SLOT_B,
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+        )
+        self.assertIsInstance(takeover, TakeoverReconciliationResult)
+        self.assertEqual(takeover.reconciliation_outcome, "ambiguous_hold")
+        self.assertEqual(takeover.blocker, "corrupted_app_ledger_marker")
+        self.assertEqual(app_transport.calls, [])
+
+    def test_detail_comment_authority_recheck_blocks_retry_after_throttle_sleep(
+        self,
+    ) -> None:
+        pr = _SimulatedPRSurface(head_sha=HEAD_A)
+        policy_digest, config_digest = compute_trusted_policy_and_config_digests(
+            default_configuration(),
+            provider_name="openai-compatible",
+            model_name="gpt-4o-mini",
+        )
+        op_id = "op-detail-recheck"
+        owner_rec = _make_owner_record(
+            operation_id=op_id, pr_head_sha=HEAD_A, slot_key=SLOT_B
+        )
+        pr.add_comment(format_v6_record_marker(owner_rec), is_app=True)
+        findings = tuple(
+            {
+                "path": f"src/f{i}.py",
+                "line": 1,
+                "side": "RIGHT",
+                "body": f"Finding body number {i}",
+            }
+            for i in range(55)
+        )
+        in_dig = canonical_sha256(
+            {
+                "base_sha": BASE_SHA,
+                "merge_base_sha": None,
+                "head_sha": HEAD_A,
+                "inventory_sha256": None,
+                "policy_digest": policy_digest,
+                "configuration_digest": config_digest,
+            }
+        )[:12]
+        unres = UnresolvedResultRecord(
+            record_id=f"result:{op_id}:{HEAD_A[:12]}:{in_dig}",
+            operation_id=op_id,
+            pr_head_sha=HEAD_A,
+            payload_sha256=canonical_sha256(findings),
+            findings_payload=findings,
+            required_evidence_digests=(
+                f"v6:base:{BASE_SHA}",
+                f"v6:policy:{policy_digest}",
+                f"v6:config:{config_digest}",
+            ),
+        )
+        pr.add_comment(format_v6_record_marker(unres), is_app=True)
+
+        state = {"head": HEAD_A, "detail_posts": 0}
+
+        def app_handler(call: dict[str, Any]) -> tuple[int, Mapping[str, str], Any]:
+            if (
+                call["method"] == "POST"
+                and "/issues/" in call["path"]
+                and "reviewsensei:v6:record" not in call["body"]["body"]
+            ):
+                state["detail_posts"] += 1
+                if state["detail_posts"] == 1:
+                    return (
+                        429,
+                        {"Retry-After": "5", "X-RateLimit-Remaining": "0"},
+                        {"message": "secondary rate limit"},
+                    )
+                raise AssertionError("must not emit second detail comment POST")
+            return pr.handle_app(call)
+
+        eng = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=_ScriptedTransport(pr.handle_wf),
+                broker_app_transport=_ScriptedTransport(app_handler),
+            ),
+            now_fn=lambda: 1_700_000_000.0,
+            sleeper=lambda _s: state.__setitem__("head", "c" * 40),
+            broker_fence_verifier=lambda _p: {
+                "repository_id": REPO_ID,
+                "pull_request": PR_NUMBER,
+                "pr_head_sha": state["head"],
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+            mutation_bound=MutationSanityBound(max_writes=64),
+        )
+        req = RecoveryRequest(
+            owner=OWNER,
+            repo=REPO,
+            repository_id=REPO_ID,
+            pull_request=PR_NUMBER,
+            operation_id=op_id,
+            ownership_proof=WriterOwnershipProof(
+                repository_id=REPO_ID,
+                pull_request=PR_NUMBER,
+                operation_id=op_id,
+                run_id=100,
+                run_attempt=1,
+                writer_epoch=1,
+                pr_head_sha=HEAD_A,
+                verified_by_broker=True,
+            ),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            expected_bot_login=BOT_LOGIN,
+            expected_bot_user_id=BOT_USER_ID,
+            slot_key=SLOT_B,
+            generation=1,
+            owner_marker=owner_rec,
+            base_sha=BASE_SHA,
+            policy_digest=policy_digest,
+            configuration_digest=config_digest,
+        )
+        with self.assertRaises(StaleWriterOwnershipError):
+            eng.recover_and_publish(req)
+        self.assertEqual(state["detail_posts"], 1)
 
 
 if __name__ == "__main__":
