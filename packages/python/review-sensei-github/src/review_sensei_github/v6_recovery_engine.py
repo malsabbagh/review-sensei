@@ -57,8 +57,10 @@ from .v6_pagination import (
 )
 from .v6_recovery_ledger import (
     MAX_MARKER_ENCODED_BYTES,
+    VALID_BATCH_ATTEMPT_STATUSES,
     VALID_NON_SUBMISSION_PROOF_KINDS,
     AdvisoryProgressHint,
+    BatchAttemptRecord,
     BatchDispatchRecord,
     BatchOutputRecord,
     BatchPlanRecord,
@@ -173,11 +175,19 @@ class RecoveryCompleted:
     reconciled_after_lost_write: bool = False
     detail_comment_ids: tuple[int, ...] = ()
     detail_resolutions: tuple[Mapping[str, Any], ...] = ()
+    operation_model_calls_total: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.model_calls_started) is not int or self.model_calls_started < 0:
             raise ValueError(
                 "v6 recovery model_calls_started must be a non-negative integer"
+            )
+        if self.operation_model_calls_total is not None and (
+            type(self.operation_model_calls_total) is not int
+            or self.operation_model_calls_total < 0
+        ):
+            raise ValueError(
+                "v6 recovery operation_model_calls_total must be None or a non-negative integer"
             )
         if (
             self.reconciled_after_lost_write
@@ -211,10 +221,28 @@ class RecoveryPaused:
     rerun_command: str = MAINTAINER_RERUN_COMMAND
     reused_prior_durable_state: bool = False
     model_calls_started: int = 0
+    operation_model_calls_total: int | None = None
+    operation_model_calls_unknown: bool = False
 
     def __post_init__(self) -> None:
-        if self.model_calls_started != 0:
-            raise ValueError("v6 recovery must never start a fresh model call")
+        if type(self.model_calls_started) is not int or self.model_calls_started < 0:
+            raise ValueError(
+                "RecoveryPaused model_calls_started must be a non-negative integer"
+            )
+        if self.operation_model_calls_total is not None and (
+            type(self.operation_model_calls_total) is not int
+            or self.operation_model_calls_total < 0
+        ):
+            raise ValueError(
+                "RecoveryPaused operation_model_calls_total must be None or a non-negative integer"
+            )
+        if (
+            self.operation_model_calls_unknown
+            and self.operation_model_calls_total is not None
+        ):
+            raise ValueError(
+                "RecoveryPaused cannot have a numeric operation_model_calls_total when unknown=True"
+            )
 
 
 @dataclass(frozen=True)
@@ -225,11 +253,35 @@ class RecoveryHold:
     blocker: str
     missing_evidence: tuple[str, ...]
     zero_model_calls_started: bool = True
+    model_calls_started: int | None = 0
+    operation_model_calls_total: int | None = None
+    operation_model_calls_unknown: bool = False
 
     def __post_init__(self) -> None:
-        if self.zero_model_calls_started is not True:
+        if self.model_calls_started is not None and (
+            type(self.model_calls_started) is not int or self.model_calls_started < 0
+        ):
             raise ValueError(
-                "RecoveryHold must guarantee zero_model_calls_started=True"
+                "RecoveryHold model_calls_started must be None or a non-negative integer"
+            )
+        if self.operation_model_calls_total is not None and (
+            type(self.operation_model_calls_total) is not int
+            or self.operation_model_calls_total < 0
+        ):
+            raise ValueError(
+                "RecoveryHold operation_model_calls_total must be None or a non-negative integer"
+            )
+        if (
+            self.operation_model_calls_unknown
+            and self.operation_model_calls_total is not None
+        ):
+            raise ValueError(
+                "RecoveryHold cannot have a numeric operation_model_calls_total when unknown=True"
+            )
+        expected_zero = self.model_calls_started == 0
+        if self.zero_model_calls_started is not expected_zero:
+            raise ValueError(
+                "RecoveryHold must guarantee zero_model_calls_started matches model_calls_started == 0"
             )
 
 
@@ -253,6 +305,8 @@ class TakeoverReconciliationResult:
     missing_evidence: tuple[str, ...] = ()
     anchor_comment_id: int | None = None
     model_calls_started: int = 0
+    operation_model_calls_total: int | None = None
+    operation_model_calls_unknown: bool = False
 
     def __post_init__(self) -> None:
         if self.reconciliation_outcome not in {
@@ -337,8 +391,88 @@ class _CollectedLedger:
     result_manifests: tuple[ResultManifestRecord, ...] = ()
     batch_plans: tuple[BatchPlanRecord, ...] = ()
     batch_dispatches: tuple[BatchDispatchRecord, ...] = ()
+    batch_attempts: tuple[BatchAttemptRecord, ...] = ()
     batch_outputs: tuple[BatchOutputRecord, ...] = ()
     malformed_app_markers: tuple[tuple[int | None, str], ...] = ()
+
+
+_HOLD_BLOCKER_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+
+
+def _sanitize_attempt_diagnostic(raw_diagnostic: Any) -> str:
+    """Normalize arbitrary failure diagnostics to a bounded single-line marker field."""
+
+    if not isinstance(raw_diagnostic, str):
+        return "v6_batch_inference_failed"
+    collapsed = " ".join(redact_secrets(raw_diagnostic).splitlines()).strip()
+    if not collapsed:
+        return "v6_batch_inference_failed"
+    return collapsed[:256].strip() or "v6_batch_inference_failed"
+
+
+def _normalize_hold_blocker(
+    raw_code: Any, *, default: str = "v6_batch_inference_failed"
+) -> str:
+    """Return a clean blocker identifier, falling back when raw_code is free-form prose."""
+
+    if isinstance(raw_code, str) and _HOLD_BLOCKER_CODE_RE.fullmatch(raw_code):
+        return raw_code
+    return default
+
+
+def _summarize_operation_provider_calls(
+    collected: _CollectedLedger,
+    *,
+    operation_id: str,
+    plan_sha256: str | None = None,
+) -> tuple[int | None, bool, int]:
+    """Return ``(known_total, total_unknown, conservative_budget_used)`` for an operation.
+
+    Distinguishes verified zero-call records (``provider_calls == 0``),
+    counted calls, and unresolved dispatches with missing outcome records
+    (``total_unknown = True``). Unknown dispatches never synthesize ``0`` and
+    still reserve at least ``1`` call against the conservative batch budget.
+    """
+
+    dispatches = [
+        d
+        for d in collected.batch_dispatches
+        if d.operation_id == operation_id
+        and (plan_sha256 is None or d.plan_sha256 == plan_sha256)
+    ]
+    outputs = [
+        o
+        for o in collected.batch_outputs
+        if o.operation_id == operation_id
+        and (plan_sha256 is None or o.plan_sha256 == plan_sha256)
+    ]
+    attempts = [
+        a
+        for a in collected.batch_attempts
+        if a.operation_id == operation_id
+        and (plan_sha256 is None or a.plan_sha256 == plan_sha256)
+    ]
+    recorded_calls_by_key: dict[tuple[str, int], int] = {}
+    for out_rec in outputs:
+        key = (out_rec.batch_id, out_rec.attempt)
+        recorded_calls_by_key[key] = (
+            max(recorded_calls_by_key[key], out_rec.provider_calls)
+            if key in recorded_calls_by_key
+            else out_rec.provider_calls
+        )
+    for att_rec in attempts:
+        key = (att_rec.batch_id, att_rec.attempt)
+        recorded_calls_by_key[key] = (
+            max(recorded_calls_by_key[key], att_rec.provider_calls)
+            if key in recorded_calls_by_key
+            else att_rec.provider_calls
+        )
+    dispatch_keys = {(d.batch_id, d.attempt) for d in dispatches}
+    unknown_dispatch_keys = dispatch_keys - set(recorded_calls_by_key)
+    known_sum = sum(recorded_calls_by_key.values())
+    if unknown_dispatch_keys:
+        return None, True, known_sum + len(unknown_dispatch_keys)
+    return known_sum, False, known_sum
 
 
 class _AmbiguousWriteOutcomeError(RuntimeError):
@@ -352,9 +486,12 @@ class _AmbiguousReceiptOutcomeError(RuntimeError):
 class _ThrottlePausedSignal(Exception):
     """Internal control-flow carrying a clean ``RecoveryPaused`` outcome."""
 
-    def __init__(self, outcome: RecoveryPaused) -> None:
+    def __init__(
+        self, outcome: RecoveryPaused, *, accounting_attached: bool = False
+    ) -> None:
         super().__init__(outcome.reason)
         self.outcome = outcome
+        self.accounting_attached = accounting_attached
 
 
 def render_v6_hold_summary(
@@ -2142,6 +2279,7 @@ class V6RecoveryEngine:
         result_manifests: list[ResultManifestRecord] = []
         batch_plans: list[BatchPlanRecord] = []
         batch_dispatches: list[BatchDispatchRecord] = []
+        batch_attempts: list[BatchAttemptRecord] = []
         batch_outputs: list[BatchOutputRecord] = []
         hints: list[AdvisoryProgressHint] = []
         app_marker_comments: list[PaginatedRecord] = []
@@ -2218,6 +2356,8 @@ class V6RecoveryEngine:
                     batch_plans.append(rec)
                 elif isinstance(rec, BatchDispatchRecord):
                     batch_dispatches.append(rec)
+                elif isinstance(rec, BatchAttemptRecord):
+                    batch_attempts.append(rec)
                 elif isinstance(rec, BatchOutputRecord):
                     batch_outputs.append(rec)
                 elif isinstance(rec, AdvisoryProgressHint):
@@ -2238,6 +2378,7 @@ class V6RecoveryEngine:
             result_manifests=tuple(result_manifests),
             batch_plans=tuple(batch_plans),
             batch_dispatches=tuple(batch_dispatches),
+            batch_attempts=tuple(batch_attempts),
             batch_outputs=tuple(batch_outputs),
             malformed_app_markers=tuple(malformed_app_markers),
         )
@@ -2573,6 +2714,9 @@ class V6RecoveryEngine:
         prior_hint: AdvisoryProgressHint | None,
         blocker: str,
         missing_evidence: tuple[str, ...],
+        model_calls_started: int | None = 0,
+        operation_model_calls_total: int | None = None,
+        operation_model_calls_unknown: bool = False,
     ) -> RecoveryHold:
         if (
             request.emit_durable_hold_on_pr
@@ -2630,6 +2774,7 @@ class V6RecoveryEngine:
                 StaleWriterOwnershipError,
                 MutationSanityBoundError,
                 _AmbiguousWriteOutcomeError,
+                _ThrottlePausedSignal,
                 GitHubHTTPPermissionError,
                 GitHubHTTPRateLimitError,
                 GitHubHTTPTransientError,
@@ -2657,8 +2802,54 @@ class V6RecoveryEngine:
             operation_id=request.operation_id,
             blocker=blocker,
             missing_evidence=missing_evidence,
-            zero_model_calls_started=True,
+            zero_model_calls_started=(model_calls_started == 0),
+            model_calls_started=model_calls_started,
+            operation_model_calls_total=operation_model_calls_total,
+            operation_model_calls_unknown=operation_model_calls_unknown,
         )
+
+    def summarize_operation_provider_calls_read_only(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pull_request: int,
+        operation_id: str,
+        event: GitHubEventKind,
+        visibility: RepositoryVisibility,
+        granted_scopes: Collection[str],
+        expected_app_id: int | None = None,
+        expected_bot_login: str | None = None,
+        expected_bot_user_id: int | None = None,
+    ) -> tuple[int | None, bool]:
+        """Read PR-resident batch ledger using read-only credentials only."""
+
+        guard = NoProgressGuard(operation_id=operation_id)
+
+        def _exec(*args: Any, **kwargs: Any) -> DualCredentialResponse:
+            return self.client.execute(*args, **{**kwargs, "now_epoch": self.now_fn()})
+
+        comment_res = self.paginator.scan_rest(
+            endpoint_id="pr_issue_comments",
+            path=f"/repos/{owner}/{repo}/issues/{pull_request}/comments?per_page=100",
+            event=event,
+            visibility=visibility,
+            granted_scopes=granted_scopes,
+            progress_guard=guard,
+            phase_name="read_only_call_summary_comments",
+            now_epoch=self.now_fn(),
+            execute_fn=_exec,
+        )
+        collected = self._collect_full_ledger(
+            comment_res.records,
+            expected_app_id=expected_app_id,
+            expected_bot_login=expected_bot_login,
+            expected_bot_user_id=expected_bot_user_id,
+        )
+        total, unknown, _ = _summarize_operation_provider_calls(
+            collected, operation_id=operation_id
+        )
+        return total, unknown
 
     def _persist_owner_marker_if_needed(
         self,
@@ -3362,6 +3553,9 @@ class V6RecoveryEngine:
             expected_bot_login=expected_bot_login,
             expected_bot_user_id=expected_bot_user_id,
         )
+        op_calls_total, op_calls_unknown, _ = _summarize_operation_provider_calls(
+            collected, operation_id=operation_id
+        )
         owners = collected.owners
         intents = collected.intents
         receipts = collected.receipts
@@ -3440,6 +3634,8 @@ class V6RecoveryEngine:
                     blocker=blocker,
                     missing_evidence=(str(exc),),
                     anchor_comment_id=anchor_comment_id,
+                    operation_model_calls_total=op_calls_total,
+                    operation_model_calls_unknown=op_calls_unknown,
                 )
 
         if old_generation is not None and old_generation >= 1:
@@ -3519,6 +3715,8 @@ class V6RecoveryEngine:
                 blocker=blocker,
                 missing_evidence=missing,
                 anchor_comment_id=anchor_comment_id,
+                operation_model_calls_total=op_calls_total,
+                operation_model_calls_unknown=op_calls_unknown,
             )
 
         summary = reconcile_immutable_records(intents, receipts)
@@ -3549,6 +3747,8 @@ class V6RecoveryEngine:
                 blocker=blocker,
                 missing_evidence=missing,
                 anchor_comment_id=anchor_comment_id,
+                operation_model_calls_total=op_calls_total,
+                operation_model_calls_unknown=op_calls_unknown,
             )
 
         check_runs_by_head: dict[str, tuple[PaginatedRecord, ...]] = {}
@@ -3770,6 +3970,8 @@ class V6RecoveryEngine:
                 blocker=hold_blocker,
                 missing_evidence=missing_tuple,
                 anchor_comment_id=anchor_comment_id,
+                operation_model_calls_total=op_calls_total,
+                operation_model_calls_unknown=op_calls_unknown,
             )
 
         if adopted:
@@ -3790,6 +3992,8 @@ class V6RecoveryEngine:
             reconciliation_evidence=evidence,
             old_owner_comment_id=old_owner_comment_id,
             anchor_comment_id=anchor_comment_id,
+            operation_model_calls_total=op_calls_total,
+            operation_model_calls_unknown=op_calls_unknown,
         )
 
     def _reconcile_unreconciled_detail_intents(
@@ -3970,6 +4174,73 @@ class V6RecoveryEngine:
     ]:
         """Run or resume prompt-budgeted restartable batch analysis."""
 
+        init_calls, init_unknown, _ = _summarize_operation_provider_calls(
+            collected, operation_id=request.operation_id
+        )
+        pause_accounting: dict[str, Any] = {
+            "run_calls": 0,
+            "op_calls_total": init_calls,
+            "op_calls_unknown": init_unknown,
+        }
+        try:
+            return self._run_restartable_batch_analysis_impl(
+                request=request,
+                guard=guard,
+                prior_hint=prior_hint,
+                collected=collected,
+                owners=owners,
+                owner_cid=owner_cid,
+                unresolved_results=unresolved_results,
+                result_parts=result_parts,
+                result_manifests=result_manifests,
+                comment_ids_by_record_id=comment_ids_by_record_id,
+                pause_accounting=pause_accounting,
+            )
+        except _ThrottlePausedSignal as paused:
+            op_unknown = bool(pause_accounting["op_calls_unknown"])
+            op_total = None if op_unknown else pause_accounting["op_calls_total"]
+            raise _ThrottlePausedSignal(
+                replace(
+                    paused.outcome,
+                    model_calls_started=int(pause_accounting["run_calls"]),
+                    operation_model_calls_total=op_total,
+                    operation_model_calls_unknown=op_unknown,
+                ),
+                accounting_attached=True,
+            ) from paused
+
+    def _run_restartable_batch_analysis_impl(
+        self,
+        *,
+        request: RecoveryRequest,
+        guard: NoProgressGuard,
+        prior_hint: AdvisoryProgressHint | None,
+        collected: _CollectedLedger,
+        owners: tuple[OwnerMarkerRecord, ...],
+        owner_cid: int | None,
+        unresolved_results: tuple[UnresolvedResultRecord, ...],
+        result_parts: tuple[ResultPartRecord, ...],
+        result_manifests: tuple[ResultManifestRecord, ...],
+        comment_ids_by_record_id: dict[str, int],
+        pause_accounting: dict[str, Any],
+    ) -> tuple[
+        RecoveryRequest,
+        UnresolvedResultRecord | None,
+        int,
+        tuple[OwnerMarkerRecord, ...],
+        int | None,
+        tuple[UnresolvedResultRecord, ...],
+        tuple[ResultPartRecord, ...],
+        tuple[ResultManifestRecord, ...],
+        dict[str, int],
+        RecoveryHold | None,
+    ]:
+        """Internal implementation for restartable batch analysis."""
+
+        calls_started_this_run = 0
+        known_op_calls: int | None = pause_accounting["op_calls_total"]
+        op_calls_unknown = bool(pause_accounting["op_calls_unknown"])
+
         assert request.fresh_analysis_context_loader is not None
         try:
             context = request.fresh_analysis_context_loader()
@@ -3988,8 +4259,15 @@ class V6RecoveryEngine:
                     request=request,
                     guard=guard,
                     prior_hint=prior_hint,
-                    blocker=exc.diagnostic or "v6_fresh_analysis_failed",
+                    blocker=_normalize_hold_blocker(
+                        exc.diagnostic, default="v6_fresh_analysis_failed"
+                    ),
                     missing_evidence=(str(exc),),
+                    model_calls_started=calls_started_this_run,
+                    operation_model_calls_total=(
+                        None if op_calls_unknown else known_op_calls
+                    ),
+                    operation_model_calls_unknown=op_calls_unknown,
                 ),
             )
 
@@ -4044,6 +4322,11 @@ class V6RecoveryEngine:
                     prior_hint=prior_hint,
                     blocker=existing_validated.blocker,
                     missing_evidence=existing_validated.missing_evidence,
+                    model_calls_started=calls_started_this_run,
+                    operation_model_calls_total=(
+                        None if op_calls_unknown else known_op_calls
+                    ),
+                    operation_model_calls_unknown=op_calls_unknown,
                 ),
             )
 
@@ -4064,7 +4347,6 @@ class V6RecoveryEngine:
         input_digest = _request_input_digest(
             scoped_request, pr_head_sha=context.head_sha
         )
-        calls_started_this_run = 0
         batch_results_by_id: dict[str, Any] = {}
 
         if context.planned_batches:
@@ -4137,6 +4419,11 @@ class V6RecoveryEngine:
                             prior_hint=prior_hint,
                             blocker="ambiguous_write_outcome",
                             missing_evidence=(f"batch_plan:{plan_rec.record_id}",),
+                            model_calls_started=calls_started_this_run,
+                            operation_model_calls_total=(
+                                None if op_calls_unknown else known_op_calls
+                            ),
+                            operation_model_calls_unknown=op_calls_unknown,
                         ),
                     )
 
@@ -4154,6 +4441,15 @@ class V6RecoveryEngine:
                 if o.operation_id == scoped_request.operation_id
                 and o.plan_sha256 == plan_sha256
             ]
+            matching_attempts = [
+                a
+                for a in collected.batch_attempts
+                if a.operation_id == scoped_request.operation_id
+                and a.plan_sha256 == plan_sha256
+            ]
+            attempts_by_key: dict[tuple[str, int], BatchAttemptRecord] = {
+                (a.batch_id, a.attempt): a for a in matching_attempts
+            }
             outputs_by_id: dict[str, BatchOutputRecord] = {}
             for out_rec in matching_outputs:
                 if out_rec.batch_id in planned_by_id:
@@ -4182,13 +4478,48 @@ class V6RecoveryEngine:
                                 missing_evidence=(
                                     f"batch_hunk_coverage:{out_rec.batch_id}",
                                 ),
+                                model_calls_started=calls_started_this_run,
+                                operation_model_calls_total=(
+                                    None if op_calls_unknown else known_op_calls
+                                ),
+                                operation_model_calls_unknown=op_calls_unknown,
                             ),
                         )
                     outputs_by_id[out_rec.batch_id] = out_rec
 
+            known_op_calls, op_calls_unknown, used_provider_calls = (
+                _summarize_operation_provider_calls(
+                    collected,
+                    operation_id=scoped_request.operation_id,
+                    plan_sha256=plan_sha256,
+                )
+            )
+            pause_accounting["op_calls_total"] = known_op_calls
+            pause_accounting["op_calls_unknown"] = op_calls_unknown
             for dispatch in matching_dispatches:
                 matched_out = outputs_by_id.get(dispatch.batch_id)
                 if matched_out is None or matched_out.attempt < dispatch.attempt:
+                    att_rec = attempts_by_key.get((dispatch.batch_id, dispatch.attempt))
+                    hold_blocker = (
+                        _normalize_hold_blocker(att_rec.diagnostic)
+                        if att_rec is not None
+                        else "ambiguous_batch_inference_outcome"
+                    )
+                    hold_missing = (
+                        (
+                            f"batch_attempt:{att_rec.batch_id}:attempt:{att_rec.attempt}:"
+                            f"calls:{att_rec.provider_calls}:status:{att_rec.status}",
+                            *(
+                                (f"diagnostic:{att_rec.diagnostic}",)
+                                if hold_blocker != att_rec.diagnostic
+                                else ()
+                            ),
+                        )
+                        if att_rec is not None
+                        else (
+                            f"batch_dispatch:{dispatch.batch_id}:attempt:{dispatch.attempt}",
+                        )
+                    )
                     return (
                         scoped_request,
                         None,
@@ -4203,25 +4534,46 @@ class V6RecoveryEngine:
                             request=scoped_request,
                             guard=guard,
                             prior_hint=prior_hint,
-                            blocker="ambiguous_batch_inference_outcome",
-                            missing_evidence=(
-                                f"batch_dispatch:{dispatch.batch_id}:attempt:{dispatch.attempt}",
-                            ),
+                            blocker=hold_blocker,
+                            missing_evidence=hold_missing,
+                            model_calls_started=0,
+                            operation_model_calls_total=known_op_calls,
+                            operation_model_calls_unknown=op_calls_unknown,
                         ),
                     )
-
-            output_calls_by_key: dict[tuple[str, int], int] = {}
-            for out_rec in matching_outputs:
-                key = (out_rec.batch_id, out_rec.attempt)
-                output_calls_by_key[key] = max(
-                    output_calls_by_key.get(key, 1), out_rec.provider_calls
-                )
-            consumed_keys: set[tuple[str, int]] = {
-                (d.batch_id, d.attempt) for d in matching_dispatches
-            } | set(output_calls_by_key)
-            used_provider_calls = sum(
-                output_calls_by_key.get(k, 1) for k in consumed_keys
-            )
+            for att_rec in matching_attempts:
+                matched_out = outputs_by_id.get(att_rec.batch_id)
+                if matched_out is None or matched_out.attempt < att_rec.attempt:
+                    att_blocker = _normalize_hold_blocker(att_rec.diagnostic)
+                    return (
+                        scoped_request,
+                        None,
+                        calls_started_this_run,
+                        owners,
+                        owner_cid,
+                        unresolved_results,
+                        result_parts,
+                        result_manifests,
+                        comment_ids_by_record_id,
+                        self._finalize_hold(
+                            request=scoped_request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker=att_blocker,
+                            missing_evidence=(
+                                f"batch_attempt:{att_rec.batch_id}:attempt:{att_rec.attempt}:"
+                                f"calls:{att_rec.provider_calls}:status:{att_rec.status}",
+                                *(
+                                    (f"diagnostic:{att_rec.diagnostic}",)
+                                    if att_blocker != att_rec.diagnostic
+                                    else ()
+                                ),
+                            ),
+                            model_calls_started=0,
+                            operation_model_calls_total=known_op_calls,
+                            operation_model_calls_unknown=op_calls_unknown,
+                        ),
+                    )
             dispatch_gen = (
                 scoped_request.generation
                 if type(scoped_request.generation) is int
@@ -4335,6 +4687,11 @@ class V6RecoveryEngine:
                                     missing_evidence=(
                                         f"batch_output_parts:{b.batch_id}",
                                     ),
+                                    model_calls_started=calls_started_this_run,
+                                    operation_model_calls_total=(
+                                        None if op_calls_unknown else known_op_calls
+                                    ),
+                                    operation_model_calls_unknown=op_calls_unknown,
                                 ),
                             )
 
@@ -4380,6 +4737,9 @@ class V6RecoveryEngine:
                             missing_evidence=(
                                 f"batch_budget:{used_provider_calls}/{plan_rec.max_provider_calls}",
                             ),
+                            model_calls_started=calls_started_this_run,
+                            operation_model_calls_total=known_op_calls,
+                            operation_model_calls_unknown=op_calls_unknown,
                         ),
                     )
 
@@ -4442,19 +4802,165 @@ class V6RecoveryEngine:
                             missing_evidence=(
                                 f"batch_dispatch:{dispatch_rec.record_id}",
                             ),
+                            model_calls_started=calls_started_this_run,
+                            operation_model_calls_total=(
+                                None if op_calls_unknown else known_op_calls
+                            ),
+                            operation_model_calls_unknown=op_calls_unknown,
                         ),
                     )
 
-                batch_res, batch_calls = execute_v6_batch(
-                    context,
-                    b,
-                    remaining_provider_calls=(
-                        plan_rec.max_provider_calls - used_provider_calls
-                    ),
-                )
-                used_provider_calls += batch_calls
-                calls_started_this_run += batch_calls
-                if batch_res.review_status != "complete":
+                def _persist_incomplete_attempt(
+                    *,
+                    attempt_status: str,
+                    attempt_calls: int,
+                    attempt_diag: str,
+                    run_calls: int,
+                    total_calls: int | None,
+                    total_unknown: bool,
+                ) -> tuple[
+                    RecoveryRequest,
+                    UnresolvedResultRecord | None,
+                    int,
+                    tuple[OwnerMarkerRecord, ...],
+                    int | None,
+                    tuple[UnresolvedResultRecord, ...],
+                    tuple[ResultPartRecord, ...],
+                    tuple[ResultManifestRecord, ...],
+                    dict[str, int],
+                    RecoveryHold | None,
+                ]:
+                    safe_diag = _sanitize_attempt_diagnostic(attempt_diag)
+                    attempt_rec = BatchAttemptRecord(
+                        record_id=(
+                            f"batch-attempt:{scoped_request.operation_id}:"
+                            f"{context.head_sha[:12]}:{input_digest}:{b.batch_id}:{attempt}"
+                        ),
+                        operation_id=scoped_request.operation_id,
+                        batch_id=b.batch_id,
+                        attempt=attempt,
+                        plan_sha256=plan_sha256,
+                        status=attempt_status,
+                        provider_calls=attempt_calls,
+                        diagnostic=safe_diag,
+                    )
+
+                    def _find_attempt_cid(
+                        ledger: _CollectedLedger,
+                        *,
+                        expected: BatchAttemptRecord = attempt_rec,
+                    ) -> int | None:
+                        for cand in ledger.batch_attempts:
+                            if cand.record_id == expected.record_id:
+                                return ledger.comment_ids_by_record_id.get(
+                                    cand.record_id
+                                )
+                        return None
+
+                    try:
+                        acid = self._post_ledger_marker_with_rescan(
+                            request=scoped_request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            record=attempt_rec,
+                            effect_kind_label="batch_attempt",
+                            find_existing_cid=_find_attempt_cid,
+                        )
+                        comment_ids_by_record_id[attempt_rec.record_id] = acid
+                    except (
+                        _AmbiguousWriteOutcomeError,
+                        TimeoutError,
+                        ConnectionError,
+                        GitHubHTTPTransientError,
+                    ):
+                        return (
+                            scoped_request,
+                            None,
+                            run_calls,
+                            owners,
+                            owner_cid,
+                            unresolved_results,
+                            result_parts,
+                            result_manifests,
+                            comment_ids_by_record_id,
+                            self._finalize_hold(
+                                request=scoped_request,
+                                guard=guard,
+                                prior_hint=prior_hint,
+                                blocker="ambiguous_write_outcome",
+                                missing_evidence=(
+                                    f"batch_attempt:{attempt_rec.record_id}",
+                                ),
+                                model_calls_started=run_calls,
+                                operation_model_calls_total=total_calls,
+                                operation_model_calls_unknown=total_unknown,
+                            ),
+                        )
+
+                    attempt_blocker = _normalize_hold_blocker(safe_diag)
+                    return (
+                        scoped_request,
+                        None,
+                        run_calls,
+                        owners,
+                        owner_cid,
+                        unresolved_results,
+                        result_parts,
+                        result_manifests,
+                        comment_ids_by_record_id,
+                        self._finalize_hold(
+                            request=scoped_request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker=attempt_blocker,
+                            missing_evidence=(
+                                f"batch_attempt:{b.batch_id}:attempt:{attempt}:"
+                                f"calls:{attempt_calls}:status:{attempt_status}",
+                                *(
+                                    (f"diagnostic:{safe_diag}",)
+                                    if attempt_blocker != safe_diag
+                                    else ()
+                                ),
+                            ),
+                            model_calls_started=run_calls,
+                            operation_model_calls_total=total_calls,
+                            operation_model_calls_unknown=total_unknown,
+                        ),
+                    )
+
+                try:
+                    batch_res, batch_calls = execute_v6_batch(
+                        context,
+                        b,
+                        remaining_provider_calls=(
+                            plan_rec.max_provider_calls - used_provider_calls
+                        ),
+                    )
+                except V6FreshAnalysisError as batch_exc:
+                    attempt_diag = _sanitize_attempt_diagnostic(
+                        batch_exc.diagnostic or "v6_batch_inference_failed"
+                    )
+                    if (
+                        type(batch_exc.provider_calls) is int
+                        and batch_exc.provider_calls >= 0
+                    ):
+                        used_provider_calls += batch_exc.provider_calls
+                        calls_started_this_run += batch_exc.provider_calls
+                        if known_op_calls is not None and not op_calls_unknown:
+                            known_op_calls += batch_exc.provider_calls
+                        pause_accounting["run_calls"] = calls_started_this_run
+                        pause_accounting["op_calls_total"] = known_op_calls
+                        pause_accounting["op_calls_unknown"] = op_calls_unknown
+                        return _persist_incomplete_attempt(
+                            attempt_status="failed",
+                            attempt_calls=batch_exc.provider_calls,
+                            attempt_diag=attempt_diag,
+                            run_calls=calls_started_this_run,
+                            total_calls=known_op_calls,
+                            total_unknown=op_calls_unknown,
+                        )
+                    pause_accounting["op_calls_total"] = None
+                    pause_accounting["op_calls_unknown"] = True
                     return (
                         scoped_request,
                         None,
@@ -4469,11 +4975,62 @@ class V6RecoveryEngine:
                             request=scoped_request,
                             guard=guard,
                             prior_hint=prior_hint,
-                            blocker="v6_batch_incomplete_coverage",
+                            blocker=_normalize_hold_blocker(attempt_diag),
                             missing_evidence=(
-                                f"batch_incomplete:{b.batch_id}:{batch_res.review_status}",
+                                f"batch_dispatch:{b.batch_id}:attempt:{attempt}",
+                                str(batch_exc),
                             ),
+                            model_calls_started=None,
+                            operation_model_calls_total=None,
+                            operation_model_calls_unknown=True,
                         ),
+                    )
+                except Exception:
+                    pause_accounting["op_calls_total"] = None
+                    pause_accounting["op_calls_unknown"] = True
+                    return (
+                        scoped_request,
+                        None,
+                        calls_started_this_run,
+                        owners,
+                        owner_cid,
+                        unresolved_results,
+                        result_parts,
+                        result_manifests,
+                        comment_ids_by_record_id,
+                        self._finalize_hold(
+                            request=scoped_request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker="ambiguous_batch_inference_outcome",
+                            missing_evidence=(
+                                f"batch_dispatch:{b.batch_id}:attempt:{attempt}",
+                            ),
+                            model_calls_started=None,
+                            operation_model_calls_total=None,
+                            operation_model_calls_unknown=True,
+                        ),
+                    )
+
+                used_provider_calls += batch_calls
+                calls_started_this_run += batch_calls
+                if known_op_calls is not None and not op_calls_unknown:
+                    known_op_calls += batch_calls
+                pause_accounting["run_calls"] = calls_started_this_run
+                pause_accounting["op_calls_total"] = known_op_calls
+                pause_accounting["op_calls_unknown"] = op_calls_unknown
+                if batch_res.review_status != "complete":
+                    return _persist_incomplete_attempt(
+                        attempt_status=(
+                            batch_res.review_status
+                            if batch_res.review_status in VALID_BATCH_ATTEMPT_STATUSES
+                            else "partial"
+                        ),
+                        attempt_calls=batch_calls,
+                        attempt_diag="v6_batch_incomplete_coverage",
+                        run_calls=calls_started_this_run,
+                        total_calls=known_op_calls,
+                        total_unknown=op_calls_unknown,
                     )
                 batch_results_by_id[b.batch_id] = batch_res
 
@@ -4623,6 +5180,11 @@ class V6RecoveryEngine:
                                     missing_evidence=(
                                         f"batch_output_part:{bp_rec.record_id}",
                                     ),
+                                    model_calls_started=calls_started_this_run,
+                                    operation_model_calls_total=(
+                                        None if op_calls_unknown else known_op_calls
+                                    ),
+                                    operation_model_calls_unknown=op_calls_unknown,
                                 ),
                             )
 
@@ -4683,6 +5245,11 @@ class V6RecoveryEngine:
                             prior_hint=prior_hint,
                             blocker="ambiguous_write_outcome",
                             missing_evidence=(f"batch_output:{output_rec.record_id}",),
+                            model_calls_started=calls_started_this_run,
+                            operation_model_calls_total=(
+                                None if op_calls_unknown else known_op_calls
+                            ),
+                            operation_model_calls_unknown=op_calls_unknown,
                         ),
                     )
 
@@ -4714,6 +5281,11 @@ class V6RecoveryEngine:
                     prior_hint=prior_hint,
                     blocker=cov_exc.diagnostic or "v6_batch_incomplete_coverage",
                     missing_evidence=(str(cov_exc),),
+                    model_calls_started=calls_started_this_run,
+                    operation_model_calls_total=(
+                        None if op_calls_unknown else known_op_calls
+                    ),
+                    operation_model_calls_unknown=op_calls_unknown,
                 ),
             )
         raw_findings, raw_digests = finalize_v6_fresh_analysis_result(
@@ -4765,6 +5337,11 @@ class V6RecoveryEngine:
                     missing_evidence=(
                         f"result_persistence:{scoped_request.operation_id}:{context.head_sha}",
                     ),
+                    model_calls_started=calls_started_this_run,
+                    operation_model_calls_total=(
+                        None if op_calls_unknown else known_op_calls
+                    ),
+                    operation_model_calls_unknown=op_calls_unknown,
                 ),
             )
 
@@ -4792,6 +5369,13 @@ class V6RecoveryEngine:
                     prior_hint=prior_hint,
                     blocker=validated.blocker,
                     missing_evidence=validated.missing_evidence,
+                    model_calls_started=calls_started_this_run,
+                    operation_model_calls_total=(
+                        known_op_calls if context.planned_batches else 0
+                    ),
+                    operation_model_calls_unknown=(
+                        op_calls_unknown if context.planned_batches else False
+                    ),
                 ),
             )
         return (
@@ -5416,6 +6000,9 @@ class V6RecoveryEngine:
         guard.ensure_not_stalled()
 
         prior_hint: AdvisoryProgressHint | None = None
+        model_calls_started = 0
+        op_calls_total: int | None = None
+        op_calls_unknown = False
         try:
             comment_records, review_records, latest_hint = self._scan_pr_surfaces(
                 request=request,
@@ -5495,6 +6082,9 @@ class V6RecoveryEngine:
                         missing_evidence=(str(exc),),
                     )
 
+            op_calls_total, op_calls_unknown, _ = _summarize_operation_provider_calls(
+                collected, operation_id=request.operation_id
+            )
             unresolved_holds = [
                 h
                 for h in holds
@@ -5511,6 +6101,9 @@ class V6RecoveryEngine:
                     prior_hint=prior_hint,
                     blocker="unresolved_durable_hold",
                     missing_evidence=tuple(h.record_id for h in unresolved_holds),
+                    model_calls_started=0,
+                    operation_model_calls_total=op_calls_total,
+                    operation_model_calls_unknown=op_calls_unknown,
                 )
 
             summary = reconcile_immutable_records(intents, receipts)
@@ -5578,6 +6171,7 @@ class V6RecoveryEngine:
                     owner_comment_id=owner_cid,
                     receipt_comment_id=comment_ids_by_record_id.get(matched.record_id),
                     detail_comment_ids=existing_detail_cids,
+                    operation_model_calls_total=op_calls_total,
                 )
 
             op_unreconciled = [
@@ -5684,6 +6278,7 @@ class V6RecoveryEngine:
                         receipt_comment_id=receipt_cid,
                         intent_record=current_intent,
                         detail_comment_ids=existing_detail_cids,
+                        operation_model_calls_total=op_calls_total,
                     )
 
             # Effect not yet landed: recover from PR-resident result or execute restartable batch analysis.
@@ -6241,6 +6836,11 @@ class V6RecoveryEngine:
                 reconciled_after_lost_write=reconciled_after_lost_write,
                 detail_comment_ids=detail_cids,
                 detail_resolutions=detail_resolutions,
+                operation_model_calls_total=(
+                    None
+                    if op_calls_unknown
+                    else (op_calls_total or 0) + model_calls_started
+                ),
             )
         except V6LedgerIntegrityError as integrity_err:
             if integrity_err.diagnostic != "corrupted_app_ledger_marker":
@@ -6253,4 +6853,20 @@ class V6RecoveryEngine:
                 missing_evidence=(str(integrity_err),),
             )
         except _ThrottlePausedSignal as paused:
-            return paused.outcome
+            if paused.accounting_attached:
+                return paused.outcome
+            paused_total: int | None
+            if op_calls_unknown:
+                paused_total = None
+            elif op_calls_total is not None:
+                paused_total = op_calls_total + model_calls_started
+            elif model_calls_started > 0:
+                paused_total = model_calls_started
+            else:
+                paused_total = None
+            return replace(
+                paused.outcome,
+                model_calls_started=model_calls_started,
+                operation_model_calls_total=paused_total,
+                operation_model_calls_unknown=op_calls_unknown,
+            )

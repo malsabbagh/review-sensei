@@ -160,12 +160,46 @@ jobs:
           fi
           mkdir -p "$src_checkout"
           git --git-dir="$source_dir" archive "$workflow_commit" | tar -x -C "$src_checkout"
+          wheel_dir="$RUNNER_TEMP/review-sensei-v6-wheels"
+          rm -rf "$wheel_dir"
+          mkdir -p "$wheel_dir"
           python -m venv "$RUNNER_TEMP/review-sensei-v6-venv"
           python_bin="$RUNNER_TEMP/review-sensei-v6-venv/bin/python"
           "$python_bin" -m pip install --disable-pip-version-check --upgrade pip
-          "$python_bin" -m pip install --disable-pip-version-check \
+          "$python_bin" -m pip wheel \
+            --disable-pip-version-check \
+            --no-deps \
+            --wheel-dir "$wheel_dir" \
             "$src_checkout" \
             "$src_checkout/packages/python/review-sensei-github"
+          "$python_bin" - "$workflow_commit" "$wheel_dir" "${GITHUB_STEP_SUMMARY:-}" <<'PY'
+          import hashlib, pathlib, sys
+          workflow_commit, wheel_dir_raw, summary_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          wheels = sorted(pathlib.Path(wheel_dir_raw).glob("*.whl"))
+          names = [w.name for w in wheels]
+          has_core = [w for w in wheels if w.name.startswith("review_sensei-")]
+          has_github = [w for w in wheels if w.name.startswith("review_sensei_github-")]
+          if len(wheels) != 2 or len(has_core) != 1 or len(has_github) != 1:
+              raise SystemExit(
+                  f"expected 1 review_sensei-*.whl and 1 review_sensei_github-*.whl, found {names}"
+              )
+          lines = [f"review_sensei_v6_workflow_commit={workflow_commit}"]
+          for whl in wheels:
+              h = hashlib.sha256()
+              with whl.open("rb") as fh:
+                  while chunk := fh.read(65536):
+                      h.update(chunk)
+              digest = h.hexdigest()
+              lines.append(f"review_sensei_v6_wheel_sha256 {whl.name} {digest}")
+          for line in lines:
+              print(line)
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("### ReviewSensei v6 Runner Provenance\n")
+                  for line in lines:
+                      fh.write(f"- `{line}`\n")
+          PY
+          "$python_bin" -m pip install --disable-pip-version-check "$wheel_dir"/*.whl
           "$RUNNER_TEMP/review-sensei-v6-venv/bin/pip" check
           "$RUNNER_TEMP/review-sensei-v6-venv/bin/review-sensei-github" v6-pilot-run --help >/dev/null
 

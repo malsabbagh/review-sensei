@@ -38,6 +38,7 @@ RESULT_PART_SCHEMA = "reviewsensei:v6:result-part:v1"
 RESULT_MANIFEST_SCHEMA = "reviewsensei:v6:result-manifest:v1"
 BATCH_PLAN_SCHEMA = "reviewsensei:v6:batch-plan:v1"
 BATCH_DISPATCH_SCHEMA = "reviewsensei:v6:batch-dispatch:v1"
+BATCH_ATTEMPT_SCHEMA = "reviewsensei:v6:batch-attempt:v1"
 BATCH_OUTPUT_SCHEMA = "reviewsensei:v6:batch-output:v1"
 PROGRESS_HINT_SCHEMA = "reviewsensei:v6:progress:v1"
 
@@ -53,6 +54,17 @@ VALID_NON_SUBMISSION_PROOF_KINDS: frozenset[str] = frozenset(
     }
 )
 
+VALID_BATCH_ATTEMPT_STATUSES: frozenset[str] = frozenset(
+    {
+        "partial",
+        "failed",
+        "budget_exhausted",
+        "incomplete",
+        "provider_failed",
+        "reviewed",
+    }
+)
+
 VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
     {
         OWNER_SCHEMA,
@@ -65,6 +77,7 @@ VALID_V6_RECORD_SCHEMAS: frozenset[str] = frozenset(
         RESULT_MANIFEST_SCHEMA,
         BATCH_PLAN_SCHEMA,
         BATCH_DISPATCH_SCHEMA,
+        BATCH_ATTEMPT_SCHEMA,
         BATCH_OUTPUT_SCHEMA,
         PROGRESS_HINT_SCHEMA,
     }
@@ -806,6 +819,46 @@ class BatchDispatchRecord:
 
 
 @dataclass(frozen=True)
+class BatchAttemptRecord:
+    """Immutable PR-resident marker recording provider calls for an incomplete/failed batch attempt."""
+
+    record_id: str
+    operation_id: str
+    batch_id: str
+    attempt: int
+    plan_sha256: str
+    status: str
+    provider_calls: int
+    diagnostic: str
+    schema: str = BATCH_ATTEMPT_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != BATCH_ATTEMPT_SCHEMA:
+            raise ReviewInputError(
+                f"invalid BatchAttemptRecord schema: {self.schema!r}",
+                diagnostic="v6_unknown_schema",
+            )
+        _require_non_empty_str(self.record_id, name="record_id")
+        _require_non_empty_str(self.operation_id, name="operation_id")
+        _require_non_empty_str(self.batch_id, name="batch_id")
+        _require_strict_int(self.attempt, name="attempt", minimum=1)
+        _require_sha256_64(self.plan_sha256, name="plan_sha256")
+        _require_non_empty_str(self.status, name="status")
+        if self.status not in VALID_BATCH_ATTEMPT_STATUSES:
+            raise ReviewInputError(
+                f"invalid BatchAttemptRecord status: {self.status!r}",
+                diagnostic="v6_invalid_ledger_field",
+            )
+        _require_strict_int(self.provider_calls, name="provider_calls", minimum=0)
+        _require_non_empty_str(self.diagnostic, name="diagnostic")
+        if len(self.diagnostic) > 256:
+            raise ReviewInputError(
+                "diagnostic exceeds maximum length (256)",
+                diagnostic="v6_invalid_ledger_field",
+            )
+
+
+@dataclass(frozen=True)
 class BatchOutputRecord:
     """Immutable PR-resident marker recorded AFTER a verified batch provider response."""
 
@@ -858,7 +911,7 @@ class BatchOutputRecord:
             _require_non_empty_str(self.model, name="model")
         _require_non_empty_str(self.review_status, name="review_status")
         _require_strict_int(self.attempt, name="attempt", minimum=1)
-        _require_strict_int(self.provider_calls, name="provider_calls", minimum=1)
+        _require_strict_int(self.provider_calls, name="provider_calls", minimum=0)
 
 
 @dataclass(frozen=True)
@@ -1005,6 +1058,7 @@ V6LedgerRecord: TypeAlias = (
     | ResultManifestRecord
     | BatchPlanRecord
     | BatchDispatchRecord
+    | BatchAttemptRecord
     | BatchOutputRecord
     | AdvisoryProgressHint
 )
@@ -1148,6 +1202,18 @@ def record_to_dict(record: V6LedgerRecord) -> dict[str, Any]:
             "plan_sha256": record.plan_sha256,
             "prompt_sha256": record.prompt_sha256,
             "generation": record.generation,
+        }
+    if isinstance(record, BatchAttemptRecord):
+        return {
+            "schema": record.schema,
+            "record_id": record.record_id,
+            "operation_id": record.operation_id,
+            "batch_id": record.batch_id,
+            "attempt": record.attempt,
+            "plan_sha256": record.plan_sha256,
+            "status": record.status,
+            "provider_calls": record.provider_calls,
+            "diagnostic": record.diagnostic,
         }
     if isinstance(record, BatchOutputRecord):
         return {
@@ -1671,6 +1737,35 @@ def _record_from_mapping(payload: Mapping[str, Any]) -> V6LedgerRecord:
                 plan_sha256=_require_mapping_str(payload, "plan_sha256"),
                 prompt_sha256=_require_mapping_str(payload, "prompt_sha256"),
                 generation=_require_mapping_int(payload, "generation"),
+            )
+
+        if schema == BATCH_ATTEMPT_SCHEMA:
+            expected_keys = {
+                "schema",
+                "record_id",
+                "operation_id",
+                "batch_id",
+                "attempt",
+                "plan_sha256",
+                "status",
+                "provider_calls",
+                "diagnostic",
+            }
+            if set(payload.keys()) != expected_keys:
+                raise V6LedgerIntegrityError(
+                    "BatchAttemptRecord has unexpected or missing keys",
+                    diagnostic="v6_malformed_marker",
+                )
+            return BatchAttemptRecord(
+                schema=schema,
+                record_id=_require_mapping_str(payload, "record_id"),
+                operation_id=_require_mapping_str(payload, "operation_id"),
+                batch_id=_require_mapping_str(payload, "batch_id"),
+                attempt=_require_mapping_int(payload, "attempt"),
+                plan_sha256=_require_mapping_str(payload, "plan_sha256"),
+                status=_require_mapping_str(payload, "status"),
+                provider_calls=_require_mapping_int(payload, "provider_calls"),
+                diagnostic=_require_mapping_str(payload, "diagnostic"),
             )
 
         if schema == BATCH_OUTPUT_SCHEMA:

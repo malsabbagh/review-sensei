@@ -144,6 +144,7 @@ from .v6_recovery_engine import (
     write_v6_step_summary,
 )
 from .v6_recovery_ledger import (
+    BATCH_ATTEMPT_SCHEMA,
     BATCH_DISPATCH_SCHEMA,
     BATCH_OUTPUT_SCHEMA,
     BATCH_PLAN_SCHEMA,
@@ -152,6 +153,7 @@ from .v6_recovery_ledger import (
     NON_SUBMISSION_SCHEMA,
     OWNER_SCHEMA,
     AdvisoryProgressHint,
+    BatchAttemptRecord,
     BatchDispatchRecord,
     BatchOutputRecord,
     BatchPlanRecord,
@@ -280,9 +282,11 @@ __all__ = [
     "ALLOWED_V6_CAPABILITIES",
     "ALLOWED_V6_PERMISSION_NAMES",
     "AdvisoryProgressHint",
+    "BATCH_ATTEMPT_SCHEMA",
     "BATCH_DISPATCH_SCHEMA",
     "BATCH_OUTPUT_SCHEMA",
     "BATCH_PLAN_SCHEMA",
+    "BatchAttemptRecord",
     "BatchDispatchRecord",
     "BatchOutputRecord",
     "BatchPlanRecord",
