@@ -169,6 +169,7 @@ export interface LivePullRequestReview {
 
 export interface LivePullRequestReviewComment {
   id: number;
+  in_reply_to_id?: number;
   login: string;
   userType: string;
   commit_id: string | null;
@@ -834,7 +835,7 @@ export class GitHubApi {
     repository: string,
     token: string,
     observed = false,
-  ): Promise<{ id: number; fork: boolean; full_name?: string; owner_id?: number; owner_login?: string } | null> {
+  ): Promise<{ id: number; fork: boolean; default_branch?: string; full_name?: string; owner_id?: number; owner_login?: string } | null> {
     const response = await this.request("GET", repositoryPath(repository), token);
     if (response.status === 404 || response.status === 403) {
       return null;
@@ -853,7 +854,7 @@ export class GitHubApi {
       if (!isObject(owner) || !Number.isSafeInteger(owner.id) || (owner.id as number) <= 0 || typeof owner.login !== "string" || !/^[A-Za-z0-9-]{1,100}$/.test(owner.login) || typeof fullName !== "string" || fullName.toLowerCase() !== repository.toLowerCase() || fullName.split("/")[0].toLowerCase() !== owner.login.toLowerCase()) throw new Error("github_repository_observation_invalid");
       return { id, fork, full_name: fullName, owner_id: owner.id as number, owner_login: owner.login };
     }
-    return { id, fork };
+    return { id, fork, ...(typeof response.data.default_branch === "string" ? { default_branch: response.data.default_branch } : {}) };
   }
 
   /** Return the current immutable head for one pull request, or null when it cannot be read. */
@@ -1735,6 +1736,7 @@ export class GitHubApi {
       original_commit_id: typeof originalCommitId === "string" ? originalCommitId : null,
       body,
       pull_request_url: prUrl,
+      ...(Number.isSafeInteger(data.in_reply_to_id) ? { in_reply_to_id: Number(data.in_reply_to_id) } : {}),
       performedViaAppId: isObject(appObj) ? this.optionalPositiveId(appObj.id) : null,
     };
   }

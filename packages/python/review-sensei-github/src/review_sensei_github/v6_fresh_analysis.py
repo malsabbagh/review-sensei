@@ -1745,6 +1745,79 @@ def _review_result_to_unresolved_payload(
     return (envelope,), tuple(digests)
 
 
+def v6_provider_settings(
+    configuration: ProductConfiguration,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    provider_base_url: str | None = None,
+    allow_custom_endpoint: bool = False,
+) -> tuple[HostedPlan, ProviderSettings]:
+    """Resolve the trusted hosted backend for reviews and conversations."""
+    filtered_env = {k: os.environ[k] for k in _ALLOWED_ENV_KEYS if k in os.environ}
+    plan = plan_hosted_execution(
+        configuration,
+        cli_provider=provider,
+        cli_model=model,
+        environ=filtered_env,
+    )
+    adapter_name = _BACKEND_ADAPTERS.get(plan.backend)
+    if adapter_name is None:
+        raise ReviewInputError(
+            f"unsupported backend {plan.backend!r} for v6 fresh analysis",
+            diagnostic="v6_unsupported_provider_backend",
+        )
+    effective_base_url = (
+        provider_base_url.strip()
+        if isinstance(provider_base_url, str) and provider_base_url.strip()
+        else plan.base_url
+    )
+    effective_allow_custom = bool(allow_custom_endpoint) or plan.allow_custom_endpoint
+    if adapter_name == "openai-compatible":
+        try:
+            validate_openai_compatible_endpoint(
+                effective_base_url, allow_custom_endpoint=effective_allow_custom
+            )
+        except ValueError as exc:
+            raise ReviewInputError(
+                str(exc), diagnostic="v6_invalid_provider_endpoint"
+            ) from exc
+
+    cred_env = plan.credential_env
+    if plan.credential_required and cred_env not in {
+        "OLLAMA_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+    }:
+        raise ReviewInputError(
+            "hosted credential is not declared by the workflow",
+            diagnostic="v6_undeclared_provider_credential",
+        )
+    api_key = os.environ.get(cred_env, "").strip() or None if cred_env else None
+    if plan.credential_required and not api_key:
+        raise ReviewInputError(
+            f"environment variable {cred_env} is unavailable",
+            diagnostic="v6_missing_provider_credential",
+        )
+    if not plan.credential_required:
+        api_key = None
+
+    settings = ProviderSettings(
+        name=adapter_name,
+        model=plan.model,
+        base_url=effective_base_url,
+        api_key=api_key,
+        timeout_seconds=plan.timeout_seconds,
+        allow_custom_endpoint=effective_allow_custom,
+        openrouter_policy=(
+            OpenRouterRoutingPolicy(plan.upstream_provider)
+            if plan.backend == "openrouter" and plan.upstream_provider is not None
+            else None
+        ),
+    )
+    return plan, settings
+
+
 def prepare_v6_fresh_analysis_context(
     *,
     owner: str,
@@ -1880,57 +1953,12 @@ def prepare_v6_fresh_analysis_context(
         )
 
     configuration = _load_trusted_configuration(policy_root)
-    filtered_env = {k: os.environ[k] for k in _ALLOWED_ENV_KEYS if k in os.environ}
-    plan = plan_hosted_execution(
+    plan, settings = v6_provider_settings(
         configuration,
-        cli_provider=provider,
-        cli_model=model,
-        environ=filtered_env,
-    )
-    adapter_name = _BACKEND_ADAPTERS.get(plan.backend)
-    if adapter_name is None:
-        raise ReviewInputError(
-            f"unsupported backend {plan.backend!r} for v6 fresh analysis",
-            diagnostic="v6_unsupported_provider_backend",
-        )
-    effective_base_url = (
-        provider_base_url.strip()
-        if isinstance(provider_base_url, str) and provider_base_url.strip()
-        else plan.base_url
-    )
-    effective_allow_custom = bool(allow_custom_endpoint) or plan.allow_custom_endpoint
-    if adapter_name == "openai-compatible":
-        try:
-            validate_openai_compatible_endpoint(
-                effective_base_url, allow_custom_endpoint=effective_allow_custom
-            )
-        except ValueError as exc:
-            raise ReviewInputError(
-                str(exc), diagnostic="v6_invalid_provider_endpoint"
-            ) from exc
-
-    cred_env = plan.credential_env
-    api_key = os.environ.get(cred_env, "").strip() or None if cred_env else None
-    if plan.credential_required and not api_key:
-        raise ReviewInputError(
-            f"environment variable {cred_env} is unavailable",
-            diagnostic="v6_missing_provider_credential",
-        )
-    if not plan.credential_required:
-        api_key = None
-
-    settings = ProviderSettings(
-        name=adapter_name,
-        model=plan.model,
-        base_url=effective_base_url,
-        api_key=api_key,
-        timeout_seconds=plan.timeout_seconds,
-        allow_custom_endpoint=effective_allow_custom,
-        openrouter_policy=(
-            OpenRouterRoutingPolicy(plan.upstream_provider)
-            if plan.backend == "openrouter" and plan.upstream_provider is not None
-            else None
-        ),
+        provider=provider,
+        model=model,
+        provider_base_url=provider_base_url,
+        allow_custom_endpoint=allow_custom_endpoint,
     )
     review_provider, stage_providers = bind_stage_providers(
         registry=default_registry(),
@@ -2217,22 +2245,37 @@ def run_v6_fresh_pr_analysis(
         instructions=instructions,
     )
 
+    evidence, digests, _ = analyze_v6_context(context)
+    return evidence, digests
+
+
+def analyze_v6_context(
+    context: V6FreshAnalysisContext,
+) -> tuple[Sequence[Mapping[str, Any]], Sequence[str], int]:
+    """Complete the immutable batch plan and account for provider calls without publishing."""
     batch_results: list[ReviewResult] = []
     reviewed_hunk_ids: list[str] = []
     calls_used = 0
     for batch in context.planned_batches:
         remaining = context.max_provider_calls - calls_used
-        result, batch_calls = execute_v6_batch(
-            context, batch, remaining_provider_calls=remaining
-        )
+        try:
+            result, batch_calls = execute_v6_batch(
+                context, batch, remaining_provider_calls=remaining
+            )
+        except V6FreshAnalysisError as exc:
+            if exc.provider_calls is not None:
+                exc.provider_calls += calls_used
+            raise
+        calls_used += batch_calls
         if result.review_status != "complete":
             raise V6FreshAnalysisError(
                 "v6_batch_incomplete_coverage",
                 f"batch {batch.batch_id} returned incomplete review_status={result.review_status!r}",
+                provider_calls=calls_used,
             )
-        calls_used += batch_calls
         reviewed_hunk_ids.extend(batch.primary_hunk_ids)
         batch_results.append(result)
 
     verify_expected_hunks_reviewed(context, reviewed_hunk_ids)
-    return finalize_v6_fresh_analysis_result(context, batch_results)
+    findings, digests = finalize_v6_fresh_analysis_result(context, batch_results)
+    return findings, digests, calls_used

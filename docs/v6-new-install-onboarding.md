@@ -42,37 +42,53 @@ recovery ledger.
 
 ## Workflow compatibility
 
-This matrix compares the generated v5 caller at the signed v5 cut
-`40b4f52face3402fc3a9cd51387bde7cf53c3951` and the v6 coordinator callable at
-the prepared signed cut `b8bf8668407263e9ceff67572c7ea271c90e5d73`.
+The public v5 cut is `40b4f52face3402fc3a9cd51387bde7cf53c3951`. The locally
+prepared v6 cut at `b8bf8668407263e9ceff67572c7ea271c90e5d73` lacks the
+entry points below. This candidate includes changes to both the hosted
+`review-sensei-v6-pilot.yml` callable and its Worker.
 
-| Entry point | v5 onboarding | Exact v6 and the proposed caller |
+| Entry point | v5 onboarding | Candidate v6 |
 | --- | --- | --- |
-| Automatic | Opened, reopened, synchronize, and ready-for-review. The reusable workflow skips drafts. | Same event types. Same-repository, non-draft only. The v6 runner skips fresh work when `github.writes=false` or automatic reviews are disabled. Default generated configuration leaves writes off. |
-| Manual | Dispatch a selected PR with rescan or bounded review-remaining intent. | The callable accepts a dispatch event label. The proposed caller has no dispatch trigger, the new-install broker admits only PR events, and the callable has no review-remaining input. |
-| Top-level mention | Authorized non-bot PR comments can request replies, rescans, review remaining, or supported commands. The v5 runner verifies the live source. | The callable accepts the `issue_comment` label but has no caller trigger, comment-source contract, or equivalent command/reply route in this channel. |
-| Inline mention | A separate created review-comment trigger sends an authenticated inline reply context. | The callable rejects `pull_request_review_comment` in its preflight. The proposed caller has no inline trigger. |
-| Fork | Automatic review is disabled. The v5 caller accepts and forwards a manual `head_repository` input. The metered hosted workflow preflight rejects a foreign or fork head. | Both automatic caller and v6 workflow exclude forks. The v6 validation step also rejects an explicit foreign head repository. |
-| Uninstall | Manual cleanup opens a PR to remove the generated caller and configuration. Uninstalling the App is a separate GitHub action. | The existing cleanup still removes the shared caller path. It has no broker activation or coordinator drain operation. Reinstalls after a v6 activation require reconciliation of the old installation's slots and PR evidence before replacement. |
+| Automatic | Opened, reopened, synchronize and ready-for-review on an eligible PR. | Same events. A read-only plan verifies the live head, open non-draft PR and base/head repository identities. `automatic_reviews=false` skips the run. |
+| Writes off | Review with a read-only GitHub token. | The coordinator checks admission for the exact head. The runner analyzes the immutable diff or verified conversation and writes its result to the Actions step summary. No reservation, writer credential, PR ledger entry, check, review or reply is produced. |
+| Provider and runner | Hosted providers or local Ollama on the configured labeled runner. | Trusted default-branch configuration selects the same backend and labels. The plan and runner bind the same policy commit and provider settings. Local Ollama requires an available `self-hosted, linux, x64, ollama` runner and its configured model. Check availability for each cohort. |
+| Manual | Dispatch a review on a selected PR, including full rescan or bounded review remaining. | Full review verifies the current maintainer, original event, default branch and live PR. It runs even if automatic reviews are disabled. A rerun reuses its operation ID. Remaining-only requests stop before inference because v6 lacks the retained coverage contract. |
+| Top-level mention | Authorized PR comments can request a reply, full rescan, bounded remaining review or maintainer command. | The runner rereads the comment and verifies its author, association, PR, body digest and update time. A discussion gets one issue-comment reply. An explicit unedited full rescan additionally requires current maintainer permission. Remaining-only and recognized maintainer commands stop with a diagnostic. |
+| Inline mention | A created review comment can request a thread reply. | After the same source validation, the runner verifies the root belongs to this PR and posts one native reply to that root. The receipt binds its exact body and parent. An uncertain reply is reconciled before any retry. Thread resolution remains manual. |
+| Protected branch | A repository may require the head-bound native check named `ReviewSensei` from the ReviewSensei App, or an exact Actions job context. | The candidate publishes a PR review when writes are enabled. The native App check is outstanding. Hold migration for repositories whose branch rules require it or any v5 job context until the required name, numeric producer ID and head are qualified. Keep unknown protection requirements in the held cohort. |
+| Fork and draft | Automatic fork reviews are disabled. The metered v5 preflight rejects foreign heads. | A fork or draft fails the callable's live preflight before coordinator access or analysis. The workflow never executes the PR head. |
+| Uninstall | Manual cleanup opens a PR to remove managed files. | Cleanup still removes the same caller path. A previously activated generation requires a coordinator drain and reconciliation of its PRs before replacement. |
 
-The v6 callee is `review-sensei-v6-pilot.yml`. The legacy
-`review-sensei-run.yml` has the same bytes at both release commits. The v6
-caller declares `checks: read` and `actions: read` in addition to the read
-scopes and OIDC, which are required by the reusable workflow. Route retained
-manual and comment behavior through the same v6 owner before enabling it. A
-v5 event fallback on a v6-owned PR would break the single-writer contract.
+All supported writes pass through one coordinator slot for the PR. The owner,
+result, intent and receipt stay on the PR. The callable forwards only the
+credential required by the selected provider. GitHub queues pending work in
+the per-PR concurrency group. Its documented limit is 100 pending runs.
+[GitHub workflow identity](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context),
+[concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
+[inline reply contract](https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment).
+
+Admit a cohort only after its required workflows and merge controls are
+qualified. Remaining gaps include bounded review-remaining, disposition and
+approval commands, evidence-backed human reassessment, automatic thread
+resolution and native check publication. A discussion reply does not resolve a
+finding. Keep v5 available for repositories using these features. Before
+migration, an authorized administrator can compare effective branch protection
+and rulesets against run metadata for a representative head. Record the exact
+check context and GitHub App ID. A passing Actions job from a different
+producer cannot satisfy a producer-pinned App check. Use count-only results for
+progress reporting. [GitHub protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging).
 
 ## Rollout sequence
 
-1. Decide the required parity for active default onboarding. Qualify the exact
-   caller, Worker and callable through the project's protected release paths.
-   If the missing behavior is in scope, qualify a new immutable release
-   containing the callable changes. Verify the signed v6 object and peeled
-   source, absence of a conflicting public ref, and public GitHub Actions
-   reachability after authorized publication. Check that repository Actions
-   policy allows the reusable workflow and the current manual cleanup. The
-   prepared v6 tag can use the existing 0.9.0 / 0.3.35 release only for its
-   qualified behavior.
+1. Qualify a fresh immutable release containing the caller, callable, installed
+   runner and Worker changes together. Use protected exact-commit CI and
+   CodeQL, release publication and both-package installed-consumer
+   qualification. Check each eligible cohort's runner, provider, workflow
+   permissions and required checks. Verify the new release tags and signatures.
+   The prepared v6 tag points to the older release. Create a separately
+   approved signed release-aligned v6 ref, reconcile any local/remote conflict
+   explicitly, and verify its peeled commit and public callable reachability
+   before enabling proposals. Preserve all immutable package tags.
 2. Deploy the qualified Worker with proposals disabled. Verify the build,
    traffic, bindings, legacy v5 admission and the exact reachable v6 ref.
    Choose the cutoff when the serving rollout is ready. Enable proposals for

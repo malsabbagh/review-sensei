@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 from review_sensei.configuration import default_configuration
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
+from review_sensei.hosted import plan_hosted_execution
 
 from .errors import GitHubHTTPTransientError, GitHubResponseTooLargeError
 from .v6_coordinator_client import (
@@ -35,7 +36,9 @@ from .v6_credential_matrix import (
 )
 from .v6_fresh_analysis import (
     V6FreshAnalysisContext,
+    V6FreshAnalysisError,
     _load_trusted_configuration,
+    analyze_v6_context,
     compute_trusted_policy_and_config_digests,
     filtered_hosted_environ,
     prepare_v6_fresh_analysis_context,
@@ -65,6 +68,13 @@ from .v6_recovery_ledger import (
     redact_secrets,
 )
 from .v6_transport import DualCredentialGitHubClient, DualCredentialTransport
+from .v6_workflow_event import (
+    COMMENT_EVENTS,
+    WorkflowOperation,
+    analyze_mention,
+    read_workflow_event,
+    workflow_plan_digest,
+)
 
 _SHA1_40_RE = re.compile(r"^[0-9a-f]{40}$")
 _REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -397,6 +407,7 @@ class V6PilotRunConfig:
         Callable[[], tuple[Sequence[Mapping[str, Any]], Sequence[str]]] | None
     ) = None
     analyze_fresh_pr: bool = False
+    workflow_operation: WorkflowOperation | None = None
     policy_root: Path | None = None
     provider: str | None = None
     model: str | None = None
@@ -628,6 +639,92 @@ class V6PilotRunner:
 
         return _verify
 
+    def _analyze_read_only(self, config: V6PilotRunConfig) -> V6PilotRunOutcome:
+        """Use read-only admission and the same immutable batch plan as the writer."""
+        calls: int | Literal["unknown"] = 0
+        try:
+            status = self.coordinator.status(
+                pull_request=config.pull_request,
+                slot_key=config.slot_key,
+                analysis_head_sha=config.head_sha,
+            )
+            if status.state != "IDLE":
+                raise ReviewInputError(
+                    "PR has an outstanding writer", diagnostic="v6_read_only_slot_busy"
+                )
+
+            def verify() -> None:
+                if config.pre_publish_head_verifier is not None:
+                    config.pre_publish_head_verifier()
+                else:
+                    verify_live_pr_head(
+                        owner=config.owner,
+                        repo=config.repo,
+                        pull_request=config.pull_request,
+                        expected_head_sha=config.head_sha,
+                        workflow_token_transport=self.workflow_token_transport,
+                        event=config.event,
+                        visibility=config.visibility,
+                        granted_scopes=config.granted_scopes,
+                        is_ghec=self.is_ghec,
+                        clock=self.clock,
+                    )
+
+            verify()
+            operation = config.workflow_operation
+            if operation is not None and operation.conversation is not None:
+                calls = "unknown"
+                reply, _ = analyze_mention(
+                    operation, _load_trusted_configuration(config.policy_root)
+                )
+                calls = reply[0]["provider_calls"]
+                body = reply[0]["body"]
+            else:
+                prepare = _build_fresh_analysis_context_loader(
+                    config,
+                    workflow_token_transport=self.workflow_token_transport,
+                    is_ghec=self.is_ghec,
+                    clock=self.clock,
+                )
+                if prepare is None:
+                    raise ReviewInputError(
+                        "a fresh analysis plan is required",
+                        diagnostic="v6_missing_analysis_plan",
+                    )
+                context = prepare()
+                calls = "unknown"
+                findings, _, calls = analyze_v6_context(context)
+                body = str(findings[0]["review_body"])
+            verify()
+            data = body.encode("utf-8")
+            if len(data) > 768 * 1024:
+                body = (
+                    data[: 768 * 1024].decode("utf-8", errors="ignore")
+                    + "\n\n[Review summary truncated]"
+                )
+            if not write_v6_step_summary(
+                f"### ReviewSensei read-only review of `{config.head_sha}`\n\n{body}\n",
+                sink=config.step_summary_sink,
+            ):
+                raise ReviewInputError(
+                    "cannot write the analysis summary",
+                    diagnostic="v6_analysis_summary_unavailable",
+                )
+            outcome = V6PilotRunOutcome(
+                status="analyzed", slot_key=status.slot_key, model_calls_started=calls
+            )
+        except (ReviewSenseiError, V6CoordinatorError) as exc:
+            if isinstance(exc, V6FreshAnalysisError) and calls == "unknown":
+                calls = (
+                    exc.provider_calls if exc.provider_calls is not None else "unknown"
+                )
+            reason = getattr(exc, "diagnostic", None) or "v6_read_only_analysis_failed"
+            self._emit_hold_summary(config, slot_key=config.slot_key, blocker=reason)
+            outcome = V6PilotRunOutcome(
+                status="hold", diagnostic=reason, model_calls_started=calls
+            )
+        return self._write_outcome(config, outcome)
+
     def run(self, config: V6PilotRunConfig) -> V6PilotRunOutcome:
         """Execute one full v6 coordinator + PR-governed recovery lifecycle."""
 
@@ -650,15 +747,6 @@ class V6PilotRunner:
                         diagnostic=diag,
                     ),
                 )
-            if not trusted_cfg.github.writes:
-                return self._write_outcome(
-                    config,
-                    V6PilotRunOutcome(
-                        status="skipped",
-                        slot_key=config.slot_key,
-                        diagnostic="v6_policy_writes_disabled",
-                    ),
-                )
             if (
                 config.event == GitHubEventKind.PULL_REQUEST
                 and not trusted_cfg.github.automatic_reviews
@@ -669,6 +757,24 @@ class V6PilotRunner:
                         status="skipped",
                         slot_key=config.slot_key,
                         diagnostic="v6_policy_automatic_reviews_disabled",
+                    ),
+                )
+            if config.event in COMMENT_EVENTS and not trusted_cfg.github.mentions:
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="skipped", diagnostic="v6_policy_mentions_disabled"
+                    ),
+                )
+            if not trusted_cfg.github.writes:
+                if config.analyze_fresh_pr:
+                    return self._analyze_read_only(config)
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="skipped",
+                        slot_key=config.slot_key,
+                        diagnostic="v6_policy_writes_disabled",
                     ),
                 )
 
@@ -978,6 +1084,18 @@ class V6PilotRunner:
                 ),
             )
 
+        if config.workflow_operation is not None:
+            try:
+                config.workflow_operation.verify()
+            except ReviewSenseiError as exc:
+                reason = getattr(exc, "diagnostic", None) or "v6_event_binding_invalid"
+                self._emit_hold_summary(config, slot_key=slot_key, blocker=reason)
+                return self._write_outcome(
+                    config,
+                    V6PilotRunOutcome(
+                        status="hold", slot_key=slot_key, diagnostic=reason
+                    ),
+                )
         try:
             grant = self.coordinator.acquire(
                 pull_request=config.pull_request,
@@ -1469,7 +1587,7 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
     parser.add_argument("--operation-id", default=None)
     parser.add_argument(
         "--event",
-        choices=("pull_request", "issue_comment", "workflow_dispatch"),
+        choices=tuple(event.value for event in GitHubEventKind),
         default="pull_request",
     )
     parser.add_argument(
@@ -1492,6 +1610,7 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
     parser.add_argument("--step-summary-path", type=Path, default=None)
     parser.add_argument("--initial-findings-json", type=Path, default=None)
     parser.add_argument("--analyze-fresh-pr", action="store_true", default=False)
+    parser.add_argument("--workflow-event-path", type=Path)
     parser.add_argument("--policy-root", type=Path, default=None)
     parser.add_argument("--provider", default=None)
     parser.add_argument("--model", default=None)
@@ -1510,7 +1629,9 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         raise ReviewInputError("repository_id and pull_request must be positive")
     if options.expected_app_id is not None and options.expected_app_id <= 0:
         raise ReviewInputError("expected_app_id must be positive")
-    if _SHA1_40_RE.fullmatch(options.head_sha) is None:
+    if (
+        options.head_sha or options.workflow_event_path is None
+    ) and _SHA1_40_RE.fullmatch(options.head_sha) is None:
         raise ReviewInputError("head_sha must be a 40-hex SHA-1")
 
     owner, repo = options.repository.split("/", 1)
@@ -1539,6 +1660,40 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
             "GITHUB_TOKEN is required for read-only PR bulk scans",
             diagnostic="v6_missing_github_token",
         )
+    operation = None
+    if options.workflow_event_path is not None:
+        if (
+            options.policy_root is None
+            or not options.analyze_fresh_pr
+            or options.initial_findings_json
+            or options.affirmative_non_submission
+        ):
+            raise ReviewInputError(
+                "installed workflow requires trusted fresh-analysis configuration"
+            )
+        operation = read_workflow_event(
+            options.workflow_event_path,
+            event=GitHubEventKind(options.event),
+            repository=options.repository,
+            repository_id=options.repository_id,
+            pull_request=options.pull_request,
+            expected_head=options.head_sha,
+            api_url=options.github_api_url,
+            token=gh_token,
+        )
+        options.head_sha = operation.head_sha
+        if expected_plan := os.environ.get("V6_EXPECTED_PLAN_SHA"):
+            current = plan_hosted_execution(
+                _load_trusted_configuration(options.policy_root),
+                cli_provider=options.provider,
+                cli_model=options.model,
+                environ=filtered_hosted_environ(),
+            )
+            if workflow_plan_digest(current) != expected_plan:
+                raise ReviewInputError(
+                    "trusted inference plan changed",
+                    diagnostic="v6_workflow_plan_changed",
+                )
     operation_id = options.operation_id or default_v6_operation_id(
         repository_id=options.repository_id,
         pull_request=options.pull_request,
@@ -1546,6 +1701,27 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         effect_kind=options.effect_kind,
     )
 
+    if operation is not None:
+        if options.effect_kind != "pr_review_publish":
+            raise ReviewInputError(
+                "installed workflow effects are derived from the event"
+            )
+        operation_id = default_v6_operation_id(
+            repository_id=options.repository_id,
+            pull_request=options.pull_request,
+            head_sha=options.head_sha,
+        )
+        scope = f"v6:{options.repository_id}:{options.pull_request}"
+        if operation.conversation is not None:
+            operation_id = f"{scope}:{operation.operation}:{operation.source_id}"
+        elif options.event == "workflow_dispatch":
+            operation_id = f"{scope}:dispatch:{run_id}"
+        elif operation.source_id is not None:
+            operation_id = f"{scope}:rescan:{operation.source_id}"
+        if options.operation_id and options.operation_id != operation_id:
+            raise ReviewInputError(
+                "installed workflow operation identity differs from the event"
+            )
     coordinator = V6CoordinatorClient(base_url=options.coordinator_url)
     wf_transport = UrllibGitHubTransport(
         token=gh_token,
@@ -1577,6 +1753,30 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         provider_base_url=options.provider_base_url,
         allow_custom_endpoint=options.allow_custom_endpoint,
     )
+    if operation is not None:
+        config = replace(
+            config,
+            workflow_operation=operation,
+            pre_publish_head_verifier=operation.verify,
+        )
+        if operation.conversation is not None:
+            target = (
+                f"/repos/{options.repository}/issues/{options.pull_request}/comments"
+                if operation.operation == "issue_reply"
+                else f"/repos/{options.repository}/pulls/{options.pull_request}/comments/{operation.root_id}/replies"
+            )
+            mention = operation
+            config = replace(
+                config,
+                effect_kind=mention.operation,
+                effect_endpoint_id=mention.operation,
+                effect_path=target,
+                capabilities=(mention.operation,),
+                observed_evidence_digests=(mention.source_digest or "",),
+                initial_result_loader=lambda: analyze_mention(
+                    mention, _load_trusted_configuration(options.policy_root)
+                ),
+            )
     outcome = run_v6_pilot(
         config,
         coordinator=coordinator,
@@ -1584,4 +1784,4 @@ def run_v6_pilot_cli(argv: Sequence[str]) -> int:
         github_api_url=options.github_api_url,
     )
     sys.stdout.write(json.dumps(outcome.to_dict(), indent=2, sort_keys=True) + "\n")
-    return 0 if outcome.status in {"completed", "paused", "skipped"} else 1
+    return 0 if outcome.status in {"analyzed", "completed", "paused", "skipped"} else 1

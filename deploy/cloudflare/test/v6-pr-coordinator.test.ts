@@ -137,7 +137,7 @@ class FakeV6Provider implements V6ProviderAdapter {
     refSha: WORKFLOW_SHA,
   };
   installationId: number | null = 67890;
-  repoInfo: { id: number; fork: boolean } | null = { id: 987654321, fork: false };
+  repoInfo: { id: number; fork: boolean; default_branch?: string } | null = { id: 987654321, fork: false, default_branch: "main" };
   prBindings = new Map<number, PullRequestBinding | null>();
   runAttempts = new Map<string, WorkflowRunAttemptInfo | null>();
   comments = new Map<number, LiveIssueComment | null>();
@@ -2550,7 +2550,35 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       expect((await engine.handleAcquire(env, request)).status).toBe(403);
       expect(provider.calls.mints).toBe(0);
     }
+    const admission = { oidc_token: request.oidc_token, pull_request: 42, analysis_head_sha: HEAD_SHA_1 };
+    const beforeAnalysis = await engine.handleStatus(env, { oidc_token: request.oidc_token, pull_request: 42 });
+    expect((await engine.handleStatus(env, admission)).status).toBe(403);
     provider.prBindings.set(42, { ...originalBinding, created_at: "2026-11-02T01:00:01Z" });
+    for (const event of ["pull_request", "workflow_dispatch", "issue_comment", "pull_request_review_comment"]) {
+      const ref = event === "workflow_dispatch" || event === "issue_comment" ? "refs/heads/main" : "refs/pull/42/merge";
+      const claims = makeClaims({
+        event_name: event, ref,
+        workflow_ref: PILOT_REPO + "/.github/workflows/review-sensei-review.yml@" + ref,
+        job_workflow_ref: "malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@refs/tags/v6",
+      });
+      provider.registerOidc("entry-" + event, claims);
+      const response = await engine.handleStatus(env, { ...admission, oidc_token: "entry-" + event });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ state: "IDLE", generation: beforeAnalysis.body.generation, analysis_head_sha: HEAD_SHA_1 });
+      expect((await engine.handleAcquire(env, { ...request, oidc_token: "entry-" + event, capabilities: ["learning_write"] })).status).toBe(403);
+      const otherRef = ref.startsWith("refs/pull/") ? "refs/pull/43/merge" : "refs/heads/other";
+      provider.registerOidc("other-ref", { ...claims, ref: otherRef,
+        workflow_ref: PILOT_REPO + "/.github/workflows/review-sensei-review.yml@" + otherRef });
+      expect((await engine.handleStatus(env, { ...admission, oidc_token: "other-ref" })).status).toBe(403);
+      expect((await engine.handleAcquire(env, { ...request, oidc_token: "other-ref" })).status).toBe(403);
+    }
+    expect((await engine.handleStatus(env, { ...admission, analysis_head_sha: "0".repeat(40) })).status).toBe(403);
+    expect((await engine.handleStatus({ ...env, V6_PILOT_ROLLBACK_REPOSITORIES: PILOT_REPO }, admission)).status).toBe(403);
+    const cleanBinding = provider.prBindings.get(42)!;
+    provider.prBindings.set(42, { ...cleanBinding, head_repo_id: 100, is_fork_pr: true });
+    expect((await engine.handleStatus(env, admission)).status).toBe(403);
+    provider.prBindings.set(42, cleanBinding);
+    expect(provider.calls.mints).toBe(0);
     const holding = await engine.handleAcquire({ ...env, V6_PILOT_ROLLBACK_REPOSITORIES: PILOT_REPO }, request);
     expect(holding.status).toBe(403);
     expect(holding.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
@@ -3815,6 +3843,65 @@ describe("v6 acquire response redaction", () => {
     expect(conflictRes.headers.get("cache-control")).toBe("no-store");
     const conflictBody = (await conflictRes.json()) as Record<string, unknown>;
     expect(conflictBody.token).toBe("[REDACTED_TOKEN]");
+  });
+
+  it.each([
+    ["issue_reply", "exact"],
+    ["inline_reply", "exact"],
+    ["inline_reply", "other-root"],
+    ["inline_reply", "changed-body"],
+    ["issue_reply", "other-app"],
+  ])("reconciles %s against its retained reply intent (%s)", async (kind, evidence) => {
+    const { env, engine, provider, store, slotKey42 } = createHarness();
+    const op = `v6:987654321:42:${kind}:24`;
+    const token = "oidc-run-1";
+    const held = await engine.handleAcquire(env, {
+      oidc_token: token, pull_request: 42, head_sha: HEAD_SHA_1, capabilities: [kind], operation_id: op,
+    });
+    expect(held.status).toBe(200);
+    const released = await engine.handleRelease(env, {
+      oidc_token: token, slot_key: slotKey42, generation: 1, lease_epoch: 1,
+      reservation_id: held.body.reservation_id,
+    });
+    expect(released.status).toBe(200);
+    const inline = kind === "inline_reply";
+    const payloadSha = "b".repeat(64);
+    const reply = `Explanation\n\n<!-- reviewsensei:v6:effect op=${op} sha256=${payloadSha} -->`;
+    const intent = canonicalJsonString({
+      schema: "reviewsensei:v6:intent:v1", record_id: `intent:${op}:1`,
+      operation_id: op, writer_epoch: 1, generation: 1, pr_head_sha: HEAD_SHA_1,
+      effect_kind: kind, payload_sha256: payloadSha,
+      target_digest: await sha256Hex(canonicalJsonString({ body: reply })),
+      target_location: `/repos/${PILOT_REPO}/${inline ? "pulls/42/comments/17/replies" : "issues/42/comments"}`,
+    });
+    const author = { login: "reviewsensei[bot]", userType: "Bot", association: "NONE", performedViaAppId: 12345 };
+    provider.comments.set(5001, {
+      ...author, id: 5001, body: `<!-- reviewsensei:v6:record sha256=${await sha256Hex(intent)} payload=${intent} -->`,
+    });
+    const effect = {
+      ...author, id: 5002, performedViaAppId: evidence === "other-app" ? 321 : 12345,
+      body: evidence === "changed-body" ? "Changed\n" + reply : reply,
+    };
+    if (inline) {
+      provider.reviewComments.set(5002, {
+        ...effect, in_reply_to_id: evidence === "other-root" ? 18 : 17,
+        // GitHub's thread root may precede this request's reviewed head.
+        commit_id: "9".repeat(40), original_commit_id: "8".repeat(40),
+        pull_request_url: `https://api.github.com/repos/${PILOT_REPO}/pulls/42`,
+      });
+    } else {
+      provider.comments.set(5002, effect);
+    }
+    const result = await engine.handleCompleteReconcile(env, {
+      oidc_token: token, slot_key: slotKey42, generation: 1, reconciliation_outcome: "adopted_missing_receipt",
+      reconciliation_evidence: { old_generation: 1, intent_resolutions: [{
+        operation_id: op, intent_comment_id: 5001, resolution: "adopted_effect",
+        native_effect_kind: inline ? "pull_request_review_comment" : "issue_comment", native_effect_id: 5002,
+      }] },
+    });
+    expect(result.status).toBe(evidence === "exact" ? 200 : 409);
+    expect((await store.getSlot(slotKey42))?.state).toBe(evidence === "exact" ? "IDLE" : "HOLD");
+    expect(provider.calls.mints).toBe(1);
   });
 
   it("verifies issue_comment adopted native effects and catches deletion boundary shift in Gate 2 reconciliation", async () => {

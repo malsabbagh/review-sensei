@@ -208,6 +208,15 @@ interface V6EnrollmentAuthorization {
   firstPrAfter: number;
 }
 
+/** Bind the enrolled caller to GitHub's ref for the actual PR or default branch. */
+export function verifyOnboardingEventRef(claims: OidcClaims, defaultBranch: string | undefined, pr: number): void {
+  const usesPrRef = claims.event_name === "pull_request" || claims.event_name === "pull_request_review_comment";
+  const ref = usesPrRef ? `refs/pull/${pr}/merge` : defaultBranch && `refs/heads/${defaultBranch}`;
+  if (!ref || claims.ref !== ref || !claims.workflow_ref.endsWith("@" + ref)) {
+    throw new Error("v6_lease_unauthorized_tuple");
+  }
+}
+
 /** A configured cutover takes precedence over the older slug-based pilot rule. */
 export async function requireV6Admission(
   env: WorkerEnv,
@@ -218,7 +227,7 @@ export async function requireV6Admission(
   const activation = policy?.activations.get(claims.repository_id);
   const slug = claims.repository.toLowerCase();
   if (policy !== null && activation !== undefined) {
-    if (activation.repository !== slug || claims.event_name !== "pull_request" ||
+    if (activation.repository !== slug || !["pull_request", "issue_comment", "pull_request_review_comment", "workflow_dispatch"].includes(claims.event_name) ||
         !claims.workflow_ref.toLowerCase().startsWith(slug + "/" + SETUP_WORKFLOW_PATH + "@") ||
         claims.job_workflow_ref !== PUBLIC_REPOSITORY + "/" + V6_ONBOARDING_WORKFLOW + "@refs/tags/" + V6_ONBOARDING_TAG ||
         (claims.job_workflow_sha !== policy.sourceSha && claims.job_workflow_sha !== policy.tagObject)) {

@@ -29,6 +29,7 @@ class GitHubEventKind(str, Enum):
 
     PULL_REQUEST = "pull_request"
     ISSUE_COMMENT = "issue_comment"
+    PULL_REQUEST_REVIEW_COMMENT = "pull_request_review_comment"
     WORKFLOW_DISPATCH = "workflow_dispatch"
 
 
@@ -266,6 +267,8 @@ def _broker_mutation(
     method: str = "POST",
     required_permissions: tuple[str, ...],
     rationale: str,
+    supported_events: frozenset[GitHubEventKind] = ALL_EVENTS
+    - {GitHubEventKind.PULL_REQUEST_REVIEW_COMMENT},
 ) -> tuple[str, EndpointCredentialRule]:
     """Construct an App-broker mutation rule."""
 
@@ -276,7 +279,7 @@ def _broker_mutation(
         operation_kind=OperationKind.MUTATION,
         credential_kind=CredentialKind.APP_BROKER,
         required_permissions=required_permissions,
-        supported_events=ALL_EVENTS,
+        supported_events=supported_events,
         supported_visibilities=SAME_REPO_VISIBILITIES,
         allow_app_fallback=False,
         max_items_per_page=None,
@@ -463,6 +466,7 @@ _MATRIX_ENTRIES: tuple[tuple[str, EndpointCredentialRule], ...] = (
     _broker_mutation(
         "write_intent_comment",
         "/repos/{owner}/{repo}/issues/{pull_number}/comments",
+        supported_events=ALL_EVENTS,
         required_permissions=("issues: write", "pull-requests: write"),
         rationale=(
             "Persist an immutable App-authored write intent record before "
@@ -472,6 +476,7 @@ _MATRIX_ENTRIES: tuple[tuple[str, EndpointCredentialRule], ...] = (
     _broker_mutation(
         "completion_receipt_comment",
         "/repos/{owner}/{repo}/issues/{pull_number}/comments",
+        supported_events=ALL_EVENTS,
         required_permissions=("issues: write", "pull-requests: write"),
         rationale=(
             "Persist an immutable App-authored completion receipt record after "
@@ -481,12 +486,27 @@ _MATRIX_ENTRIES: tuple[tuple[str, EndpointCredentialRule], ...] = (
     _broker_mutation(
         "advisory_progress_hint",
         "/repos/{owner}/{repo}/issues/{pull_number}/comments/{comment_id}",
+        supported_events=ALL_EVENTS,
         method="PATCH",
         required_permissions=("issues: write", "pull-requests: write"),
         rationale=(
             "Update compact read-phase progress/stall hint only; never stores "
             "the sole copy of an unresolved intent, receipt, or review result."
         ),
+    ),
+    _broker_mutation(
+        "issue_reply",
+        "/repos/{owner}/{repo}/issues/{pull_number}/comments",
+        supported_events=frozenset({GitHubEventKind.ISSUE_COMMENT}),
+        required_permissions=("pull-requests: write",),
+        rationale="Reply to a verified top-level PR mention.",
+    ),
+    _broker_mutation(
+        "inline_reply",
+        "/repos/{owner}/{repo}/pulls/{pull_number}/comments/{root_id}/replies",
+        supported_events=frozenset({GitHubEventKind.PULL_REQUEST_REVIEW_COMMENT}),
+        required_permissions=("pull-requests: write",),
+        rationale="Reply to the verified review-comment root.",
     ),
     _broker_mutation(
         "pr_review_publish",

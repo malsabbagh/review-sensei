@@ -2199,6 +2199,13 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
                 for line in runs_on_lines:
                     self.assertNotIn("ENABLE_UBICLOUD_HOSTED", line)
                     self.assertNotIn("ubicloud-standard-2", line)
+                    if (
+                        workflow.name == "review-sensei-v6-pilot.yml"
+                        and line
+                        == 'runs-on: ${{ fromJSON(needs.plan.outputs.runner_kind == \'local\' && \'["self-hosted","linux","x64","ollama"]\' || \'"ubuntu-latest"\') }}'
+                    ):
+                        self.assertIn("    needs: plan", lines)
+                        continue
                     if workflow.name == "review-sensei-run.yml":
                         self.assertTrue(
                             line

@@ -5,6 +5,28 @@ name: ReviewSensei review
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request to review
+        required: true
+        type: string
+      operation:
+        description: Operation to run
+        type: choice
+        options: [review]
+        default: review
+      review_remaining:
+        description: Remaining-only review requires retained coverage and is currently held
+        default: false
+        type: boolean
+      head_repository:
+        description: Optional same-repository head slug
+        type: string
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -17,17 +39,23 @@ permissions:
 jobs:
   review:
     if: >-
-      github.event.pull_request.draft != true &&
-      github.event.pull_request.head.repo.fork == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.fork == false && github.event.pull_request.head.repo.full_name == github.repository) ||
+       ((github.event_name == 'issue_comment' && github.event.issue.pull_request ||
+         github.event_name == 'pull_request_review_comment' && !github.event.pull_request.draft &&
+         github.event.pull_request.head.repo.fork == false && github.event.pull_request.head.repo.full_name == github.repository) &&
+        github.event.comment.user.type == 'User' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei'))))
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@v6
     with:
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
-      pull_request_number: ${{ format('{0}', github.event.pull_request.number) }}
+      pull_request_number: ${{ format('{0}', github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number) }}
       head_sha: ${{ github.event.pull_request.head.sha }}
-      head_repository: ${{ github.event.pull_request.head.repo.full_name }}
-      event: pull_request
+      head_repository: ${{ github.event.pull_request.head.repo.full_name || inputs.head_repository }}
+      event: ${{ github.event_name }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

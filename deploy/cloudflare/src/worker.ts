@@ -25,7 +25,7 @@ import {
   processDelivery,
 } from "./github-app";
 import { freshSetupCursor, signSetupCursor } from "./signed-mac";
-import { requireV6Admission, attestInstallDelivery } from "./v6-onboarding";
+import { requireV6Admission, attestInstallDelivery, verifyOnboardingEventRef } from "./v6-onboarding";
 import { runSignedSetupStep, scheduleSetupContinue } from "./setup-step";
 
 export { V6PrCoordinator };
@@ -870,6 +870,7 @@ async function v6Lease(
       if (repoInfo === null || repoInfo.fork || repoInfo.id !== claims.repository_id) {
         throw new Error("v6_lease_unauthorized_tuple");
       }
+      if (enrollment !== null) verifyOnboardingEventRef(claims, repoInfo.default_branch, pullRequest);
       return buildCanonicalSlotKey({
         host,
         appId: appIdValue,

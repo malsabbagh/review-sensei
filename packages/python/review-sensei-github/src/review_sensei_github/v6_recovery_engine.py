@@ -29,7 +29,7 @@ from review_sensei.bounded_evidence import (
     read_partitioned_evidence,
 )
 from review_sensei.configuration import default_configuration
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ReviewInputError, ReviewSenseiError
 
 from .errors import (
     GitHubHTTPError,
@@ -442,6 +442,24 @@ def _summarize_operation_provider_calls(
     still reserve at least ``1`` call against the conservative batch budget.
     """
 
+    if _MENTION_EFFECT.fullmatch(operation_id):
+        counts = [
+            entry.get("provider_calls")
+            for record in collected.unresolved_results
+            if record.operation_id == operation_id
+            for entry in record.findings_payload
+            if isinstance(entry, Mapping)
+            and entry.get("schema") == "reviewsensei:v6:mention-reply:v1"
+        ]
+        if (
+            counts
+            and type(counts[0]) is int
+            and counts[0] > 0
+            and all(type(count) is int and count == counts[0] for count in counts)
+        ):
+            return counts[0], False, counts[0]
+        if any(o.operation_id == operation_id for o in collected.owners):
+            return None, True, 1
     dispatches = [
         d
         for d in collected.batch_dispatches
@@ -774,7 +792,7 @@ def _matches_effect_payload(
         expected_bot_user_id=expected_bot_user_id,
     ):
         return False
-    if expected_head_sha is not None:
+    if expected_head_sha is not None and not _MENTION_EFFECT.fullmatch(operation_id):
         commit_id = payload.get("commit_id")
         if isinstance(commit_id, str) and commit_id != expected_head_sha:
             return False
@@ -820,7 +838,7 @@ def _has_contradictory_effect_marker(
         return False
     if match.group(2) != payload_sha256:
         return True
-    if expected_head_sha is not None:
+    if expected_head_sha is not None and not _MENTION_EFFECT.fullmatch(operation_id):
         commit_id = payload.get("commit_id")
         if isinstance(commit_id, str) and commit_id != expected_head_sha:
             return True
@@ -952,6 +970,33 @@ def _canonical_native_effect_kind(effect_kind: str) -> str:
     return effect_kind
 
 
+_MENTION_EFFECT = re.compile(
+    r"v6:[1-9][0-9]*:[1-9][0-9]*:(issue_reply|inline_reply):[1-9][0-9]*"
+)
+
+
+def _mention_effect_matches(
+    payload: Mapping[str, Any], intent: WriteIntentRecord
+) -> bool:
+    """Require the actual body and inline parent to match the durable native intent."""
+    body = payload.get("body")
+    path = intent.target_location or ""
+    if (
+        not isinstance(body, str)
+        or not body.endswith(_effect_tag(intent.operation_id, intent.payload_sha256))
+        or canonical_sha256({"body": body}) != intent.target_digest
+    ):
+        return False
+    if intent.effect_kind == "inline_reply":
+        root = payload.get("in_reply_to_id")
+        return (
+            type(root) is int
+            and root > 0
+            and path.endswith(f"/comments/{root}/replies")
+        )
+    return intent.effect_kind == "issue_reply"
+
+
 def _match_native_effects_for_intent(
     intent: WriteIntentRecord,
     *,
@@ -1064,6 +1109,11 @@ def _match_native_effects_for_intent(
             expected_bot_user_id=expected_bot_user_id,
             expected_head_sha=intent.pr_head_sha,
         ):
+            if _MENTION_EFFECT.fullmatch(
+                intent.operation_id
+            ) and not _mention_effect_matches(rec.payload, intent):
+                contradictory = True
+                continue
             matched_ids.append(rec.payload.get("id", rec.record_id))
     return tuple(matched_ids), contradictory
 
@@ -1786,6 +1836,8 @@ def _render_native_review_with_detail_links(
     joined = "\n\n".join(parts).rstrip()
     if effect_tag not in joined.splitlines():
         joined = f"{joined}\n\n{effect_tag}" if joined else effect_tag
+    if request.effect_endpoint_id in {"issue_reply", "inline_reply"}:
+        return {"body": joined}
     return {
         "commit_id": request.ownership_proof.pr_head_sha,
         "event": "COMMENT",
@@ -1802,6 +1854,42 @@ def _plan_review_and_detail_comments(
 ) -> _PlannedDelivery:
     """Partition findings/body into K>=0 bounded detail comments + 1 bounded native review."""
 
+    if request.effect_endpoint_id in {"issue_reply", "inline_reply"}:
+        kind = request.effect_endpoint_id
+        items = pr_result.findings_payload
+        item = items[0] if len(items) == 1 and isinstance(items[0], Mapping) else {}
+        source, root, body = (
+            item.get("source_id"),
+            item.get("root_id"),
+            item.get("body"),
+        )
+        prefix = f"/repos/{request.owner}/{request.repo}"
+        target = (
+            f"{prefix}/pulls/{request.pull_request}/comments/{root}/replies"
+            if kind == "inline_reply"
+            else f"{prefix}/issues/{request.pull_request}/comments"
+        )
+        if (
+            item.get("schema") != "reviewsensei:v6:mention-reply:v1"
+            or request.effect_kind != kind
+            or item.get("kind") != kind
+            or type(root) is not int
+            or root <= 0
+            or type(source) is not int
+            or source <= 0
+            or request.effect_path != target
+            or request.observed_evidence_digests != (item.get("source"),)
+            or request.operation_id
+            != f"v6:{request.repository_id}:{request.pull_request}:{kind}:{source}"
+            or not isinstance(body, str)
+            or not body.strip()
+            or len(body.encode("utf-8")) > 60_000
+        ):
+            raise ReviewInputError(
+                "reply evidence differs from the authenticated event",
+                diagnostic="v6_mention_binding_invalid",
+            )
+        return _PlannedDelivery((), body, (), payload_sha256)
     max_review_bytes = max(
         512,
         min(request.max_native_review_body_bytes, MAX_MARKER_ENCODED_BYTES),
@@ -2223,6 +2311,14 @@ class V6RecoveryEngine:
         """Build a pre-attempt authority and write-policy recheck hook."""
 
         def _hook() -> None:
+            if (
+                endpoint_id in {"issue_reply", "inline_reply"}
+                or (
+                    request.event == GitHubEventKind.ISSUE_COMMENT
+                    and endpoint_id == "pr_review_publish"
+                )
+            ) and request.pre_publish_head_verifier:
+                request.pre_publish_head_verifier()
             authorize_v6_endpoint_credential(
                 endpoint_id,
                 CredentialKind.APP_BROKER,
@@ -2673,6 +2769,7 @@ class V6RecoveryEngine:
         expected_head_sha: str | None = None,
         operation_id: str | None = None,
         effect_kind: str | None = None,
+        intent: WriteIntentRecord | None = None,
     ) -> tuple[bool, bool, str | int | None]:
         """Return ``(outcome_known, landed, verified_effect_id)`` via broker."""
 
@@ -2680,14 +2777,13 @@ class V6RecoveryEngine:
         canonical_kind = _canonical_native_effect_kind(
             effect_kind or request.effect_kind
         )
-        verify_path = (
-            f"/repos/{request.owner}/{request.repo}/issues/comments/{candidate_effect_id}"
-            if canonical_kind == "issue_comment"
-            else (
-                f"/repos/{request.owner}/{request.repo}/pulls/"
-                f"{request.pull_request}/reviews/{candidate_effect_id}"
-            )
-        )
+        repo_path = f"/repos/{request.owner}/{request.repo}"
+        if canonical_kind == "issue_comment":
+            verify_path = f"{repo_path}/issues/comments/{candidate_effect_id}"
+        elif canonical_kind == "pull_request_review_comment":
+            verify_path = f"{repo_path}/pulls/comments/{candidate_effect_id}"
+        else:
+            verify_path = f"{repo_path}/pulls/{request.pull_request}/reviews/{candidate_effect_id}"
         try:
             resp = self._execute_with_throttle(
                 request=request,
@@ -2710,6 +2806,12 @@ class V6RecoveryEngine:
         if resp.status in (404, 410):
             return True, False, None
         if resp.status not in (200, 201) or not isinstance(resp.body, Mapping):
+            return False, False, None
+        if _MENTION_EFFECT.fullmatch(target_op_id) and (
+            intent is None
+            or resp.body.get("id") != candidate_effect_id
+            or not _mention_effect_matches(resp.body, intent)
+        ):
             return False, False, None
         if _matches_effect_payload(
             resp.body,
@@ -2736,6 +2838,7 @@ class V6RecoveryEngine:
         rescan_before_verify: bool = False,
         operation_id: str | None = None,
         effect_kind: str | None = None,
+        intent: WriteIntentRecord | None = None,
     ) -> tuple[bool, bool, str | int | None, int]:
         """Determine whether the target mutation landed without duplicate writes."""
 
@@ -2743,7 +2846,7 @@ class V6RecoveryEngine:
         effective_kind = effect_kind or request.effect_kind
         canonical_kind = _canonical_native_effect_kind(effective_kind)
         surfaces = scanned_reviews
-        if rescan_before_verify:
+        if rescan_before_verify or _MENTION_EFFECT.fullmatch(target_op_id):
             exec_fn = self._throttled_page_executor(
                 request=request, guard=guard, prior_hint=prior_hint
             )
@@ -2759,6 +2862,18 @@ class V6RecoveryEngine:
                     granted_scopes=request.granted_scopes,
                     progress_guard=guard,
                     phase_name="reconcile_issue_comments",
+                    now_epoch=self.now_fn(),
+                    execute_fn=exec_fn,
+                )
+            elif canonical_kind == "pull_request_review_comment":
+                rescan = self.paginator.scan_rest(
+                    endpoint_id="pr_review_comments",
+                    path=f"/repos/{request.owner}/{request.repo}/pulls/{request.pull_request}/comments?per_page=100",
+                    event=request.event,
+                    visibility=request.visibility,
+                    granted_scopes=request.granted_scopes,
+                    progress_guard=guard,
+                    phase_name="reconcile_inline_replies",
                     now_epoch=self.now_fn(),
                     execute_fn=exec_fn,
                 )
@@ -2821,6 +2936,7 @@ class V6RecoveryEngine:
             expected_head_sha=expected_head_sha,
             operation_id=target_op_id,
             effect_kind=effective_kind,
+            intent=intent,
         )
         if not known:
             return False, False, None, readbacks
@@ -5490,6 +5606,21 @@ class V6RecoveryEngine:
                     )
 
                 try:
+                    if (
+                        request.event
+                        in {
+                            GitHubEventKind.WORKFLOW_DISPATCH,
+                            GitHubEventKind.ISSUE_COMMENT,
+                        }
+                        and request.pre_publish_head_verifier is not None
+                    ):
+                        try:
+                            request.pre_publish_head_verifier()
+                        except ReviewInputError as exc:
+                            raise V6FreshAnalysisError(
+                                exc.diagnostic or "v6_event_binding_invalid",
+                                provider_calls=0,
+                            ) from exc
                     batch_res, batch_calls = execute_v6_batch(
                         context,
                         b,
@@ -6735,6 +6866,22 @@ class V6RecoveryEngine:
                     operation_model_calls_total=op_calls_total,
                 )
 
+            if re.fullmatch(
+                r"v6:[1-9][0-9]*:[1-9][0-9]*:(?:issue_reply|inline_reply|rescan|dispatch):[1-9][0-9]*",
+                request.operation_id,
+            ) and any(
+                owner.operation_id == request.operation_id
+                and owner.pr_head_sha != request.ownership_proof.pr_head_sha
+                for owner in owners
+            ):
+                return self._finalize_hold(
+                    request=request,
+                    guard=guard,
+                    prior_hint=prior_hint,
+                    blocker="v6_event_predecessor_head_changed",
+                    missing_evidence=("original_event_head",),
+                )
+
             op_unreconciled = [
                 i
                 for i in summary.unreconciled_intents
@@ -6775,6 +6922,7 @@ class V6RecoveryEngine:
                         scanned_reviews=review_records,
                         expected_head_sha=existing_intent.pr_head_sha,
                         rescan_before_verify=False,
+                        intent=existing_intent,
                     )
                 )
                 readback_gets += gets
@@ -6920,6 +7068,17 @@ class V6RecoveryEngine:
                     and request.initial_result_loader is not None
                     and request.has_active_write_lease
                 ):
+                    if _MENTION_EFFECT.fullmatch(request.operation_id) and any(
+                        o.operation_id == request.operation_id for o in owners
+                    ):
+                        return self._finalize_hold(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker="v6_mention_prior_analysis_uncertain",
+                            missing_evidence=("retained_mention_result",),
+                            operation_model_calls_unknown=True,
+                        )
                     if owner_cid is None:
                         owner_cid = self._persist_owner_marker_if_needed(
                             request=request,
@@ -6933,8 +7092,40 @@ class V6RecoveryEngine:
                             and request.owner_marker not in owners
                         ):
                             owners = (*owners, request.owner_marker)
-                    raw_findings, raw_digests = request.initial_result_loader()
+                    try:
+                        raw_findings, raw_digests = request.initial_result_loader()
+                    except ReviewSenseiError as exc:
+                        if not _MENTION_EFFECT.fullmatch(request.operation_id):
+                            raise
+                        used = (
+                            exc.provider_calls
+                            if isinstance(exc, V6FreshAnalysisError)
+                            else 0
+                        )
+                        return self._finalize_hold(
+                            request=request,
+                            guard=guard,
+                            prior_hint=prior_hint,
+                            blocker=getattr(exc, "diagnostic", None)
+                            or "v6_mention_analysis_failed",
+                            model_calls_started=used,
+                            operation_model_calls_total=used,
+                            missing_evidence=("retained_mention_result",),
+                            operation_model_calls_unknown=used is None,
+                        )
                     model_calls_started = 1
+                    if _MENTION_EFFECT.fullmatch(request.operation_id):
+                        count = (
+                            raw_findings[0].get("provider_calls")
+                            if len(raw_findings) == 1
+                            else None
+                        )
+                        if type(count) is not int or count < 1:
+                            raise ReviewInputError(
+                                "missing mention provider call accounting"
+                            )
+                        model_calls_started = count
+                        op_calls_total = count
                     findings_tuple = tuple(dict(entry) for entry in raw_findings)
                     try:
                         (
@@ -7101,6 +7292,8 @@ class V6RecoveryEngine:
                             guard=guard,
                             prior_hint=prior_hint,
                             blocker=head_exc.diagnostic or "v6_pr_head_mismatch",
+                            model_calls_started=model_calls_started,
+                            operation_model_calls_total=op_calls_total,
                             missing_evidence=(
                                 f"pr_head_match:{request.ownership_proof.pr_head_sha}",
                             ),
@@ -7274,6 +7467,19 @@ class V6RecoveryEngine:
                         blocker=blocker,
                         missing_evidence=missing,
                     )
+                if _MENTION_EFFECT.fullmatch(request.operation_id) and (
+                    not isinstance(write_resp.body, Mapping)
+                    or not _mention_effect_matches(write_resp.body, current_intent)
+                    or not verify_app_authored_record(
+                        write_resp.body,
+                        expected_app_id=request.expected_app_id,
+                        expected_bot_login=request.expected_bot_login,
+                        expected_bot_user_id=request.expected_bot_user_id,
+                    )
+                ):
+                    raise _AmbiguousWriteOutcomeError(
+                        "reply response did not confirm the original intent"
+                    )
                 effect_id = verify_write_response_readback(
                     write_resp,
                     expected_operation_id=request.operation_id,
@@ -7296,6 +7502,7 @@ class V6RecoveryEngine:
                         scanned_reviews=review_records,
                         expected_head_sha=request.ownership_proof.pr_head_sha,
                         rescan_before_verify=True,
+                        intent=current_intent,
                     )
                 )
                 readback_gets += gets

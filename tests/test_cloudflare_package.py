@@ -49,14 +49,31 @@ class CloudflarePackageTests(unittest.TestCase):
         )
         self.assertLessEqual(set(job["with"]), set(contract["inputs"]))
         self.assertLessEqual(
-            {name for name, schema in contract["inputs"].items() if schema.get("required") == "true"},
+            {
+                name
+                for name, schema in contract["inputs"].items()
+                if schema.get("required") == "true"
+            },
             set(job["with"]),
         )
         self.assertEqual(set(job["secrets"]), set(contract["secrets"]))
         self.assertEqual(caller["permissions"], callee["permissions"])
-        self.assertEqual(caller["permissions"], callee["jobs"]["v6-pilot"]["permissions"])
-        self.assertEqual(set(caller["on"]), {"pull_request"})
-        self.assertEqual(job["with"]["event"], "pull_request")
+        self.assertEqual(
+            caller["permissions"], callee["jobs"]["v6-pilot"]["permissions"]
+        )
+        self.assertEqual(
+            set(caller["on"]),
+            {
+                "pull_request",
+                "workflow_dispatch",
+                "issue_comment",
+                "pull_request_review_comment",
+            },
+        )
+        self.assertEqual(job["with"]["event"], "${{ github.event_name }}")
+        self.assertEqual(set(caller["jobs"]), {"review"})
+        self.assertEqual(callee["jobs"]["v6-pilot"]["needs"], "plan")
+        self.assertNotIn("id-token", callee["jobs"]["plan"]["permissions"])
         self.assertIn("head.repo.full_name == github.repository", job["if"])
 
     def test_wrangler_declares_sqlite_ledgers(self):
