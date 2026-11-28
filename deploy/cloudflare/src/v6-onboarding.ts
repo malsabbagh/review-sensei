@@ -2,8 +2,14 @@ import type { WorkerEnv } from "./env";
 import type { PublicWorkflowRuntimeShas } from "./github-api";
 import type { VerifiedDelivery } from "./github-app";
 import type { OidcClaims } from "./oidc";
-import { issueV6OnboardingReceipt, sha256Hex, verifyV6OnboardingReceipt } from "./signed-mac";
-import { PUBLIC_REPOSITORY } from "./setup-content";
+import {
+  MAX_SETUP_INSTALL_REPOSITORIES,
+  issueV6OnboardingReceipt,
+  sha256Hex,
+  verifyV6OnboardingReceipt,
+  type SetupInstallSelection,
+} from "./signed-mac";
+import { PUBLIC_REPOSITORY, SETUP_WORKFLOW_PATH } from "./setup-content";
 import { parseRepositoryCsv } from "./v6-escrow-crypto";
 
 export const V6_ONBOARDING_TAG = "v6";
@@ -12,18 +18,15 @@ const CONFIG_LIMIT = 4096;
 const LEGACY_TOKEN_DRAIN_MS = 60 * 60 * 1000;
 const RECEIPT = /^[A-Za-z0-9_-]{43}$/;
 const SHA1 = /^[a-f0-9]{40}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
 const SLUG = /^[a-z0-9-]{1,100}\/[a-z0-9_.-]{1,100}$/;
 
-interface Enrollment {
+export interface SetupInstallIdentity {
   installationId: number;
   repositoryId: number;
   repository: string;
-  deliveryId: string;
-  bodySha256: string;
 }
 
-interface SetupActivation {
+interface SetupActivation extends SetupInstallIdentity {
   receipt: string;
   fencedAt?: number;
 }
@@ -33,14 +36,12 @@ export interface V6Onboarding {
   startAt: number;
   tagObject: string;
   sourceSha: string;
-  enrollments: readonly Enrollment[];
   activations: ReadonlyMap<number, SetupActivation>;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
+    ? value as Record<string, unknown> : null;
 }
 
 function positiveInteger(value: unknown): value is number {
@@ -48,45 +49,34 @@ function positiveInteger(value: unknown): value is number {
 }
 
 function timestamp(value: unknown): number {
-  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(value)) {
-    return NaN;
-  }
+  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(value)) return NaN;
   const milliseconds = Date.parse(value);
   return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString().replace(".000Z", "Z") === value
-    ? milliseconds
-    : NaN;
+    ? milliseconds : NaN;
 }
 
-function parseEnrollment(entry: unknown, startAt: number): { enrollment: Enrollment; activation?: SetupActivation } {
-  const row = object(entry);
-  const hasActivation = row?.activation !== undefined;
-  if (row === null || Object.keys(row).length !== (hasActivation ? 6 : 5) ||
+function parseActivation(value: unknown, startAt: number): SetupActivation {
+  const row = object(value);
+  if (row === null || Object.keys(row).length !== (row.fenced_at === undefined ? 4 : 5) ||
       !positiveInteger(row.installation_id) || !positiveInteger(row.repository_id) ||
       typeof row.repository !== "string" || !SLUG.test(row.repository) ||
-      typeof row.delivery_id !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(row.delivery_id) ||
-      typeof row.body_sha256 !== "string" || !SHA256.test(row.body_sha256)) {
+      typeof row.receipt !== "string" || !RECEIPT.test(row.receipt)) {
     throw new Error("configuration_unavailable");
   }
-  const enrollment = {
+  const fencedAt = row.fenced_at === undefined ? undefined : timestamp(row.fenced_at);
+  if (fencedAt !== undefined && !(fencedAt >= startAt)) {
+    throw new Error("configuration_unavailable");
+  }
+  return {
     installationId: row.installation_id,
     repositoryId: row.repository_id,
     repository: row.repository,
-    deliveryId: row.delivery_id,
-    bodySha256: row.body_sha256,
+    receipt: row.receipt,
+    fencedAt,
   };
-  if (!hasActivation) return { enrollment };
-  const activation = object(row.activation);
-  const hasFenceTime = activation?.fenced_at !== undefined;
-  const fencedAt = hasFenceTime ? timestamp(activation?.fenced_at) : undefined;
-  if (activation === null || Object.keys(activation).length !== (hasFenceTime ? 2 : 1) ||
-      typeof activation.receipt !== "string" || !RECEIPT.test(activation.receipt) ||
-      (fencedAt !== undefined && !(fencedAt >= startAt))) {
-    throw new Error("configuration_unavailable");
-  }
-  return { enrollment, activation: { receipt: activation.receipt, fencedAt } };
 }
 
-/** An operator attests first-time history. A webhook or installation age alone cannot prove it. */
+/** The policy enables proposals; each activation authorizes a verified writer cutover. */
 export function readV6Onboarding(env: WorkerEnv): V6Onboarding | null {
   const configured = env.V6_NEW_INSTALL_ONBOARDING;
   if (configured === undefined) return null;
@@ -107,114 +97,101 @@ export function readV6Onboarding(env: WorkerEnv): V6Onboarding | null {
       !Number.isFinite(startAt) ||
       typeof policy.tag_object !== "string" || !SHA1.test(policy.tag_object) ||
       typeof policy.source_sha !== "string" || !SHA1.test(policy.source_sha) ||
-      policy.tag_object === policy.source_sha ||
-      !Array.isArray(policy.enrollments) || policy.enrollments.length === 0) {
+      policy.tag_object === policy.source_sha || !Array.isArray(policy.activations)) {
     throw new Error("configuration_unavailable");
   }
-  const entries = policy.enrollments.map((entry) => parseEnrollment(entry, startAt));
-  const enrollments = entries.map(({ enrollment }) => enrollment);
   const activations = new Map<number, SetupActivation>();
-  for (const { enrollment, activation } of entries) {
-    if (activation !== undefined) activations.set(enrollment.repositoryId, activation);
-  }
-  if (new Set(enrollments.map((entry) => entry.repositoryId)).size !== enrollments.length ||
-      new Set(enrollments.map((entry) => entry.repository)).size !== enrollments.length) {
-    throw new Error("configuration_unavailable");
+  const repositories = new Set<string>();
+  for (const row of policy.activations) {
+    const activation = parseActivation(row, startAt);
+    if (activations.has(activation.repositoryId) || repositories.has(activation.repository)) {
+      throw new Error("configuration_unavailable");
+    }
+    repositories.add(activation.repository);
+    activations.set(activation.repositoryId, activation);
   }
   return {
     setupEnabled: setupEnabled === true,
     startAt,
     tagObject: policy.tag_object,
     sourceSha: policy.source_sha,
-    enrollments,
     activations,
   };
 }
 
-export function onboardingForRepository(policy: V6Onboarding | null, repositoryId: number): Enrollment | undefined {
-  return policy?.enrollments.find((entry) => entry.repositoryId === repositoryId);
+function policyIdentity(policy: V6Onboarding): string {
+  return JSON.stringify([policy.startAt, policy.tagObject, policy.sourceSha]);
 }
 
-function enrollmentRows(policy: V6Onboarding, delivery: Pick<VerifiedDelivery, "installationId" | "deliveryId">): Enrollment[] {
-  return policy.enrollments.filter((entry) =>
-    entry.installationId === delivery.installationId && entry.deliveryId === delivery.deliveryId
-  ).sort((left, right) => left.repositoryId - right.repositoryId);
-}
-
-async function setupProof(policy: V6Onboarding, rows: Enrollment[]): Promise<string> {
-  return sha256Hex(JSON.stringify([policy.startAt, policy.tagObject, policy.sourceSha, rows]));
-}
-
-/** Call only after the upstream GitHub webhook body MAC has been verified. */
-export async function verifyFirstInstallDelivery(
+/** Called only on a GitHub webhook whose original body MAC has verified. */
+export async function attestInstallDelivery(
   env: WorkerEnv,
   delivery: VerifiedDelivery,
   body: ArrayBuffer,
-): Promise<string | undefined> {
+  now = Date.now(),
+): Promise<SetupInstallSelection | undefined> {
   const policy = readV6Onboarding(env);
-  if (!policy?.setupEnabled || delivery.event !== "installation" || delivery.action !== "created" || delivery.suspended) {
+  if (policy === null || delivery.event !== "installation" || delivery.action !== "created" || delivery.suspended) {
     return undefined;
   }
-  const rows = enrollmentRows(policy, delivery);
-  if (rows.length === 0) return undefined;
-  const bodyText = new TextDecoder("utf-8", { fatal: true }).decode(body);
-  const payload = object(JSON.parse(bodyText));
+  const payload = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
   const installation = object(payload?.installation);
   const createdAt = timestamp(installation?.created_at);
-  if (installation?.id !== delivery.installationId || !(createdAt >= policy.startAt) ||
-      (installation.app_id !== undefined && String(installation.app_id) !== env.GITHUB_APP_ID) ||
-      !Array.isArray(payload?.repositories)) return undefined;
+  if (!(createdAt <= now) || installation?.id !== delivery.installationId ||
+      (installation.app_id !== undefined && String(installation.app_id) !== env.GITHUB_APP_ID)) {
+    throw new Error("v6_installation_identity_unavailable");
+  }
+  if (createdAt < policy.startAt) return undefined;
 
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", body)),
-    (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const repositories = new Set(payload.repositories.map((value: unknown) => {
-    const repo = object(value);
-    return positiveInteger(repo?.id) && typeof repo?.full_name === "string"
-      ? JSON.stringify([repo.id, repo.full_name.toLowerCase()])
-      : null;
-  }));
-  if (rows.some((row) => row.bodySha256 !== digest ||
-      !repositories.has(JSON.stringify([row.repositoryId, row.repository])))) return undefined;
-  return setupProof(policy, rows);
+  const entries = Array.isArray(payload?.repositories) && payload.repositories.length > 0
+    ? payload.repositories : [payload?.repository];
+  if (entries.length > MAX_SETUP_INSTALL_REPOSITORIES) {
+    throw new Error("v6_installation_selection_unavailable");
+  }
+  const selected = new Set(delivery.repositories.map(repository => repository.toLowerCase()));
+  const repositoryIds = new Set<number>();
+  for (const entry of entries) {
+    const repository = object(entry);
+    if (!positiveInteger(repository?.id) || typeof repository.full_name !== "string" ||
+        !selected.delete(repository.full_name.toLowerCase()) || repositoryIds.has(repository.id)) {
+      throw new Error("v6_installation_selection_unavailable");
+    }
+    repositoryIds.add(repository.id);
+  }
+  if (selected.size > 0 || repositoryIds.size === 0) throw new Error("v6_installation_selection_unavailable");
+  return {
+    createdAt,
+    policySha256: await sha256Hex(policyIdentity(policy)),
+    repositoryIds: [...repositoryIds].sort((a, b) => a - b),
+  };
 }
 
-export async function setupEnrollmentMatches(
-  policy: V6Onboarding,
-  delivery: VerifiedDelivery,
-): Promise<boolean> {
-  if (!policy.setupEnabled || delivery.onboardingProof === undefined) return false;
-  const rows = enrollmentRows(policy, delivery);
-  return rows.length > 0 && delivery.onboardingProof === await setupProof(policy, rows);
+export async function setupSelectionMatches(policy: V6Onboarding, selection: SetupInstallSelection): Promise<boolean> {
+  return policy.setupEnabled && selection.createdAt >= policy.startAt &&
+    selection.policySha256 === await sha256Hex(policyIdentity(policy));
 }
 
-function receiptMessage(env: WorkerEnv, policy: V6Onboarding, entry: Enrollment): string {
-  return JSON.stringify([env.GITHUB_APP_ID, policy.startAt, policy.tagObject, policy.sourceSha, entry]);
+function receiptMessage(env: WorkerEnv, policy: V6Onboarding, identity: SetupInstallIdentity): string {
+  return JSON.stringify([env.GITHUB_APP_ID, policyIdentity(policy),
+    identity.installationId, identity.repositoryId, identity.repository]);
 }
 
-export function generateOnboardingReceipt(env: WorkerEnv, policy: V6Onboarding, entry: Enrollment): Promise<string> {
-  return issueV6OnboardingReceipt(env.REVIEWSENSEI_SIGNING_KEY ?? "", receiptMessage(env, policy, entry));
+export function generateOnboardingReceipt(env: WorkerEnv, policy: V6Onboarding, identity: SetupInstallIdentity): Promise<string> {
+  return issueV6OnboardingReceipt(env.REVIEWSENSEI_SIGNING_KEY ?? "", receiptMessage(env, policy, identity));
 }
 
-export async function onboardingStage(
-  env: WorkerEnv,
-  policy: V6Onboarding,
-  entry: Enrollment,
-  now = Date.now(),
-): Promise<"setup" | "draining" | "active"> {
-  const activation = policy.activations.get(entry.repositoryId);
-  if (activation === undefined) return "setup";
+async function verifyActivation(env: WorkerEnv, policy: V6Onboarding, activation: SetupActivation): Promise<void> {
   if (!(await verifyV6OnboardingReceipt(
-    env.REVIEWSENSEI_SIGNING_KEY ?? "", receiptMessage(env, policy, entry), activation.receipt,
+    env.REVIEWSENSEI_SIGNING_KEY ?? "", receiptMessage(env, policy, activation), activation.receipt,
   ))) throw new Error("configuration_unavailable");
-  return activation.fencedAt !== undefined && now >= activation.fencedAt + LEGACY_TOKEN_DRAIN_MS
-    ? "active" : "draining";
 }
 
 export async function v6OnboardingFencesV5(env: WorkerEnv, repositoryId: number): Promise<boolean> {
   const policy = readV6Onboarding(env);
-  if (policy === null) return false;
-  const entry = onboardingForRepository(policy, repositoryId);
-  return entry !== undefined && await onboardingStage(env, policy, entry) !== "setup";
+  const activation = policy?.activations.get(repositoryId);
+  if (policy === null || activation === undefined) return false;
+  await verifyActivation(env, policy, activation);
+  return true;
 }
 
 export function onboardingRuntimeMatches(
@@ -224,37 +201,35 @@ export function onboardingRuntimeMatches(
   return runtime.refSha === policy.tagObject && runtime.commitSha === policy.sourceSha;
 }
 
-function onboardingWorkflowMatches(policy: V6Onboarding, entry: Enrollment, claims: OidcClaims): boolean {
-  return entry.repository === claims.repository.toLowerCase() &&
-    claims.event_name === "pull_request" &&
-    claims.workflow_ref.toLowerCase().startsWith(entry.repository + "/.github/workflows/review-sensei-review.yml@") &&
-    claims.job_workflow_ref === PUBLIC_REPOSITORY + "/" + V6_ONBOARDING_WORKFLOW + "@refs/tags/" + V6_ONBOARDING_TAG &&
-    (claims.job_workflow_sha === policy.sourceSha || claims.job_workflow_sha === policy.tagObject);
-}
-
 interface V6EnrollmentAuthorization {
   installationId: number;
   tagObject: string;
   sourceSha: string;
+  firstPrAfter: number;
 }
 
-/** A known enrollment takes precedence over any older slug-based pilot rule. */
+/** A configured cutover takes precedence over the older slug-based pilot rule. */
 export async function requireV6Admission(
   env: WorkerEnv,
   claims: OidcClaims,
   now = Date.now(),
 ): Promise<V6EnrollmentAuthorization | null> {
   const policy = readV6Onboarding(env);
-  const entry = onboardingForRepository(policy, claims.repository_id);
-  if (policy !== null && entry !== undefined) {
-    if (!onboardingWorkflowMatches(policy, entry, claims) ||
-        await onboardingStage(env, policy, entry, now) !== "active") {
+  const activation = policy?.activations.get(claims.repository_id);
+  const slug = claims.repository.toLowerCase();
+  if (policy !== null && activation !== undefined) {
+    if (activation.repository !== slug || claims.event_name !== "pull_request" ||
+        !claims.workflow_ref.toLowerCase().startsWith(slug + "/" + SETUP_WORKFLOW_PATH + "@") ||
+        claims.job_workflow_ref !== PUBLIC_REPOSITORY + "/" + V6_ONBOARDING_WORKFLOW + "@refs/tags/" + V6_ONBOARDING_TAG ||
+        (claims.job_workflow_sha !== policy.sourceSha && claims.job_workflow_sha !== policy.tagObject)) {
       throw new Error("v6_lease_unauthorized_tuple");
     }
-    return { installationId: entry.installationId, tagObject: policy.tagObject, sourceSha: policy.sourceSha };
+    await verifyActivation(env, policy, activation);
+    const firstPrAfter = (activation.fencedAt ?? Infinity) + LEGACY_TOKEN_DRAIN_MS;
+    if (!(now >= firstPrAfter)) throw new Error("v6_lease_unauthorized_tuple");
+    return { installationId: activation.installationId, tagObject: policy.tagObject, sourceSha: policy.sourceSha, firstPrAfter };
   }
-  const slug = claims.repository.toLowerCase();
-  if (policy?.enrollments.some((item) => item.repository === slug) ||
+  if ((policy && Array.from(policy.activations.values()).some(item => item.repository === slug)) ||
       !parseRepositoryCsv(env.V6_PILOT_REPOSITORIES).has(slug)) {
     throw new Error("v6_lease_unauthorized_tuple");
   }

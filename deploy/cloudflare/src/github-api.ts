@@ -208,6 +208,7 @@ export interface RevocationResult {
 }
 
 export interface PullRequestBinding {
+  created_at?: string;
   head_sha: string;
   base_repo_id: number;
   state: "open" | "closed";
@@ -789,16 +790,25 @@ export class GitHubApi {
     }
   }
 
-  async installationFor(repository: string): Promise<number | null> {
+  private async repositoryInstallation(repository: string): Promise<JsonObject | null> {
     const response = await this.request("GET", `${repositoryPath(repository)}/installation`, await this.appJwt());
-    if (response.status === 404 || response.status === 403) {
-      return null;
-    }
+    if (response.status === 404 || response.status === 403) return null;
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
       throw new Error("github_installation_lookup_failed");
     }
-    const id = response.data.id;
+    return response.data;
+  }
+
+  async installationFor(repository: string): Promise<number | null> {
+    const data = await this.repositoryInstallation(repository);
+    const id = data?.id;
     return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+
+  async installationGenerationMatches(repository: string, installationId: number, createdAt: number): Promise<boolean> {
+    const data = await this.repositoryInstallation(repository);
+    return data?.id === installationId && typeof data.created_at === "string" &&
+      Date.parse(data.created_at) === createdAt && data.suspended_at == null;
   }
 
   /** One authenticated lookup. Association and caller-supplied role are not permission. */
@@ -987,6 +997,7 @@ export class GitHubApi {
       state,
       head_repo_id: headRepoId,
       is_fork_pr: isForkPr,
+      ...(typeof response.data.created_at === "string" ? { created_at: response.data.created_at } : {}),
     };
   }
 

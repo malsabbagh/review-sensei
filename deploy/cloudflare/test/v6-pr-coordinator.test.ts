@@ -2513,24 +2513,19 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
       start_at: "2026-11-01T00:00:00Z",
       tag_object: "e".repeat(40),
       source_sha: WORKFLOW_SHA,
-      enrollments: [{
-        installation_id: 67890,
-        repository_id: 987654321,
-        repository: PILOT_REPO,
-        delivery_id: "initial-delivery",
-        body_sha256: "a".repeat(64),
-      }],
+      activations: [],
     };
+    const identity = { installationId: 67890, repositoryId: 987654321, repository: PILOT_REPO };
     env.V6_NEW_INSTALL_ONBOARDING = JSON.stringify(approvedConfiguration);
-    const prepared = readV6Onboarding(env)!;
-    const receipt = await generateOnboardingReceipt(env, prepared, prepared.enrollments[0]!);
+    const receipt = await generateOnboardingReceipt(env, readV6Onboarding(env)!, identity);
     env.V6_NEW_INSTALL_ONBOARDING = JSON.stringify({
       ...approvedConfiguration,
-      enrollments: [{ ...approvedConfiguration.enrollments[0], activation: {
-        receipt, fenced_at: "2026-11-02T00:00:00Z",
-      } }],
+      activations: [{
+        installation_id: identity.installationId, repository_id: identity.repositoryId,
+        repository: identity.repository, receipt, fenced_at: "2026-11-02T00:00:00Z",
+      }],
     });
-    clock.now = Date.parse("2026-11-02T01:00:00Z");
+    clock.now = Date.parse("2026-11-02T01:02:00Z");
     provider.registerOidc("onboarded-workflow", makeClaims({
       workflow_ref: PILOT_REPO + "/.github/workflows/review-sensei-review.yml@refs/pull/42/merge",
       job_workflow_ref: "malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@refs/tags/v6",
@@ -2549,6 +2544,17 @@ describe("v6 PR coordinator Phase 4 matrix", () => {
     expect((await engine.handleAcquire(env, request)).status).toBe(403);
     expect(provider.calls.mints).toBe(0);
     clock.trusted = true;
+    const originalBinding = provider.prBindings.get(42)!;
+    for (const created_at of [undefined, "2026-11-02T00:01:00Z", "2026-11-02T01:00:00Z"]) {
+      provider.prBindings.set(42, { ...originalBinding, created_at });
+      expect((await engine.handleAcquire(env, request)).status).toBe(403);
+      expect(provider.calls.mints).toBe(0);
+    }
+    provider.prBindings.set(42, { ...originalBinding, created_at: "2026-11-02T01:00:01Z" });
+    const holding = await engine.handleAcquire({ ...env, V6_PILOT_ROLLBACK_REPOSITORIES: PILOT_REPO }, request);
+    expect(holding.status).toBe(403);
+    expect(holding.body.diagnostic).toMatchObject({ code: "v6_lease_rollback_blocked" });
+    expect(provider.calls.mints).toBe(0);
     expect((await engine.handleAcquire(env, request)).status).toBe(200);
     expect(provider.calls.mints).toBe(1);
   });

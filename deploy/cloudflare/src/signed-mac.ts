@@ -25,6 +25,15 @@ export interface SessionGrantFields {
   now?: number;
 }
 
+// Keep the signed numeric selection within the 64 KiB continuation limit.
+export const MAX_SETUP_INSTALL_REPOSITORIES = 2500;
+
+export interface SetupInstallSelection {
+  createdAt: number;
+  policySha256: string;
+  repositoryIds: number[];
+}
+
 export interface SetupCursorClaims {
   installationId: number;
   deliveryId: string;
@@ -33,7 +42,7 @@ export interface SetupCursorClaims {
   expiry: number;
   listingSha256: string;
   failureCount: number;
-  onboardingProof?: string;
+  onboarding?: SetupInstallSelection;
 }
 
 function text(value: string): Uint8Array {
@@ -162,7 +171,7 @@ function cursorMessage(claims: SetupCursorClaims): string {
     String(claims.expiry),
     claims.listingSha256,
     String(claims.failureCount),
-    ...(claims.onboardingProof === undefined ? [] : [claims.onboardingProof]),
+    ...(claims.onboarding === undefined ? [] : [JSON.stringify(claims.onboarding)]),
   ].join("\n");
 }
 
@@ -175,8 +184,24 @@ function cursorPayload(claims: SetupCursorClaims): string {
     expiry: claims.expiry,
     listing_sha256: claims.listingSha256,
     failure_count: claims.failureCount,
-    ...(claims.onboardingProof === undefined ? {} : { onboarding_proof: claims.onboardingProof }),
+    ...(claims.onboarding === undefined ? {} : { onboarding: claims.onboarding }),
   });
+}
+
+function parseInstallSelection(value: unknown): SetupInstallSelection | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { createdAt, policySha256, repositoryIds } = value as Record<string, unknown>;
+  if (Object.keys(value).length !== 3 || typeof createdAt !== "number" ||
+      !Number.isSafeInteger(createdAt) || createdAt <= 0 ||
+      typeof policySha256 !== "string" || !/^[a-f0-9]{64}$/.test(policySha256) ||
+      !Array.isArray(repositoryIds) || repositoryIds.length === 0 ||
+      repositoryIds.length > MAX_SETUP_INSTALL_REPOSITORIES) return null;
+  let previous = 0;
+  for (const id of repositoryIds) {
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= previous) return null;
+    previous = id;
+  }
+  return { createdAt, policySha256, repositoryIds };
 }
 
 function parseCursorPayload(value: unknown): SetupCursorClaims | null {
@@ -184,11 +209,8 @@ function parseCursorPayload(value: unknown): SetupCursorClaims | null {
     return null;
   }
   const record = value as Record<string, unknown>;
-  const onboardingProof = record.onboarding_proof;
-  if (onboardingProof !== undefined && (typeof onboardingProof !== "string" || !/^[a-f0-9]{64}$/.test(onboardingProof))) {
-    return null;
-  }
-  if (Object.keys(record).length !== (onboardingProof === undefined ? 7 : 8)) {
+  const onboarding = record.onboarding === undefined ? undefined : parseInstallSelection(record.onboarding);
+  if (onboarding === null || Object.keys(record).length !== (onboarding === undefined ? 7 : 8)) {
     return null;
   }
   const installationId = record.installation_id;
@@ -232,14 +254,14 @@ function parseCursorPayload(value: unknown): SetupCursorClaims | null {
     expiry,
     listingSha256,
     failureCount,
-    ...(onboardingProof === undefined ? {} : { onboardingProof }),
+    ...(onboarding === undefined ? {} : { onboarding }),
   };
 }
 
 export function freshSetupCursor(input: {
   installationId: number;
   deliveryId: string;
-  onboardingProof?: string;
+  onboarding?: SetupInstallSelection;
   now?: number;
 }): SetupCursorClaims {
   return {
@@ -250,7 +272,7 @@ export function freshSetupCursor(input: {
     expiry: (input.now ?? Date.now()) + SETUP_CURSOR_TTL_MS,
     listingSha256: "",
     failureCount: 0,
-    ...(input.onboardingProof === undefined ? {} : { onboardingProof: input.onboardingProof }),
+    ...(input.onboarding === undefined ? {} : { onboarding: input.onboarding }),
   };
 }
 

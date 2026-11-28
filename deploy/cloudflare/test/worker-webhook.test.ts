@@ -18,13 +18,13 @@ import worker from "../src/worker";
 const SECRET = "test-webhook-secret";
 const SIGNING_KEY = "test-signing-key";
 
-function installationPayload(repositories: string[], verified = false) {
+function installationPayload(repositories: string[], createdAt?: string, includeIds = true) {
   return {
     action: "created",
     installation: {
       id: 2468,
       suspended_at: null,
-      ...(verified ? { created_at: "2026-11-28T12:00:00Z" } : {}),
+      ...(createdAt ? { created_at: createdAt } : {}),
       permissions: {
         contents: "write",
         pull_requests: "write",
@@ -32,7 +32,7 @@ function installationPayload(repositories: string[], verified = false) {
         workflows: "write",
       },
     },
-    repositories: repositories.map((full_name, index) => ({ full_name, ...(verified ? { id: 100 + index } : {}) })),
+    repositories: repositories.map((full_name, index) => ({ full_name, ...(createdAt && includeIds ? { id: 100 + index } : {}) })),
   };
 }
 
@@ -49,9 +49,13 @@ async function signature(body: Uint8Array): Promise<string> {
   return `sha256=${hex}`;
 }
 
-async function webhook(repositories: string[], options: { signingKey?: string; self?: boolean; onboarding?: boolean; cutoff?: string; wrongBodyDigest?: boolean } = {}) {
-  const bodyText = JSON.stringify(installationPayload(repositories, options.onboarding));
-  const body = new TextEncoder().encode(bodyText);
+async function webhook(repositories: string[], options: { signingKey?: string; self?: boolean; onboarding?: boolean; cutoff?: string; omitIds?: boolean; event?: string; action?: string } = {}) {
+  const payload = installationPayload(repositories, options.onboarding ? "2026-11-28T12:00:00Z" : undefined, !options.omitIds);
+  const body = new TextEncoder().encode(JSON.stringify({
+    ...payload,
+    action: options.action ?? "created",
+    ...(options.event === "installation_repositories" ? { repositories_added: payload.repositories } : {}),
+  }));
   const calls: string[] = [];
   const self = {
     fetch: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -73,13 +77,7 @@ async function webhook(repositories: string[], options: { signingKey?: string; s
       start_at: options.cutoff ?? "2026-11-28T11:00:00Z",
       tag_object: "e".repeat(40),
       source_sha: "f".repeat(40),
-      enrollments: repositories.map((repository, index) => ({
-        installation_id: 2468,
-        repository_id: 100 + index,
-        repository,
-        delivery_id: "delivery-1",
-        body_sha256: options.wrongBodyDigest ? "0".repeat(64) : createHash("sha256").update(body).digest("hex"),
-      })),
+      activations: [],
     }) } : {}),
     REVIEWSENSEI_SIGNING_KEY: options.signingKey === undefined ? SIGNING_KEY : options.signingKey,
     SELF: options.self === false ? undefined : self,
@@ -90,7 +88,7 @@ async function webhook(repositories: string[], options: { signingKey?: string; s
       headers: {
         "content-length": String(body.byteLength),
         "content-type": "application/json",
-        "x-github-event": "installation",
+        "x-github-event": options.event ?? "installation",
         "x-github-delivery": "delivery-1",
         "x-hub-signature-256": await signature(body),
       },
@@ -156,27 +154,33 @@ describe("stateless installation webhooks", () => {
   });
 });
 
-it("binds a verified first-time setup delivery to its continuation", async () => {
-  const repositories = ["acme/one", "acme/two"];
-  const { response, init } = await webhook(repositories, { onboarding: true });
+it("binds the initial authenticated install generation and repository IDs to its continuation", async () => {
+  const { response, init } = await webhook(["acme/one", "acme/two"], { onboarding: true });
   expect(response.status).toBe(202);
   const cursor = JSON.parse(String(init?.body)).cursor as string;
-  const digest = createHash("sha256").update(JSON.stringify(installationPayload(repositories, true))).digest("hex");
-  const rows = repositories.map((repository, index) => ({
-    installationId: 2468, repositoryId: 100 + index, repository, deliveryId: "delivery-1", bodySha256: digest,
-  }));
-  const proof = createHash("sha256").update(JSON.stringify([
-    Date.parse("2026-11-28T11:00:00Z"), "e".repeat(40), "f".repeat(40), rows,
+  const fingerprint = createHash("sha256").update(JSON.stringify([
+    Date.parse("2026-11-28T11:00:00Z"), "e".repeat(40), "f".repeat(40),
   ])).digest("hex");
-  expect(await verifySetupCursor(SIGNING_KEY, cursor)).toMatchObject({ onboardingProof: proof });
+  expect(await verifySetupCursor(SIGNING_KEY, cursor)).toMatchObject({ onboarding: {
+    createdAt: Date.parse("2026-11-28T12:00:00Z"), policySha256: fingerprint, repositoryIds: [100, 101],
+  } });
 });
 
 it.each([
   { cutoff: "2026-11-28T12:00:01Z" },
-  { wrongBodyDigest: true },
-])("does not mark old or changed delivery evidence as first-time (%j)", async (options) => {
+  { action: "new_permissions_accepted" },
+  { event: "installation_repositories", action: "added" },
+])("keeps old or non-install events out of v6 continuation (%j)", async (options) => {
   const { response, init } = await webhook(["acme/one", "acme/two"], { onboarding: true, ...options });
   expect(response.status).toBe(202);
   const cursor = JSON.parse(String(init?.body)).cursor as string;
-  expect(await verifySetupCursor(SIGNING_KEY, cursor)).not.toHaveProperty("onboardingProof");
+  expect(await verifySetupCursor(SIGNING_KEY, cursor)).not.toHaveProperty("onboarding");
+});
+
+it("holds an authenticated post-cutover event with no stable selection", async () => {
+  const { response, calls } = await webhook(["acme/one", "acme/two"], { onboarding: true, omitIds: true });
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ error_code: "v6_installation_selection_unavailable" });
+  expect(calls).toEqual([]);
+  expect(processDelivery).not.toHaveBeenCalled();
 });

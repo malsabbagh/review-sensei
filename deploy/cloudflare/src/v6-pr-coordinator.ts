@@ -1374,6 +1374,7 @@ export class GitHubV6ProviderAdapter implements V6ProviderAdapter {
 }
 
 interface VerifiedEdgeContext {
+  firstPrAfter?: number;
   claims: OidcClaims;
   appId: number;
   installationId: number;
@@ -1513,6 +1514,7 @@ export class V6PrCoordinatorEngine {
       appId,
       installationId,
       baseRepoId: repoInfo.id,
+      firstPrAfter: enrollment?.firstPrAfter,
       host,
       clockMarginMs,
       crypto: escrowCrypto,
@@ -2578,6 +2580,10 @@ export class V6PrCoordinatorEngine {
         edge.readToken,
       );
       if (prBinding === null || prBinding.base_repo_id !== edge.baseRepoId || prBinding.state !== "open") {
+        return await abortReservedToIdle(403, "v6_lease_unauthorized_tuple");
+      }
+      if (edge.firstPrAfter !== undefined &&
+          !(Date.parse(prBinding.created_at ?? "") > edge.firstPrAfter)) {
         return await abortReservedToIdle(403, "v6_lease_unauthorized_tuple");
       }
       if (

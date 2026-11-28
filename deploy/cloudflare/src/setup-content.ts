@@ -2023,11 +2023,18 @@ export function buildSetupFiles(
   return buildTaggedV4SetupFiles(publicWorkflowTag);
 }
 
-export function buildV6NewInstallSetupFiles(receipt: string): readonly SetupFile[] {
-  const caller = "# ReviewSensei v6 enrollment receipt: " + receipt + "\n" + v6NewInstallCaller;
-  return buildSetupFiles().map((file) =>
-    file.path === SETUP_WORKFLOW_PATH ? { ...file, content: caller } : file
-  );
+export function buildV6NewInstallSetupFiles(
+  receipt: string,
+  installationId: number,
+  repositoryId: number,
+): readonly [SetupFile, ...SetupFile[]] {
+  const caller = "# ReviewSensei v6 installation ID: " + installationId +
+    "\n# ReviewSensei v6 repository ID: " + repositoryId +
+    "\n# ReviewSensei v6 enrollment receipt: " + receipt + "\n" + v6NewInstallCaller;
+  return [
+    { path: SETUP_WORKFLOW_PATH, content: caller },
+    ...buildSetupFiles().filter(file => file.path !== SETUP_WORKFLOW_PATH),
+  ];
 }
 
 export function buildHistoricalV3SetupFiles(

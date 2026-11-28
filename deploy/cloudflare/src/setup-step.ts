@@ -171,7 +171,7 @@ async function scheduleNext(
     expiry: now + 10 * 60 * 1000,
     listingSha256: digest,
     failureCount,
-    onboardingProof: claims.onboardingProof,
+    onboarding: claims.onboarding,
   });
   scheduleSetupContinue(env, ctx, cursor);
 }
@@ -192,7 +192,7 @@ async function processOneRepository(
     action: "created",
     installationId: claims.installationId,
     deliveryId: claims.deliveryId,
-    onboardingProof: claims.onboardingProof,
+    onboarding: claims.onboarding,
     repository,
     repositories: [repository],
     suspended: false,

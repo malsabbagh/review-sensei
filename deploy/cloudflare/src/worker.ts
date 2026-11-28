@@ -25,7 +25,7 @@ import {
   processDelivery,
 } from "./github-app";
 import { freshSetupCursor, signSetupCursor } from "./signed-mac";
-import { requireV6Admission, verifyFirstInstallDelivery } from "./v6-onboarding";
+import { requireV6Admission, attestInstallDelivery } from "./v6-onboarding";
 import { runSignedSetupStep, scheduleSetupContinue } from "./setup-step";
 
 export { V6PrCoordinator };
@@ -50,7 +50,9 @@ function response(body: unknown, status = 200, noStore = false): Response {
  */
 export function setupErrorCode(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
-  if (/^github_[a-z0-9_]{1,80}$/.test(message)) {
+  if (/^github_[a-z0-9_]{1,80}$/.test(message) ||
+      message === "v6_installation_identity_unavailable" ||
+      message === "v6_installation_selection_unavailable") {
     return message;
   }
   if (message === "GitHub App installation lacks setup permissions") {
@@ -608,8 +610,8 @@ async function webhook(
   try {
     const delivery = parseVerifiedDelivery(body, event, deliveryId, app);
     if (delivery !== null) {
-      const proof = await verifyFirstInstallDelivery(env, delivery, body);
-      if (proof !== undefined) delivery.onboardingProof = proof;
+      const onboarding = await attestInstallDelivery(env, delivery, body);
+      if (onboarding !== undefined) delivery.onboarding = onboarding;
     }
     if (delivery !== null && deferInstallationSetup(delivery)) {
       if (
@@ -625,7 +627,7 @@ async function webhook(
         freshSetupCursor({
           installationId: delivery.installationId,
           deliveryId: delivery.deliveryId,
-          onboardingProof: delivery.onboardingProof,
+          onboarding: delivery.onboarding,
         }),
       );
       scheduleSetupContinue(env, ctx, cursor);

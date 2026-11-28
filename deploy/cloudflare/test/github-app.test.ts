@@ -1,7 +1,7 @@
 import { GitHubApi } from "../src/github-api";
 import * as oidc from "../src/oidc";
 import worker from "../src/worker";
-import { verifyFirstInstallDelivery } from "../src/v6-onboarding";
+import { attestInstallDelivery } from "../src/v6-onboarding";
 import { describe, expect, it, vi } from "vitest";
 import { createHash, createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -105,10 +105,16 @@ class FakeGitHub {
   }));
   readonly installationRepositories = vi.fn(async () => ["acme/one", "acme/two"]);
   readonly publicWorkflowSha = vi.fn(async () => SHA);
+  liveInstallationId = 2468;
+  liveInstallationCreatedAt = Date.parse("2026-11-28T12:00:00Z");
+  readonly installationGenerationMatches = vi.fn(async (_repo: string, installationId: number, createdAt: number) =>
+    installationId === this.liveInstallationId && createdAt === this.liveInstallationCreatedAt);
   readonly publicWorkflowRuntimeShas = vi.fn(async () => ({ refSha: "e".repeat(40), commitSha: "f".repeat(40) }));
   repositoryId = 101;
+  repositoryIds = new Map<string, number>();
   setupHistory: unknown[] = [];
   setupHistoryTruncated = false;
+  earlierInstallationPullRequest: number | null = null;
   fork = false;
   files: SetupFiles = Object.fromEntries(SETUP_FILE_PATHS.map((path) => [path, null]));
   branchFiles: SetupFiles = Object.fromEntries(
@@ -129,9 +135,9 @@ class FakeGitHub {
   async request(method: string, path: string, _token: string, requestBody?: Record<string, unknown>) {
     this.requests.push({ method, path, body: requestBody });
     if (method === "GET" && /^\/repos\/acme\/(widgets|one|two)$/.test(path)) {
-      return { status: 200, data: { default_branch: "main", id: this.repositoryId, fork: this.fork } };
+      return { status: 200, data: { default_branch: "main", id: this.repositoryIds.get(path) ?? this.repositoryId, fork: this.fork } };
     }
-    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v5-")) {
+    if (method === "GET" && /\/branches\/review-sensei%2Fsetup-v[56]-/.test(path)) {
       const exists = this.branchExists || this.collisionObserved || this.sharedRace?.branchReady === true;
       return {
         status: exists ? 200 : 404,
@@ -166,8 +172,12 @@ class FakeGitHub {
         },
       };
     }
-    if (method === "GET" && path.includes("/pulls?state=all&per_page=30")) {
+    if (method === "GET" && path.includes("/pulls?state=open&per_page=30")) {
       return { status: 200, data: this.setupHistory, hasNextPage: this.setupHistoryTruncated };
+    }
+    if (method === "GET" && path.includes("state=all&per_page=1")) {
+      const number = this.earlierInstallationPullRequest;
+      return { status: 200, data: number === null ? [] : [{ number }] };
     }
     if (method === "GET" && path.includes("/pulls?")) {
       const number = this.existingPullRequest ?? this.sharedRace?.pullNumber ?? null;
@@ -179,7 +189,7 @@ class FakeGitHub {
     if (method === "GET" && path.includes("/contents/")) {
       const encoded = path.split("/contents/")[1].split("?", 1)[0];
       const filePath = encoded.split("/").map(decodeURIComponent).join("/");
-      const content = path.includes("?ref=review-sensei%2Fsetup-v5-")
+      const content = /\?ref=review-sensei%2Fsetup-v[56]-/.test(path)
         ? this.branchFiles[filePath]
         : this.files[filePath];
       return content === null || content === undefined
@@ -1024,55 +1034,61 @@ describe("setup repository reconciliation", () => {
   });
 });
 
-describe("verified first-time v6 enrollment", () => {
-  async function verifiedSetup() {
-    const installationBody = JSON.stringify({
+describe("v6 onboarding for post-cutover installation events", () => {
+  async function verifiedSetup(installationId = 2468, createdAt = "2026-11-28T12:00:00Z") {
+    const payload = {
       action: "created",
-      installation: { id: 2468, created_at: "2026-11-28T12:00:00Z", permissions: ALL_PERMISSIONS },
+      installation: { id: installationId, created_at: createdAt, permissions: ALL_PERMISSIONS },
       repositories: [{ id: 101, full_name: "acme/widgets" }],
-    });
+    };
+    const installationBody = JSON.stringify(payload);
     const runtime = { ...env(), REVIEWSENSEI_SIGNING_KEY: "fixture-signing-key", V6_NEW_INSTALL_ONBOARDING: JSON.stringify({
       app_id: 12345, setup_enabled: true, start_at: "2026-11-28T11:00:00Z",
-      tag_object: "e".repeat(40), source_sha: "f".repeat(40),
-      enrollments: [{
-        installation_id: 2468, repository_id: 101, repository: "acme/widgets", delivery_id: "delivery-1",
-        body_sha256: createHash("sha256").update(installationBody).digest("hex"),
-      }],
+      tag_object: "e".repeat(40), source_sha: "f".repeat(40), activations: [],
     }) };
-    const initial = delivery();
-    const onboardingProof = await verifyFirstInstallDelivery(runtime, initial, new TextEncoder().encode(installationBody).buffer);
-    expect(onboardingProof).toMatch(/^[a-f0-9]{64}$/);
-    return { runtime, initial: { ...initial, onboardingProof }, installationBody };
+    const initial = parseVerifiedDelivery(body(payload), "installation", "delivery-1", 12345)!;
+    const onboarding = await attestInstallDelivery(runtime, initial, body(payload), Date.parse("2026-11-28T14:00:00Z"));
+    return { runtime, initial: { ...initial, onboarding }, installationBody };
   }
 
-  it("generates the v6 callable only for the positively verified fresh repository", async () => {
-    const { runtime, initial } = await verifiedSetup();
+  it("generates a v6 proposal for a fresh install and a cleaned-up reinstall", async () => {
+    for (const installationId of [2468, 2469]) {
+      const { runtime, initial } = await verifiedSetup(installationId);
+      expect(initial.onboarding?.repositoryIds).toEqual([101]);
+      const fake = new FakeGitHub();
+      fake.liveInstallationId = installationId;
+      expect(await new GitHubSetupService(runtime, fake).process(initial)).toMatchObject([{ status: "created" }]);
+      const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"))?.body?.tree as Array<{path: string; content: string}>;
+      const workflow = tree.find(({ path }) => path === SETUP_FILE_PATHS[0])?.content;
+      expect(workflow).toContain("malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@v6");
+      expect(workflow).toContain("# ReviewSensei v6 installation ID: " + installationId);
+      expect(fake.requests.find(({ path, method }) => method === "POST" && path.endsWith("/pulls"))?.body)
+        .toMatchObject({ head: "review-sensei/setup-v6-" + installationId });
+    }
+  });
+
+  it("replaces only a recognized v5 caller after a reinstall, leaving customer files byte-for-byte", async () => {
+    const { runtime, initial } = await verifiedSetup(2469);
     const fake = new FakeGitHub();
+    fake.liveInstallationId = 2469;
+    fake.files[SETUP_FILE_PATHS[0]] = buildSetupFiles("v5")[0].content;
+    fake.files[SETUP_FILE_PATHS[1]] = "name: Customer cleanup workflow\n";
+    fake.files[CONFIG_PATH] = "github:\n  writes: true\n";
     expect(await new GitHubSetupService(runtime, fake).process(initial)).toMatchObject([{ status: "created" }]);
     const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"))?.body?.tree as Array<{path: string; content: string}>;
-    const workflow = tree.find(({ path }) => path === SETUP_FILE_PATHS[0])?.content;
-    expect(workflow).toContain("malsabbagh/review-sensei/.github/workflows/review-sensei-v6-pilot.yml@v6");
-    expect(workflow).not.toContain("review-sensei-run.yml@");
-    expect(fake.publicWorkflowRuntimeShas).toHaveBeenCalledWith("v6");
+    expect(tree.map(file => file.path)).toEqual([SETUP_FILE_PATHS[0]]);
+    expect(tree[0]?.content).toContain("review-sensei-v6-pilot.yml@v6");
+    expect(fake.requests.some(({ path, method }) => method === "POST" && path.endsWith("/pulls"))).toBe(true);
   });
 
-  it("leaves an existing v5 setup untouched even when the installation proof matches", async () => {
+  it("holds for customized callers, competing setup PRs, and incomplete open-PR reads", async () => {
     const { runtime, initial } = await verifiedSetup();
-    const fake = new FakeGitHub();
-    fake.files = Object.fromEntries(buildSetupFiles("v5").map(({ path, content }) => [path, content]));
-    expect(await new GitHubSetupService(runtime, fake).process(initial)).toEqual([
-      { repository: "acme/widgets", status: "skipped_unknown_setup" },
-    ]);
-    expect(mutationRequests(fake)).toEqual([]);
-  });
-
-  it("holds for prior setup PRs or incomplete setup history", async () => {
-    const { runtime, initial } = await verifiedSetup();
-    for (const state of ["open", "closed", "truncated"]) {
+    for (const state of ["custom caller", "competing PR", "truncated"]) {
       const fake = new FakeGitHub();
+      fake.files[SETUP_FILE_PATHS[0]] = state === "custom caller" ? "name: Customer-owned workflow\n" : null;
       fake.setupHistoryTruncated = state === "truncated";
-      fake.setupHistory = state === "truncated" ? [] : [{
-        state,
+      fake.setupHistory = state !== "competing PR" ? [] : [{
+        state: "open",
         head: { ref: "review-sensei/setup-v5-000000000000-v5", repo: { id: 101 } },
       }];
       expect(await new GitHubSetupService(runtime, fake).process(initial)).toEqual([
@@ -1082,53 +1098,56 @@ describe("verified first-time v6 enrollment", () => {
     }
   });
 
-  it("refuses re-enrollment and a changed repository identity without setup writes", async () => {
+  it("refuses stale installation IDs, repositories added since the event, and fork repositories", async () => {
     const { runtime, initial } = await verifiedSetup();
-    for (const event of [
-      { ...initial, installationId: 2469, onboardingProof: undefined },
-      { ...initial, action: "new_permissions_accepted", onboardingProof: undefined },
-      { ...initial, event: "installation_repositories", action: "added", onboardingProof: undefined },
+    for (const change of [
+      { installation: 2469, repository: 101, fork: false },
+      { installation: 2468, repository: 101, fork: false, liveCreatedAt: "2026-11-28T13:00:00Z" },
+      { installation: 2468, repository: 102, fork: false },
+      { installation: 2468, repository: 101, fork: true },
     ]) {
       const fake = new FakeGitHub();
-      expect(await new GitHubSetupService(runtime, fake).process(event)).toEqual([
+      fake.repositoryId = change.repository;
+      fake.fork = change.fork;
+      fake.liveInstallationId = change.installation;
+      if (change.liveCreatedAt) fake.liveInstallationCreatedAt = Date.parse(change.liveCreatedAt);
+      expect(await new GitHubSetupService(runtime, fake).process(initial)).toEqual([
         { repository: "acme/widgets", status: "skipped_v6_enrollment_required" },
       ]);
       expect(mutationRequests(fake)).toEqual([]);
+      expect(fake.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
     }
-    const replacedRepository = new FakeGitHub();
-    replacedRepository.repositoryId = 102;
-    expect(await new GitHubSetupService(runtime, replacedRepository).process(initial)).toEqual([
-      { repository: "acme/widgets", status: "skipped_v6_enrollment_required" },
-    ]);
-    expect(mutationRequests(replacedRepository)).toEqual([]);
   });
 
-  it("keeps other repositories on v5 when an existing installation adds one", async () => {
-    const { runtime, initial } = await verifiedSetup();
-    const fake = new FakeGitHub();
-    fake.repositoryId = 102;
-    expect(await new GitHubSetupService(runtime, fake).process({
-      ...initial, event: "installation_repositories", action: "added",
-      repository: "acme/one", repositories: ["acme/one"], onboardingProof: undefined,
-    })).toMatchObject([{ status: "created" }]);
-    expect(JSON.stringify(mutationRequests(fake))).toContain("review-sensei-run.yml@v5");
-    expect(fake.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
+  it("keeps old delivery replays, permission updates, and repository additions on v5", async () => {
+    const { runtime, initial } = await verifiedSetup(2468, "2026-11-28T10:59:59Z");
+    expect(initial.onboarding).toBeUndefined();
+    for (const delivery of [
+      initial,
+      { ...initial, action: "new_permissions_accepted" },
+      { ...initial, event: "installation_repositories", action: "added" },
+    ]) {
+      const fake = new FakeGitHub();
+      const service = new GitHubSetupService(runtime, fake);
+      expect(await service.process(delivery)).toMatchObject([{ status: "created" }]);
+      expect(JSON.stringify(mutationRequests(fake))).toContain("review-sensei-run.yml@v5");
+      expect(fake.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
+      expect(fake.installationGenerationMatches).not.toHaveBeenCalled();
+    }
   });
 
-  it("reuses its own setup PR after redelivery without rewriting the caller", async () => {
+  it("reuses a prior proposal on original redelivery even with all files and branches removed", async () => {
     const { runtime, initial } = await verifiedSetup();
     const fake = new FakeGitHub();
     const service = new GitHubSetupService(runtime, fake);
     expect(await service.process(initial)).toMatchObject([{ status: "created" }]);
-    const files = fake.requests.find(({ path }) => path.endsWith("/git/trees"))?.body?.tree as Array<{path: string; content: string}>;
-    fake.branchFiles = Object.fromEntries(files.filter(({ content }) => content !== undefined).map(({ path, content }) => [path, content]));
-    fake.branchExists = true;
-    fake.existingPullRequest = 42;
+    fake.earlierInstallationPullRequest = 42;
     fake.requests.length = 0;
     expect(await service.process(initial)).toEqual([
       { repository: "acme/widgets", status: "skipped_pull_request_exists", pull_request_number: 42 },
     ]);
     expect(mutationRequests(fake)).toEqual([]);
+    expect(fake.requests[1]?.path).toContain("state=all");
   });
 
   it("stops before setup writes when the signed v6 ref is unavailable, moved, or lightweight", async () => {
@@ -1159,17 +1178,69 @@ describe("verified first-time v6 enrollment", () => {
     }
   });
 
-  it("routes a signed first-time webhook through setup and activation into the v6 broker", async () => {
+  it("continues a signed original selection without routing a later repository addition", async () => {
+    const { runtime } = await verifiedSetup();
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-28T14:00:00Z"));
+    const fake = new FakeGitHub();
+    fake.repositoryIds.set("/repos/acme/one", 101);
+    fake.repositoryIds.set("/repos/acme/two", 102);
+    fake.repositoryIds.set("/repos/acme/widgets", 103);
+    const request = vi.spyOn(GitHubApi.prototype, "request").mockImplementation(fake.request.bind(fake));
+    const setupToken = vi.spyOn(GitHubApi.prototype, "installationToken").mockImplementation(fake.installationToken);
+    const legacyTag = vi.spyOn(GitHubApi.prototype, "publicWorkflowSha").mockResolvedValue(SHA);
+    const workflowRuntime = vi.spyOn(GitHubApi.prototype, "publicWorkflowRuntimeShas").mockImplementation(fake.publicWorkflowRuntimeShas);
+    const generation = vi.spyOn(GitHubApi.prototype, "installationGenerationMatches").mockImplementation(fake.installationGenerationMatches);
+    const view = vi.spyOn(GitHubApi.prototype, "installationSetupView").mockResolvedValue({
+      permissions: ALL_PERMISSIONS,
+      repositories: ["acme/one", "acme/widgets", "acme/two"],
+    });
+    try {
+      const event = JSON.stringify({
+        action: "created",
+        installation: { id: 2468, created_at: "2026-11-28T12:00:00Z", permissions: ALL_PERMISSIONS },
+        repositories: [{ id: 101, full_name: "acme/one" }, { id: 102, full_name: "acme/two" }],
+      });
+      const tasks: Promise<unknown>[] = [];
+      const ctx = { waitUntil: (task: Promise<unknown>) => tasks.push(task) };
+      const config: WorkerEnv = { ...runtime, SELF: {
+        fetch: async (url, init) => worker.fetch(new Request(url, init), config, ctx),
+      } };
+      const result = await worker.fetch(new Request("https://github.reviewsensei.dev/github/webhook", {
+        method: "POST",
+        headers: {
+          "content-length": String(Buffer.byteLength(event)),
+          "x-github-event": "installation",
+          "x-github-delivery": "delivery-1",
+          "x-hub-signature-256": "sha256=" + createHmac("sha256", config.GITHUB_APP_WEBHOOK_SECRET).update(event).digest("hex"),
+        },
+        body: event,
+      }), config, ctx);
+      expect(result.status).toBe(202);
+      for (const task of tasks) await task;
+      expect(mutationRequests(fake).filter(({ path }) => path.endsWith("/git/trees")).map(({ path }) => path)).toEqual([
+        "/repos/acme/one/git/trees", "/repos/acme/two/git/trees",
+      ]);
+      expect(mutationRequests(fake).every(({ path }) => !path.includes("/widgets/"))).toBe(true);
+      expect(workflowRuntime).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const spy of [now, request, setupToken, legacyTag, workflowRuntime, generation, view]) spy.mockRestore();
+    }
+  });
+
+  it("routes a signed install webhook through setup and fences the same PR through v6 admission", async () => {
     const { runtime, installationBody } = await verifiedSetup();
     const fake = new FakeGitHub();
     const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-28T14:00:00Z"));
     const setupTransport = vi.spyOn(GitHubApi.prototype, "request").mockImplementation(fake.request.bind(fake));
     const legacyTag = vi.spyOn(GitHubApi.prototype, "publicWorkflowSha").mockResolvedValue(SHA);
     const setupToken = vi.spyOn(GitHubApi.prototype, "installationToken").mockImplementation(fake.installationToken);
-    const workflowRuntime = vi.spyOn(GitHubApi.prototype, "publicWorkflowRuntimeShas").mockImplementation(fake.publicWorkflowRuntimeShas);
+    const workflowRuntime = vi.spyOn(GitHubApi.prototype, "publicWorkflowRuntimeShas").mockImplementation(async (tag) =>
+      tag === "v5" ? { commitSha: SHA, refSha: SHA } : fake.publicWorkflowRuntimeShas());
+    const head = vi.spyOn(GitHubApi.prototype, "pullRequestHead").mockResolvedValue(SHA);
     const installLookup = vi.spyOn(GitHubApi.prototype, "installationFor").mockResolvedValue(2468);
     const capability = vi.spyOn(GitHubApi.prototype, "capabilityToken").mockImplementation(fake.installationToken);
     const repo = vi.spyOn(GitHubApi.prototype, "repositoryInfo").mockResolvedValue({ id: 101, fork: false });
+    const generation = vi.spyOn(GitHubApi.prototype, "installationGenerationMatches").mockImplementation(fake.installationGenerationMatches);
     const auth = vi.spyOn(oidc, "verifyOidcAssertion");
     const coordinator = vi.fn(async () => new Response(JSON.stringify({ state: "IDLE" }), { status: 200 }));
     try {
@@ -1200,10 +1271,17 @@ describe("verified first-time v6 enrollment", () => {
         ref: "refs/pull/42/merge", sha: SHA, run_id: "1", run_number: "1", run_attempt: "1",
         runner_environment: "github-hosted",
       };
-      auth.mockResolvedValue(claims);
+      const legacyClaims: oidc.OidcClaims = {
+        ...claims,
+        job_workflow_ref: "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+        job_workflow_sha: SHA,
+      };
+      auth.mockImplementation(async token => token === "legacy" ? legacyClaims : claims);
       const policy = JSON.parse(runtime.V6_NEW_INSTALL_ONBOARDING);
       const makeRuntime = (activation?: { receipt: string; fenced_at?: string }) => {
-        const config = { ...policy, enrollments: [{ ...policy.enrollments[0], activation }] };
+        const config = { ...policy, activations: activation === undefined ? [] : [{
+          installation_id: 2468, repository_id: 101, repository: "acme/widgets", ...activation,
+        }] };
         return {
           ...runtime,
           V6_NEW_INSTALL_ONBOARDING: JSON.stringify(config),
@@ -1222,8 +1300,24 @@ describe("verified first-time v6 enrollment", () => {
       const lease = (config: WorkerEnv) => worker.fetch(request("/github/v6/lease/status", {
         oidc_token: "fixture", pull_request: 42,
       }), config);
-      expect((await lease(makeRuntime())).status).toBe(403);
-      expect((await lease(makeRuntime({ receipt: receipt! }))).status).toBe(403);
+      const legacy = (config: WorkerEnv, capability = "review_publish") => worker.fetch(request("/github/token", {
+        oidc_token: "legacy", capability,
+        session_attestation: {
+          version: 3, purpose: "review", repository: "acme/widgets", repository_id: 101,
+          pull_request: 42, head_sha: SHA, run_id: "1", run_attempt: 1, job: "hosted",
+          job_workflow_ref: legacyClaims.job_workflow_ref, job_workflow_sha: SHA,
+          issued_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 300,
+          audience: "reviewsensei-run-action",
+          source: { kind: "pull_request", id: 42, updated_at: null, body_sha256: null },
+        },
+      }), config);
+      const pending = makeRuntime();
+      expect((await legacy(pending)).status).toBe(200);
+      expect((await lease(pending)).status).toBe(403);
+
+      const draining = makeRuntime({ receipt: receipt! });
+      expect((await lease(draining)).status).toBe(403);
+      expect((await legacy(draining)).status).toBe(403);
       expect((await lease(makeRuntime({ receipt: receipt!, fenced_at: "2026-11-28T13:00:01Z" }))).status).toBe(403);
       expect(coordinator).not.toHaveBeenCalled();
 
@@ -1231,10 +1325,14 @@ describe("verified first-time v6 enrollment", () => {
       const tamperedReceipt = (receipt![0] === "a" ? "b" : "a") + receipt!.slice(1);
       expect((await lease(makeRuntime({ receipt: tamperedReceipt, fenced_at: "2026-11-28T13:00:00Z" }))).status).not.toBe(200);
       expect(coordinator).not.toHaveBeenCalled();
-      const legacy = await worker.fetch(request("/github/token", { oidc_token: "fixture", capability: "review_publish" }), active);
-      expect(legacy.status).toBe(403);
-      expect(await legacy.json()).toMatchObject({ diagnostic: { code: "broker_v6_pilot_v5_writer_disabled" } });
+      for (const write of ["review_publish", "review_session", "inline_reply", "issue_reply", "check_publish"]) {
+        const refused = await legacy(active, write);
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toMatchObject({ diagnostic: { code: "broker_v6_pilot_v5_writer_disabled" } });
+      }
+      expect((await legacy(active, "review_status")).status).toBe(200);
       expect((await lease(active)).status).toBe(200);
+      expect(coordinator).toHaveBeenCalledTimes(1);
       const paused = JSON.parse(active.V6_NEW_INSTALL_ONBOARDING);
       paused.setup_enabled = false;
       expect((await lease({ ...active, V6_NEW_INSTALL_ONBOARDING: JSON.stringify(paused) })).status).toBe(200);
@@ -1247,7 +1345,7 @@ describe("verified first-time v6 enrollment", () => {
       expect((await lease(active)).status).toBe(403);
       expect(coordinator).toHaveBeenCalledTimes(2);
     } finally {
-      for (const spy of [now, setupTransport, legacyTag, setupToken, workflowRuntime, installLookup, capability, repo, auth]) {
+      for (const spy of [now, setupTransport, legacyTag, setupToken, workflowRuntime, head, installLookup, capability, repo, generation, auth]) {
         spy.mockRestore();
       }
     }

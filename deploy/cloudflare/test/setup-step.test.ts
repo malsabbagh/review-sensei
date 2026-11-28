@@ -31,7 +31,7 @@ function context(calls: Array<{ url: string; cursor: string }>): WorkerExecution
 }
 
 describe("signed setup continuation", () => {
-  it.each([undefined, "a".repeat(64)])("re-reads installation and preserves the proof (%s)", async (onboardingProof) => {
+  it.each([undefined, { createdAt: 1795867200000, policySha256: "a".repeat(64), repositoryIds: [101, 102] }])("re-reads installation and preserves the selection (%j)", async (onboarding) => {
     const calls: Array<{ url: string; cursor: string }> = [];
     const processed: string[] = [];
     const runtime = env();
@@ -51,7 +51,7 @@ describe("signed setup continuation", () => {
       expiry: Date.now() + 60_000,
       listingSha256: "",
       failureCount: 0,
-      onboardingProof,
+      onboarding,
     });
     const result = await runSignedSetupStep(runtime, cursor, ctx, {
       github: {
@@ -71,7 +71,7 @@ describe("signed setup continuation", () => {
     expect(calls[0]?.url).toBe(SETUP_CONTINUE_URL);
     expect(calls[0]?.url).not.toContain("github.reviewsensei.dev");
     const next = await verifySetupCursor(KEY, calls[0]!.cursor);
-    expect(next?.onboardingProof).toBe(onboardingProof);
+    expect(next?.onboarding).toEqual(onboarding);
     expect(next).toMatchObject({
       installationId: 2468,
       deliveryId: "delivery-1",
