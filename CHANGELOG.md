@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-28
+
+Changes since [v0.8.28](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.28), from [40b4f52face3402fc3a9cd51387bde7cf53c3951](https://github.com/malsabbagh/review-sensei/commit/40b4f52face3402fc3a9cd51387bde7cf53c3951) through [5ae9a1064e7bbc8eb9cb4ebb3dd0d09772eb0ecf](https://github.com/malsabbagh/review-sensei/commit/5ae9a1064e7bbc8eb9cb4ebb3dd0d09772eb0ecf).
+
+Previous annotated tag object: `902312cffab823663c09b97bb1b1ee995b7a202b`.
+
+- docs,github: add ADR 0144, v6 recovery proposal, and credential matrix \(\#509\) ([68c1b20df9ab72f6553ca2ed41ae029146e61f55](https://github.com/malsabbagh/review-sensei/commit/68c1b20df9ab72f6553ca2ed41ae029146e61f55)).
+- github: add v6 dual-credential transport and rate-limit/permission classifiers \(\#510\) ([570deb2fa0aff5588306baa607a6f539c7ec2f82](https://github.com/malsabbagh/review-sensei/commit/570deb2fa0aff5588306baa607a6f539c7ec2f82)).
+- docs: record released v0.8.28 ([91f4b19b72807acf8e2e094bf7ac6dc81f6a5f18](https://github.com/malsabbagh/review-sensei/commit/91f4b19b72807acf8e2e094bf7ac6dc81f6a5f18)).
+- github: implement v6 recovery ledger, stability pagination, recovery engine, and Gap 10 diagnostics \(\#511\) ([b42bc20e5d0e3aed2884b3555650610d7848adcb](https://github.com/malsabbagh/review-sensei/commit/b42bc20e5d0e3aed2884b3555650610d7848adcb)).
+- test: add v6 release-gate qualification suite covering all 8 gates \(\#512\) ([d886faca6f4018a5303456625bdf5ca2425e89e9](https://github.com/malsabbagh/review-sensei/commit/d886faca6f4018a5303456625bdf5ca2425e89e9)).
+- github: isolate v6 REST and GraphQL quota buckets per credential \(\#513\) ([ff406a44754d5016fead2435e547b9fd0536e17b](https://github.com/malsabbagh/review-sensei/commit/ff406a44754d5016fead2435e547b9fd0536e17b)).
+- v6 Phase 0 Issuance Audit &amp; Phase 1 Shared Coordinator Contract Freeze \(\#515\) ([fcd2c4fd8b07b96d44777b8bed8b058e149def73](https://github.com/malsabbagh/review-sensei/commit/fcd2c4fd8b07b96d44777b8bed8b058e149def73)).
+- feat\(v6\): add one-writer pilot runner, coordinator client, callable workflow, and PR recovery tests \(\#517\) ([482eeb8559066bca6d4b08937a0e6f80b8965408](https://github.com/malsabbagh/review-sensei/commit/482eeb8559066bca6d4b08937a0e6f80b8965408)).
+- docs\(v6\): freeze two-gate token clearance and write reconciliation contract \(\#518\) ([0c8d45f9c97f76f508b68899422a3638d7bbfdb7](https://github.com/malsabbagh/review-sensei/commit/0c8d45f9c97f76f508b68899422a3638d7bbfdb7)).
+- v6 Phase 2 &amp; 4: Serialized Worker PR Coordinator, Token Escrow, and Revocation Tests \(\#516\) ([156759cf3f25b02fb30750f7e5c467c46e0860bf](https://github.com/malsabbagh/review-sensei/commit/156759cf3f25b02fb30750f7e5c467c46e0860bf)).
+- feat\(v6\): two-gate Python runner, ledger, client, and reconciliation tests \(\#519\) ([9e928fb1a2ff8104336759bc3c3ded93a17844d1](https://github.com/malsabbagh/review-sensei/commit/9e928fb1a2ff8104336759bc3c3ded93a17844d1)).
+- Fix v6 cross-runtime wire parity and reconciliation bounds \(\#520\) ([f03c87263279b9f6d63511bd09f6ff2459fa6737](https://github.com/malsabbagh/review-sensei/commit/f03c87263279b9f6d63511bd09f6ff2459fa6737)).
+- fix\(cloudflare\): preserve token on 200 v6 lease acquire response \(\#521\) ([df1d2c351081abca088e20d0066b19066a0f7810](https://github.com/malsabbagh/review-sensei/commit/df1d2c351081abca088e20d0066b19066a0f7810)).
+- feat\(v6\): remove HOLD-&gt;IDLE shortcut, persist initial results, and add integrated Worker acceptance qualification \(\#522\) ([a2ca7a5fd9828ae6f4f59b35e9ffd83caf9c0484](https://github.com/malsabbagh/review-sensei/commit/a2ca7a5fd9828ae6f4f59b35e9ffd83caf9c0484)).
+- fix\(v6\): install workflow commit candidate, wire lazy fresh-PR analysis, and harden recovery transitions \(\#523\) ([5144fc7ca43c4fc1ed3594db3f5ea2c9bf251db5](https://github.com/malsabbagh/review-sensei/commit/5144fc7ca43c4fc1ed3594db3f5ea2c9bf251db5)).
+- v6: complete diff inventory, restartable batching, and lossless delivery \(\#524\) ([048848f8395990286161629f94f3358d89167d2f](https://github.com/malsabbagh/review-sensei/commit/048848f8395990286161629f94f3358d89167d2f)).
+- fix\(v6\): harden batch coverage, line=None replay, provider call budget, and pagination bounds \(\#525\) ([db0b0d59db63cdf995482e3bbff117a3f18bb765](https://github.com/malsabbagh/review-sensei/commit/db0b0d59db63cdf995482e3bbff117a3f18bb765)).
+- fix\(v6\): recheck write authority per attempt and fail closed on corrupt App markers \(\#528\) ([bc17122bc9d8b9fa15d3cc7c08a481ac505076e8](https://github.com/malsabbagh/review-sensei/commit/bc17122bc9d8b9fa15d3cc7c08a481ac505076e8)).
+- fix\(v6\): support resumable Worker reconciliation across capped/throttled scans \(\#530\) ([40e7d9487d05c84732a8a9ea610ef0ff52cdeb6b](https://github.com/malsabbagh/review-sensei/commit/40e7d9487d05c84732a8a9ea610ef0ff52cdeb6b)).
+- v6: durable incomplete-batch call accounting and workflow wheel hashing \(\#526\) ([5f401d794950e9d4c3ad21a87a2b11d1c6350e59](https://github.com/malsabbagh/review-sensei/commit/5f401d794950e9d4c3ad21a87a2b11d1c6350e59)).
+- feat\(v6\): split oversized batch plans into bounded parts and binding manifest \(\#527\) ([5ae9a1064e7bbc8eb9cb4ebb3dd0d09772eb0ecf](https://github.com/malsabbagh/review-sensei/commit/5ae9a1064e7bbc8eb9cb4ebb3dd0d09772eb0ecf)).
+
+## review-sensei-github 0.3.35 - 2026-11-28
+
+- Pin `review-sensei==0.9.0`.
+
 ## 0.8.28 - 2026-11-26
 
 Changes since [v0.8.27](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.27), from [99f4a9cbb627b555e9132189d961e29827e07cbb](https://github.com/malsabbagh/review-sensei/commit/99f4a9cbb627b555e9132189d961e29827e07cbb) through [77dc79d5b5f1489178018bba2c30ec2988cfabe3](https://github.com/malsabbagh/review-sensei/commit/77dc79d5b5f1489178018bba2c30ec2988cfabe3).
