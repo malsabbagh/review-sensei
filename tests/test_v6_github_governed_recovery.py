@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from collections.abc import Mapping
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from typing import Any
 
 from review_sensei_github.errors import (
@@ -31,6 +31,7 @@ from review_sensei_github.v6_recovery_engine import (
     RecoveryPaused,
     RecoveryRequest,
     StaleWriterOwnershipError,
+    TakeoverReconciliationResult,
     V6RecoveryEngine,
 )
 from review_sensei_github.v6_recovery_ledger import (
@@ -1450,3 +1451,475 @@ class RecoveryEngineTests(unittest.TestCase):
         self.assertEqual(hold_ambig.blocker, "ambiguous_write_outcome")
         self.assertTrue(hold_ambig.zero_model_calls_started)
         self.assertEqual([c["method"] for c in app_ambig_transport.calls], ["GET"])
+
+    def test_authority_rechecked_after_throttle_wait_blocks_second_mutation(
+        self,
+    ) -> None:
+        unresolved = _make_unresolved_record()
+
+        def wf_ok(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if "/issues/12/comments" in call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "999"},
+                    [
+                        {
+                            "id": 100,
+                            "body": format_v6_record_marker(unresolved),
+                            **_app_meta(),
+                        }
+                    ],
+                )
+            return 200, {"X-RateLimit-Remaining": "998"}, []
+
+        base_req = RecoveryRequest(
+            owner="octo",
+            repo="repo",
+            repository_id=101,
+            pull_request=12,
+            operation_id="op-1",
+            ownership_proof=_make_proof(),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            advisory_comment_id=99,
+        )
+
+        # (a1) Review POST hits 429 -> head SHA moves during sleeper -> zero second review POST.
+        state_a1 = {"head": HEAD_SHA, "review_posts": 0}
+
+        def app_a1(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if call["method"] == "POST" and "/pulls/12/reviews" in call["path"]:
+                state_a1["review_posts"] += 1
+                if state_a1["review_posts"] == 1:
+                    return (
+                        429,
+                        {"Retry-After": "5", "X-RateLimit-Remaining": "0"},
+                        {"message": "secondary rate limit"},
+                    )
+                raise AssertionError(
+                    "must never emit second review POST after head move"
+                )
+            return (
+                201,
+                {"X-RateLimit-Remaining": "4999"},
+                {"id": 201, "body": call["body"]["body"]},
+            )
+
+        app_t_a1 = ScriptedTransport(app_a1)
+        eng_a1 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_ok),
+                broker_app_transport=app_t_a1,
+            ),
+            sleeper=lambda _s: state_a1.__setitem__("head", OTHER_SHA),
+            broker_fence_verifier=lambda _p: {
+                "repository_id": 101,
+                "pull_request": 12,
+                "pr_head_sha": state_a1["head"],
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+        )
+        with self.assertRaises(StaleWriterOwnershipError):
+            eng_a1.recover_and_publish(base_req)
+        self.assertEqual(state_a1["review_posts"], 1)
+
+        # (a2) Intent POST hits 429 -> token expires during sleeper -> zero second intent POST.
+        state_a2 = {"now": 1000.0, "intent_posts": 0}
+        req_exp = replace(
+            base_req,
+            token_expires_at_ms=1_000_000 + 305_000,
+            clock_margin_ms=300_000,
+        )
+
+        def app_a2(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if call["method"] == "POST" and "/issues/12/comments" in call["path"]:
+                state_a2["intent_posts"] += 1
+                if state_a2["intent_posts"] == 1:
+                    return (
+                        429,
+                        {"Retry-After": "6", "X-RateLimit-Remaining": "0"},
+                        {"message": "secondary rate limit"},
+                    )
+                raise AssertionError("must never emit second intent POST after expiry")
+            raise AssertionError(f"unexpected call: {call}")
+
+        eng_a2 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_ok),
+                broker_app_transport=ScriptedTransport(app_a2),
+            ),
+            now_fn=lambda: state_a2["now"],
+            sleeper=lambda s: state_a2.__setitem__("now", state_a2["now"] + s),
+            broker_fence_verifier=lambda _p: {
+                "repository_id": 101,
+                "pull_request": 12,
+                "pr_head_sha": HEAD_SHA,
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+        )
+        with self.assertRaises(StaleWriterOwnershipError):
+            eng_a2.recover_and_publish(req_exp)
+        self.assertEqual(state_a2["intent_posts"], 1)
+
+        # (a3) Review POST hits 429 -> write policy becomes unauthorized during sleeper -> zero second review POST.
+        state_a3 = {"review_posts": 0}
+        req_policy = replace(base_req)
+
+        def app_a3(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if call["method"] == "POST" and "/pulls/12/reviews" in call["path"]:
+                state_a3["review_posts"] += 1
+                if state_a3["review_posts"] == 1:
+                    return (
+                        429,
+                        {"Retry-After": "5", "X-RateLimit-Remaining": "0"},
+                        {"message": "secondary rate limit"},
+                    )
+                raise AssertionError(
+                    "must never emit second review POST after policy change"
+                )
+            return (
+                201,
+                {"X-RateLimit-Remaining": "4999"},
+                {"id": 202, "body": call["body"]["body"]},
+            )
+
+        eng_a3 = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_ok),
+                broker_app_transport=ScriptedTransport(app_a3),
+            ),
+            sleeper=lambda _s: object.__setattr__(
+                req_policy, "visibility", RepositoryVisibility.FORK_PULL_REQUEST
+            ),
+            broker_fence_verifier=lambda _p: {
+                "repository_id": 101,
+                "pull_request": 12,
+                "pr_head_sha": HEAD_SHA,
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+        )
+        with self.assertRaises(ReviewInputError):
+            eng_a3.recover_and_publish(req_policy)
+        self.assertEqual(state_a3["review_posts"], 1)
+
+        # (b) Marker write via _post_ledger_marker_with_rescan: head change during sleep blocks 2nd POST.
+        for mode in ("head_sha", "token_expiry", "write_policy"):
+            with self.subTest(marker_mode=mode):
+                st_b = {"head": HEAD_SHA, "now": 1000.0, "posts": 0}
+                req_b = replace(
+                    base_req,
+                    token_expires_at_ms=1_000_000 + 305_000,
+                    clock_margin_ms=300_000,
+                )
+
+                def _sleep_b(secs: float) -> None:
+                    if mode == "head_sha":
+                        st_b["head"] = OTHER_SHA
+                    elif mode == "token_expiry":
+                        st_b["now"] += secs
+                    else:
+                        object.__setattr__(
+                            req_b, "visibility", RepositoryVisibility.FORK_PULL_REQUEST
+                        )
+
+                def app_b(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+                    st_b["posts"] += 1
+                    if st_b["posts"] == 1:
+                        return (
+                            429,
+                            {"Retry-After": "6", "X-RateLimit-Remaining": "0"},
+                            {"message": "secondary rate limit"},
+                        )
+                    raise AssertionError("must never emit second marker POST")
+
+                eng_b = V6RecoveryEngine(
+                    DualCredentialGitHubClient(
+                        workflow_token_transport=ScriptedTransport(wf_ok),
+                        broker_app_transport=ScriptedTransport(app_b),
+                    ),
+                    now_fn=lambda: st_b["now"],
+                    sleeper=_sleep_b,
+                    broker_fence_verifier=lambda _p: {
+                        "repository_id": 101,
+                        "pull_request": 12,
+                        "pr_head_sha": st_b["head"],
+                        "active_writer_epoch": 1,
+                        "pr_state": "open",
+                    },
+                )
+                guard_b = NoProgressGuard(operation_id="op-1")
+                expected_exc = (
+                    ReviewInputError
+                    if mode == "write_policy"
+                    else StaleWriterOwnershipError
+                )
+                with self.assertRaises(expected_exc):
+                    eng_b._post_ledger_marker_with_rescan(
+                        request=req_b,
+                        guard=guard_b,
+                        prior_hint=None,
+                        record=unresolved,
+                        effect_kind_label="unresolved_result",
+                        find_existing_cid=lambda _l: None,
+                    )
+                self.assertEqual(st_b["posts"], 1)
+
+        # (c) Pause-checkpoint write (_persist_pause_checkpoint): authority loss during 429 + sleeper
+        # blocks PATCH and propagates error.
+        for mode in ("head_sha", "token_expiry", "write_policy"):
+            with self.subTest(pause_mode=mode):
+                st_c = {"head": HEAD_SHA, "now": 1000.0, "wf_calls": 0, "patches": 0}
+                req_c = replace(
+                    base_req,
+                    token_expires_at_ms=1_000_000 + 305_000,
+                    clock_margin_ms=300_000,
+                )
+
+                def wf_c(_call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+                    st_c["wf_calls"] += 1
+                    if st_c["wf_calls"] == 1:
+                        return (
+                            429,
+                            {"Retry-After": "6", "X-RateLimit-Remaining": "0"},
+                            {"message": "short secondary rate limit"},
+                        )
+                    return (
+                        429,
+                        {"Retry-After": "900", "X-RateLimit-Remaining": "0"},
+                        {"message": "long secondary rate limit"},
+                    )
+
+                def _sleep_c(secs: float) -> None:
+                    if mode == "head_sha":
+                        st_c["head"] = OTHER_SHA
+                    elif mode == "token_expiry":
+                        st_c["now"] += secs
+                    else:
+                        object.__setattr__(
+                            req_c, "visibility", RepositoryVisibility.FORK_PULL_REQUEST
+                        )
+
+                def app_c(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+                    if call["method"] == "PATCH":
+                        st_c["patches"] += 1
+                    raise AssertionError(f"pause checkpoint must not mutate: {call}")
+
+                eng_c = V6RecoveryEngine(
+                    DualCredentialGitHubClient(
+                        workflow_token_transport=ScriptedTransport(wf_c),
+                        broker_app_transport=ScriptedTransport(app_c),
+                    ),
+                    now_fn=lambda: st_c["now"],
+                    sleeper=_sleep_c,
+                    max_in_job_sleep_seconds=60.0,
+                    remaining_job_seconds=600.0,
+                    broker_fence_verifier=lambda _p: {
+                        "repository_id": 101,
+                        "pull_request": 12,
+                        "pr_head_sha": st_c["head"],
+                        "active_writer_epoch": 1,
+                        "pr_state": "open",
+                    },
+                )
+                expected_exc = (
+                    ReviewInputError
+                    if mode == "write_policy"
+                    else StaleWriterOwnershipError
+                )
+                with self.assertRaises(expected_exc):
+                    eng_c.recover_and_publish(req_c)
+                self.assertEqual(st_c["patches"], 0)
+
+    def test_corrupted_app_marker_fails_closed_while_prose_and_effect_markers_pass(
+        self,
+    ) -> None:
+        unresolved = _make_unresolved_record()
+        valid_effect = (
+            f"ReviewSensei note.\n"
+            f"<!-- reviewsensei:v6:effect op=op-other sha256={'b' * 64} -->"
+        )
+        non_app_bad = {
+            "id": 98,
+            "body": 'Human quote:\n<!-- reviewsensei:v6:record sha256=bad payload={"broken":true}',
+            **_human_meta(),
+        }
+        app_prose_and_effect = {
+            "id": 99,
+            "body": valid_effect,
+            **_app_meta(),
+        }
+
+        def wf_clean(_call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if "/issues/12/comments" in _call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "999"},
+                    [
+                        non_app_bad,
+                        app_prose_and_effect,
+                        {
+                            "id": 100,
+                            "body": format_v6_record_marker(unresolved),
+                            **_app_meta(),
+                        },
+                    ],
+                )
+            return 200, {"X-RateLimit-Remaining": "998"}, []
+
+        app_clean = ScriptedTransport(
+            lambda c: (
+                201 if c["method"] == "POST" and "/comments" in c["path"] else 200,
+                {"X-RateLimit-Remaining": "4999"},
+                {"id": 501, "body": c["body"]["body"]},
+            )
+        )
+        req = RecoveryRequest(
+            owner="octo",
+            repo="repo",
+            repository_id=101,
+            pull_request=12,
+            operation_id="op-1",
+            ownership_proof=_make_proof(),
+            event=GitHubEventKind.PULL_REQUEST,
+            visibility=RepositoryVisibility.PUBLIC,
+            granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+            expected_app_id=APP_ID,
+            slot_key=f"v6-pr:github.com:{APP_ID}:7777:101:12",
+            generation=1,
+            emit_durable_hold_on_pr=True,
+        )
+        done = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_clean),
+                broker_app_transport=app_clean,
+            ),
+            broker_fence_verifier=lambda _p: {
+                "repository_id": 101,
+                "pull_request": 12,
+                "pr_head_sha": HEAD_SHA,
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+        ).recover_and_publish(req)
+        self.assertIsInstance(done, RecoveryCompleted)
+
+        # Corrupt App marker (both truncated v6:record and malformed v6:effect) fails closed with 0 writes.
+        for bad_app_body in (
+            "<!-- reviewsensei:v6:record sha256="
+            + ("0" * 64)
+            + ' payload={"schema":"reviewsensei:v6:batch-dispatch:v1"',
+            "<!-- reviewsensei:v6:effect op=op-1 sha256=not-hex -->",
+        ):
+            with self.subTest(bad_app_body=bad_app_body[:40]):
+
+                def wf_corrupt(
+                    call: dict[str, Any], body_str: str = bad_app_body
+                ) -> tuple[int, dict[str, str], Any]:
+                    if "/issues/12/comments" in call["path"]:
+                        return (
+                            200,
+                            {"X-RateLimit-Remaining": "999"},
+                            [
+                                {
+                                    "id": 100,
+                                    "body": format_v6_record_marker(unresolved),
+                                    **_app_meta(),
+                                },
+                                {
+                                    "id": 101,
+                                    "body": body_str,
+                                    **_app_meta(),
+                                },
+                            ],
+                        )
+                    return 200, {"X-RateLimit-Remaining": "998"}, []
+
+                app_never = ScriptedTransport(
+                    lambda c: (_ for _ in ()).throw(
+                        AssertionError(f"must make 0 writes on corrupt marker: {c}")
+                    )
+                )
+                eng_corrupt = V6RecoveryEngine(
+                    DualCredentialGitHubClient(
+                        workflow_token_transport=ScriptedTransport(wf_corrupt),
+                        broker_app_transport=app_never,
+                    ),
+                    broker_fence_verifier=lambda _p: {
+                        "repository_id": 101,
+                        "pull_request": 12,
+                        "pr_head_sha": HEAD_SHA,
+                        "active_writer_epoch": 1,
+                        "pr_state": "open",
+                    },
+                )
+                hold = eng_corrupt.recover_and_publish(req)
+                self.assertIsInstance(hold, RecoveryHold)
+                assert isinstance(hold, RecoveryHold)
+                self.assertEqual(hold.blocker, "corrupted_app_ledger_marker")
+                self.assertTrue(hold.zero_model_calls_started)
+                self.assertEqual(app_never.calls, [])
+
+                takeover = eng_corrupt.reconcile_takeover_read_only(
+                    owner="octo",
+                    repo="repo",
+                    repository_id=101,
+                    pull_request=12,
+                    slot_key=f"v6-pr:github.com:{APP_ID}:7777:101:12",
+                    event=GitHubEventKind.PULL_REQUEST,
+                    visibility=RepositoryVisibility.PUBLIC,
+                    granted_scopes=WORKFLOW_READ_ONLY_SCOPES,
+                    expected_app_id=APP_ID,
+                    expected_bot_login=BOT_LOGIN,
+                )
+                self.assertIsInstance(takeover, TakeoverReconciliationResult)
+                self.assertEqual(takeover.reconciliation_outcome, "ambiguous_hold")
+                self.assertEqual(takeover.blocker, "corrupted_app_ledger_marker")
+                self.assertEqual(app_never.calls, [])
+
+        # _post_ledger_marker_with_rescan rescan encountering corrupted App marker fails closed.
+        def wf_rescan_corrupt(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            if "/issues/12/comments" in call["path"]:
+                return (
+                    200,
+                    {"X-RateLimit-Remaining": "999"},
+                    [
+                        {
+                            "id": 777,
+                            "body": "<!-- reviewsensei:v6:record sha256=bad payload={}",
+                            **_app_meta(),
+                        }
+                    ],
+                )
+            return 200, {"X-RateLimit-Remaining": "998"}, []
+
+        def app_timeout(call: dict[str, Any]) -> tuple[int, dict[str, str], Any]:
+            raise TimeoutError("dropped write reply")
+
+        eng_rescan = V6RecoveryEngine(
+            DualCredentialGitHubClient(
+                workflow_token_transport=ScriptedTransport(wf_rescan_corrupt),
+                broker_app_transport=ScriptedTransport(app_timeout),
+            ),
+            broker_fence_verifier=lambda _p: {
+                "repository_id": 101,
+                "pull_request": 12,
+                "pr_head_sha": HEAD_SHA,
+                "active_writer_epoch": 1,
+                "pr_state": "open",
+            },
+        )
+        with self.assertRaises(V6LedgerIntegrityError) as caught:
+            eng_rescan._post_ledger_marker_with_rescan(
+                request=req,
+                guard=NoProgressGuard(operation_id="op-1"),
+                prior_hint=None,
+                record=unresolved,
+                effect_kind_label="unresolved_result",
+                find_existing_cid=lambda _l: None,
+            )
+        self.assertEqual(caught.exception.diagnostic, "corrupted_app_ledger_marker")
