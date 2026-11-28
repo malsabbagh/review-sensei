@@ -1165,9 +1165,12 @@ export class DurableObjectSqlV6CoordinatorStore implements V6CoordinatorStore {
             )
           ) {
             validated.reconcile_scan_cursor = parsedCursor;
+          } else {
+            this.sql.exec(`DELETE FROM v6_pr_reconcile_cursor WHERE slot_key = ?`, slotKey);
           }
         } catch {
           validated.reconcile_scan_cursor = null;
+          this.sql.exec(`DELETE FROM v6_pr_reconcile_cursor WHERE slot_key = ?`, slotKey);
         }
       }
     }
@@ -3913,6 +3916,15 @@ export class V6PrCoordinatorEngine {
     if (hasResumablePause) {
       const nextPage = isPositiveSafeInt(page.nextPage) ? page.nextPage : startPage;
       const pageSize = isPositiveSafeInt(page.pageSize) ? page.pageSize : initialPageSize;
+      if (
+        useCursor &&
+        page.rateLimited !== true &&
+        page.transientFailure !== true &&
+        pageSize === validSavedCursor!.page_size &&
+        nextPage <= validSavedCursor!.next_page
+      ) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
       const retryAfterMs =
         page.retryAfterMs !== undefined && Number.isFinite(page.retryAfterMs)
           ? Math.max(0, Math.round(page.retryAfterMs))
@@ -4502,7 +4514,9 @@ export class V6PrCoordinatorEngine {
           kind: "done" as const,
           result: diagnosticResponse(409, "v6_lease_reconciling", {
             slotState: "RECONCILING",
-            retryAfterMs: incompleteResult.retryAfterMs,
+            ...(incompleteResult.retryAfterMs !== undefined
+              ? { retryAfterMs: incompleteResult.retryAfterMs }
+              : {}),
             rayId,
           }),
         };

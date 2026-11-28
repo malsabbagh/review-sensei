@@ -774,7 +774,11 @@ export class GitHubApi {
         return {
           status: response.status,
           data,
-          ...(hasNextPage ? { hasNextPage: true } : linkHeader !== null ? { hasNextPage: false } : {}),
+          ...(hasNextPage
+            ? { hasNextPage: true }
+            : linkHeader !== null && linkHeader.trim() !== ""
+              ? { hasNextPage: false }
+              : {}),
           ...(Object.keys(metadata).length ? {lookupMetadata: metadata} : {}),
         };
       }, this.dispatchControl, path.includes("/git/ref/") ? "workflow_ref" : path.includes("/git/tags/") ? "workflow_tag" : path.endsWith("/access_tokens") || path === "/installation/token" ? "installation_token" : method === "GET" ? "github_read" : "github_write");

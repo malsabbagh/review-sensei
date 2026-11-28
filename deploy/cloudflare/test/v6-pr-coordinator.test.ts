@@ -4178,7 +4178,7 @@ describe("v6 resumable Gate 2 reconciliation", () => {
         throw new Error("github_response_too_large");
       }
       if (perPage === 12 && callCount === 2) {
-        // Turn 1 hits 429 on page 1 at per_page=12 -> saves page_size=12, next_page=1 (or after page 1 -> next_page=2)
+        // Turn 1 serves page 1 at per_page=12 (next call hits 429 on page 2 -> saves page_size=12, next_page=2)
         return {
           status: 200,
           hasNextPage: true,
@@ -4587,7 +4587,7 @@ describe("v6 resumable Gate 2 reconciliation", () => {
         ],
       },
     });
-    expect(commentListPagesFetched[0]).toBe(1);
+    expect(commentListPagesFetched).toEqual([1, 2, 1, 2]);
     expect(gen2Turn2.status).toBe(409);
     expect(await gen2Turn2.json()).toMatchObject({
       error: "v6_lease_reconciliation_evidence_invalid",
