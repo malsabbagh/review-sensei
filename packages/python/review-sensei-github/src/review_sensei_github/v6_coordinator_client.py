@@ -962,6 +962,7 @@ class V6CoordinatorClient:
         pull_request: int,
         slot_key: str | None = None,
         control_budget: Mapping[str, Any] | None = None,
+        analysis_head_sha: str | None = None,
     ) -> V6SlotStatus:
         """Query current slot state via ``POST /github/v6/lease/status``."""
 
@@ -973,7 +974,14 @@ class V6CoordinatorClient:
         if control_budget is not None:
             payload["control_budget"] = dict(control_budget)
 
+        if analysis_head_sha is not None:
+            payload["analysis_head_sha"] = analysis_head_sha
         data = self._post("/github/v6/lease/status", payload)
+        if (
+            analysis_head_sha is not None
+            and data.get("analysis_head_sha") != analysis_head_sha
+        ):
+            raise V6CoordinatorError("missing exact-head analysis admission")
         return V6SlotStatus(
             slot_key=validate_v6_slot_key(
                 _require_str(data.get("slot_key"), name="slot_key")

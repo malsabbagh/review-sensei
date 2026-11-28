@@ -521,6 +521,7 @@ class ConversationPublisher:
         defer_evidence: bool = False,
         source_body_sha256: str | None = None,
         repository_id: int | None = None,
+        source_actor_id: int | None = None,
     ) -> PreparedConversation | ReplyResult:
         """Authorize and bound a mention before any provider invocation."""
         return self._prepare_context(
@@ -536,6 +537,7 @@ class ConversationPublisher:
             defer_evidence=defer_evidence,
             source_body_sha256=source_body_sha256,
             repository_id=repository_id,
+            source_actor_id=source_actor_id,
         )
 
     def prepare_selected_assessment_context(
@@ -586,6 +588,7 @@ class ConversationPublisher:
         defer_evidence: bool = False,
         source_body_sha256: str | None = None,
         repository_id: int | None = None,
+        source_actor_id: int | None = None,
     ) -> PreparedConversation | ReplyResult:
         """Authorize a mention, optionally deferring generic context evidence.
 
@@ -634,7 +637,17 @@ class ConversationPublisher:
             return ReplyResult(status="skipped_source_gone")
         if status < 200 or status >= 300 or not isinstance(source, dict):
             raise GitHubConversationError("reply source lookup failed")
-        if assessment_selector is not None and (
+        if source_actor_id is not None:
+            author = source.get("user")
+            if (
+                not isinstance(author, dict)
+                or author.get("type") != "User"
+                or type(author.get("id")) is not int
+                or author["id"] != source_actor_id
+                or source.get("performed_via_github_app") is not None
+            ):
+                return ReplyResult(status="skipped_unauthorized")
+        if (assessment_selector is not None or source_actor_id is not None) and (
             type(source.get("id")) is not int or source["id"] != source_comment_id
         ):
             raise GitHubConversationError("selected assessment source identity changed")
@@ -721,7 +734,10 @@ class ConversationPublisher:
                     raise GitHubConversationError(
                         "reply root comment could not be resolved"
                     )
-                if root.get("in_reply_to_id") is not None:
+                if root.get("in_reply_to_id") is not None or (
+                    source_actor_id is not None
+                    and (type(root.get("id")) is not int or root["id"] != resolved_root)
+                ):
                     raise GitHubConversationError("reply root comment is not a root")
                 self._require_comment_association(
                     comment=root,

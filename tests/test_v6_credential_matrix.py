@@ -68,6 +68,8 @@ EXPECTED_MUTATION_ENDPOINTS = frozenset(
         "review_thread_mutation",
         "check_run_write",
         "pr_approval_publish",
+        "inline_reply",
+        "issue_reply",
     }
 )
 
@@ -159,6 +161,7 @@ class V6CredentialMatrixTests(unittest.TestCase):
             {
                 GitHubEventKind.PULL_REQUEST,
                 GitHubEventKind.ISSUE_COMMENT,
+                GitHubEventKind.PULL_REQUEST_REVIEW_COMMENT,
                 GitHubEventKind.WORKFLOW_DISPATCH,
             },
         )

@@ -3,6 +3,19 @@ const SETUP_CURSOR_TTL_MS = 10 * 60 * 1000;
 const HKDF_SALT = new Uint8Array(32);
 const SESSION_GRANT_LABEL = "session-grant-v1";
 const SETUP_CURSOR_LABEL = "setup-cursor-v1";
+const V6_ONBOARDING_RECEIPT_LABEL = "v6-onboarding-receipt-v1";
+
+export async function issueV6OnboardingReceipt(secret: string, message: string): Promise<string> {
+  const key = await hmacKey(secret, V6_ONBOARDING_RECEIPT_LABEL);
+  const mac = await crypto.subtle.sign("HMAC", key, text(message).buffer as ArrayBuffer);
+  return base64Url(new Uint8Array(mac));
+}
+
+export async function verifyV6OnboardingReceipt(secret: string, message: string, receipt: string): Promise<boolean> {
+  const mac = fromBase64Url(receipt);
+  return mac !== null && mac.length === 32 &&
+    await macMatches(secret, V6_ONBOARDING_RECEIPT_LABEL, message, mac);
+}
 
 export interface SessionGrantFields {
   scope: string;
@@ -10,6 +23,15 @@ export interface SessionGrantFields {
   audience: string;
   runId: string;
   now?: number;
+}
+
+// Keep the signed numeric selection within the 64 KiB continuation limit.
+export const MAX_SETUP_INSTALL_REPOSITORIES = 2500;
+
+export interface SetupInstallSelection {
+  createdAt: number;
+  policySha256: string;
+  repositoryIds: number[];
 }
 
 export interface SetupCursorClaims {
@@ -20,6 +42,7 @@ export interface SetupCursorClaims {
   expiry: number;
   listingSha256: string;
   failureCount: number;
+  onboarding?: SetupInstallSelection;
 }
 
 function text(value: string): Uint8Array {
@@ -148,6 +171,7 @@ function cursorMessage(claims: SetupCursorClaims): string {
     String(claims.expiry),
     claims.listingSha256,
     String(claims.failureCount),
+    ...(claims.onboarding === undefined ? [] : [JSON.stringify(claims.onboarding)]),
   ].join("\n");
 }
 
@@ -160,7 +184,24 @@ function cursorPayload(claims: SetupCursorClaims): string {
     expiry: claims.expiry,
     listing_sha256: claims.listingSha256,
     failure_count: claims.failureCount,
+    ...(claims.onboarding === undefined ? {} : { onboarding: claims.onboarding }),
   });
+}
+
+function parseInstallSelection(value: unknown): SetupInstallSelection | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { createdAt, policySha256, repositoryIds } = value as Record<string, unknown>;
+  if (Object.keys(value).length !== 3 || typeof createdAt !== "number" ||
+      !Number.isSafeInteger(createdAt) || createdAt <= 0 ||
+      typeof policySha256 !== "string" || !/^[a-f0-9]{64}$/.test(policySha256) ||
+      !Array.isArray(repositoryIds) || repositoryIds.length === 0 ||
+      repositoryIds.length > MAX_SETUP_INSTALL_REPOSITORIES) return null;
+  let previous = 0;
+  for (const id of repositoryIds) {
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= previous) return null;
+    previous = id;
+  }
+  return { createdAt, policySha256, repositoryIds };
 }
 
 function parseCursorPayload(value: unknown): SetupCursorClaims | null {
@@ -168,7 +209,8 @@ function parseCursorPayload(value: unknown): SetupCursorClaims | null {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== 7) {
+  const onboarding = record.onboarding === undefined ? undefined : parseInstallSelection(record.onboarding);
+  if (onboarding === null || Object.keys(record).length !== (onboarding === undefined ? 7 : 8)) {
     return null;
   }
   const installationId = record.installation_id;
@@ -212,12 +254,14 @@ function parseCursorPayload(value: unknown): SetupCursorClaims | null {
     expiry,
     listingSha256,
     failureCount,
+    ...(onboarding === undefined ? {} : { onboarding }),
   };
 }
 
 export function freshSetupCursor(input: {
   installationId: number;
   deliveryId: string;
+  onboarding?: SetupInstallSelection;
   now?: number;
 }): SetupCursorClaims {
   return {
@@ -228,6 +272,7 @@ export function freshSetupCursor(input: {
     expiry: (input.now ?? Date.now()) + SETUP_CURSOR_TTL_MS,
     listingSha256: "",
     failureCount: 0,
+    ...(input.onboarding === undefined ? {} : { onboarding: input.onboarding }),
   };
 }
 

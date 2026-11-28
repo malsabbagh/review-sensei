@@ -586,9 +586,17 @@ def _build_offline_venv_and_install(
     checkout_step = next(
         step
         for step in wf_steps
-        if step.get("name") == "Check out trusted default-branch policy only"
+        if step.get("name") == "Check out the same trusted policy as the planner"
     )
-    if checkout_step["with"].get("path") != "trusted-policy":
+    if (
+        checkout_step["with"].get("path") != "trusted-policy"
+        or checkout_step["with"].get("ref") != "${{ needs.plan.outputs.policy }}"
+        or not any(
+            step.get("with", {}).get("ref")
+            == "${{ github.event.repository.default_branch }}"
+            for step in wf_doc["jobs"]["plan"]["steps"]
+        )
+    ):
         raise RuntimeError(
             "workflow checkout step must isolate policy under trusted-policy/"
         )
@@ -1185,6 +1193,7 @@ def _make_github_handler(
                         "number": pr_num,
                         "title": pr.get("title", "Fix bounds check"),
                         "state": pr["state"],
+                        "draft": False,
                         "head": {
                             "sha": pr["head_sha"],
                             "repo": {
@@ -3314,8 +3323,8 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             sum_59,
         )
 
-    def test_trusted_policy_disabled_skips_before_coordinator(self) -> None:
-        """Test 5: trusted policy github.writes=false / automatic_reviews=false skips cleanly with exit 0 and 0 coordinator calls."""
+    def test_trusted_writes_off_analysis_and_disabled_automatic_policy(self) -> None:
+        """The installed CLI analyzes on read-only admission; disabled automatic review performs no API calls."""
 
         provider_state, provider_port = self._start_mock_provider()
         policy_writes_off = self._write_trusted_policy(
@@ -3330,13 +3339,39 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
             mint_before = self.gh_state.runner_mint_count
 
         for tag, pol_dir, expected_diag in (
-            ("w", policy_writes_off, "v6_policy_writes_disabled"),
+            ("w", policy_writes_off, None),
             ("a", policy_auto_off, "v6_policy_automatic_reviews_disabled"),
         ):
             out_p = self.tmp_path / f"outcome-56-{tag}.json"
             sum_p = self.tmp_path / f"summary-56-{tag}.md"
             cwd_p = self.tmp_path / f"cwd-56-{tag}"
             cwd_p.mkdir()
+            event_args = []
+            event_env = {"OPENAI_API_KEY": PROVIDER_API_KEY}
+            if expected_diag is None:
+                event = cwd_p / "event.json"
+                repository = {"full_name": REPO_FULL, "id": REPO_ID, "fork": False}
+                event.write_text(
+                    json.dumps(
+                        {
+                            "action": "opened",
+                            "repository": repository,
+                            "pull_request": {
+                                "number": 56,
+                                "head": {"sha": HEAD_SHA, "repo": repository},
+                            },
+                        }
+                    )
+                )
+                event_args = ["--workflow-event-path", str(event)]
+                event_env.update(
+                    {
+                        "GITHUB_REPOSITORY": REPO_FULL,
+                        "GITHUB_REPOSITORY_ID": str(REPO_ID),
+                        "GITHUB_EVENT_NAME": "pull_request",
+                        "GITHUB_REF": "refs/pull/56/merge",
+                    }
+                )
             res = subprocess.run(
                 self._runner_argv(
                     pr_number=56,
@@ -3347,21 +3382,32 @@ class V6OneWriterWorkerQualificationTests(unittest.TestCase):
                     step_summary_path=sum_p,
                     analyze_fresh_pr=True,
                     policy_root=pol_dir,
-                ),
+                )
+                + event_args,
                 cwd=str(cwd_p),
-                env=self._runner_env(run_id=9601),
+                env=self._runner_env(run_id=9601, extra_env=event_env),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
             self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
             parsed = json.loads(out_p.read_text(encoding="utf-8"))
-            self.assertEqual(parsed["status"], "skipped")
             self.assertEqual(parsed["diagnostic"], expected_diag)
-            self.assertEqual(parsed["model_calls_started"], 0)
+            if expected_diag is None:
+                self.assertEqual(parsed["status"], "analyzed")
+                self.assertGreater(parsed["model_calls_started"], 0)
+                self.assertIn("ReviewSensei read-only review", sum_p.read_text())
+                with self.gh_state.lock:
+                    for method, path in self.gh_state.requests_log[req_before:]:
+                        if path.startswith("/repos/"):
+                            self.assertEqual(method, "GET")
+                    req_before = len(self.gh_state.requests_log)
+            else:
+                self.assertEqual(parsed["status"], "skipped")
+                self.assertEqual(parsed["model_calls_started"], 0)
 
         with provider_state.lock:
-            self.assertEqual(provider_state.calls, 0)
+            self.assertGreater(provider_state.calls, 0)
         with self.gh_state.lock:
             self.assertEqual(len(self.gh_state.requests_log), req_before)
             self.assertEqual(self.gh_state.runner_mint_count, mint_before)

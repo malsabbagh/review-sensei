@@ -169,6 +169,7 @@ export interface LivePullRequestReview {
 
 export interface LivePullRequestReviewComment {
   id: number;
+  in_reply_to_id?: number;
   login: string;
   userType: string;
   commit_id: string | null;
@@ -208,6 +209,7 @@ export interface RevocationResult {
 }
 
 export interface PullRequestBinding {
+  created_at?: string;
   head_sha: string;
   base_repo_id: number;
   state: "open" | "closed";
@@ -789,16 +791,25 @@ export class GitHubApi {
     }
   }
 
-  async installationFor(repository: string): Promise<number | null> {
+  private async repositoryInstallation(repository: string): Promise<JsonObject | null> {
     const response = await this.request("GET", `${repositoryPath(repository)}/installation`, await this.appJwt());
-    if (response.status === 404 || response.status === 403) {
-      return null;
-    }
+    if (response.status === 404 || response.status === 403) return null;
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
       throw new Error("github_installation_lookup_failed");
     }
-    const id = response.data.id;
+    return response.data;
+  }
+
+  async installationFor(repository: string): Promise<number | null> {
+    const data = await this.repositoryInstallation(repository);
+    const id = data?.id;
     return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+
+  async installationGenerationMatches(repository: string, installationId: number, createdAt: number): Promise<boolean> {
+    const data = await this.repositoryInstallation(repository);
+    return data?.id === installationId && typeof data.created_at === "string" &&
+      Date.parse(data.created_at) === createdAt && data.suspended_at == null;
   }
 
   /** One authenticated lookup. Association and caller-supplied role are not permission. */
@@ -824,7 +835,7 @@ export class GitHubApi {
     repository: string,
     token: string,
     observed = false,
-  ): Promise<{ id: number; fork: boolean; full_name?: string; owner_id?: number; owner_login?: string } | null> {
+  ): Promise<{ id: number; fork: boolean; default_branch?: string; full_name?: string; owner_id?: number; owner_login?: string } | null> {
     const response = await this.request("GET", repositoryPath(repository), token);
     if (response.status === 404 || response.status === 403) {
       return null;
@@ -843,7 +854,7 @@ export class GitHubApi {
       if (!isObject(owner) || !Number.isSafeInteger(owner.id) || (owner.id as number) <= 0 || typeof owner.login !== "string" || !/^[A-Za-z0-9-]{1,100}$/.test(owner.login) || typeof fullName !== "string" || fullName.toLowerCase() !== repository.toLowerCase() || fullName.split("/")[0].toLowerCase() !== owner.login.toLowerCase()) throw new Error("github_repository_observation_invalid");
       return { id, fork, full_name: fullName, owner_id: owner.id as number, owner_login: owner.login };
     }
-    return { id, fork };
+    return { id, fork, ...(typeof response.data.default_branch === "string" ? { default_branch: response.data.default_branch } : {}) };
   }
 
   /** Return the current immutable head for one pull request, or null when it cannot be read. */
@@ -987,6 +998,7 @@ export class GitHubApi {
       state,
       head_repo_id: headRepoId,
       is_fork_pr: isForkPr,
+      ...(typeof response.data.created_at === "string" ? { created_at: response.data.created_at } : {}),
     };
   }
 
@@ -1724,6 +1736,7 @@ export class GitHubApi {
       original_commit_id: typeof originalCommitId === "string" ? originalCommitId : null,
       body,
       pull_request_url: prUrl,
+      ...(Number.isSafeInteger(data.in_reply_to_id) ? { in_reply_to_id: Number(data.in_reply_to_id) } : {}),
       performedViaAppId: isObject(appObj) ? this.optionalPositiveId(appObj.id) : null,
     };
   }

@@ -16,7 +16,7 @@ import {
   parseCanonicalSlotKey,
   serializeV6RouteResponseBody,
 } from "./v6-pr-coordinator";
-import { parseRepositoryCsv, redactSensitiveText } from "./v6-escrow-crypto";
+import { redactSensitiveText } from "./v6-escrow-crypto";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
@@ -25,6 +25,7 @@ import {
   processDelivery,
 } from "./github-app";
 import { freshSetupCursor, signSetupCursor } from "./signed-mac";
+import { requireV6Admission, attestInstallDelivery, verifyOnboardingEventRef } from "./v6-onboarding";
 import { runSignedSetupStep, scheduleSetupContinue } from "./setup-step";
 
 export { V6PrCoordinator };
@@ -49,7 +50,9 @@ function response(body: unknown, status = 200, noStore = false): Response {
  */
 export function setupErrorCode(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
-  if (/^github_[a-z0-9_]{1,80}$/.test(message)) {
+  if (/^github_[a-z0-9_]{1,80}$/.test(message) ||
+      message === "v6_installation_identity_unavailable" ||
+      message === "v6_installation_selection_unavailable") {
     return message;
   }
   if (message === "GitHub App installation lacks setup permissions") {
@@ -606,6 +609,10 @@ async function webhook(
 
   try {
     const delivery = parseVerifiedDelivery(body, event, deliveryId, app);
+    if (delivery !== null) {
+      const onboarding = await attestInstallDelivery(env, delivery, body);
+      if (onboarding !== undefined) delivery.onboarding = onboarding;
+    }
     if (delivery !== null && deferInstallationSetup(delivery)) {
       if (
         ctx === undefined ||
@@ -620,6 +627,7 @@ async function webhook(
         freshSetupCursor({
           installationId: delivery.installationId,
           deliveryId: delivery.deliveryId,
+          onboarding: delivery.onboarding,
         }),
       );
       scheduleSetupContinue(env, ctx, cursor);
@@ -848,12 +856,10 @@ async function v6Lease(
         dispatchControl: control,
         requestLifetime: lifetime,
       });
-      if (!parseRepositoryCsv(env.V6_PILOT_REPOSITORIES).has(claims.repository.toLowerCase())) {
-        throw new Error("v6_lease_unauthorized_tuple");
-      }
+      const enrollment = await requireV6Admission(env, claims);
       const github = new GitHubApi(env).withRequestLifetime(lifetime, control);
       const installationId = await github.installationFor(claims.repository);
-      if (installationId === null) {
+      if (installationId === null || (enrollment !== null && installationId !== enrollment.installationId)) {
         throw new Error("v6_lease_unauthorized_tuple");
       }
       const readToken = await github.capabilityToken(installationId, claims.repository, {
@@ -864,6 +870,7 @@ async function v6Lease(
       if (repoInfo === null || repoInfo.fork || repoInfo.id !== claims.repository_id) {
         throw new Error("v6_lease_unauthorized_tuple");
       }
+      if (enrollment !== null) verifyOnboardingEventRef(claims, repoInfo.default_branch, pullRequest);
       return buildCanonicalSlotKey({
         host,
         appId: appIdValue,

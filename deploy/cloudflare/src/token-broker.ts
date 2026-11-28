@@ -9,6 +9,7 @@ import { type OidcClaims, verifyOidcAssertion } from "./oidc";
 import { issueSessionGrant, sessionGrantAuthentic } from "./signed-mac";
 import { RUN_AUTHORITY_AUDIENCE, authorizeRunCapability, authorizeRunSource, bindRunAuthority, canonicalRunAuthority, parseRunAuthority, type RunAuthority } from "./run-authority";
 import { parseRepositoryCsv } from "./v6-escrow-crypto";
+import { v6OnboardingFencesV5 } from "./v6-onboarding";
 import {
   PUBLIC_REPOSITORY,
   brokerAcceptedPublicWorkflowTags,
@@ -342,7 +343,8 @@ export class TokenBroker {
     if (
       requested !== "review_status" &&
       requested !== "review_actions" &&
-      parseRepositoryCsv(this.env.V6_PILOT_REPOSITORIES).has(claims.repository.toLowerCase())
+      (parseRepositoryCsv(this.env.V6_PILOT_REPOSITORIES).has(claims.repository.toLowerCase()) ||
+        await v6OnboardingFencesV5(this.env, claims.repository_id))
     ) {
       throw new Error("broker_v6_pilot_v5_writer_disabled");
     }
@@ -490,6 +492,9 @@ export class TokenBroker {
     });
     if (!authentic) {
       throw new Error("broker_session_grant_invalid");
+    }
+    if (await v6OnboardingFencesV5(this.env, parsed.repository_id)) {
+      throw new Error("broker_v6_pilot_v5_writer_disabled");
     }
     control?.check();
     return parsed;

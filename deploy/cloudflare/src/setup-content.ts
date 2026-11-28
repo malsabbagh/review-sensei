@@ -7,6 +7,7 @@
  * to the workflow; this module never handles its value.
  */
 
+import v6NewInstallCaller from "../fixtures/v6-new-install-caller.yml";
 import senseiOnlyV5CallerFixture from "../fixtures/sensei-only-v5-caller.yml";
 import keywordRescanV5CallerFixture from "../fixtures/released-v5-keyword-rescan-caller.yml";
 import preRecoveryV5CallerFixture from "../fixtures/released-v5-pre-recovery-caller.yml";
@@ -2020,6 +2021,20 @@ export function buildSetupFiles(
   publicWorkflowTag: string = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ): readonly SetupFile[] {
   return buildTaggedV4SetupFiles(publicWorkflowTag);
+}
+
+export function buildV6NewInstallSetupFiles(
+  receipt: string,
+  installationId: number,
+  repositoryId: number,
+): readonly [SetupFile, ...SetupFile[]] {
+  const caller = "# ReviewSensei v6 installation ID: " + installationId +
+    "\n# ReviewSensei v6 repository ID: " + repositoryId +
+    "\n# ReviewSensei v6 enrollment receipt: " + receipt + "\n" + v6NewInstallCaller;
+  return [
+    { path: SETUP_WORKFLOW_PATH, content: caller },
+    ...buildSetupFiles().filter(file => file.path !== SETUP_WORKFLOW_PATH),
+  ];
 }
 
 export function buildHistoricalV3SetupFiles(

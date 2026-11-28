@@ -56,17 +56,75 @@ permissions:
   id-token: write
 
 concurrency:
-  group: reviewsensei-v6-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
+  group: reviewsensei-v6-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  v6-pilot:
+  plan:
     if: >-
-      (github.event_name != 'pull_request' ||
-       (github.event.pull_request.draft != true &&
-        github.event.pull_request.head.repo.fork != true &&
-        github.event.pull_request.head.repo.full_name == github.repository))
+      (github.event_name != 'pull_request' && github.event_name != 'pull_request_review_comment') ||
+      (github.event.pull_request.draft != true && github.event.pull_request.head.repo.fork != true &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      runner_kind: ${{ steps.entry.outputs.runner_kind }}
+      credential: ${{ steps.entry.outputs.credential }}
+      plan_sha: ${{ steps.entry.outputs.plan_sha }}
+      head: ${{ steps.entry.outputs.head_sha }}
+      policy: ${{ steps.entry.outputs.policy }}
+      enabled: ${{ steps.entry.outputs.enabled }}
+    steps:
+      - name: Check out the reusable workflow source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: malsabbagh/review-sensei
+          ref: ${{ job.workflow_sha }}
+          path: v6-source
+          persist-credentials: false
+      - name: Check out trusted default-branch policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted-policy
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Bind the event and choose the configured analysis runner
+        id: entry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+          EVENT_KIND: ${{ inputs.event }}
+          REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}
+          REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -z "$HEAD_REPOSITORY" || "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]]
+          export POLICY_ROOT="$GITHUB_WORKSPACE/trusted-policy"
+          policy="$(git -C "$POLICY_ROOT" rev-parse HEAD)"
+          [[ "$policy" =~ ^[0-9a-f]{40}$ ]]
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
+          cd "$RUNNER_TEMP"
+          python -m venv "$RUNNER_TEMP/v6-plan"
+          python_bin="$RUNNER_TEMP/v6-plan/bin/python"
+          "$python_bin" -m pip install "$GITHUB_WORKSPACE/v6-source" "$GITHUB_WORKSPACE/v6-source/packages/python/review-sensei-github"
+          "$python_bin" -I -m review_sensei_github.v6_workflow_event
+
+  v6-pilot:
+    needs: plan
+    if: needs.plan.outputs.enabled == 'true' && contains(fromJSON('["hosted","local"]'), needs.plan.outputs.runner_kind)
+    runs-on: ${{ fromJSON(needs.plan.outputs.runner_kind == 'local' && '["self-hosted","linux","x64","ollama"]' || '"ubuntu-latest"') }}
     permissions:
       contents: read
       pull-requests: read
@@ -80,7 +138,7 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
           OPERATION_ID: ${{ inputs.operation_id }}
           EVENT_KIND: ${{ inputs.event }}
@@ -108,7 +166,7 @@ jobs:
             exit 1
           fi
           case "$EVENT_KIND" in
-            pull_request|issue_comment|workflow_dispatch) ;;
+            pull_request|issue_comment|pull_request_review_comment|workflow_dispatch) ;;
             *) echo '::error::unsupported v6 event input' >&2; exit 1 ;;
           esac
           if [[ -n "$OPERATION_ID" && ! "$OPERATION_ID" =~ ^[A-Za-z0-9._:/-]{1,128}$ ]]; then
@@ -120,10 +178,10 @@ jobs:
             exit 1
           fi
 
-      - name: Check out trusted default-branch policy only
+      - name: Check out the same trusted policy as the planner
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ needs.plan.outputs.policy }}
           path: trusted-policy
           fetch-depth: 1
           persist-credentials: false
@@ -142,6 +200,7 @@ jobs:
             echo '::error::workflow SHA is invalid' >&2
             exit 1
           fi
+          cd "$RUNNER_TEMP"
           source_dir="$RUNNER_TEMP/review-sensei-v6-source"
           src_checkout="$RUNNER_TEMP/review-sensei-v6-src"
           rm -rf "$source_dir" "$src_checkout"
@@ -163,7 +222,7 @@ jobs:
           wheel_dir="$RUNNER_TEMP/review-sensei-v6-wheels"
           rm -rf "$wheel_dir"
           mkdir -p "$wheel_dir"
-          python -m venv "$RUNNER_TEMP/review-sensei-v6-venv"
+          python -I -m venv "$RUNNER_TEMP/review-sensei-v6-venv"
           python_bin="$RUNNER_TEMP/review-sensei-v6-venv/bin/python"
           "$python_bin" -m pip install --disable-pip-version-check --upgrade pip
           "$python_bin" -m pip wheel \
@@ -206,15 +265,16 @@ jobs:
       - name: Run ReviewSensei v6 pilot recovery
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          V6_EXPECTED_PLAN_SHA: ${{ needs.plan.outputs.plan_sha }}
+          OLLAMA_API_KEY: ${{ needs.plan.outputs.credential == 'OLLAMA_API_KEY' && secrets.OLLAMA_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ needs.plan.outputs.credential == 'OPENROUTER_API_KEY' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ needs.plan.outputs.credential == 'OPENAI_API_KEY' && secrets.OPENAI_API_KEY || '' }}
           REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}
           REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
           OPERATION_ID: ${{ inputs.operation_id }}
           EVENT_KIND: ${{ inputs.event }}
           EFFECT_KIND: ${{ inputs.effect_kind }}
@@ -231,6 +291,7 @@ jobs:
             --effect-kind "$EFFECT_KIND"
             --workflow-sha "$REVIEW_SENSEI_WORKFLOW_SHA"
             --analyze-fresh-pr
+            --workflow-event-path "$GITHUB_EVENT_PATH"
             --policy-root "$GITHUB_WORKSPACE/trusted-policy"
             --outcome "$RUNNER_TEMP/v6-pilot-outcome.json"
           )

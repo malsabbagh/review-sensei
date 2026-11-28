@@ -1,3 +1,4 @@
+import { V6_ONBOARDING_TAG, onboardingRuntimeMatches, requireV6Admission, verifyOnboardingEventRef } from "./v6-onboarding";
 import { DurableObject } from "cloudflare:workers";
 import { brokerDiagnostic } from "./broker-diagnostics";
 import type { BrokerDispatchControl } from "./broker-dispatch-control";
@@ -174,7 +175,7 @@ export interface V6ProviderAdapter {
   appBotLogin(): Promise<string>;
   installationFor(repository: string): Promise<number | null>;
   readOnlyToken(installationId: number, repository: string, scope?: "status" | "actions"): Promise<string>;
-  repositoryInfo(repository: string, token: string): Promise<{ id: number; fork: boolean } | null>;
+  repositoryInfo(repository: string, token: string): Promise<{ id: number; fork: boolean; default_branch?: string } | null>;
   pullRequestBinding(
     repository: string,
     pullRequest: number,
@@ -1284,7 +1285,7 @@ export class GitHubV6ProviderAdapter implements V6ProviderAdapter {
   async repositoryInfo(
     repository: string,
     token: string,
-  ): Promise<{ id: number; fork: boolean } | null> {
+  ): Promise<{ id: number; fork: boolean; default_branch?: string } | null> {
     return this.github.repositoryInfo(repository, token);
   }
 
@@ -1373,6 +1374,7 @@ export class GitHubV6ProviderAdapter implements V6ProviderAdapter {
 }
 
 interface VerifiedEdgeContext {
+  firstPrAfter?: number;
   claims: OidcClaims;
   appId: number;
   installationId: number;
@@ -1380,7 +1382,6 @@ interface VerifiedEdgeContext {
   host: string;
   clockMarginMs: number;
   crypto: V6EscrowCrypto;
-  pilotRepos: Set<string>;
   rollbackRepos: Set<string>;
   readToken: string;
 }
@@ -1451,9 +1452,10 @@ export class V6PrCoordinatorEngine {
 
   private async verifyTupleAndEdge(
     env: WorkerEnv,
-    oidcToken: unknown,
+    body: Record<string, unknown>,
     control?: BrokerDispatchControl,
   ): Promise<VerifiedEdgeContext> {
+    const oidcToken = body.oidc_token;
     const appId = configuredAppId(env);
     const clockMarginMs = configuredClockMarginMs(env);
     const host = canonicalSlotHost(env.GITHUB_API_URL);
@@ -1485,15 +1487,17 @@ export class V6PrCoordinatorEngine {
       throw new Error("v6_lease_unauthorized_tuple");
     }
 
-    const pilotRepos = parseRepositoryCsv(env.V6_PILOT_REPOSITORIES);
-    if (!pilotRepos.has(claims.repository.toLowerCase())) {
-      throw new Error("v6_lease_unauthorized_tuple");
-    }
-
-    await this.verifyPinnedWorkflow(env, claims);
+    const enrollment = await requireV6Admission(
+      env, claims, this.clock.isTrusted() ? this.clock.nowMs() : NaN,
+    );
+    if (enrollment === null) await this.verifyPinnedWorkflow(env, claims);
 
     const installationId = await this.provider.installationFor(claims.repository);
-    if (installationId === null) {
+    if (installationId === null || (enrollment !== null && installationId !== enrollment.installationId)) {
+      throw new Error("v6_lease_unauthorized_tuple");
+    }
+    if (enrollment !== null &&
+        !onboardingRuntimeMatches(enrollment, await this.provider.workflowRuntimeShas(V6_ONBOARDING_TAG))) {
       throw new Error("v6_lease_unauthorized_tuple");
     }
     const readToken = await this.provider.readOnlyToken(
@@ -1506,15 +1510,20 @@ export class V6PrCoordinatorEngine {
       throw new Error("v6_lease_unauthorized_tuple");
     }
 
+    if (enrollment !== null) {
+      const pr = body.pull_request ?? parseCanonicalSlotKey(body.slot_key)?.pullRequest;
+      if (!isPositiveSafeInt(pr)) throw new Error("v6_lease_unauthorized_tuple");
+      verifyOnboardingEventRef(claims, repoInfo.default_branch, pr);
+    }
     return {
       claims,
       appId,
       installationId,
       baseRepoId: repoInfo.id,
+      firstPrAfter: enrollment?.firstPrAfter,
       host,
       clockMarginMs,
       crypto: escrowCrypto,
-      pilotRepos,
       rollbackRepos: parseRepositoryCsv(env.V6_PILOT_ROLLBACK_REPOSITORIES),
       readToken,
     };
@@ -2052,13 +2061,22 @@ export class V6PrCoordinatorEngine {
 
     let edge: VerifiedEdgeContext;
     try {
-      edge = await this.verifyTupleAndEdge(env, body.oidc_token, control);
+      edge = await this.verifyTupleAndEdge(env, body, control);
     } catch (error) {
       return this.mapEdgeError("/github/v6/lease/acquire", error, rayId);
     }
 
     const pullRequest = body.pull_request;
     const headSha = body.head_sha;
+    if (edge.firstPrAfter !== undefined) {
+      const event = edge.claims.event_name;
+      const allowed = event === "pull_request_review_comment"
+        ? ["inline_reply"]
+        : event === "issue_comment" ? ["issue_reply", "review_publish"] : ["review_publish"];
+      if (!Array.isArray(body.capabilities) || body.capabilities.length !== 1 || !allowed.includes(body.capabilities[0])) {
+        return diagnosticResponse(403, "v6_lease_unauthorized_tuple", { rayId });
+      }
+    }
     const predecessorAnchorId = body.predecessor_anchor_comment_id as number | undefined;
     const slotKey = buildCanonicalSlotKey({
       host: edge.host,
@@ -2579,6 +2597,10 @@ export class V6PrCoordinatorEngine {
       if (prBinding === null || prBinding.base_repo_id !== edge.baseRepoId || prBinding.state !== "open") {
         return await abortReservedToIdle(403, "v6_lease_unauthorized_tuple");
       }
+      if (edge.firstPrAfter !== undefined &&
+          !(Date.parse(prBinding.created_at ?? "") > edge.firstPrAfter)) {
+        return await abortReservedToIdle(403, "v6_lease_unauthorized_tuple");
+      }
       if (
         (prBinding.is_fork_pr || prBinding.head_repo_id !== prBinding.base_repo_id) &&
         (requestedScope.hasWriteScope || edge.claims.event_name !== "pull_request")
@@ -2950,7 +2972,7 @@ export class V6PrCoordinatorEngine {
     let slotKey: string;
     let pullRequest: number;
     try {
-      edge = await this.verifyTupleAndEdge(env, body.oidc_token, control);
+      edge = await this.verifyTupleAndEdge(env, body, control);
       ({ slotKey, pullRequest } = this.validateSlotKeyForEdge(body.slot_key, edge));
     } catch (error) {
       return this.mapEdgeError("/github/v6/lease/drain", error, rayId);
@@ -3307,7 +3329,7 @@ export class V6PrCoordinatorEngine {
     let edge: VerifiedEdgeContext;
     let slotKey: string;
     try {
-      edge = await this.verifyTupleAndEdge(env, body.oidc_token, control);
+      edge = await this.verifyTupleAndEdge(env, body, control);
       ({ slotKey } = this.validateSlotKeyForEdge(body.slot_key, edge));
     } catch (error) {
       return this.mapEdgeError("/github/v6/lease/release", error, rayId);
@@ -3630,7 +3652,26 @@ export class V6PrCoordinatorEngine {
     operationId: string,
     payloadSha256: string,
     intentHeadSha: string,
+    intent: Record<string, unknown>,
   ): Promise<void> {
+    const mention = /^v6:[1-9][0-9]*:[1-9][0-9]*:(issue_reply|inline_reply):[1-9][0-9]*$/.exec(operationId);
+    const verifyReply = async (body: string, parentId?: number): Promise<void> => {
+      if (!mention) return;
+      const target = typeof intent.target_location === "string"
+        ? /^\/repos\/([^/]+\/[^/]+)\/(pulls|issues)\/([1-9][0-9]*)\/comments(?:\/([1-9][0-9]*)\/replies)?$/.exec(intent.target_location)
+        : null;
+      const inline = mention[1] === "inline_reply";
+      if (intent.effect_kind !== mention[1] || !target || target[1] !== edge.claims.repository ||
+          target[2] !== (inline ? "pulls" : "issues") || Number(target[3]) !== pullRequest ||
+          (inline ? !parentId || Number(target[4]) !== parentId : target[4] !== undefined) ||
+          !body.endsWith(`<!-- reviewsensei:v6:effect op=${operationId} sha256=${payloadSha256} -->`) ||
+          await sha256Hex(canonicalJsonString({ body })) !== intent.target_digest) {
+        throw new Error("v6_lease_reconciliation_evidence_invalid");
+      }
+    };
+    if (mention && kind !== (mention[1] === "inline_reply" ? "pull_request_review_comment" : "issue_comment")) {
+      throw new Error("v6_lease_reconciliation_evidence_invalid");
+    }
     if (kind === "pull_request_review") {
       const review = await this.provider.pullRequestReview(
         edge.claims.repository,
@@ -3671,13 +3712,14 @@ export class V6PrCoordinatorEngine {
           reviewComment.performedViaAppId,
           edge.appId,
         ) ||
-        (reviewComment.commit_id !== null &&
+        (!mention && reviewComment.commit_id !== null &&
           reviewComment.commit_id !== intentHeadSha &&
           reviewComment.original_commit_id !== intentHeadSha) ||
         !this.hasEffectEvidence(reviewComment.body, operationId, payloadSha256)
       ) {
         throw new Error("v6_lease_reconciliation_evidence_invalid");
       }
+      await verifyReply(reviewComment.body, reviewComment.in_reply_to_id);
       return;
     }
     if (kind === "issue_comment") {
@@ -3700,6 +3742,7 @@ export class V6PrCoordinatorEngine {
       ) {
         throw new Error("v6_lease_reconciliation_evidence_invalid");
       }
+      await verifyReply(issueComment.body);
       return;
     }
     const run = await this.provider.checkRun(edge.claims.repository, effectId, edge.readToken);
@@ -4021,6 +4064,7 @@ export class V6PrCoordinatorEngine {
           item.operation_id,
           intentPayloadSha,
           intentHeadSha,
+          intentRecord.payload,
         );
       } else if (item.resolution === "proved_not_submitted") {
         let proofRecord: ParsedPrLedgerRecord;
@@ -4090,7 +4134,7 @@ export class V6PrCoordinatorEngine {
     let slotKey: string;
     let pullRequest: number;
     try {
-      edge = await this.verifyTupleAndEdge(env, body.oidc_token, control);
+      edge = await this.verifyTupleAndEdge(env, body, control);
       ({ slotKey, pullRequest } = this.validateSlotKeyForEdge(body.slot_key, edge));
     } catch (error) {
       return this.mapEdgeError("/github/v6/lease/complete-reconcile", error, rayId);
@@ -4575,19 +4619,22 @@ export class V6PrCoordinatorEngine {
       "oidc_token",
       "pull_request",
       "slot_key",
+      "analysis_head_sha",
       "control_budget",
     ]);
     if (
       Object.keys(body).some((key) => !allowedKeys.has(key)) ||
       !isPositiveSafeInt(body.pull_request) ||
-      (body.slot_key !== undefined && typeof body.slot_key !== "string")
+      (body.slot_key !== undefined && typeof body.slot_key !== "string") ||
+      (body.analysis_head_sha !== undefined &&
+        (typeof body.analysis_head_sha !== "string" || !SHA1_HEX40_PATTERN.test(body.analysis_head_sha)))
     ) {
       return diagnosticResponse(400, "broker_invalid_request", { rayId });
     }
 
     let edge: VerifiedEdgeContext;
     try {
-      edge = await this.verifyTupleAndEdge(env, body.oidc_token, control);
+      edge = await this.verifyTupleAndEdge(env, body, control);
     } catch (error) {
       return this.mapEdgeError("/github/v6/lease/status", error, rayId);
     }
@@ -4605,10 +4652,20 @@ export class V6PrCoordinatorEngine {
 
     try {
       const slot = await this.readSlot(derivedSlotKey);
-      return {
-        status: 200,
-        body: slot === null ? absentSlotView(derivedSlotKey) : slotStatusView(slot),
-      };
+      const view = slot === null ? absentSlotView(derivedSlotKey) : slotStatusView(slot);
+      if (typeof body.analysis_head_sha === "string") {
+        if (edge.rollbackRepos.has(edge.claims.repository.toLowerCase())) {
+          return diagnosticResponse(403, "v6_lease_rollback_blocked", { rayId });
+        }
+        const pr = await this.provider.pullRequestBinding(edge.claims.repository, body.pull_request, edge.readToken);
+        if (pr === null || pr.state !== "open" || pr.is_fork_pr || pr.base_repo_id !== edge.baseRepoId ||
+            pr.head_repo_id !== edge.baseRepoId || pr.head_sha !== body.analysis_head_sha ||
+            (edge.firstPrAfter !== undefined && !(Date.parse(pr.created_at ?? "") > edge.firstPrAfter))) {
+          return diagnosticResponse(403, "v6_lease_unauthorized_tuple", { rayId });
+        }
+        view.analysis_head_sha = pr.head_sha;
+      }
+      return { status: 200, body: view };
     } catch (error) {
       if (error instanceof Error && error.message === "v6_lease_escrow_lost") {
         return diagnosticResponse(409, "v6_lease_escrow_lost", { slotState: "HOLD", rayId });
@@ -4651,7 +4708,7 @@ export class V6PrCoordinatorEngine {
     let slotKey: string;
     let pullRequest: number;
     try {
-      edge = await this.verifyTupleAndEdge(env, body.oidc_token, control);
+      edge = await this.verifyTupleAndEdge(env, body, control);
       ({ slotKey, pullRequest } = this.validateSlotKeyForEdge(body.slot_key, edge));
     } catch (error) {
       return this.mapEdgeError("/github/v6/lease/resolve-hold", error, rayId);
