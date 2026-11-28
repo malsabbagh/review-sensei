@@ -100,8 +100,19 @@ _LCA_RESULT = 8
 class V6FreshAnalysisError(ReviewInputError):
     """Fail-closed error raised during v6 fresh PR ancestry, diff, or batch planning."""
 
-    def __init__(self, diagnostic: str, message: str = "") -> None:
+    def __init__(
+        self,
+        diagnostic: str,
+        message: str = "",
+        *,
+        provider_calls: int | None = None,
+    ) -> None:
         super().__init__(message or diagnostic, diagnostic=diagnostic)
+        if provider_calls is not None and (
+            type(provider_calls) is not int or provider_calls < 0
+        ):
+            raise ValueError("provider_calls must be None or a non-negative integer")
+        self.provider_calls: int | None = provider_calls
 
 
 def _is_40_hex(value: Any) -> bool:
@@ -2063,6 +2074,7 @@ def execute_v6_batch(
         raise V6FreshAnalysisError(
             "review_provider_call_budget_exhausted",
             "review-wide provider call budget exhausted before batch dispatch",
+            provider_calls=0,
         )
     req = ReviewRequest(
         diff=batch.diff_text,
@@ -2080,7 +2092,10 @@ def execute_v6_batch(
             max_provider_calls=remaining_provider_calls,
         )
         run = context.service.run(req, budget=budget)
-        calls_made = max(1, int(getattr(run.outcome, "provider_calls", 1) or 1))
+        raw_calls = getattr(getattr(run, "outcome", None), "provider_calls", None)
+        calls_made: int | None = (
+            raw_calls if (type(raw_calls) is int and raw_calls >= 0) else None
+        )
         if run.result is None or run.outcome.status in {
             "provider_failed",
             "budget_exhausted",
@@ -2092,6 +2107,13 @@ def execute_v6_batch(
             raise V6FreshAnalysisError(
                 str(diag),
                 f"batch {batch.batch_id} failed during provider execution ({run.outcome.status})",
+                provider_calls=calls_made,
+            )
+        if calls_made is None:
+            raise V6FreshAnalysisError(
+                "v6_batch_provider_calls_unknown",
+                f"batch {batch.batch_id} completed without a valid integer outcome.provider_calls",
+                provider_calls=None,
             )
         return run.result, calls_made
 

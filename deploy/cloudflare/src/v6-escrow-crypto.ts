@@ -5,6 +5,9 @@ export const V6_ESCROW_IV_BYTES = 12;
 export const V6_ATTESTATION_HKDF_SALT = "v6-pr-coordinator-owner-attestation-v1";
 export const V6_ATTESTATION_HKDF_INFO = "reviewsensei:v6:owner-attestation:v1";
 
+export const V6_RECONCILE_CURSOR_HKDF_SALT = "v6-pr-coordinator-reconcile-cursor-v1";
+export const V6_RECONCILE_CURSOR_HKDF_INFO = "reviewsensei:v6:reconcile-cursor:v1";
+
 export interface EncryptedEscrow {
   version: 1;
   iv_b64: string;
@@ -26,6 +29,19 @@ export interface OwnerAttestationTuple {
   run_attempt: number;
   pr_head_sha: string;
   workflow_sha: string;
+}
+
+export interface ReconcileCursorMacFields {
+  version: 1;
+  slot_key: string;
+  generation: number;
+  lease_epoch: number;
+  evidence_sha256: string;
+  since_iso: string;
+  page_size: number;
+  next_page: number;
+  matched_intents: Array<{ intent_comment_id: number; operation_id_sha256: string }>;
+  old_owner_sha256: string | null;
 }
 
 const ENCODER = new TextEncoder();
@@ -238,9 +254,26 @@ export function redactSensitiveText(text: string): string {
 export class V6EscrowCrypto {
   private escrowKeyPromise: Promise<CryptoKey> | undefined;
   private attestationKeyPromise: Promise<CryptoKey> | undefined;
+  private reconcileCursorKeyPromise: Promise<CryptoKey> | undefined;
 
   constructor(private readonly signingKey: string | undefined) {
     requireSigningKey(signingKey);
+  }
+
+  private async deriveHmacKey(salt: string, info: string): Promise<CryptoKey> {
+    const root = await importHkdfRoot(this.signingKey);
+    return crypto.subtle.deriveKey(
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: toArrayBuffer(utf8Bytes(salt)),
+        info: toArrayBuffer(utf8Bytes(info)),
+      },
+      root,
+      { name: "HMAC", hash: "SHA-256", length: 256 },
+      false,
+      ["sign", "verify"],
+    );
   }
 
   private async escrowKey(): Promise<CryptoKey> {
@@ -258,27 +291,33 @@ export class V6EscrowCrypto {
         false,
         ["encrypt", "decrypt"],
       );
-    })();
+    })().catch((error) => {
+      this.escrowKeyPromise = undefined;
+      throw error;
+    });
     return this.escrowKeyPromise;
   }
 
   private async attestationKey(): Promise<CryptoKey> {
-    this.attestationKeyPromise ??= (async () => {
-      const root = await importHkdfRoot(this.signingKey);
-      return crypto.subtle.deriveKey(
-        {
-          name: "HKDF",
-          hash: "SHA-256",
-          salt: toArrayBuffer(utf8Bytes(V6_ATTESTATION_HKDF_SALT)),
-          info: toArrayBuffer(utf8Bytes(V6_ATTESTATION_HKDF_INFO)),
-        },
-        root,
-        { name: "HMAC", hash: "SHA-256", length: 256 },
-        false,
-        ["sign", "verify"],
-      );
-    })();
+    this.attestationKeyPromise ??= this.deriveHmacKey(
+      V6_ATTESTATION_HKDF_SALT,
+      V6_ATTESTATION_HKDF_INFO,
+    ).catch((error) => {
+      this.attestationKeyPromise = undefined;
+      throw error;
+    });
     return this.attestationKeyPromise;
+  }
+
+  private async reconcileCursorKey(): Promise<CryptoKey> {
+    this.reconcileCursorKeyPromise ??= this.deriveHmacKey(
+      V6_RECONCILE_CURSOR_HKDF_SALT,
+      V6_RECONCILE_CURSOR_HKDF_INFO,
+    ).catch((error) => {
+      this.reconcileCursorKeyPromise = undefined;
+      throw error;
+    });
+    return this.reconcileCursorKeyPromise;
   }
 
   async sealToken(token: string, aad: EscrowAadFields): Promise<EncryptedEscrow> {
@@ -337,30 +376,49 @@ export class V6EscrowCrypto {
     }
   }
 
-  async signOwnerAttestation(tuple: OwnerAttestationTuple): Promise<string> {
-    const key = await this.attestationKey();
-    const mac = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      toArrayBuffer(ownerAttestationBytes(tuple)),
-    );
+  private async hmacSignBytes(key: CryptoKey, payload: Uint8Array): Promise<string> {
+    const mac = await crypto.subtle.sign("HMAC", key, toArrayBuffer(payload));
     return hexFromBytes(new Uint8Array(mac));
   }
 
-  async verifyOwnerAttestation(
-    tuple: OwnerAttestationTuple,
+  private async hmacVerifyBytes(
+    key: CryptoKey,
+    payload: Uint8Array,
     macHex: string,
   ): Promise<boolean> {
     const macBytes = bytesFromHex64(macHex);
     if (macBytes === null) {
       return false;
     }
-    const key = await this.attestationKey();
-    return crypto.subtle.verify(
-      "HMAC",
-      key,
-      toArrayBuffer(macBytes),
-      toArrayBuffer(ownerAttestationBytes(tuple)),
+    return crypto.subtle.verify("HMAC", key, toArrayBuffer(macBytes), toArrayBuffer(payload));
+  }
+
+  async signOwnerAttestation(tuple: OwnerAttestationTuple): Promise<string> {
+    return this.hmacSignBytes(await this.attestationKey(), ownerAttestationBytes(tuple));
+  }
+
+  async verifyOwnerAttestation(
+    tuple: OwnerAttestationTuple,
+    macHex: string,
+  ): Promise<boolean> {
+    return this.hmacVerifyBytes(await this.attestationKey(), ownerAttestationBytes(tuple), macHex);
+  }
+
+  async signReconcileCursor(fields: ReconcileCursorMacFields): Promise<string> {
+    return this.hmacSignBytes(
+      await this.reconcileCursorKey(),
+      utf8Bytes(canonicalJsonString(fields)),
+    );
+  }
+
+  async verifyReconcileCursor(
+    fields: ReconcileCursorMacFields,
+    macHex: string,
+  ): Promise<boolean> {
+    return this.hmacVerifyBytes(
+      await this.reconcileCursorKey(),
+      utf8Bytes(canonicalJsonString(fields)),
+      macHex,
     );
   }
 }

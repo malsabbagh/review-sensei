@@ -13,7 +13,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -190,6 +190,16 @@ def _build_fresh_analysis_context_loader(
 ) -> Callable[[], V6FreshAnalysisContext] | None:
     """Return a lazy restartable batch context builder when fresh PR analysis is active."""
 
+    if config.fresh_analysis_context_loader is not None:
+        if (
+            config.initial_result_loader is not None
+            or config.initial_findings_path is not None
+        ):
+            raise ReviewInputError(
+                "fresh_analysis_context_loader cannot be combined with initial_result_loader or initial_findings_path",
+                diagnostic="v6_conflicting_analysis_config",
+            )
+        return config.fresh_analysis_context_loader
     if (
         not config.analyze_fresh_pr
         or config.initial_result_loader is not None
@@ -396,6 +406,26 @@ class V6PilotRunConfig:
     base_sha: str | None = None
     policy_digest: str | None = None
     configuration_digest: str | None = None
+    fresh_analysis_context_loader: Callable[[], V6FreshAnalysisContext] | None = None
+
+
+def _is_valid_call_report_value(value: Any) -> bool:
+    return (type(value) is str and value == "unknown") or (
+        type(value) is int and value >= 0
+    )
+
+
+def _format_operation_calls(
+    total: int | None,
+    unknown: bool,
+    *,
+    fallback: int | Literal["unknown"],
+) -> int | Literal["unknown"]:
+    if unknown:
+        return "unknown"
+    if type(total) is int and total >= 0:
+        return total
+    return fallback
 
 
 @dataclass(frozen=True)
@@ -411,8 +441,23 @@ class V6PilotRunOutcome:
     takeover_reconciliation: TakeoverReconciliationResult | None = None
     diagnostic: str | None = None
     lease_released: bool = False
-    model_calls_started: int = 0
+    model_calls_started: int | Literal["unknown"] = 0
+    operation_model_calls_total: int | Literal["unknown"] | None = None
     _details: Mapping[str, Any] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if not _is_valid_call_report_value(self.model_calls_started):
+            raise ValueError(
+                "V6PilotRunOutcome model_calls_started must be 'unknown' or integer >= 0"
+            )
+        if self.operation_model_calls_total is None:
+            object.__setattr__(
+                self, "operation_model_calls_total", self.model_calls_started
+            )
+        elif not _is_valid_call_report_value(self.operation_model_calls_total):
+            raise ValueError(
+                "V6PilotRunOutcome operation_model_calls_total must be None, 'unknown', or integer >= 0"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize a secret-redacted outcome dictionary."""
@@ -431,6 +476,7 @@ class V6PilotRunOutcome:
             ),
             "lease_released": self.lease_released,
             "model_calls_started": self.model_calls_started,
+            "operation_model_calls_total": self.operation_model_calls_total,
         }
         if isinstance(self.recovery_outcome, RecoveryCompleted):
             payload["github_effect_id"] = self.recovery_outcome.github_effect_id
@@ -674,6 +720,27 @@ class V6PilotRunner:
 
         if current_state == "HOLD":
             diag = slot_status.last_reason_code or "v6_lease_hold"
+            hold_op_total: int | Literal["unknown"] = "unknown"
+            try:
+                ro_total, ro_unknown = (
+                    read_only_engine.summarize_operation_provider_calls_read_only(
+                        owner=config.owner,
+                        repo=config.repo,
+                        pull_request=config.pull_request,
+                        operation_id=config.operation_id,
+                        event=config.event,
+                        visibility=config.visibility,
+                        granted_scopes=config.granted_scopes,
+                        expected_app_id=effective_expected_app_id,
+                        expected_bot_login=config.expected_bot_login,
+                        expected_bot_user_id=config.expected_bot_user_id,
+                    )
+                )
+                hold_op_total = _format_operation_calls(
+                    ro_total, ro_unknown, fallback=0
+                )
+            except Exception:
+                hold_op_total = "unknown"
             self._emit_hold_summary(config, slot_key=slot_key, blocker=diag)
             return self._write_outcome(
                 config,
@@ -684,6 +751,8 @@ class V6PilotRunner:
                     generation=current_generation,
                     lease_epoch=current_epoch,
                     diagnostic=diag,
+                    model_calls_started=0,
+                    operation_model_calls_total=hold_op_total,
                 ),
             )
 
@@ -848,6 +917,12 @@ class V6PilotRunner:
                         lease_epoch=current_epoch,
                         takeover_reconciliation=takeover_recon,
                         diagnostic=diag,
+                        model_calls_started=0,
+                        operation_model_calls_total=_format_operation_calls(
+                            takeover_recon.operation_model_calls_total,
+                            takeover_recon.operation_model_calls_unknown,
+                            fallback=0,
+                        ),
                     ),
                 )
             current_state = comp.state
@@ -868,6 +943,12 @@ class V6PilotRunner:
                         lease_epoch=current_epoch,
                         takeover_reconciliation=takeover_recon,
                         diagnostic=diag,
+                        model_calls_started=0,
+                        operation_model_calls_total=_format_operation_calls(
+                            takeover_recon.operation_model_calls_total,
+                            takeover_recon.operation_model_calls_unknown,
+                            fallback=0,
+                        ),
                     ),
                 )
 
@@ -884,6 +965,16 @@ class V6PilotRunner:
                     lease_epoch=current_epoch,
                     takeover_reconciliation=takeover_recon,
                     diagnostic=diag,
+                    model_calls_started=0,
+                    operation_model_calls_total=(
+                        _format_operation_calls(
+                            takeover_recon.operation_model_calls_total,
+                            takeover_recon.operation_model_calls_unknown,
+                            fallback=0,
+                        )
+                        if takeover_recon is not None
+                        else 0
+                    ),
                 ),
             )
 
@@ -1223,11 +1314,103 @@ class V6PilotRunner:
                 if diag_code is None:
                     diag_code = getattr(exc, "diagnostic", None)
 
-        model_calls_started = (
-            recovery_outcome.model_calls_started
-            if isinstance(recovery_outcome, (RecoveryCompleted, RecoveryPaused))
-            else 0
-        )
+        model_calls_started: int | Literal["unknown"] = 0
+        operation_model_calls_total: int | Literal["unknown"] = 0
+        if isinstance(recovery_outcome, RecoveryHold):
+            model_calls_started = (
+                recovery_outcome.model_calls_started
+                if recovery_outcome.model_calls_started is not None
+                else "unknown"
+            )
+            if model_calls_started == "unknown":
+                operation_model_calls_total = "unknown"
+            elif (
+                recovery_outcome.operation_model_calls_total is not None
+                or recovery_outcome.operation_model_calls_unknown
+            ):
+                operation_model_calls_total = _format_operation_calls(
+                    recovery_outcome.operation_model_calls_total,
+                    recovery_outcome.operation_model_calls_unknown,
+                    fallback=model_calls_started,
+                )
+            elif takeover_recon is not None:
+                if takeover_recon.operation_model_calls_unknown:
+                    operation_model_calls_total = "unknown"
+                elif type(takeover_recon.operation_model_calls_total) is int:
+                    operation_model_calls_total = (
+                        takeover_recon.operation_model_calls_total + model_calls_started
+                    )
+                else:
+                    operation_model_calls_total = "unknown"
+            else:
+                try:
+                    ro_total, ro_unknown = (
+                        read_only_engine.summarize_operation_provider_calls_read_only(
+                            owner=config.owner,
+                            repo=config.repo,
+                            pull_request=config.pull_request,
+                            operation_id=config.operation_id,
+                            event=config.event,
+                            visibility=config.visibility,
+                            granted_scopes=config.granted_scopes,
+                            expected_app_id=effective_expected_app_id,
+                            expected_bot_login=config.expected_bot_login,
+                            expected_bot_user_id=config.expected_bot_user_id,
+                        )
+                    )
+                    if ro_unknown:
+                        operation_model_calls_total = "unknown"
+                    elif type(ro_total) is int and ro_total >= 0:
+                        operation_model_calls_total = max(ro_total, model_calls_started)
+                    else:
+                        operation_model_calls_total = model_calls_started
+                except Exception:
+                    operation_model_calls_total = "unknown"
+        elif isinstance(recovery_outcome, RecoveryCompleted):
+            model_calls_started = recovery_outcome.model_calls_started
+            operation_model_calls_total = (
+                recovery_outcome.operation_model_calls_total
+                if recovery_outcome.operation_model_calls_total is not None
+                else model_calls_started
+            )
+        elif isinstance(recovery_outcome, RecoveryPaused):
+            model_calls_started = recovery_outcome.model_calls_started
+            if (
+                recovery_outcome.operation_model_calls_total is not None
+                or recovery_outcome.operation_model_calls_unknown
+            ):
+                operation_model_calls_total = _format_operation_calls(
+                    recovery_outcome.operation_model_calls_total,
+                    recovery_outcome.operation_model_calls_unknown,
+                    fallback=model_calls_started,
+                )
+            elif takeover_recon is not None:
+                operation_model_calls_total = _format_operation_calls(
+                    takeover_recon.operation_model_calls_total,
+                    takeover_recon.operation_model_calls_unknown,
+                    fallback=model_calls_started,
+                )
+            else:
+                try:
+                    ro_total, ro_unknown = (
+                        read_only_engine.summarize_operation_provider_calls_read_only(
+                            owner=config.owner,
+                            repo=config.repo,
+                            pull_request=config.pull_request,
+                            operation_id=config.operation_id,
+                            event=config.event,
+                            visibility=config.visibility,
+                            granted_scopes=config.granted_scopes,
+                            expected_app_id=effective_expected_app_id,
+                            expected_bot_login=config.expected_bot_login,
+                            expected_bot_user_id=config.expected_bot_user_id,
+                        )
+                    )
+                    operation_model_calls_total = _format_operation_calls(
+                        ro_total, ro_unknown, fallback=model_calls_started
+                    )
+                except Exception:
+                    operation_model_calls_total = "unknown"
         return self._write_outcome(
             config,
             V6PilotRunOutcome(
@@ -1241,6 +1424,7 @@ class V6PilotRunner:
                 diagnostic=diag_code,
                 lease_released=lease_released,
                 model_calls_started=model_calls_started,
+                operation_model_calls_total=operation_model_calls_total,
             ),
         )
 
